@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # macOS packaging: build the release binary for the host arch and produce
-#   target/package/comet-<version>-macos-<arch>.dmg
+#   target/package/comet-<version>-macos-<arch>.dmg          (user download)
+#   target/package/comet-<version>-macos-<arch>-app.tar.gz   (auto-updater)
 # containing Comet.app (unsigned unless CODESIGN_IDENTITY is set).
 #
 # Usage: scripts/package-macos.sh
@@ -15,11 +16,12 @@ ARCH="$(uname -m)" # arm64 on Apple silicon runners
 OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Comet.app"
 DMG="$OUT_DIR/comet-$VERSION-macos-$ARCH.dmg"
+APP_TARBALL="$OUT_DIR/comet-$VERSION-macos-$ARCH-app.tar.gz"
 
 cd "$ROOT"
 cargo build --release -p comet
 
-rm -rf "$APP" "$DMG"
+rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/comet" "$APP/Contents/MacOS/comet"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
@@ -43,6 +45,12 @@ else
   # requires right-click → Open on first launch without notarization).
   codesign --deep --force --sign - "$APP"
 fi
+
+# The auto-updater artifact: the signed bundle as a plain tarball (the in-app
+# updater downloads + extracts it, then swaps /Applications/Comet.app —
+# crates/update stage_mac_app/apply_mac_app).
+tar -czf "$APP_TARBALL" -C "$OUT_DIR" Comet.app
+echo "packaged: $APP_TARBALL"
 
 hdiutil create -volname Comet -srcfolder "$APP" -ov -format UDZO "$DMG"
 echo "packaged: $DMG"

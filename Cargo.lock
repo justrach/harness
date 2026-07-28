@@ -1192,6 +1192,7 @@ dependencies = [
  "comet-engine",
  "comet-tui",
  "comet-ui",
+ "comet-update",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1223,6 +1224,7 @@ dependencies = [
  "comet-proto",
  "comet-rpc",
  "comet-sync",
+ "comet-update",
  "futures",
  "libc",
  "loro",
@@ -1352,6 +1354,7 @@ dependencies = [
  "comet-engine",
  "comet-proto",
  "comet-rpc",
+ "comet-update",
  "futures",
  "gpui",
  "gpui_platform",
@@ -1364,6 +1367,21 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "uuid",
+]
+
+[[package]]
+name = "comet-update"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
