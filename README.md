@@ -31,3 +31,5 @@ On macOS: build `comet` from source, then `comet daemon install` (launchd).
 ---
 
 Developing or curious how it works? See [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Licensed under the [MIT License](LICENSE).
