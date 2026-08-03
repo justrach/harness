@@ -19,6 +19,11 @@ struct Cli {
     tui: TuiArgs,
 }
 
+/// Same allocator as the `comet` binary (see its note) — the TUI attaches to
+/// the same engine crates and inherits the same churn profile.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> anyhow::Result<()> {
     comet_tui::cli::run(Cli::parse().tui)
 }
