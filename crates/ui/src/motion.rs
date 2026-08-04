@@ -373,10 +373,8 @@ where
 // ---------------------------------------------------------------------------
 
 /// Comet-pulse floor opacity.
-// The loader curves are shared with the terminal viewport
-// (`comet_proto::motion`): a loading indicator is a brand surface, and two of
-// them that disagree read as two products. The constants and the math live
-// there; this crate animates them with gpui, `comet-tui` with cell colours.
+// The loader constants and math live in `comet_proto::motion` (pure phase
+// functions); this crate animates them with gpui.
 pub use comet_proto::motion::{
     PULSE_MIN_OPACITY, PULSE_MIN_SCALE, PULSE_STAGGER, gspin_opacity, pulse_opacity, pulse_scale,
     pulse_wave, staggered_phase,

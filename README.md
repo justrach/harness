@@ -22,7 +22,6 @@ No configuration needed. Day-to-day:
 ```bash
 comet status      # signed in? engine running?
 comet update      # update to the latest release
-comet tui         # terminal UI, attaches to the daemon
 comet daemon start|stop|restart|status
 ```
 
