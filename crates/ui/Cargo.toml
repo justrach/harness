@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 comet-proto.workspace = true
+similar.workspace = true
 comet-doc.workspace = true
 comet-engine.workspace = true
 comet-rpc.workspace = true
