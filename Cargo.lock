@@ -1193,6 +1193,7 @@ dependencies = [
  "comet-sync",
  "comet-update",
  "futures",
+ "gethostname",
  "ignore",
  "libc",
  "loro",
