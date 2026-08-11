@@ -32,6 +32,8 @@ mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/comet"
 install -m 644 "$ROOT/dist/comet.desktop" "$STAGE/comet.desktop"
 install -m 644 "$ROOT/dist/comet.png" "$STAGE/comet.png"
+mkdir -p "$STAGE/licenses/fonts"
+cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash

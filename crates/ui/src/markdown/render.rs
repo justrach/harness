@@ -117,12 +117,12 @@ impl RenderOptions {
 /// Cached runs carry a resolved [`gpui::Hsla`] per span, so an entry is only
 /// valid for the palette that produced it — content-only keys silently serve
 /// dark-mode text onto a light background after an appearance switch.
-/// [`RenderCache::sync_palette`] drops everything when the palette moves.
+/// [`RenderCache::sync_style`] drops everything when color or typography moves.
 #[derive(Default)]
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
-    /// The [`crate::theme::theme_generation`] these entries were shaped under.
+    /// The [`crate::theme::style_generation`] these entries were shaped under.
     generation: u32,
 }
 
@@ -146,10 +146,14 @@ impl RenderCache {
         self.code.clear();
     }
 
-    /// Drop every entry if the palette changed since they were shaped. Cheap
+    /// Drop every entry if the resolved text style changed since shaping. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
-    fn sync_palette(&mut self) {
-        let generation = crate::theme::theme_generation();
+    fn sync_style(&mut self) {
+        let generation = crate::theme::style_generation();
+        self.sync_generation(generation);
+    }
+
+    fn sync_generation(&mut self, generation: u32) {
         if self.generation != generation {
             self.clear();
             self.generation = generation;
@@ -626,7 +630,7 @@ fn flatten_cached(
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_style();
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -999,7 +1003,7 @@ fn render_code_block(
     let cached: Rc<CachedCode> = match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_style();
             let entry = cache
                 .code
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -1352,5 +1356,28 @@ mod tests {
         ];
         let flat = flatten_runs(&runs, &theme, false);
         assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_string())]);
+    }
+
+    #[test]
+    fn style_generation_change_invalidates_cached_runs() {
+        let mut cache = RenderCache::default();
+        cache.generation = 10;
+        cache.flats.insert(
+            ("row".into(), 0, 0),
+            Rc::new(FlatText {
+                text: "cached".into(),
+                runs: Vec::new(),
+                links: Vec::new(),
+                code_ranges: Vec::new(),
+            }),
+        );
+        cache.sync_generation(10);
+        assert_eq!(cache.flats.len(), 1, "same style is idempotent");
+        cache.sync_generation(11);
+        assert!(
+            cache.flats.is_empty(),
+            "font or color changes invalidate runs"
+        );
+        assert!(cache.code.is_empty());
     }
 }

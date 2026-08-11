@@ -25,6 +25,8 @@ rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/comet" "$APP/Contents/MacOS/comet"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources/licenses/fonts"
+cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 
 # Icon: iconset from dist/comet.png — the comet mark from the original app
 # (apps/desktop/resources/icon.png in the comet repo; source dist/comet.svg).

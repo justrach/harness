@@ -1103,6 +1103,7 @@ impl Shell {
             // choice.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
+                shell.settings.ui_font_family = crate::typography::requested(cx);
                 shell.settings.clone()
             }) else {
                 return;

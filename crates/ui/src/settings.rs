@@ -87,6 +87,8 @@ pub struct UiSettings {
     pub keymap: KeymapConfig,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// Interface and conversational-prose family. Device-local by design.
+    pub ui_font_family: crate::typography::UiFontFamily,
 }
 
 impl Default for UiSettings {
@@ -107,6 +109,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
+            ui_font_family: crate::typography::UiFontFamily::default(),
         }
     }
 }
@@ -368,6 +371,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             appearance: crate::appearance::AppearanceMode::Light,
+            ui_font_family: crate::typography::UiFontFamily::Inter,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -388,6 +392,39 @@ mod tests {
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled, "other keys still parse");
+    }
+
+    #[test]
+    fn settings_without_ui_font_default_to_geist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(
+            loaded.ui_font_family,
+            crate::typography::UiFontFamily::Geist
+        );
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(!loaded.sound_enabled);
+    }
+
+    #[test]
+    fn unknown_ui_font_falls_back_without_resetting_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "uiFontFamily": "futureSans"}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(
+            loaded.ui_font_family,
+            crate::typography::UiFontFamily::Geist
+        );
+        assert_eq!(loaded.sidebar_width, 300.0);
     }
 
     #[test]

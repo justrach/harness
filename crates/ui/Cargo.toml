@@ -34,3 +34,4 @@ objc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+ttf-parser = "0.25.1"

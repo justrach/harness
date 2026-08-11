@@ -1307,6 +1307,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "ttf-parser",
  "unicode-segmentation",
  "uuid",
 ]
