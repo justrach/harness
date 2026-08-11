@@ -34,7 +34,7 @@ use crate::theme::Theme;
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::view::{
     COALESCE_MS, InputCoalescer, RESIZE_DEBOUNCE_MS, SELECTION_DRAG_THRESHOLD, TerminalElement,
-    cell_at, keystroke_bytes, paste_bytes, terminal_bg,
+    cell_at, keystroke_bytes, paste_bytes, terminal_panel_bg,
 };
 
 /// Fixed tab width — drag-reorder math stays analytic.
@@ -1285,7 +1285,7 @@ impl Render for TerminalPanel {
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
-                .bg(terminal_bg())
+                .bg(terminal_panel_bg(&theme))
                 .font_family(theme.font_sans_fixed.clone())
                 .flex()
                 .items_center()
@@ -1304,7 +1304,7 @@ impl Render for TerminalPanel {
             // Terminal chrome is fixed Geist; TerminalElement measures and
             // paints its viewport independently with the technical mono role.
             .font_family(theme.font_sans_fixed.clone())
-            .bg(terminal_bg())
+            .bg(terminal_panel_bg(&theme))
             .child(self.render_tab_bar(&chat, cx))
             .child(
                 div()
