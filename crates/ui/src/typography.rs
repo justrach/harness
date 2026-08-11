@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use gpui::{App, Global, SharedString};
+use gpui::{App, Global, Rems, SharedString, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::settings::UiSettings;
@@ -90,6 +90,51 @@ impl<'de> Deserialize<'de> for UiFontFamily {
     }
 }
 
+/// Base size used by rem-based interface text. Persisted as a number so future
+/// builds can add choices without changing the settings format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UiFontSize(u8);
+
+impl UiFontSize {
+    pub const ALL: [Self; 7] = [
+        Self(12),
+        Self(13),
+        Self(14),
+        Self(15),
+        Self(16),
+        Self(18),
+        Self(20),
+    ];
+
+    pub const fn pixels(self) -> f32 {
+        self.0 as f32
+    }
+
+    pub fn label(self) -> SharedString {
+        format!("{} px", self.0).into()
+    }
+
+    pub fn normalized(self) -> Self {
+        Self::ALL
+            .into_iter()
+            .min_by_key(|candidate| candidate.0.abs_diff(self.0))
+            .unwrap_or_default()
+    }
+}
+
+impl Default for UiFontSize {
+    fn default() -> Self {
+        Self(16)
+    }
+}
+
+/// Convert a size designed at the 16px baseline into a scalable interface rem.
+/// Code, diffs, and terminal text deliberately keep absolute pixel sizes.
+pub const fn ui_rems(pixels_at_default: f32) -> Rems {
+    rems(pixels_at_default / 16.0)
+}
+
 /// Which catalog families successfully registered during this process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontAvailability {
@@ -150,6 +195,7 @@ impl Default for FontAvailability {
 pub struct TypographyState {
     pub requested: UiFontFamily,
     pub effective: UiFontFamily,
+    pub size: UiFontSize,
     pub availability: FontAvailability,
     data_dir: PathBuf,
 }
@@ -233,6 +279,7 @@ fn resolve_effective(requested: UiFontFamily, availability: FontAvailability) ->
 /// Install typography state before appearance builds the first [`crate::theme::Theme`].
 pub fn init(
     requested: UiFontFamily,
+    size: UiFontSize,
     availability: FontAvailability,
     data_dir: impl Into<PathBuf>,
     cx: &mut App,
@@ -241,6 +288,7 @@ pub fn init(
     cx.set_global(TypographyState {
         requested,
         effective,
+        size: size.normalized(),
         availability,
         data_dir: data_dir.into(),
     });
@@ -260,6 +308,12 @@ pub fn effective(cx: &App) -> UiFontFamily {
 
 pub fn effective_family_name(cx: &App) -> SharedString {
     effective(cx).family_name().into()
+}
+
+pub fn font_size(cx: &App) -> UiFontSize {
+    cx.try_global::<TypographyState>()
+        .map(|state| state.size)
+        .unwrap_or_default()
 }
 
 pub fn availability(cx: &App) -> FontAvailability {
@@ -287,6 +341,7 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
     }
 
     let data_dir = state.data_dir.clone();
+    let size = state.size;
     let effective_changed = state.effective != effective;
     let state = cx.global_mut::<TypographyState>();
     state.requested = family;
@@ -298,13 +353,34 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
         crate::theme::Theme::install(appearance, cx);
         cx.refresh_windows();
     }
-    persist(family, &data_dir);
+    persist(family, size, &data_dir);
     effective_changed
 }
 
-fn persist(family: UiFontFamily, data_dir: &Path) {
+/// Apply a supported UI size to the current window and persist it.
+pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> bool {
+    let size = size.normalized();
+    let Some(state) = cx.try_global::<TypographyState>() else {
+        return false;
+    };
+    if state.size == size {
+        return false;
+    }
+
+    let data_dir = state.data_dir.clone();
+    let family = state.requested;
+    cx.global_mut::<TypographyState>().size = size;
+    window.set_rem_size(px(size.pixels()));
+    crate::theme::bump_style_generation();
+    cx.refresh_windows();
+    persist(family, size, &data_dir);
+    true
+}
+
+fn persist(family: UiFontFamily, size: UiFontSize, data_dir: &Path) {
     let mut settings = UiSettings::load(data_dir);
     settings.ui_font_family = family;
+    settings.ui_font_size = size;
     if let Err(err) = settings.save(data_dir) {
         tracing::warn!(error = %err, "could not persist interface font");
     }
@@ -348,6 +424,14 @@ mod tests {
                 "Atkinson Hyperlegible Next"
             ]
         );
+    }
+
+    #[test]
+    fn ui_font_sizes_have_stable_labels_and_normalize() {
+        assert_eq!(UiFontSize::default().label().as_ref(), "16 px");
+        assert_eq!(UiFontSize(19).normalized(), UiFontSize(18));
+        assert_eq!(UiFontSize(250).normalized(), UiFontSize(20));
+        assert_eq!(ui_rems(14.0).0, 0.875);
     }
 
     #[test]

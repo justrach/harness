@@ -1104,6 +1104,7 @@ impl Shell {
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
                 shell.settings.ui_font_family = crate::typography::requested(cx);
+                shell.settings.ui_font_size = crate::typography::font_size(cx);
                 shell.settings.clone()
             }) else {
                 return;
@@ -1856,7 +1857,7 @@ impl Shell {
                             .px(px(Theme::SPACE_SM))
                             .pt(px(12.0))
                             .pb(px(4.0))
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.6))
                             .child(SharedString::from("Settings")),
@@ -1873,7 +1874,7 @@ impl Shell {
                                 .rounded(px(8.0))
                                 .px(px(Theme::SPACE_SM))
                                 .py(px(6.0))
-                                .text_size(px(13.0))
+                                .text_size(crate::typography::ui_rems(13.0))
                                 .when(selected, |el| {
                                     // Same tokens as the main sidebar's session
                                     // rows — the two sidebars must feel alike.
@@ -1911,7 +1912,7 @@ impl Shell {
                         .rounded(px(8.0))
                         .px(px(Theme::SPACE_SM))
                         .py(px(6.0))
-                        .text_size(px(13.0))
+                        .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text_muted)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
@@ -1993,7 +1994,7 @@ impl Shell {
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(10.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(if archived {
                             "Unarchive"
@@ -2031,7 +2032,7 @@ impl Shell {
                         .child(glyph)
                         .child(
                             div()
-                                .text_size(px(10.0))
+                                .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(status_color)
                                 .child(SharedString::from(label)),
@@ -2039,7 +2040,7 @@ impl Shell {
                         .into_any_element()
                 }
                 None => div()
-                    .text_size(px(10.0))
+                    .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(time_ago.clone())
                     .into_any_element(),
@@ -2150,7 +2151,7 @@ impl Shell {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .line_height(px(14.0))
                             .text_color(subline)
                             .child(space_name),
@@ -2162,7 +2163,7 @@ impl Shell {
                 div()
                     .w_full()
                     .truncate()
-                    .text_size(px(13.0))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .line_height(px(17.0))
                     .child(title),
             )
@@ -2197,7 +2198,7 @@ impl Shell {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(crate::typography::ui_rems(11.0))
                                 .line_height(px(14.0))
                                 .text_color(subline)
                                 .child(branch),
@@ -2341,7 +2342,7 @@ impl Shell {
                                 div()
                                     .px(px(Theme::SPACE_SM))
                                     .pb(px(Theme::SPACE_SM))
-                                    .text_size(px(12.0))
+                                    .text_size(crate::typography::ui_rems(12.0))
                                     .text_color(theme.text_faint)
                                     .child(SharedString::from("No sessions yet"))
                                     .into_any_element()
@@ -2366,7 +2367,7 @@ impl Shell {
                         .rounded(px(Theme::CONTROL_RADIUS))
                         .border_1()
                         .border_color(theme.danger)
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.danger)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -2433,7 +2434,7 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.0))
+            .text_size(crate::typography::ui_rems(11.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(tone)
             .child(
@@ -2592,7 +2593,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
                     .child(initial),
@@ -2606,7 +2607,7 @@ impl Shell {
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
@@ -2615,7 +2616,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .line_height(px(15.0))
                             .text_color(theme.text_muted)
                             .child(SharedString::from("Alpha")),
@@ -2644,7 +2645,7 @@ impl Shell {
                         .px(px(8.0))
                         .pt(px(6.0))
                         .pb(px(4.0))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted.opacity(0.7))
                         .truncate()
                         .child(user_email.unwrap_or(user_line)),
@@ -2947,7 +2948,7 @@ impl Shell {
                         .child(
                             div()
                                 .mt(px(24.0))
-                                .text_size(px(16.0))
+                                .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(SharedString::from("Add a project to get started")),
@@ -2955,7 +2956,7 @@ impl Shell {
                         .child(
                             div()
                                 .mt(px(6.0))
-                                .text_size(px(13.0))
+                                .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(
                                     "A project is a folder on one of your devices.",
@@ -2971,7 +2972,7 @@ impl Shell {
                             div()
                                 .id("onboarding-no-project")
                                 .mt(px(10.0))
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted.opacity(0.6))
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text_muted))
@@ -3018,7 +3019,7 @@ impl Shell {
                         .child(
                             div()
                                 .mt(px(12.0))
-                                .text_size(px(14.0))
+                                .text_size(crate::typography::ui_rems(14.0))
                                 .text_color(theme.text_muted.opacity(0.6))
                                 .child(helper),
                         ),
@@ -3129,7 +3130,7 @@ impl Shell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(13.0))
+                        .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
                         .child("Drop images to attach"),
                 )
@@ -3191,13 +3192,13 @@ impl Shell {
                         }))
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted)
                                 .child(SharedString::from("↓")),
                         )
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text)
                                 .child(SharedString::from("Scroll to bottom")),
                         ),
@@ -3297,7 +3298,7 @@ impl Shell {
             .items_center()
             .gap(px(Theme::SPACE_SM))
             .px(px(Theme::SPACE_LG + 8.0))
-            .text_size(px(11.0));
+            .text_size(crate::typography::ui_rems(11.0));
 
         let Some(chat_id) = state.selected_chat.clone() else {
             return strip.into_any_element();
@@ -3343,7 +3344,7 @@ impl Shell {
                 ))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from("Sending…")),
                 )
@@ -3421,7 +3422,7 @@ impl Shell {
                 .gap(px(Theme::SPACE_MD))
                 .child(
                     div()
-                        .text_size(px(14.0))
+                        .text_size(crate::typography::ui_rems(14.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(error.clone())),
                 )
@@ -3433,7 +3434,7 @@ impl Shell {
                         .rounded(px(8.0))
                         .border_1()
                         .border_color(theme.border)
-                        .text_size(px(13.0))
+                        .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.glass_hover()))
@@ -3465,7 +3466,7 @@ impl Shell {
                 .child(
                     div()
                         .mt(px(24.0))
-                        .text_size(px(18.0))
+                        .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .child(SharedString::from("Log in to Comet")),
@@ -3474,7 +3475,7 @@ impl Shell {
                     div()
                         .mt(px(6.0))
                         .mb(px(24.0))
-                        .text_size(px(13.0))
+                        .text_size(crate::typography::ui_rems(13.0))
                         .line_height(px(19.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(
@@ -3491,7 +3492,7 @@ impl Shell {
                         .justify_center()
                         .rounded(px(6.0))
                         .bg(theme.text)
-                        .text_size(px(14.0))
+                        .text_size(crate::typography::ui_rems(14.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.on_solid)
                         .cursor_pointer()
@@ -3585,7 +3586,7 @@ impl Shell {
                     .child(
                         div()
                             .pb(px(8.0))
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.6))
                             .child(SharedString::from(
@@ -3603,7 +3604,7 @@ impl Shell {
                                 .border_1()
                                 .border_color(theme.border)
                                 .bg(theme.bg)
-                                .text_size(px(13.0))
+                                .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text)
                                 .when(submitting, |el| el.opacity(0.5))
                                 .cursor_pointer()
@@ -3650,7 +3651,7 @@ impl Shell {
             .child(
                 div()
                     .mt(px(20.0))
-                    .text_size(px(18.0))
+                    .text_size(crate::typography::ui_rems(18.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(SharedString::from("Create your workspace")),
@@ -3659,7 +3660,7 @@ impl Shell {
                 div()
                     .mt(px(6.0))
                     .mb(px(24.0))
-                    .text_size(px(13.0))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(blurb),
@@ -3681,7 +3682,7 @@ impl Shell {
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.bg)
-                            .text_size(px(13.0))
+                            .text_size(crate::typography::ui_rems(13.0))
                             .child(name_input),
                     )
                     .child(
@@ -3693,7 +3694,7 @@ impl Shell {
                             .items_center()
                             .rounded(px(6.0))
                             .bg(theme.text)
-                            .text_size(px(14.0))
+                            .text_size(crate::typography::ui_rems(14.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.on_solid)
                             .when(submitting, |el| el.opacity(0.5))
@@ -3712,7 +3713,7 @@ impl Shell {
                 el.child(
                     div()
                         .mt(px(16.0))
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .line_height(px(17.0))
                         .text_color(theme.danger_muted.opacity(0.9)) // red-300
                         .child(message),
@@ -3722,7 +3723,7 @@ impl Shell {
                 div().mt(px(24.0)).flex().flex_row().child(
                     div()
                         .id("org-signout")
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.6))
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.text))
@@ -3929,7 +3930,7 @@ fn windows_caption_button(
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(10.0))
+        .text_size(crate::typography::ui_rems(10.0))
         .text_color(theme.text)
         .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
         .active(move |style| style.bg(active_bg).text_color(active_fg))
@@ -4069,7 +4070,7 @@ impl Render for Shell {
             .bg(frost)
             .text_color(text)
             .font_family(font)
-            .text_size(px(14.0))
+            .text_size(crate::typography::ui_rems(14.0))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))

@@ -89,6 +89,9 @@ pub struct UiSettings {
     pub appearance: crate::appearance::AppearanceMode,
     /// Interface and conversational-prose family. Device-local by design.
     pub ui_font_family: crate::typography::UiFontFamily,
+    /// Base size for interface and conversational prose. Code-related surfaces
+    /// retain their fixed metrics.
+    pub ui_font_size: crate::typography::UiFontSize,
 }
 
 impl Default for UiSettings {
@@ -110,6 +113,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             ui_font_family: crate::typography::UiFontFamily::default(),
+            ui_font_size: crate::typography::UiFontSize::default(),
         }
     }
 }
@@ -301,6 +305,7 @@ impl UiSettings {
             TERMINAL_ABS_MAX_HEIGHT,
             TERMINAL_DEFAULT_HEIGHT,
         );
+        self.ui_font_size = self.ui_font_size.normalized();
         self
     }
 
@@ -372,6 +377,7 @@ mod tests {
             },
             appearance: crate::appearance::AppearanceMode::Light,
             ui_font_family: crate::typography::UiFontFamily::Inter,
+            ui_font_size: crate::typography::UiFontSize::ALL[5],
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -408,6 +414,23 @@ mod tests {
             crate::typography::UiFontFamily::Geist
         );
         assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(!loaded.sound_enabled);
+        assert_eq!(
+            loaded.ui_font_size,
+            crate::typography::UiFontSize::default()
+        );
+    }
+
+    #[test]
+    fn unsupported_ui_font_size_snaps_to_the_nearest_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"uiFontSize": 19, "soundEnabled": false}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.ui_font_size.pixels(), 18.0);
         assert!(!loaded.sound_enabled);
     }
 

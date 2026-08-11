@@ -112,6 +112,7 @@ pub fn run_app(config: UiConfig) {
         // effective family, so the first frame has both final style choices.
         typography::init(
             settings.ui_font_family,
+            settings.ui_font_size,
             font_availability,
             data_dir.clone(),
             cx,
@@ -204,6 +205,7 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             ..Default::default()
         },
         move |window, cx| {
+            window.set_rem_size(px(typography::font_size(cx).pixels()));
             // React to the user flipping macOS between light and dark. Detached:
             // the subscription lives as long as the window does, and the window
             // owns nothing that would drop it early.

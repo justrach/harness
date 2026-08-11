@@ -262,8 +262,8 @@ pub fn render_block(
                     Some(start) => div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .text_size(px(MD_TEXT_SIZE))
-                        .line_height(px(MD_LINE_HEIGHT))
+                        .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
+                        .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
                         .text_color(theme.accent.opacity(0.85))
                         .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                         .into_any_element(),
@@ -459,8 +459,8 @@ fn render_table(
                 .flex_basis(px(0.0))
                 .min_w(px(geo.minimums[c]))
                 .p(px(TABLE_CELL_PADDING))
-                .text_size(px(MD_TEXT_SIZE))
-                .line_height(px(MD_LINE_HEIGHT));
+                .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
+                .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT));
             cell = match align.get(c).copied().unwrap_or_default() {
                 TableAlign::Left => cell,
                 TableAlign::Center => cell.text_center(),
@@ -959,8 +959,8 @@ fn text_element(
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
     let inner = flat_text_element(&flat, ix, opts, theme);
     div()
-        .text_size(px(size))
-        .line_height(px(line_height))
+        .text_size(crate::typography::ui_rems(size))
+        .line_height(crate::typography::ui_rems(line_height))
         .child(inner)
         .into_any_element()
 }

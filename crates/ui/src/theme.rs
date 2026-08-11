@@ -91,7 +91,7 @@ pub fn current_appearance() -> Appearance {
     }
 }
 
-/// Monotonic id of the current resolved text style (palette + UI family).
+/// Monotonic id of the current resolved text style (palette + UI family/size).
 pub fn style_generation() -> u32 {
     STYLE_GENERATION.load(Ordering::Relaxed)
 }

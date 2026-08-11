@@ -269,7 +269,7 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .shadow_lg()
         .p(px(4.0))
         .overflow_hidden()
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text);
     if theme.is_glass() {
         // Translucent tint — the backdrop blur beneath it comes from the
@@ -564,7 +564,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(8.0))
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .cursor_pointer();
     if active {
         row.bg(crate::theme::card_selected_bg())
@@ -618,7 +618,7 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
         .px(px(8.0))
         .pb(px(4.0))
         .pt(px(6.0))
-        .text_size(px(10.0))
+        .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted.opacity(0.6))
         .child(SharedString::from(tracked_upper(label)))
@@ -677,7 +677,7 @@ pub fn key_cap(_theme: &Theme) -> gpui::Div {
 /// The tiny verb after a key-cap.
 fn key_hint_label(theme: &Theme, label: &'static str) -> gpui::Div {
     div()
-        .text_size(px(10.5))
+        .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted.opacity(0.45))
         .child(SharedString::from(label))
 }
@@ -738,7 +738,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .py(px(1.0))
         .rounded(px(5.0))
         .bg(ink(0.05))
-        .text_size(px(10.0))
+        .text_size(crate::typography::ui_rems(10.0))
         .font_family(theme.font_mono.clone())
         .text_color(theme.text_muted.opacity(0.6))
         .child(SharedString::from(label.to_string()))
@@ -755,7 +755,7 @@ pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(8.0))
         .bg(ink(0.04))
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .child(input)
 }
 
@@ -797,7 +797,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
 /// Dialog title: `text-[15px] font-semibold tracking-tight`.
 pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
     div()
-        .text_size(px(15.0))
+        .text_size(crate::typography::ui_rems(15.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .child(SharedString::from(title.to_string()))
@@ -806,7 +806,7 @@ pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
 /// Dialog body copy: `text-[13px] leading-relaxed text-muted-foreground`.
 pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
     div()
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .line_height(px(19.0))
         .text_color(theme.text_muted)
         .child(copy.into())
@@ -823,7 +823,7 @@ pub fn dialog_field(input: AnyElement) -> gpui::Div {
         .border_1()
         .border_color(hairline(0.08))
         .bg(ink(0.04))
-        .text_size(px(14.0))
+        .text_size(crate::typography::ui_rems(14.0))
         .child(input)
 }
 
@@ -836,7 +836,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(8.0))
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(
             &fade_key,
@@ -857,7 +857,7 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(8.0))
         .bg(theme.text)
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.on_solid)
         .cursor_pointer()
@@ -872,7 +872,7 @@ pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
         .py(px(6.0))
         .rounded(px(8.0))
         .bg(theme.danger_strong)
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(gpui::white())
         .cursor_pointer()
@@ -915,7 +915,7 @@ pub fn error_row(theme: &Theme, message: &str) -> gpui::Div {
         .flex_col()
         .gap(px(6.0))
         .p(px(Theme::SPACE_SM))
-        .text_size(px(12.0))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.danger)
         .child(gpui::SharedString::from(message.to_string()))
 }

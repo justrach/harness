@@ -1989,7 +1989,7 @@ impl Transcript {
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
                 .pt(px(10.0))
-                .text_size(px(11.0))
+                .text_size(crate::typography::ui_rems(11.0))
                 .child(crate::loaders::gradient_spinner(
                     "working-indicator",
                     &theme,
@@ -1999,7 +1999,7 @@ impl Transcript {
                 ))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(format!("{word}…"))),
                 )
@@ -2074,8 +2074,8 @@ impl Transcript {
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))
                                 .py(px(10.0))
-                                .text_size(px(14.0))
-                                .line_height(px(22.0))
+                                .text_size(crate::typography::ui_rems(14.0))
+                                .line_height(crate::typography::ui_rems(22.0))
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
                                 .child(if mentions.is_empty() {
@@ -2217,7 +2217,7 @@ impl Transcript {
                     el.child(motion::fade_quick(
                         SharedString::from(format!("ts-{}", row.id)),
                         div()
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted.opacity(0.55))
                             .child(SharedString::from(format_timestamp(ms, &chrono::Local))),
                     ))
