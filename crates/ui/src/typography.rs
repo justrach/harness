@@ -196,6 +196,10 @@ pub struct TypographyState {
     pub effective: UiFontFamily,
     pub size: UiFontSize,
     pub availability: FontAvailability,
+    /// Monotonic signal for layout caches whose measurements depend on UI
+    /// typography. Kept separate from the theme style generation so palette
+    /// changes do not force expensive list remeasurement.
+    generation: u32,
 }
 
 impl Global for TypographyState {}
@@ -287,6 +291,7 @@ pub fn init(
         effective,
         size: size.normalized(),
         availability,
+        generation: 0,
     });
 }
 
@@ -318,6 +323,15 @@ pub fn availability(cx: &App) -> FontAvailability {
         .unwrap_or_default()
 }
 
+/// Monotonic id of the current effective UI typography (family + size).
+/// Long-lived layout caches compare this value to invalidate measurements
+/// that can change when prose wraps differently.
+pub fn generation(cx: &App) -> u32 {
+    cx.try_global::<TypographyState>()
+        .map(|state| state.generation)
+        .unwrap_or_default()
+}
+
 pub fn is_available(family: UiFontFamily, cx: &App) -> bool {
     availability(cx).is_available(family)
 }
@@ -342,6 +356,7 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
     state.effective = effective;
 
     if effective_changed {
+        state.generation = state.generation.wrapping_add(1);
         crate::theme::bump_style_generation();
         let appearance = crate::theme::current_appearance();
         crate::theme::Theme::install(appearance, cx);
@@ -363,7 +378,9 @@ pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> boo
         return false;
     }
 
-    cx.global_mut::<TypographyState>().size = size;
+    let state = cx.global_mut::<TypographyState>();
+    state.size = size;
+    state.generation = state.generation.wrapping_add(1);
     window.set_rem_size(px(size.pixels()));
     crate::theme::bump_style_generation();
     cx.refresh_windows();

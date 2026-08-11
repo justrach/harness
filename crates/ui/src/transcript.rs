@@ -1173,6 +1173,10 @@ pub struct Transcript {
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
+    /// Last UI typography generation reflected in `list` item measurements.
+    /// Family and size changes can alter prose wrapping without changing row
+    /// identity, so the virtual list must explicitly discard cached heights.
+    typography_generation: u32,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -1269,6 +1273,7 @@ impl Transcript {
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
+            typography_generation: crate::typography::generation(cx),
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -3115,6 +3120,16 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let typography_generation = crate::typography::generation(cx);
+        if self.typography_generation != typography_generation {
+            self.typography_generation = typography_generation;
+            // `refresh_windows` re-lays out visible rows, but ListState keeps
+            // measured heights for virtualized rows outside the viewport.
+            // Mark every row unmeasured while retaining height hints and a
+            // proportional scroll anchor; GPUI will refresh each measurement
+            // as the row enters its layout range.
+            self.list.remeasure();
+        }
         // Release gpui-side decoded copies of any images the attachment LRU
         // evicted since the last frame (no-op when nothing was evicted).
         crate::attachments::flush_evicted(Some(window), cx);
