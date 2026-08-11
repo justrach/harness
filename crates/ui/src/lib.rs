@@ -107,6 +107,7 @@ pub fn run_app(config: UiConfig) {
         gpui_tokio::init(cx);
         let data_dir = config.boot().data_dir.clone();
         let settings = settings::UiSettings::load(&data_dir);
+        settings::init(settings.clone(), data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first, appearance second: Theme::install reads the
         // effective family, so the first frame has both final style choices.
@@ -114,10 +115,9 @@ pub fn run_app(config: UiConfig) {
             settings.ui_font_family,
             settings.ui_font_size,
             font_availability,
-            data_dir.clone(),
             cx,
         );
-        appearance::init(settings.appearance, data_dir, cx);
+        appearance::init(settings.appearance, cx);
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);
@@ -129,6 +129,7 @@ pub fn run_app(config: UiConfig) {
         // doc snapshots before the process exits (remote engines outlive us).
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
+            settings::flush(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
                     gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })

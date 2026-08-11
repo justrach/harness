@@ -38,8 +38,8 @@ use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    self, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SIDEBAR_DEFAULT,
+    SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator, OrgRow, format_time_ago,
@@ -558,7 +558,6 @@ pub struct Shell {
     motion_active: std::cell::Cell<bool>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
-    save_task: Option<Task<()>>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
     /// window): keyboard shortcuts dispatch through the window focus chain, so
     /// with nothing focused they go dead. Initial focus lands on the composer
@@ -609,7 +608,7 @@ impl Shell {
             }
         });
         let data_dir = boot.data_dir.clone();
-        let settings = UiSettings::load(&data_dir);
+        let settings = settings::current(cx);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `COMET_OPEN_ROUTE=settings[/<section>]` boots
@@ -718,7 +717,6 @@ impl Shell {
             motion_active: std::cell::Cell::new(false),
             splash: SplashPhase::Visible,
             splash_task: None,
-            save_task: None,
             focus_sub: None,
             _ticker: ticker,
             _state_observation: observation,
@@ -1087,36 +1085,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// Debounced settings write: waits [`SAVE_DEBOUNCE_MS`], then persists the
-    /// latest snapshot on the background executor. Re-scheduling drops (cancels)
-    /// the previous timer.
+    /// Publish this view's working copy to the central settings store. The
+    /// store owns the single debounce task and the only production writer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        let dir = self.data_dir.clone();
-        self.save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
-                .await;
-            // Re-stamp the appearance from the global before writing. The View
-            // menu changes it through `appearance::set_mode`, which never touches
-            // this shell's in-memory copy — without this, the next pane resize
-            // would quietly write the boot-time appearance back over the user's
-            // choice.
-            let Ok(snapshot) = this.update(cx, |shell, cx| {
-                shell.settings.appearance = crate::appearance::mode(cx);
-                shell.settings.ui_font_family = crate::typography::requested(cx);
-                shell.settings.ui_font_size = crate::typography::font_size(cx);
-                shell.settings.clone()
-            }) else {
-                return;
-            };
-            cx.background_executor()
-                .spawn(async move {
-                    if let Err(err) = snapshot.save(&dir) {
-                        tracing::warn!(error = %err, "failed to persist ui settings");
-                    }
-                })
-                .await;
-        }));
+        // Global-only controls can change while this shell copy is alive.
+        self.settings.appearance = crate::appearance::mode(cx);
+        self.settings.ui_font_family = crate::typography::requested(cx);
+        self.settings.ui_font_size = crate::typography::font_size(cx);
+        settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {

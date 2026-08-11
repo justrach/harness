@@ -2,12 +2,11 @@
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
 
 use gpui::{App, Global, Rems, SharedString, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::settings::UiSettings;
+use crate::settings::{self, SavePolicy};
 
 /// Stable, device-local interface font choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -197,7 +196,6 @@ pub struct TypographyState {
     pub effective: UiFontFamily,
     pub size: UiFontSize,
     pub availability: FontAvailability,
-    data_dir: PathBuf,
 }
 
 impl Global for TypographyState {}
@@ -281,7 +279,6 @@ pub fn init(
     requested: UiFontFamily,
     size: UiFontSize,
     availability: FontAvailability,
-    data_dir: impl Into<PathBuf>,
     cx: &mut App,
 ) {
     let effective = resolve_effective(requested, availability);
@@ -290,7 +287,6 @@ pub fn init(
         effective,
         size: size.normalized(),
         availability,
-        data_dir: data_dir.into(),
     });
 }
 
@@ -340,8 +336,6 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
         return false;
     }
 
-    let data_dir = state.data_dir.clone();
-    let size = state.size;
     let effective_changed = state.effective != effective;
     let state = cx.global_mut::<TypographyState>();
     state.requested = family;
@@ -353,7 +347,9 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
         crate::theme::Theme::install(appearance, cx);
         cx.refresh_windows();
     }
-    persist(family, size, &data_dir);
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.ui_font_family = family;
+    });
     effective_changed
 }
 
@@ -367,23 +363,14 @@ pub fn set_font_size(size: UiFontSize, window: &mut Window, cx: &mut App) -> boo
         return false;
     }
 
-    let data_dir = state.data_dir.clone();
-    let family = state.requested;
     cx.global_mut::<TypographyState>().size = size;
     window.set_rem_size(px(size.pixels()));
     crate::theme::bump_style_generation();
     cx.refresh_windows();
-    persist(family, size, &data_dir);
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.ui_font_size = size;
+    });
     true
-}
-
-fn persist(family: UiFontFamily, size: UiFontSize, data_dir: &Path) {
-    let mut settings = UiSettings::load(data_dir);
-    settings.ui_font_family = family;
-    settings.ui_font_size = size;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist interface font");
-    }
 }
 
 #[cfg(test)]
