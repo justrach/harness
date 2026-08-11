@@ -1,28 +1,121 @@
-//! Settings → Appearance: pick between following the system and pinning light or
-//! dark.
+//! Settings → Appearance: choose the palette and the interface font.
 //!
 //! Uses [`widgets::option_card_row`] — a preview-card picker, because the choice
 //! is a *look*, and a miniature of the result says more than a sentence about it.
 //! The control itself is theme-agnostic; only the previews below know what a
 //! theme is.
 //!
-//! Stateless. The choice lives in the [`crate::appearance`] globals, and
-//! `set_mode` repaints every window, so this page has nothing of its own to hold.
-
 use gpui::{
-    AnyElement, Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, FocusHandle, Hsla, IntoElement, KeyDownEvent, MouseButton, Render,
+    SharedString, Window, div, prelude::*, px,
 };
 
 use crate::appearance::{self, AppearanceMode};
+use crate::popover;
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
+use crate::typography::{self, FontAvailability, UiFontFamily};
 
-pub struct AppearancePage;
+pub struct AppearancePage {
+    selected_font: UiFontFamily,
+    font_focus: FocusHandle,
+}
 
 impl AppearancePage {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
-        Self
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            selected_font: typography::effective(cx),
+            font_focus: cx.focus_handle(),
+        }
     }
+
+    fn commit_font(&mut self, cx: &mut Context<Self>) {
+        if typography::is_available(self.selected_font, cx) {
+            typography::set_family(self.selected_font, cx);
+            self.selected_font = typography::effective(cx);
+            cx.notify();
+        }
+    }
+
+    fn reset_font(&mut self, cx: &mut Context<Self>) {
+        self.selected_font = UiFontFamily::Geist;
+        self.commit_font(cx);
+    }
+
+    fn on_font_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let availability = typography::availability(cx);
+        match event.keystroke.key.as_str() {
+            "up" | "left" => {
+                self.selected_font = step_font(self.selected_font, -1, availability);
+                cx.notify();
+            }
+            "down" | "right" => {
+                self.selected_font = step_font(self.selected_font, 1, availability);
+                cx.notify();
+            }
+            "home" => {
+                self.selected_font = first_available(availability);
+                cx.notify();
+            }
+            "end" => {
+                self.selected_font = last_available(availability);
+                cx.notify();
+            }
+            "enter" | "space" => self.commit_font(cx),
+            "escape" => {
+                self.selected_font = typography::effective(cx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn step_font(current: UiFontFamily, delta: isize, availability: FontAvailability) -> UiFontFamily {
+    let current = UiFontFamily::ALL
+        .iter()
+        .position(|family| *family == current)
+        .unwrap_or_default() as isize;
+    let mut ix = current + delta.signum();
+    while (0..UiFontFamily::ALL.len() as isize).contains(&ix) {
+        let candidate = UiFontFamily::ALL[ix as usize];
+        if availability.is_available(candidate) {
+            return candidate;
+        }
+        ix += delta.signum();
+    }
+    UiFontFamily::ALL[current as usize]
+}
+
+fn first_available(availability: FontAvailability) -> UiFontFamily {
+    UiFontFamily::ALL
+        .into_iter()
+        .find(|family| availability.is_available(*family))
+        .unwrap_or(UiFontFamily::System)
+}
+
+fn last_available(availability: FontAvailability) -> UiFontFamily {
+    UiFontFamily::ALL
+        .into_iter()
+        .rev()
+        .find(|family| availability.is_available(*family))
+        .unwrap_or(UiFontFamily::System)
+}
+
+fn can_confirm(
+    selected: UiFontFamily,
+    effective: UiFontFamily,
+    availability: FontAvailability,
+) -> bool {
+    selected != effective && availability.is_available(selected)
+}
+
+fn font_status(effective: UiFontFamily) -> SharedString {
+    format!(
+        "Current: {}. Use arrow keys, then Enter to apply.",
+        effective.label()
+    )
+    .into()
 }
 
 /// One placeholder bar in the miniature, width given as a fraction of its
@@ -170,6 +263,10 @@ impl Render for AppearancePage {
             .try_global::<appearance::AppearanceState>()
             .map(|state| state.system)
             .unwrap_or_default();
+        let effective_font = typography::effective(cx);
+        let requested_font = typography::requested(cx);
+        let availability = typography::availability(cx);
+        let fixed = theme.font_sans_fixed.clone();
 
         let cards = AppearanceMode::ALL.into_iter().map(|mode| {
             widgets::option_card(&theme, mode.label(), mode == current, preview(mode))
@@ -179,6 +276,123 @@ impl Render for AppearancePage {
                     cx.notify();
                 }))
         });
+
+        let font_rows: Vec<AnyElement> = UiFontFamily::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(ix, family)| {
+                let selected = family == self.selected_font;
+                let available = availability.is_available(family);
+                let is_current = family == effective_font;
+                div()
+                    .id(("interface-font-option", ix))
+                    .w_full()
+                    .min_h(px(62.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(16.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(if selected { theme.accent } else { theme.border })
+                    .bg(if selected {
+                        theme.accent.opacity(0.055)
+                    } else {
+                        crate::theme::ink(0.02)
+                    })
+                    .font_family(fixed.clone())
+                    .when(available, |row| {
+                        row.cursor_pointer()
+                            .hover(|s| s.bg(crate::theme::ink(0.055)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.selected_font = family;
+                                window.focus(&this.font_focus, cx);
+                                cx.notify();
+                            }))
+                    })
+                    .when(!available, |row| row.opacity(0.45))
+                    .child(
+                        div()
+                            .w(px(188.0))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(family.label())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(if !available {
+                                        "Unavailable"
+                                    } else if is_current {
+                                        "Current"
+                                    } else {
+                                        "Preview"
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap(px(14.0))
+                            .font_family(family.family_name())
+                            .text_size(px(15.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from("Aa Bb Il1 O0 rn/m 0123"))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(SharedString::from("Semibold")),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .italic()
+                                    .child(SharedString::from("Italic")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .flex_none()
+                            .text_size(px(13.0))
+                            .text_color(if selected {
+                                theme.accent
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .child(SharedString::from("✓")),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        let can_apply = can_confirm(self.selected_font, effective_font, availability);
+        let apply_button = popover::btn_primary(&theme, "Apply font")
+            .id("apply-interface-font")
+            .font_family(fixed.clone())
+            .when(can_apply, |button| {
+                button.on_click(cx.listener(|this, _, _, cx| this.commit_font(cx)))
+            })
+            .when(!can_apply, |button| button.opacity(0.45));
+        let reset_button = popover::btn_ghost(&theme, "Reset to Geist", "reset-interface-font")
+            .id("reset-interface-font")
+            .font_family(fixed.clone())
+            .on_click(cx.listener(|this, _, _, cx| this.reset_font(cx)));
 
         div()
             .id("appearance-page")
@@ -212,6 +426,71 @@ impl Render for AppearancePage {
                             .text_color(theme.text_muted)
                             .line_height(px(18.0))
                             .child(helper(current, system)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(36.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.0))
+                            .font_family(fixed.clone())
+                            .track_focus(&self.font_focus)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.focus(&this.font_focus, cx);
+                                }),
+                            )
+                            .on_key_down(cx.listener(
+                                |this, event: &KeyDownEvent, _, cx| {
+                                    this.on_font_key_down(event, cx)
+                                },
+                            ))
+                            .child(widgets::field_label(&theme, "Interface font"))
+                            .child(
+                                div()
+                                    .max_w(px(600.0))
+                                    .text_size(px(12.0))
+                                    .line_height(px(18.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(
+                                        "Used across the interface and conversations. Code, diffs, and terminal keep their current fonts.",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .children(font_rows),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.0))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(apply_button)
+                                    .child(reset_button)
+                                    .child(
+                                        div()
+                                            .ml(px(4.0))
+                                            .text_size(px(11.5))
+                                            .text_color(theme.text_faint)
+                                            .child(font_status(effective_font)),
+                                    ),
+                            )
+                            .when(requested_font != effective_font, |section| {
+                                section.child(
+                                    widgets::error_strip(
+                                        &theme,
+                                        "This font could not be loaded. Comet is using Geist.",
+                                    )
+                                    .font_family(fixed.clone()),
+                                )
+                            }),
                     ),
             )
     }
@@ -258,5 +537,54 @@ mod tests {
         let (l, d) = (Theme::light(), Theme::dark());
         assert_ne!(l.surface.l, d.surface.l);
         assert_ne!(l.bg.l, d.bg.l);
+    }
+
+    #[test]
+    fn font_options_appear_once_in_stable_order() {
+        let labels = UiFontFamily::ALL.map(UiFontFamily::label);
+        assert_eq!(labels.len(), 5);
+        assert_eq!(
+            labels,
+            [
+                "Geist",
+                "Geist Mono",
+                "System UI",
+                "Inter",
+                "Atkinson Hyperlegible Next"
+            ]
+        );
+        let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 5);
+    }
+
+    #[test]
+    fn font_keyboard_navigation_stops_at_edges_and_skips_unavailable() {
+        let all = FontAvailability::all();
+        assert_eq!(step_font(UiFontFamily::Geist, -1, all), UiFontFamily::Geist);
+        assert_eq!(
+            step_font(UiFontFamily::AtkinsonHyperlegibleNext, 1, all),
+            UiFontFamily::AtkinsonHyperlegibleNext
+        );
+        let without_inter = all.without(UiFontFamily::Inter);
+        assert_eq!(
+            step_font(UiFontFamily::System, 1, without_inter),
+            UiFontFamily::AtkinsonHyperlegibleNext
+        );
+    }
+
+    #[test]
+    fn unavailable_or_current_font_cannot_be_confirmed() {
+        let without_inter = FontAvailability::all().without(UiFontFamily::Inter);
+        assert!(!can_confirm(
+            UiFontFamily::Inter,
+            UiFontFamily::Geist,
+            without_inter
+        ));
+        assert!(!can_confirm(
+            UiFontFamily::Geist,
+            UiFontFamily::Geist,
+            FontAvailability::all()
+        ));
+        assert!(font_status(UiFontFamily::Geist).contains("Current: Geist"));
     }
 }

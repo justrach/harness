@@ -128,7 +128,7 @@ impl FontAvailability {
     }
 
     #[cfg(test)]
-    fn without(mut self, family: UiFontFamily) -> Self {
+    pub(crate) fn without(mut self, family: UiFontFamily) -> Self {
         match family {
             UiFontFamily::Geist => self.geist = false,
             UiFontFamily::GeistMono => self.geist_mono = false,
