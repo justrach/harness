@@ -1360,8 +1360,10 @@ mod tests {
 
     #[test]
     fn style_generation_change_invalidates_cached_runs() {
-        let mut cache = RenderCache::default();
-        cache.generation = 10;
+        let mut cache = RenderCache {
+            generation: 10,
+            ..Default::default()
+        };
         cache.flats.insert(
             ("row".into(), 0, 0),
             Rc::new(FlatText {

@@ -1286,6 +1286,7 @@ impl Render for TerminalPanel {
             return div()
                 .size_full()
                 .bg(terminal_bg())
+                .font_family(theme.font_sans_fixed.clone())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1300,6 +1301,9 @@ impl Render for TerminalPanel {
             .size_full()
             .flex()
             .flex_col()
+            // Terminal chrome is fixed Geist; TerminalElement measures and
+            // paints its viewport independently with the technical mono role.
+            .font_family(theme.font_sans_fixed.clone())
             .bg(terminal_bg())
             .child(self.render_tab_bar(&chat, cx))
             .child(

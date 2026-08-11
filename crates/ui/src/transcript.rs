@@ -2662,6 +2662,9 @@ impl Transcript {
         div()
             .flex()
             .flex_col()
+            // Tool summaries and cards are code-adjacent chrome. Detail bodies
+            // retain their explicit mono/diff typography below this boundary.
+            .font_family(theme.font_sans_fixed.clone())
             .child(header)
             .child(body)
             .into_any_element()
