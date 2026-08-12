@@ -1,9 +1,9 @@
-# Comet
+# Zeron
 
 Control your coding agents (Claude Code, Codex, Cursor, Grok, Hermes, Pi) from
 any of your devices.
 
-![Comet running a Claude Code session](docs/screenshot.png)
+![Zeron running a Claude Code session](docs/screenshot.png)
 
 Every device runs a small engine that keeps your sessions in sync: start an
 agent on one machine, follow and drive it from another. Install the engine as
