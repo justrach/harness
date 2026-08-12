@@ -24,9 +24,9 @@ pub const SIDEBAR_MIN: f32 = 208.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
-/// Right ("Changes") pane drag-resize bounds (px).
+/// Right ("Changes") pane drag-resize floor and default (px). Its runtime
+/// maximum is the window space remaining after the left sidebar.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
-pub const RIGHT_PANE_MAX: f32 = 760.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 
 /// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
@@ -286,10 +286,11 @@ impl UiSettings {
             SIDEBAR_MAX,
             SIDEBAR_DEFAULT,
         );
-        self.right_pane_width = clamp_or(
+        // The right pane has no persisted upper bound: its live drag clamps
+        // against the current window, which is unavailable while loading.
+        self.right_pane_width = min_or(
             self.right_pane_width,
             RIGHT_PANE_MIN,
-            RIGHT_PANE_MAX,
             RIGHT_PANE_DEFAULT,
         );
         self.terminal_height = clamp_or(
@@ -334,6 +335,14 @@ impl UiSettings {
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
+    } else {
+        default
+    }
+}
+
+fn min_or(value: f32, min: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.max(min)
     } else {
         default
     }
@@ -409,6 +418,16 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
         assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
+    }
+
+    #[test]
+    fn large_right_pane_width_is_preserved() {
+        let loaded = UiSettings {
+            right_pane_width: 2400.0,
+            ..Default::default()
+        }
+        .clamped();
+        assert_eq!(loaded.right_pane_width, 2400.0);
     }
 
     #[test]

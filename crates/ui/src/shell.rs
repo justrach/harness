@@ -4,7 +4,7 @@
 //! Layout is comet's: collapsible drag-resizable sidebar (208–400px, default
 //! 256) with a 200ms ease-out width transition; main panel with an h-11 header,
 //! content outlet, and a reserved h-6 status strip so later content never
-//! shifts; right pane scaffold (360–760px, default 520), hidden by default.
+//! shifts; right pane scaffold (360px floor, default 520), hidden by default.
 //! Widths/collapsed state persist to `ui-settings.json` (debounced).
 //!
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
@@ -38,8 +38,8 @@ use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
+    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator, OrgRow, format_time_ago,
@@ -536,6 +536,9 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
     right_tween: Option<WidthTween>,
+    /// Latest viewport width, used to keep a persisted right-pane width inside
+    /// the physical space available after the left sidebar.
+    viewport_width: f32,
     terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
@@ -708,6 +711,7 @@ impl Shell {
             debug_gate,
             sidebar_tween: None,
             right_tween: None,
+            viewport_width: 0.0,
             terminal_tween: None,
             fullscreen: None,
             titlebar_tween: None,
@@ -944,7 +948,12 @@ impl Shell {
 
     fn right_target(&self, cx: &App) -> f32 {
         if self.right_pane_open(cx) {
-            self.settings.right_pane_width
+            let available = if self.viewport_width > 0.0 {
+                (self.viewport_width - self.sidebar_target()).max(RIGHT_PANE_MIN)
+            } else {
+                self.settings.right_pane_width
+            };
+            self.settings.right_pane_width.min(available)
         } else {
             0.0
         }
@@ -1079,9 +1088,10 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - f32::from(event.event.position.x);
-        // comet caps the pane at 52% of the window on top of the absolute range.
-        let max = RIGHT_PANE_MAX.min(viewport * 0.52);
-        self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max.max(RIGHT_PANE_MIN));
+        // No arbitrary percentage or pixel ceiling: the pane can consume all
+        // space to the right of the left sidebar. The chat flexes down to zero.
+        let max = (viewport - self.sidebar_target()).max(RIGHT_PANE_MIN);
+        self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max);
         self.right_tween = None;
         self.schedule_save(cx);
         cx.notify();
@@ -3366,21 +3376,8 @@ impl Shell {
         };
         // Its OWN inset card (user request): the conversation card's right
         // gutter is the gap; padding (not margins) keeps the tweened width
-        // container clean, and the resize grabber floats over the gap.
-        let handle = self
-            .resize_handle(
-                "right-pane-resize",
-                || RightPaneResize,
-                |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
-                cx,
-            )
-            .absolute()
-            .top_0()
-            .bottom_0()
-            // INSIDE the width-clipped container (a negative inset was
-            // clipped into unreachability — user-reported dead resize),
-            // overlapping the card's left border.
-            .left(px(0.0));
+        // container clean. The resize grabber lives outside this clipped
+        // container, on the seam assembled by the root layout.
         let card = div()
             .size_full()
             .rounded(px(12.0))
@@ -3403,7 +3400,6 @@ impl Shell {
                 .pb(px(8.0))
                 .pr(px(8.0))
                 .child(card)
-                .child(handle)
                 .into_any_element(),
         )
     }
@@ -4007,6 +4003,7 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport_width = f32::from(window.viewport_size().width);
         let theme = Theme::of(cx);
         // The shell tone (comet `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the
@@ -4155,6 +4152,22 @@ impl Render for Shell {
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
                 let on_chat = matches!(self.route, Route::Chat);
+                let right_open = on_chat && self.right_pane_open(cx);
+                let right_handle = right_open.then(|| {
+                    self.resize_handle(
+                        "right-pane-resize",
+                        || RightPaneResize,
+                        |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
+                        cx,
+                    )
+                    // A forgiving transparent hit target centered on the
+                    // seam; the card's 1px border remains the visual divider.
+                    .w(px(12.0))
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-6.0))
+                });
                 let right: AnyElement = if on_chat {
                     self.render_right_pane(cx)
                 } else {
@@ -4193,6 +4206,20 @@ impl Render for Shell {
                     .flex_none()
                     .relative()
                     .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
+                // Keep the right resize target outside the pane's
+                // overflow-hidden width container. This mirrors the sidebar
+                // seam and lets the target straddle both adjacent panes.
+                let right_seam: AnyElement = if let Some(handle) = right_handle {
+                    div()
+                        .w(px(0.0))
+                        .h_full()
+                        .flex_none()
+                        .relative()
+                        .child(handle)
+                        .into_any_element()
+                } else {
+                    Empty.into_any_element()
+                };
                 let title_bar = self.render_title_bar(cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar,
                 // spanning the FULL window height (under the traffic lights,
@@ -4227,6 +4254,7 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
+                            .child(right_seam)
                             .child(right),
                     )
                     .child(
