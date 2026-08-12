@@ -9,7 +9,7 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
-use crate::pickers::{breadcrumbs, browser_rows, parent_path};
+use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use comet_proto::{ChatIndicator, Device, FolderListing, Space};
 use gpui::FocusHandle;
 
@@ -43,7 +43,9 @@ pub(super) enum SpacesMenuRow {
 pub(super) struct AddSpaceFlow {
     /// The device currently browsed (the highlighted rail row).
     device: Option<Device>,
-    /// Filter input; Enter descends into the highlighted folder.
+    /// Filter input; Enter descends into the highlighted folder. Carries the
+    /// tab-completion ghost (the faint suffix ⇥ accepts), and a trailing `/`
+    /// on a folder-naming query descends immediately.
     search: Entity<ComposerInput>,
     browser: Loadable<FolderListing>,
     /// Requested browser path (`None` = the device's default, i.e. home).
@@ -319,18 +321,16 @@ impl Shell {
             })
             .on_hover(motion::hover_listener("spaces-filter"))
             .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
-                // The menu's `on_mouse_down_out` already closed it on this
-                // click's mouse-down (the trigger is outside the card), so by
-                // the time the click lands the menu reads as closed — without
-                // the guard, clicking the open trigger would close-and-reopen.
-                let just_dismissed = this
-                    .spaces_menu_dismissed_at
-                    .is_some_and(|at| at.elapsed() < Duration::from_millis(400));
-                this.spaces_menu_dismissed_at = None;
-                if this.spaces_menu.is_open() {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.spaces_menu.take_press_was_open() {
                     this.close_spaces_menu(cx);
-                } else if !just_dismissed {
+                } else {
                     this.open_spaces_menu(window, cx);
                 }
             }))
@@ -559,7 +559,6 @@ impl Shell {
                 this.spaces_menu_key(event, cx)
             }))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.spaces_menu_dismissed_at = Some(std::time::Instant::now());
                 this.close_spaces_menu(cx);
             }))
             .flex()
@@ -909,6 +908,13 @@ impl Shell {
             cx.new(|cx| ComposerInput::with_context("Search folders…", "PaletteSearch", cx));
         let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
+                // Typing `/` after a query that names a folder descends into
+                // it — the query reads as a path segment, so the slash IS the
+                // pick (shell-style). Otherwise the slash stays in the query
+                // (it matches nothing, which is honest feedback).
+                if this.add_space_slash_descend(cx) {
+                    return;
+                }
                 if let Some(flow) = this.add_space.as_mut() {
                     flow.active = 0;
                 }
@@ -998,6 +1004,80 @@ impl Shell {
         }
         search.update(cx, |input, cx| input.set_text("", cx));
         self.load_space_folders(Some(full), cx);
+    }
+
+    /// Slash-descend: when the query ends in `/` and the part before it names
+    /// a folder of the current listing (exact name — matching casing wins
+    /// over a case-colliding sibling — else a unique prefix), descend into it
+    /// as though it were picked. Returns whether it fired —
+    /// descending clears the query, so the caller must not keep acting on the
+    /// old text.
+    fn add_space_slash_descend(&mut self, cx: &mut Context<Self>) -> bool {
+        let target = {
+            let Some(flow) = self.add_space.as_ref() else {
+                return false;
+            };
+            let text = flow.search.read(cx).text().to_string();
+            let Some(query) = text.strip_suffix('/') else {
+                return false;
+            };
+            if query.is_empty() || query.contains('/') {
+                return false;
+            }
+            let Some(listing) = flow.browser.ready() else {
+                return false;
+            };
+            let dirs = browser_rows(listing);
+            let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
+            crate::pickers::segment_target(&names, query).map(|ix| {
+                (
+                    crate::pickers::child_path(&listing.path, &dirs[ix].name),
+                    dirs[ix].is_repo,
+                )
+            })
+        };
+        let Some((full, is_repo)) = target else {
+            return false;
+        };
+        self.add_space_descend(full, is_repo, cx);
+        true
+    }
+
+    /// The tab-completion target: the highlighted row when the query prefixes
+    /// its name, else the first prefix match (filtering ranks those first).
+    /// `(full name, remaining suffix)`; `None` on an empty query or when the
+    /// match is already complete.
+    fn add_space_completion(&self, cx: &App) -> Option<(String, String)> {
+        let flow = self.add_space.as_ref()?;
+        let query = flow.search.read(cx).text().to_string();
+        if query.is_empty() {
+            return None;
+        }
+        let rows = self.add_space_filtered(cx);
+        let entry = rows
+            .get(flow.active)
+            .filter(|e| completion_prefix_len(&e.name, &query).is_some())
+            .or_else(|| {
+                rows.iter()
+                    .find(|e| completion_prefix_len(&e.name, &query).is_some())
+            })?;
+        let len = completion_prefix_len(&entry.name, &query)?;
+        if len >= entry.name.len() {
+            return None;
+        }
+        Some((entry.name.clone(), entry.name[len..].to_string()))
+    }
+
+    /// ⇥: accept the completion — the query becomes the full folder name
+    /// (the ghost the input was previewing). Descending stays on `/`/⏎.
+    fn add_space_accept_completion(&mut self, cx: &mut Context<Self>) {
+        let Some((name, _)) = self.add_space_completion(cx) else {
+            return;
+        };
+        if let Some(flow) = self.add_space.as_ref() {
+            let search = flow.search.clone();
+            search.update(cx, |input, cx| input.set_text(name, cx));
+        }
     }
 
     /// Descend into a specific folder row (mouse path); clears the query.
@@ -1180,9 +1260,11 @@ impl Shell {
     }
 
     /// Palette keys (bubbling from the focused search input) — every legend
-    /// maps to a REAL key: ↑↓ navigate, →/⏎ open the highlighted folder,
-    /// ← up a level, ⌘⏎ add the OPEN folder, ⌫ (empty query) also goes up,
-    /// esc closes.
+    /// maps to a REAL key: ↑↓ (or ctrl-n/p) navigate, →/⏎ open the
+    /// highlighted folder, ← up a level, ⇥ completes the query to the
+    /// previewed folder name, ⌘⏎ add the OPEN folder, ⌫ (empty query) also
+    /// goes up, esc closes. (Typing `/` also descends — see the Edited
+    /// subscription.)
     fn add_space_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
         // ←/→ act on the FOLDERS, not the text cursor — the palette is a
         // navigator first; queries are short and edited with ⌫.
@@ -1193,6 +1275,12 @@ impl Shell {
             }
             "left" => {
                 self.add_space_go_up(cx);
+                return;
+            }
+            // Unbound in "PaletteSearch" (like enter), so it bubbles here
+            // instead of editing text or moving focus.
+            "tab" => {
+                self.add_space_accept_completion(cx);
                 return;
             }
             _ => {}
@@ -1286,6 +1374,13 @@ impl Shell {
         };
         let devices = self.state.read(cx).devices.clone();
         let rows = self.add_space_filtered(cx);
+        // Push the completion preview into the input — the faint suffix ahead
+        // of the caret that ⇥ accepts. Recomputed every render (query, active
+        // row, and listing all move it); `set_ghost` no-ops when unchanged.
+        let ghost = self
+            .add_space_completion(cx)
+            .map(|(_, suffix)| SharedString::from(suffix));
+        search.update(cx, |input, cx| input.set_ghost(ghost, cx));
         let query_empty = search.read(cx).is_empty();
         let hairline = crate::theme::hairline(0.06);
         let now = Utc::now();
@@ -1754,6 +1849,7 @@ impl Shell {
             ))
             .child(popover::key_hint(&theme, icons::ARROW_LEFT, "Up"))
             .child(popover::key_hint(&theme, icons::ARROW_RIGHT, "Open"))
+            .child(popover::key_hint_text(&theme, "tab", "Complete"))
             .when_some(error, |el, message| {
                 el.child(
                     div()

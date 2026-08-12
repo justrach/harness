@@ -76,6 +76,12 @@ icon_assets![
     // terminal/plus/close ports) — the set has no return glyph.
     (RETURN, "return"),
     (ALT_ARROW_DOWN, "alt-arrow-down"),
+    // Hand-drawn expand/maximize arrows in the Solar Linear style (like the
+    // terminal/plus/return ports) — the set has no expand glyph.
+    (EXPAND_ARROWS, "expand-arrows"),
+    // Hand-drawn fold-all chevrons, drawn as a family with EXPAND_ARROWS
+    // (same stroke, caps, 90° joints) — Solar has no unfold-less either.
+    (FOLD_VERTICAL, "fold-vertical"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),
@@ -104,6 +110,10 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
+    // plus/return ports) — the embedded set has neither.
+    (BELL, "bell"),
+    (VOLUME_LOUD, "volume-loud"),
     // Hand-drawn comet glyphs (terminal-panel.tsx / composer-actions.tsx /
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),

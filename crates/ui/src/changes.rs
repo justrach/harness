@@ -7,12 +7,20 @@
 //!   first, then by device+cwd, then cwd alone;
 //! - states: *preparing* (no diff yet), *clean* (empty patch), *list*; a watch
 //!   error shows a banner while the last content stays;
-//! - virtualized with gpui `list()` — one row per file section; each section
-//!   collapses with a 180 ms height tween (analytic heights, no measurement)
-//!   and a 200 ms chevron transition;
+//! - virtualized with gpui `list()` at LINE granularity — every file header,
+//!   hunk header, and diff line is its own row (the flat model Zed's editor
+//!   uses for its project diff: only the visible slice materializes, and a
+//!   collapsed file's body rows are removed from the list outright, not
+//!   hidden); each section collapses with a 180 ms height tween on a
+//!   clipped stand-in row (analytic heights, capped to what the clip can
+//!   reveal) and a 200 ms chevron transition;
 //! - syntax highlight reuses the markdown tokenizer per diff line, computed
 //!   time-sliced on the background executor and applied as paint-only run
-//!   colors (layout never changes).
+//!   colors (layout never changes);
+//! - scopes (t3code parity): *Working tree* rides the watch stream; *Branch
+//!   changes* (vs a selectable base ref, default branch preselected) and
+//!   *Latest turn* fetch one-shot `GetCheckoutDiff` captures, refreshed when
+//!   the watch checksum says the tree moved.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -20,16 +28,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, ListAlignment, ListState, SharedString, Subscription, Task,
-    Window, div, font, list, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
+    SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
 
 use comet_proto::{Chat, CheckoutDiff};
 use comet_rpc::methods;
 
+use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_line};
 use crate::markdown::render;
 use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
+use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
@@ -98,6 +108,9 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub additions: u32,
     pub deletions: u32,
+    /// Largest line number on either side — sizes the gutters analytically
+    /// (a fixed column overflowed past 4 digits; user report).
+    pub max_line: u32,
 }
 
 impl FileDiff {
@@ -111,8 +124,19 @@ impl FileDiff {
             hunks: Vec::new(),
             additions: 0,
             deletions: 0,
+            max_line: 0,
         }
     }
+}
+
+/// Width of one line-number gutter column, fitted to the file's largest
+/// line number: 11px mono ≈ 6.6px per digit, the 8px right pad, and a 6px
+/// left gap so the number never abuts the accent bar (at 4 digits the old
+/// formula left 1.6px — visually touching; user report). Never narrower
+/// than the classic 36px column.
+pub fn gutter_width(file: &FileDiff) -> f32 {
+    let digits = file.max_line.max(1).ilog10() + 1;
+    (digits as f32 * 6.6 + 8.0 + 6.0).max(GUTTER_WIDTH)
 }
 
 fn strip_git_prefix(path: &str) -> &str {
@@ -254,6 +278,10 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if let Some(line) = line
                 && let Some(hunk) = file.hunks.last_mut()
             {
+                file.max_line = file
+                    .max_line
+                    .max(line.old_no.unwrap_or(0))
+                    .max(line.new_no.unwrap_or(0));
                 hunk.lines.push(line);
                 continue;
             }
@@ -314,6 +342,40 @@ pub fn file_notices(file: &FileDiff) -> Vec<String> {
     notices
 }
 
+/// Cap a file's hunks at `max_lines` total diff lines, appending a notice
+/// when lines were dropped. The transcript renders a tool diff as ONE
+/// stacked element inside its row, so an unbounded diff (a fetched
+/// full-diff blob, a whole-file rewrite) would otherwise build tens of
+/// thousands of elements every frame it is visible.
+pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
+    let total: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+    if total <= max_lines {
+        return;
+    }
+    let mut budget = max_lines;
+    file.hunks.retain_mut(|hunk| {
+        if budget == 0 {
+            return false;
+        }
+        if hunk.lines.len() > budget {
+            hunk.lines.truncate(budget);
+        }
+        budget -= hunk.lines.len();
+        true
+    });
+    file.notices.push(format!(
+        "Diff truncated — showing first {max_lines} of {total} lines"
+    ));
+    // The gutter fits what actually renders.
+    file.max_line = file
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .map(|l| l.old_no.unwrap_or(0).max(l.new_no.unwrap_or(0)))
+        .max()
+        .unwrap_or(0);
+}
+
 /// Analytic expanded-body height — drives the 180 ms fold tween without
 /// measurement.
 pub fn body_height(file: &FileDiff) -> f32 {
@@ -365,6 +427,86 @@ pub fn uncommitted_label(count: usize) -> String {
         "1 Uncommitted change".to_string()
     } else {
         format!("{count} Uncommitted changes")
+    }
+}
+
+/// What the pane diffs against (t3code's scope dropdown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffScope {
+    /// Uncommitted changes vs HEAD — the live watch stream.
+    #[default]
+    WorkingTree,
+    /// Everything this branch adds over `merge-base(base_ref, HEAD)`,
+    /// working tree included.
+    Branch,
+    /// Changes since the current chat's last turn started.
+    LatestTurn,
+}
+
+impl DiffScope {
+    pub const ALL: [DiffScope; 3] = [Self::WorkingTree, Self::Branch, Self::LatestTurn];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WorkingTree => "Working tree",
+            Self::Branch => "Branch changes",
+            Self::LatestTurn => "Latest turn",
+        }
+    }
+
+    /// Wire value for `GetCheckoutDiff` `mode` (and parse-key discriminant).
+    pub fn mode(self) -> &'static str {
+        match self {
+            Self::WorkingTree => "workingTree",
+            Self::Branch => "branch",
+            Self::LatestTurn => "turn",
+        }
+    }
+}
+
+/// Header-strip label per scope.
+pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String {
+    let files = if count == 1 { "file" } else { "files" };
+    match scope {
+        DiffScope::WorkingTree => uncommitted_label(count),
+        DiffScope::Branch => match base {
+            Some(base) => format!("{count} Changed {files} vs {base}"),
+            None => format!("{count} Changed {files}"),
+        },
+        DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
+    }
+}
+
+/// The comparison ref the branch scope preselects. `branches` comes from
+/// `ListBranches` with the repo's default branch first — but a repo with no
+/// `origin/HEAD` falls back to the *checked-out* branch there, and comparing a
+/// branch with itself is useless; prefer `main`/`master` in that case.
+pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<String> {
+    let first = branches.first()?;
+    if current != Some(first.as_str()) {
+        return Some(first.clone());
+    }
+    for candidate in ["main", "master"] {
+        if branches.iter().any(|b| b == candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+    branches
+        .iter()
+        .find(|b| current != Some(b.as_str()))
+        .or(Some(first))
+        .cloned()
+}
+
+/// Empty-state copy per scope.
+pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
+    match scope {
+        DiffScope::WorkingTree => "No uncommitted changes".to_string(),
+        DiffScope::Branch => match base {
+            Some(base) => format!("No changes vs {base}"),
+            None => "No branch changes".to_string(),
+        },
+        DiffScope::LatestTurn => "No changes this turn".to_string(),
     }
 }
 
@@ -427,6 +569,102 @@ struct ParsedDiff {
     files: Arc<Vec<FileDiff>>,
 }
 
+// ---------------------------------------------------------------------------
+// Row model — the diff flattened to line granularity (pure)
+// ---------------------------------------------------------------------------
+
+/// One virtualized list row. The diff is flattened so each visible LINE is
+/// its own row (Zed's editor draws exactly the visible line range the same
+/// way): scrolling a 10k-line file materializes ~50 line rows per frame, not
+/// one 10k-line element, and a collapsed file contributes no body rows at
+/// all. Heights are the analytic constants above — no measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffRow {
+    FileHeader {
+        file: u32,
+    },
+    Notice {
+        file: u32,
+        notice: u32,
+    },
+    HunkHeader {
+        file: u32,
+        hunk: u32,
+    },
+    Line {
+        file: u32,
+        hunk: u32,
+        line: u32,
+        /// Flat index across the file's hunks — keys into the highlight slot.
+        flat: u32,
+    },
+    /// Trailing pad closing an expanded body ([`BODY_BOTTOM_PAD`]).
+    BodyPad {
+        file: u32,
+    },
+    /// A body mid-fold-tween: one height-animated, clipped row standing in
+    /// for the whole body. Only the slice that can be revealed is built —
+    /// the tween never pays for off-screen lines.
+    FoldingBody {
+        file: u32,
+    },
+}
+
+/// Rows an expanded body contributes (notices + hunk headers + lines + pad).
+pub fn body_row_count(file: &FileDiff) -> usize {
+    let lines: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+    file_notices(file).len() + file.hunks.len() + lines + 1
+}
+
+/// The steady-state body rows of one expanded file.
+pub fn body_rows(file_ix: u32, file: &FileDiff) -> Vec<DiffRow> {
+    let mut rows = Vec::with_capacity(body_row_count(file));
+    for notice in 0..file_notices(file).len() {
+        rows.push(DiffRow::Notice {
+            file: file_ix,
+            notice: notice as u32,
+        });
+    }
+    let mut flat = 0u32;
+    for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+        rows.push(DiffRow::HunkHeader {
+            file: file_ix,
+            hunk: hunk_ix as u32,
+        });
+        for line_ix in 0..hunk.lines.len() {
+            rows.push(DiffRow::Line {
+                file: file_ix,
+                hunk: hunk_ix as u32,
+                line: line_ix as u32,
+                flat,
+            });
+            flat += 1;
+        }
+    }
+    rows.push(DiffRow::BodyPad { file: file_ix });
+    rows
+}
+
+/// Flatten all files into rows + each file's row span (header at
+/// `range.start`, body rows after it). `collapsed(ix)` folds a file to just
+/// its header.
+pub fn flatten_rows(
+    files: &[FileDiff],
+    mut collapsed: impl FnMut(usize) -> bool,
+) -> (Vec<DiffRow>, Vec<std::ops::Range<usize>>) {
+    let mut rows = Vec::new();
+    let mut ranges = Vec::with_capacity(files.len());
+    for (ix, file) in files.iter().enumerate() {
+        let start = rows.len();
+        rows.push(DiffRow::FileHeader { file: ix as u32 });
+        if !collapsed(ix) {
+            rows.extend(body_rows(ix as u32, file));
+        }
+        ranges.push(start..rows.len());
+    }
+    (rows, ranges)
+}
+
 #[derive(Default, Clone, Copy)]
 struct FileFold {
     collapsed: bool,
@@ -444,6 +682,12 @@ struct FileFold {
 /// Tween arming window after a fold toggle (COLLAPSE's 180ms plus margin).
 const FOLD_TWEEN_WINDOW: Duration = Duration::from_millis(400);
 
+/// Ceiling on how much body a fold tween's stand-in row materializes. A
+/// tween always starts from a clicked (on-screen) header, so the revealable
+/// slice is at most one viewport tall — everything past this is clipped or
+/// below the fold either way.
+const FOLD_TWEEN_MAX_PX: f32 = 2400.0;
+
 impl FileFold {
     fn animating(&self) -> bool {
         self.epoch > 0
@@ -457,6 +701,21 @@ struct HighlightSlot {
     fingerprint: u64,
     lines: Option<Arc<Vec<Vec<Token>>>>,
     _task: Option<Task<()>>,
+}
+
+/// The open base-ref dropdown — the same searchable-menu recipe as the
+/// composer's ref picker and the spaces filter: a filter input on top
+/// (`PaletteSearch` context so ↑↓/⏎ bubble to the card's key handler),
+/// ranked substring rows below.
+struct RefMenu {
+    search: Entity<ComposerInput>,
+    /// Keyboard highlight within the filtered rows.
+    active: usize,
+    /// Tracked on the card — puts it on the keyboard dispatch path while the
+    /// search input holds focus (the structure every working picker uses).
+    focus: FocusHandle,
+    list_scroll: gpui::ScrollHandle,
+    _search_events: Subscription,
 }
 
 async fn yield_now() {
@@ -490,7 +749,31 @@ pub struct Changes {
     parse_task: Option<Task<()>>,
     folds: HashMap<String, FileFold>,
     highlights: HashMap<String, HighlightSlot>,
+    /// The flattened row model the list virtualizes over (line granularity;
+    /// collapsed bodies excluded) + each file's row span within it.
+    rows: Vec<DiffRow>,
+    row_ranges: Vec<std::ops::Range<usize>>,
+    /// Sweeps [`DiffRow::FoldingBody`] stand-ins back to steady-state rows
+    /// once their tween window elapses.
+    fold_settle: Option<Task<()>>,
     list: ListState,
+    /// What the pane diffs against (toolbar dropdown).
+    scope: DiffScope,
+    /// Comparison ref for [`DiffScope::Branch`] — preset to the repo's
+    /// default branch once the branch list lands.
+    base_ref: Option<String>,
+    branches: Vec<String>,
+    /// `device:cwd` the branch list was fetched for.
+    branches_for: Option<String>,
+    branches_task: Option<Task<()>>,
+    /// One-shot scoped capture (Branch / Latest turn) + its fetch key.
+    scoped: Option<CheckoutDiff>,
+    scoped_for: Option<String>,
+    scoped_error: Option<SharedString>,
+    scoped_inflight: Option<String>,
+    scoped_task: Option<Task<()>>,
+    scope_menu: Popup<()>,
+    ref_menu: Popup<RefMenu>,
     _observe: Subscription,
 }
 
@@ -508,7 +791,24 @@ impl Changes {
             parse_task: None,
             folds: HashMap::new(),
             highlights: HashMap::new(),
-            list: ListState::new(0, ListAlignment::Top, px(320.0)),
+            rows: Vec::new(),
+            row_ranges: Vec::new(),
+            fold_settle: None,
+            // Rows are single lines now — a deep overdraw is cheap and keeps
+            // fast wheel flicks from outrunning measurement.
+            list: ListState::new(0, ListAlignment::Top, px(1024.0)),
+            scope: DiffScope::default(),
+            base_ref: None,
+            branches: Vec::new(),
+            branches_for: None,
+            branches_task: None,
+            scoped: None,
+            scoped_for: None,
+            scoped_error: None,
+            scoped_inflight: None,
+            scoped_task: None,
+            scope_menu: Popup::default(),
+            ref_menu: Popup::default(),
             _observe: observe,
         }
     }
@@ -617,13 +917,231 @@ impl Changes {
         resolve_diff(&self.diffs, chat).cloned()
     }
 
-    /// Reconcile parsed content with the currently-resolved diff.
+    /// The checkout root the scoped RPCs address: the watch-resolved diff's
+    /// canonical cwd when available, else the chat row's own.
+    fn scoped_cwd(&self, cx: &App) -> Option<String> {
+        if let Some(diff) = self.resolved(cx) {
+            return Some(diff.cwd);
+        }
+        self.state.read(cx).selected_chat_row()?.cwd.clone()
+    }
+
+    /// The diff the pane currently displays: the watch stream for the working
+    /// tree, the one-shot scoped capture otherwise.
+    fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
+        match self.scope {
+            DiffScope::WorkingTree => self.resolved(cx),
+            _ => self.scoped.clone(),
+        }
+    }
+
+    /// Scope discriminant folded into the parse key, so a scope or base
+    /// switch re-parses even when checksums collide.
+    fn scope_key(&self) -> String {
+        match self.scope {
+            DiffScope::WorkingTree => "wt".to_string(),
+            DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
+            DiffScope::LatestTurn => "turn".to_string(),
+        }
+    }
+
+    fn parse_key(&self, diff: &CheckoutDiff) -> String {
+        format!(
+            "{}:{}:{}",
+            diff.checkout_id,
+            diff.checksum,
+            self.scope_key()
+        )
+    }
+
+    /// Fetch the branch list for the selected chat's checkout (idempotent per
+    /// device+cwd); the repo's default branch (first entry) becomes the
+    /// comparison base unless the user already picked one that still exists.
+    fn ensure_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.scoped_cwd(cx) else {
+            return;
+        };
+        let target = self.desired_target(cx);
+        let key = format!("{}:{}", target.as_deref().unwrap_or("local"), cwd);
+        if self.branches_for.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.branches_for = Some(key.clone());
+        self.branches_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::Map::new();
+            params.insert("repoPath".into(), serde_json::Value::String(cwd));
+            if let Some(target) = target {
+                params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+            }
+            let result = engine
+                .client()
+                .call(methods::LIST_BRANCHES, serde_json::Value::Object(params))
+                .await;
+            this.update(cx, |changes, cx| {
+                if changes.branches_for.as_deref() != Some(key.as_str()) {
+                    return; // superseded by a chat/device switch
+                }
+                match result {
+                    Ok(value) => {
+                        changes.branches =
+                            serde_json::from_value::<Vec<String>>(value).unwrap_or_default();
+                        let keep = changes
+                            .base_ref
+                            .as_ref()
+                            .is_some_and(|base| changes.branches.contains(base));
+                        if !keep {
+                            let current = changes
+                                .state
+                                .read(cx)
+                                .selected_chat_row()
+                                .and_then(|chat| chat.branch.clone());
+                            changes.base_ref =
+                                default_base_ref(&changes.branches, current.as_deref());
+                        }
+                        changes.sync(cx);
+                    }
+                    Err(err) => {
+                        tracing::debug!(error = %err, "changes: branch list failed");
+                        // Allow a retry on the next state change.
+                        changes.branches_for = None;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Keep the one-shot scoped capture fresh. The fetch key folds in the
+    /// watch checksum, so any working-tree change (or commit — HEAD rides the
+    /// checksum) re-captures; a context change (chat/scope/base) clears the
+    /// stale content first so the pane shows the spinner, while a
+    /// checksum-only refresh keeps the old diff visible until the new one
+    /// lands.
+    fn ensure_scoped(&mut self, cx: &mut Context<Self>) {
+        if self.scope == DiffScope::WorkingTree {
+            self.scoped_inflight = None;
+            self.scoped_task = None;
+            return;
+        }
+        let Some(chat_id) = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .map(|chat| chat.id.clone())
+        else {
+            return;
+        };
+        let Some(cwd) = self.scoped_cwd(cx) else {
+            return;
+        };
+        let base = match self.scope {
+            DiffScope::Branch => match &self.base_ref {
+                Some(base) => Some(base.clone()),
+                None => return, // branch list still loading
+            },
+            _ => None,
+        };
+        let target = self.desired_target(cx);
+        let context = format!(
+            "{}|{}|{}|{}|{}",
+            target.as_deref().unwrap_or("local"),
+            chat_id,
+            cwd,
+            self.scope.mode(),
+            base.as_deref().unwrap_or("")
+        );
+        let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
+        let key = format!("{context}|{watch_sum}");
+        if self.scoped_for.as_deref() == Some(key.as_str())
+            || self.scoped_inflight.as_deref() == Some(key.as_str())
+        {
+            return;
+        }
+        if self
+            .scoped_for
+            .as_deref()
+            .is_none_or(|prev| !prev.starts_with(&format!("{context}|")))
+        {
+            self.scoped = None;
+            self.scoped_error = None;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let mode = self.scope.mode();
+        self.scoped_inflight = Some(key.clone());
+        self.scoped_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::Map::new();
+            params.insert("cwd".into(), serde_json::Value::String(cwd));
+            params.insert("mode".into(), serde_json::Value::String(mode.to_string()));
+            params.insert("chatId".into(), serde_json::Value::String(chat_id));
+            if let Some(base) = base {
+                params.insert("baseRef".into(), serde_json::Value::String(base));
+            }
+            if let Some(target) = target {
+                params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+            }
+            let result = engine
+                .client()
+                .call(methods::GET_CHECKOUT_DIFF, serde_json::Value::Object(params))
+                .await;
+            this.update(cx, |changes, cx| {
+                if changes.scoped_inflight.as_deref() != Some(key.as_str()) {
+                    return; // superseded
+                }
+                changes.scoped_inflight = None;
+                match result.and_then(|value| {
+                    serde_json::from_value::<CheckoutDiff>(value)
+                        .map_err(|e| comet_rpc::RpcError::Failed(e.to_string()))
+                }) {
+                    Ok(diff) => {
+                        changes.scoped = Some(diff);
+                        changes.scoped_error = None;
+                    }
+                    Err(err) => {
+                        changes.scoped = None;
+                        changes.scoped_error = Some(err.to_string().into());
+                    }
+                }
+                changes.scoped_for = Some(key);
+                changes.sync(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
+        if self.scope != scope {
+            self.scope = scope;
+            self.sync(cx);
+        }
+        cx.notify();
+    }
+
+    fn set_base_ref(&mut self, base: String, cx: &mut Context<Self>) {
+        if self.base_ref.as_deref() != Some(base.as_str()) {
+            self.base_ref = Some(base);
+            self.sync(cx);
+        }
+        cx.notify();
+    }
+
+    /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
         // The watch follows the selected chat's host device (idempotent when
         // the target is unchanged); a boot-deferred attempt retries here too.
         self.ensure_watch(cx);
-        let Some(diff) = self.resolved(cx) else {
+        self.ensure_branches(cx);
+        self.ensure_scoped(cx);
+        let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
+                self.rows.clear();
+                self.row_ranges.clear();
                 self.list.reset(0);
                 self.folds.clear();
                 self.highlights.clear();
@@ -631,7 +1149,7 @@ impl Changes {
             }
             return;
         };
-        let key = format!("{}:{}", diff.checkout_id, diff.checksum);
+        let key = self.parse_key(&diff);
         if self.parsed.as_ref().is_some_and(|p| p.key == key) {
             return;
         }
@@ -649,8 +1167,8 @@ impl Changes {
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
                 let current = changes
-                    .resolved(cx)
-                    .map(|d| format!("{}:{}", d.checkout_id, d.checksum));
+                    .active_diff(cx)
+                    .map(|d| changes.parse_key(&d));
                 if current.as_deref() != Some(key.as_str()) {
                     return;
                 }
@@ -659,9 +1177,17 @@ impl Changes {
                 } else {
                     files.len()
                 };
-                changes.list.reset(files.len());
                 changes.folds.clear();
                 changes.highlights.clear();
+                let (rows, ranges) = flatten_rows(&files, |_| false);
+                // The uniform hint keeps offsets for never-rendered rows
+                // sane (most rows ARE lines); real heights land as rows
+                // render.
+                changes
+                    .list
+                    .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
+                changes.rows = rows;
+                changes.row_ranges = ranges;
                 changes.parsed = Some(ParsedDiff {
                     key,
                     truncated,
@@ -676,8 +1202,33 @@ impl Changes {
         }));
     }
 
-    fn toggle_fold(&mut self, path: &str, expanded_height: f32) {
-        let fold = self.folds.entry(path.to_string()).or_default();
+    /// Swap one file's body rows (everything after its header) for
+    /// `new_body`, splicing both the row model and the list state. gpui's
+    /// `splice` shifts the logical scroll anchor by the count delta, so
+    /// content below the fold stays put.
+    fn replace_file_body(&mut self, file_ix: usize, new_body: Vec<DiffRow>) {
+        let Some(range) = self.row_ranges.get(file_ix).cloned() else {
+            return;
+        };
+        let body = range.start + 1..range.end;
+        let delta = new_body.len() as isize - body.len() as isize;
+        self.list.splice(body.clone(), new_body.len());
+        self.rows.splice(body, new_body);
+        self.row_ranges[file_ix] = range.start..(range.end as isize + delta) as usize;
+        for r in &mut self.row_ranges[file_ix + 1..] {
+            *r = (r.start as isize + delta) as usize..(r.end as isize + delta) as usize;
+        }
+    }
+
+    fn toggle_fold(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        let Some(file) = parsed.files.get(file_ix) else {
+            return;
+        };
+        let expanded_height = body_height(file);
+        let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
         fold.from = if currently_collapsed {
             0.0
@@ -692,6 +1243,215 @@ impl Changes {
         fold.collapsed = !currently_collapsed;
         fold.epoch += 1;
         fold.toggled_at = Some(std::time::Instant::now());
+        // The body tweens as ONE clipped stand-in row; the settle sweep
+        // swaps it for steady rows (all lines, or none) once the window
+        // elapses.
+        self.replace_file_body(
+            file_ix,
+            vec![DiffRow::FoldingBody {
+                file: file_ix as u32,
+            }],
+        );
+        self.ensure_fold_settle(cx);
+    }
+
+    /// Keep a sweep alive while any [`DiffRow::FoldingBody`] stand-ins
+    /// remain; each tick settles the ones whose tween window has elapsed.
+    fn ensure_fold_settle(&mut self, cx: &mut Context<Self>) {
+        if self.fold_settle.is_some() {
+            return;
+        }
+        self.fold_settle = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(FOLD_TWEEN_WINDOW).await;
+                let more = this
+                    .update(cx, |changes, cx| changes.settle_folds(cx))
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+            this.update(cx, |changes, _| changes.fold_settle = None)
+                .ok();
+        }));
+    }
+
+    /// Replace every settled folding stand-in with its steady-state rows.
+    /// Returns whether any stand-ins are still mid-tween.
+    fn settle_folds(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(parsed) = &self.parsed else {
+            return false;
+        };
+        let files = parsed.files.clone();
+        let mut pending = false;
+        for file_ix in (0..self.row_ranges.len()).rev() {
+            let range = &self.row_ranges[file_ix];
+            let folding = self.rows.get(range.start + 1)
+                == Some(&DiffRow::FoldingBody {
+                    file: file_ix as u32,
+                });
+            if !folding {
+                continue;
+            }
+            let Some(file) = files.get(file_ix) else {
+                continue;
+            };
+            let fold = self.folds.get(&file.path).copied().unwrap_or_default();
+            if fold.animating() {
+                pending = true;
+                continue;
+            }
+            let body = if fold.collapsed {
+                Vec::new()
+            } else {
+                body_rows(file_ix as u32, file)
+            };
+            self.replace_file_body(file_ix, body);
+        }
+        cx.notify();
+        pending
+    }
+
+    /// Every parsed file currently folded shut?
+    fn all_collapsed(&self) -> bool {
+        let Some(parsed) = &self.parsed else {
+            return false;
+        };
+        !parsed.files.is_empty()
+            && parsed.files.iter().all(|file| {
+                self.folds
+                    .get(&file.path)
+                    .is_some_and(|fold| fold.collapsed)
+            })
+    }
+
+    /// Collapse every file section, or expand them all when everything is
+    /// already shut (the toolbar's fold button, t3code parity). Steady-state
+    /// writes — no per-row tween arming, the whole list just snaps. List
+    /// splices run bottom-up over the OLD ranges (each is O(log n)), then
+    /// the row model rebuilds wholesale; the scroll anchor rides the
+    /// splices, landing on the nearest file header when its body vanishes.
+    fn toggle_collapse_all(&mut self, cx: &mut Context<Self>) {
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        let collapse = !self.all_collapsed();
+        let files = parsed.files.clone();
+        for file in files.iter() {
+            let fold = self.folds.entry(file.path.clone()).or_default();
+            fold.collapsed = collapse;
+            fold.toggled_at = None;
+        }
+        for file_ix in (0..self.row_ranges.len().min(files.len())).rev() {
+            let range = &self.row_ranges[file_ix];
+            let body = range.start + 1..range.end;
+            let new_len = if collapse {
+                0
+            } else {
+                body_row_count(&files[file_ix])
+            };
+            if body.len() != new_len {
+                self.list.splice(body, new_len);
+            }
+        }
+        let (rows, ranges) = flatten_rows(&files, |_| collapse);
+        self.rows = rows;
+        self.row_ranges = ranges;
+        cx.notify();
+    }
+
+    fn close_scope_menu(&mut self, cx: &mut Context<Self>) {
+        if self.scope_menu.begin_close() {
+            popover::reap_popup(cx, |changes: &mut Self| &mut changes.scope_menu);
+        }
+    }
+
+    fn close_ref_menu(&mut self, cx: &mut Context<Self>) {
+        if self.ref_menu.begin_close() {
+            popover::reap_popup(cx, |changes: &mut Self| &mut changes.ref_menu);
+        }
+    }
+
+    fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
+        // to the card's key handler.
+        let search =
+            cx.new(|cx| ComposerInput::with_context("Search branches…", "PaletteSearch", cx));
+        let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Edited) {
+                if let Some(menu) = this.ref_menu.open_mut() {
+                    menu.active = 0;
+                }
+                cx.notify();
+            }
+        });
+        let handle = search.read(cx).focus_handle(cx);
+        // The highlight starts ON the current base (query is empty, so the
+        // filtered rows are just the branch list).
+        let active = self
+            .base_ref
+            .as_ref()
+            .and_then(|base| self.branches.iter().position(|b| b == base))
+            .unwrap_or(0);
+        self.ref_menu.open(RefMenu {
+            search,
+            active,
+            focus: cx.focus_handle(),
+            list_scroll: gpui::ScrollHandle::new(),
+            _search_events: search_events,
+        });
+        // Focusable before first paint (the add-space palette's proven order).
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Filtered branch indices for the open ref menu (ranked substring match).
+    fn ref_menu_rows(&self, cx: &App) -> Vec<usize> {
+        let query = self
+            .ref_menu
+            .get()
+            .map(|menu| menu.search.read(cx).text().to_string())
+            .unwrap_or_default();
+        popover::filter_indices(&query, &self.branches)
+    }
+
+    /// Dropdown keys (bubbling from the focused search input): ↑↓ navigate,
+    /// ⏎ picks the highlighted branch, Esc closes.
+    fn ref_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        // The card stays mounted (and focused) through the exit animation —
+        // keys must not drive a dying menu.
+        if !self.ref_menu.is_open() {
+            return;
+        }
+        let key = popover::classify_key(
+            event.keystroke.key.as_str(),
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+        );
+        match key {
+            popover::MenuKey::Escape => self.close_ref_menu(cx),
+            popover::MenuKey::Up | popover::MenuKey::Down => {
+                let count = self.ref_menu_rows(cx).len();
+                let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
+                if let Some(menu) = self.ref_menu.open_mut() {
+                    menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
+                    menu.list_scroll.scroll_to_item(menu.active);
+                    cx.notify();
+                }
+            }
+            popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
+                let active = self.ref_menu.get().map(|m| m.active).unwrap_or(0);
+                let pick = self
+                    .ref_menu_rows(cx)
+                    .get(active)
+                    .and_then(|ix| self.branches.get(*ix).cloned());
+                if let Some(branch) = pick {
+                    self.set_base_ref(branch, cx);
+                    self.close_ref_menu(cx);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Tokens for a file's diff lines (paint-only). Kicks a time-sliced
@@ -768,50 +1528,96 @@ impl Changes {
         };
         let files = parsed.files.clone();
         let parsed_key = parsed.key.clone();
-        let Some(file) = files.get(ix) else {
+        let Some(row) = self.rows.get(ix).copied() else {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let expanded_height = body_height(file);
-        let fold = self.folds.get(&file.path).copied().unwrap_or_default();
-        let highlight = self.request_highlight(file, &parsed_key, cx);
-        let path = file.path.clone();
-
-        let header = self.render_file_header(ix, file, &fold, expanded_height, &theme, cx);
-        let body = render_file_body(file, highlight, &theme);
-
-        // Collapse: 180 ms committed-height tween on toggle (windowed — see
-        // FileFold::animating); steady states paint at the target height
-        // directly.
-        let body: AnyElement = if fold.animating() {
-            let (from, to) = (fold.from, fold.to);
-            div()
-                .overflow_hidden()
-                .child(body)
-                .with_animation(
-                    SharedString::from(format!("fold-{path}-{}", fold.epoch)),
-                    COLLAPSE.animation(),
-                    move |el, t| el.h(px(motion::lerp(from, to, t))),
-                )
-                .into_any_element()
-        } else {
-            let target = if fold.collapsed { 0.0 } else { expanded_height };
-            div()
-                .overflow_hidden()
-                .h(px(target))
-                .child(body)
-                .into_any_element()
-        };
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.04))
-            .child(header)
-            .child(body)
-            .into_any_element()
+        match row {
+            DiffRow::FileHeader { file } => {
+                let Some(file_diff) = files.get(file as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let fold = self
+                    .folds
+                    .get(&file_diff.path)
+                    .copied()
+                    .unwrap_or_default();
+                self.render_file_header(file as usize, file_diff, &fold, &theme, cx)
+            }
+            DiffRow::Notice { file, notice } => files
+                .get(file as usize)
+                .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
+                .map(|text| notice_row(text, &theme))
+                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+            DiffRow::HunkHeader { file, hunk } => files
+                .get(file as usize)
+                .and_then(|f| f.hunks.get(hunk as usize))
+                .map(|h| hunk_header_row(&h.header, &theme))
+                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+            DiffRow::Line {
+                file,
+                hunk,
+                line,
+                flat,
+            } => {
+                let Some(file_diff) = files.get(file as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
+                let Some(line) = file_diff
+                    .hunks
+                    .get(hunk as usize)
+                    .and_then(|h| h.lines.get(line as usize))
+                else {
+                    return gpui::Empty.into_any_element();
+                };
+                let tokens = highlight
+                    .as_ref()
+                    .and_then(|lines| lines.get(flat as usize))
+                    .map(|t| t.as_slice())
+                    .unwrap_or(&[]);
+                diff_line_row(line, tokens, &theme, gutter_width(file_diff))
+            }
+            DiffRow::BodyPad { .. } => div()
+                .w_full()
+                .h(px(BODY_BOTTOM_PAD))
+                .into_any_element(),
+            DiffRow::FoldingBody { file } => {
+                let Some(file_diff) = files.get(file as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let fold = self
+                    .folds
+                    .get(&file_diff.path)
+                    .copied()
+                    .unwrap_or_default();
+                let highlight = self.request_highlight(file_diff, &parsed_key, cx);
+                let (from, to) = (fold.from, fold.to);
+                // Only the revealable slice is built — the tween never pays
+                // for lines it cannot show.
+                let cap = from.max(to).min(FOLD_TWEEN_MAX_PX);
+                let body = render_file_body_upto(file_diff, highlight, &theme, cap);
+                let clipped = div().w_full().overflow_hidden().child(body);
+                if fold.animating() {
+                    clipped
+                        .with_animation(
+                            SharedString::from(format!(
+                                "fold-{}-{}",
+                                file_diff.path, fold.epoch
+                            )),
+                            COLLAPSE.animation(),
+                            move |el, t| el.h(px(motion::lerp(from, to, t))),
+                        )
+                        .into_any_element()
+                } else {
+                    // Post-tween, pre-settle: hold the full target height so
+                    // the settle splice swaps rows without any reflow (the
+                    // capped slice always covers what the viewport can see —
+                    // tweens start from a clicked, on-screen header).
+                    clipped.h(px(to)).into_any_element()
+                }
+            }
+        }
     }
 
     fn render_file_header(
@@ -819,7 +1625,6 @@ impl Changes {
         ix: usize,
         file: &FileDiff,
         fold: &FileFold,
-        expanded_height: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -854,10 +1659,16 @@ impl Changes {
         };
 
         // Header row: chevron + mono path (one quiet tone) + right-aligned
-        // +N / −N counts on a slightly raised wash.
+        // +N / −N counts on a slightly raised wash. The header carries the
+        // section separator (the per-file wrapper it used to hang on is
+        // gone — rows are flat now).
         div()
             .id(SharedString::from(format!("file-hdr-{ix}")))
+            .w_full()
             .h(px(FILE_HEADER_HEIGHT))
+            .when(ix > 0, |el| {
+                el.border_t_1().border_color(crate::theme::hairline(0.04))
+            })
             .flex_none()
             .flex()
             .flex_row()
@@ -868,7 +1679,7 @@ impl Changes {
             .cursor_pointer()
             .hover(|s| s.bg(crate::theme::ink(0.05)))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_fold(&path, expanded_height);
+                this.toggle_fold(ix, cx);
                 cx.notify();
             }))
             .child(chevron)
@@ -914,6 +1725,356 @@ impl Changes {
             .into_any_element()
     }
 
+    /// A small hover-washed icon button for the pane header. The header lives
+    /// inside the titlebar drag strip, so the button occludes and swallows the
+    /// mouse-down (same discipline as the shell's `header_icon_button`).
+    fn header_button(
+        id: &'static str,
+        icon_path: &'static str,
+        theme: &Theme,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .size(px(24.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .bg(motion::hover_blend(
+                id,
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener(id))
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .child(
+                crate::icons::icon(icon_path)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+    }
+
+    /// The pane-header controls: scope dropdown, `{branch} → {base ⌄}` ref
+    /// selector (branch scope), fold-all. Rendered BY THE SHELL inside the
+    /// session titlebar's trailing section (the band above the pane) — the
+    /// titlebar overlay owns that strip's hit-testing, so controls mounted
+    /// under it would never see a click. The expand and close buttons ride
+    /// alongside, shell-owned (they mutate shell state).
+    pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let scope = self.scope;
+        let trigger = div()
+            .id("changes-scope-trigger")
+            .h(px(24.0))
+            .px(px(8.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .bg(motion::hover_blend(
+                "changes-scope-trigger",
+                crate::theme::wash(0.05),
+                crate::theme::wash(0.14),
+            ))
+            .on_hover(motion::hover_listener("changes-scope-trigger"))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.prevent_default();
+                    this.scope_menu.note_trigger_press();
+                }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                if this.scope_menu.take_press_was_open() {
+                    this.close_scope_menu(cx);
+                } else {
+                    this.scope_menu.open(());
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(scope.label())),
+            )
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted.opacity(0.7)),
+            );
+        let trigger = if self.scope_menu.get().is_some() {
+            let closing = self.scope_menu.closing_since();
+            let menu = self.render_scope_menu(&theme, cx);
+            trigger.relative().child(popover::anchored_menu_below_gap(
+                "changes-scope-menu",
+                menu,
+                closing,
+                10.0,
+            ))
+        } else {
+            trigger
+        };
+
+        let fold = Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_collapse_all(cx);
+            }));
+
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(trigger)
+            .children(self.render_ref_selector(&theme, cx))
+            .child(div().flex_1())
+            .child(fold)
+            .into_any_element()
+    }
+
+    fn render_scope_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.scope;
+        popover::popover_card(theme)
+            .w(px(180.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_scope_menu(cx)))
+            .child(
+                // The 2px row gap every other menu carries — rows straight on
+                // the card abutted, adjacent washes read as one slab (user
+                // report).
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
+                        popover::menu_row(
+                            theme,
+                            scope == current,
+                            format!("changes-scope-row-{ix}"),
+                        )
+                        .id(("changes-scope-row", ix))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_scope(scope, cx);
+                            this.close_scope_menu(cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(SharedString::from(scope.label())),
+                        )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// `{branch} → {base ⌄}` — which ref the branch scope compares against
+    /// (t3code's ref strip), inlined into the pane header. Branch scope only.
+    fn render_ref_selector(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.scope != DiffScope::Branch {
+            return None;
+        }
+        let branch = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .and_then(|chat| chat.branch.clone())
+            .unwrap_or_else(|| "HEAD".to_string());
+        let base = self
+            .base_ref
+            .clone()
+            .unwrap_or_else(|| "…".to_string());
+        let trigger = div()
+            .id("changes-ref-trigger")
+            .h(px(22.0))
+            .px(px(6.0))
+            // Shrinkable, like the branch label beside it — a flex_none
+            // trigger with a long base name plowed over the header buttons
+            // (user report); both sides truncate instead.
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .bg(motion::hover_blend(
+                "changes-ref-trigger",
+                crate::theme::wash(0.0),
+                crate::theme::wash(0.12),
+            ))
+            .on_hover(motion::hover_listener("changes-ref-trigger"))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.prevent_default();
+                    this.ref_menu.note_trigger_press();
+                }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                if this.ref_menu.take_press_was_open() {
+                    this.close_ref_menu(cx);
+                    cx.notify();
+                } else {
+                    this.open_ref_menu(window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.5))
+                    .text_color(theme.text)
+                    .child(SharedString::from(base)),
+            )
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            );
+        let trigger = if self.ref_menu.get().is_some() {
+            let closing = self.ref_menu.closing_since();
+            let menu = self.render_ref_menu(theme, cx);
+            trigger.relative().child(popover::anchored_menu_below_gap(
+                "changes-ref-menu",
+                menu,
+                closing,
+                10.0,
+            ))
+        } else {
+            trigger
+        };
+        Some(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                // Extra room off the scope dropdown (row gap alone read
+                // cramped — user report).
+                .ml(px(6.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.5))
+                        .text_color(theme.text_dim)
+                        .child(SharedString::from(branch)),
+                )
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_RIGHT)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_faint),
+                )
+                .child(trigger)
+                .into_any_element(),
+        )
+    }
+
+    fn render_ref_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (search, active, focus, list_scroll) = {
+            let Some(menu) = self.ref_menu.get() else {
+                return div().into_any_element();
+            };
+            (
+                menu.search.clone(),
+                menu.active,
+                menu.focus.clone(),
+                menu.list_scroll.clone(),
+            )
+        };
+        let rows = self.ref_menu_rows(cx);
+        let current = self.base_ref.clone();
+        let branches = self.branches.clone();
+
+        let list: AnyElement = if rows.is_empty() {
+            div()
+                .px(px(8.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(if branches.is_empty() {
+                    "No branches"
+                } else {
+                    "No matching branches"
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .id("changes-ref-list")
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .max_h(px(240.0))
+                .overflow_y_scroll()
+                .track_scroll(&list_scroll)
+                .children(rows.into_iter().enumerate().map(|(row_ix, branch_ix)| {
+                    let name = branches[branch_ix].clone();
+                    let selected = current.as_deref() == Some(name.as_str());
+                    let label = name.clone();
+                    popover::menu_row_nav(
+                        theme,
+                        selected,
+                        row_ix == active,
+                        format!("changes-ref-row-{row_ix}"),
+                    )
+                    .id(("changes-ref-row", row_ix))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_base_ref(name.clone(), cx);
+                        this.close_ref_menu(cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(12.0))
+                            .child(SharedString::from(label)),
+                    )
+                }))
+                .into_any_element()
+        };
+
+        popover::popover_card(theme)
+            .w(px(240.0))
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                this.ref_menu_key(event, cx)
+            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_ref_menu(cx)))
+            .flex()
+            .flex_col()
+            .child(popover::search_input_frame(
+                theme,
+                search.into_any_element(),
+            ))
+            .child(list)
+            .into_any_element()
+    }
+
     fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
         Some(
@@ -929,9 +2090,15 @@ impl Changes {
                 .border_color(crate::theme::hairline(0.06))
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(uncommitted_label(parsed.file_count))),
+                        .child(SharedString::from(scope_label(
+                            self.scope,
+                            parsed.file_count,
+                            self.base_ref.as_deref(),
+                        ))),
                 )
                 .child(
                     div()
@@ -982,33 +2149,55 @@ fn diff_token_color(class: crate::markdown::highlight::TokenClass, theme: &Theme
     render::token_color(class, theme)
 }
 
-/// The expanded body of one file section: notices, hunk headers, +/-/context
-/// lines with a coloured accent bar, dual line-number gutters, a marker
-/// column, and paint-only syntax runs (comet checkout-diff-sidebar).
-/// Shared with the transcript's tool-diff detail blocks — the same component
-/// renders a checkout diff section and an inline ACP tool diff.
-pub(crate) fn render_file_body(
-    file: &FileDiff,
-    highlight: Option<Arc<Vec<Vec<Token>>>>,
-    theme: &Theme,
-) -> AnyElement {
-    let mono = font(theme.font_mono.clone());
-    let mut line_ix = 0usize;
-    let mut children: Vec<AnyElement> = Vec::new();
+/// One notice row ("New file", "Binary file — contents not shown", …).
+fn notice_row(notice: String, theme: &Theme) -> AnyElement {
+    div()
+        .h(px(NOTICE_HEIGHT))
+        .w_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .px(px(Theme::SPACE_LG))
+        .text_size(px(11.0))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(notice))
+        .into_any_element()
+}
 
-    for notice in file_notices(file) {
-        children.push(
-            div()
-                .h(px(NOTICE_HEIGHT))
-                .flex_none()
-                .flex()
-                .items_center()
-                .px(px(Theme::SPACE_LG))
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(notice))
-                .into_any_element(),
-        );
+/// One `@@ … @@` hunk-header row on the bluish-grey wash.
+fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+    div()
+        .h(px(HUNK_HEADER_HEIGHT))
+        .w_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .px(px(Theme::SPACE_LG))
+        .bg(theme.diff_hunk_bg)
+        .font_family(theme.font_mono.clone())
+        .text_size(px(11.0))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(header.to_string()))
+        .into_any_element()
+}
+
+/// One +/−/context/meta diff line: coloured accent bar, dual line-number
+/// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
+/// paint-only syntax runs.
+fn diff_line_row(line: &DiffLine, tokens: &[Token], theme: &Theme, gutter_px: f32) -> AnyElement {
+    if line.kind == LineKind::Meta {
+        return div()
+            .h(px(DIFF_LINE_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .pl(px(ACCENT_BAR_WIDTH + 2.0 * gutter_px + MARKER_WIDTH + 12.0))
+            .text_size(px(10.5))
+            .text_color(theme.text_faint)
+            .italic()
+            .child(SharedString::from(line.text.clone()))
+            .into_any_element();
     }
 
     // Row tints sampled from the reference: ~5–6% washes over the pane tone.
@@ -1016,153 +2205,165 @@ pub(crate) fn render_file_body(
     add_bg.a = 0.055;
     let mut del_bg = del_color(theme);
     del_bg.a = 0.055;
-    // Bluish-grey hunk-header wash.
-    let hunk_bg = theme.diff_hunk_bg;
 
-    for hunk in &file.hunks {
-        children.push(
+    let (marker, marker_color, row_bg, accent, number_color) = match line.kind {
+        LineKind::Add => (
+            "+",
+            add_color(theme),
+            Some(add_bg),
+            Some(add_color(theme).opacity(0.55)),
+            add_color(theme).opacity(0.9),
+        ),
+        LineKind::Del => (
+            "−",
+            del_color(theme),
+            Some(del_bg),
+            Some(del_color(theme).opacity(0.55)),
+            del_color(theme).opacity(0.9),
+        ),
+        _ => (
+            "·",
+            theme.text_faint.opacity(0.5),
+            None,
+            None,
+            theme.text_faint.opacity(0.8),
+        ),
+    };
+    let gutter = |no: Option<u32>, color: gpui::Hsla| {
+        div()
+            .w(px(gutter_px))
+            .flex_none()
+            .font_family(theme.font_mono.clone())
+            .text_size(px(11.0))
+            .text_color(color)
+            .flex()
+            .justify_end()
+            .pr(px(8.0))
+            .child(SharedString::from(
+                no.map(|n| n.to_string()).unwrap_or_default(),
+            ))
+    };
+    let mono = font(theme.font_mono.clone());
+    let runs = render::runs_with_palette(
+        &line.text,
+        tokens,
+        &mono,
+        theme.text.opacity(0.92),
+        |class| diff_token_color(class, theme),
+    );
+    div()
+        .h(px(DIFF_LINE_HEIGHT))
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .when_some(row_bg, |el, bg| el.bg(bg))
+        // Accent bar: solid colour on +/− rows, invisible spacer on
+        // context rows so columns always align.
+        .child(
             div()
-                .h(px(HUNK_HEADER_HEIGHT))
+                .w(px(ACCENT_BAR_WIDTH))
+                .h_full()
+                .flex_none()
+                .when_some(accent, |el, color| el.bg(color)),
+        )
+        .child(gutter(
+            line.old_no,
+            if line.kind == LineKind::Del {
+                number_color
+            } else {
+                theme.text_faint.opacity(0.8)
+            },
+        ))
+        .child(gutter(
+            line.new_no,
+            if line.kind == LineKind::Add {
+                number_color
+            } else {
+                theme.text_faint.opacity(0.8)
+            },
+        ))
+        .child(
+            div()
+                .w(px(MARKER_WIDTH))
                 .flex_none()
                 .flex()
-                .items_center()
-                .px(px(Theme::SPACE_LG))
-                .bg(hunk_bg)
+                .justify_center()
+                .text_size(px(DIFF_TEXT_SIZE))
+                .text_color(marker_color)
                 .font_family(theme.font_mono.clone())
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(hunk.header.clone()))
-                .into_any_element(),
-        );
-        for line in &hunk.lines {
-            let tokens = highlight
-                .as_ref()
-                .and_then(|lines| lines.get(line_ix))
-                .map(|t| t.as_slice())
-                .unwrap_or(&[]);
-            line_ix += 1;
+                .child(SharedString::from(marker)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .pl(px(12.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(DIFF_TEXT_SIZE))
+                .whitespace_nowrap()
+                .child(gpui::StyledText::new(line.text.clone()).with_runs(runs)),
+        )
+        .into_any_element()
+}
 
-            if line.kind == LineKind::Meta {
-                children.push(
-                    div()
-                        .h(px(DIFF_LINE_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .pl(px(ACCENT_BAR_WIDTH
-                            + 2.0 * GUTTER_WIDTH
-                            + MARKER_WIDTH
-                            + 12.0))
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .italic()
-                        .child(SharedString::from(line.text.clone()))
-                        .into_any_element(),
-                );
-                continue;
+/// The expanded body of one file section: notices, hunk headers, +/-/context
+/// lines with a coloured accent bar, dual line-number gutters, a marker
+/// column, and paint-only syntax runs (comet checkout-diff-sidebar).
+/// Shared with the transcript's tool-diff detail blocks — the same component
+/// renders a checkout diff section and an inline ACP tool diff. (The changes
+/// pane itself virtualizes these rows individually; this stacked form serves
+/// the transcript and the fold tween's clipped stand-in.)
+pub(crate) fn render_file_body(
+    file: &FileDiff,
+    highlight: Option<Arc<Vec<Vec<Token>>>>,
+    theme: &Theme,
+) -> AnyElement {
+    render_file_body_upto(file, highlight, theme, f32::INFINITY)
+}
+
+/// [`render_file_body`], building only rows that start above `max_px` — the
+/// fold tween's stand-in never materializes lines its clip cannot reveal.
+fn render_file_body_upto(
+    file: &FileDiff,
+    highlight: Option<Arc<Vec<Vec<Token>>>>,
+    theme: &Theme,
+    max_px: f32,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = Vec::new();
+    let mut y = 0.0f32;
+    let mut line_ix = 0usize;
+    let gutter_px = gutter_width(file);
+
+    'build: {
+        for notice in file_notices(file) {
+            if y >= max_px {
+                break 'build;
             }
-
-            let (marker, marker_color, row_bg, accent, number_color) = match line.kind {
-                LineKind::Add => (
-                    "+",
-                    add_color(theme),
-                    Some(add_bg),
-                    Some(add_color(theme).opacity(0.55)),
-                    add_color(theme).opacity(0.9),
-                ),
-                LineKind::Del => (
-                    "−",
-                    del_color(theme),
-                    Some(del_bg),
-                    Some(del_color(theme).opacity(0.55)),
-                    del_color(theme).opacity(0.9),
-                ),
-                _ => (
-                    "·",
-                    theme.text_faint.opacity(0.5),
-                    None,
-                    None,
-                    theme.text_faint.opacity(0.8),
-                ),
-            };
-            let gutter = |no: Option<u32>, color: gpui::Hsla| {
-                div()
-                    .w(px(GUTTER_WIDTH))
-                    .flex_none()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(11.0))
-                    .text_color(color)
-                    .flex()
-                    .justify_end()
-                    .pr(px(8.0))
-                    .child(SharedString::from(
-                        no.map(|n| n.to_string()).unwrap_or_default(),
-                    ))
-            };
-            let runs = render::runs_with_palette(
-                &line.text,
-                tokens,
-                &mono,
-                theme.text.opacity(0.92),
-                |class| diff_token_color(class, theme),
-            );
-            children.push(
-                div()
-                    .h(px(DIFF_LINE_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .when_some(row_bg, |el, bg| el.bg(bg))
-                    // Accent bar: solid colour on +/− rows, invisible spacer on
-                    // context rows so columns always align.
-                    .child(
-                        div()
-                            .w(px(ACCENT_BAR_WIDTH))
-                            .h_full()
-                            .flex_none()
-                            .when_some(accent, |el, color| el.bg(color)),
-                    )
-                    .child(gutter(
-                        line.old_no,
-                        if line.kind == LineKind::Del {
-                            number_color
-                        } else {
-                            theme.text_faint.opacity(0.8)
-                        },
-                    ))
-                    .child(gutter(
-                        line.new_no,
-                        if line.kind == LineKind::Add {
-                            number_color
-                        } else {
-                            theme.text_faint.opacity(0.8)
-                        },
-                    ))
-                    .child(
-                        div()
-                            .w(px(MARKER_WIDTH))
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .text_size(px(DIFF_TEXT_SIZE))
-                            .text_color(marker_color)
-                            .font_family(theme.font_mono.clone())
-                            .child(SharedString::from(marker)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .pl(px(12.0))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(DIFF_TEXT_SIZE))
-                            .whitespace_nowrap()
-                            .child(gpui::StyledText::new(line.text.clone()).with_runs(runs)),
-                    )
-                    .into_any_element(),
-            );
+            children.push(notice_row(notice, theme));
+            y += NOTICE_HEIGHT;
+        }
+        for hunk in &file.hunks {
+            if y >= max_px {
+                break 'build;
+            }
+            children.push(hunk_header_row(&hunk.header, theme));
+            y += HUNK_HEADER_HEIGHT;
+            for line in &hunk.lines {
+                if y >= max_px {
+                    break 'build;
+                }
+                let tokens = highlight
+                    .as_ref()
+                    .and_then(|lines| lines.get(line_ix))
+                    .map(|t| t.as_slice())
+                    .unwrap_or(&[]);
+                children.push(diff_line_row(line, tokens, theme, gutter_px));
+                y += DIFF_LINE_HEIGHT;
+                line_ix += 1;
+            }
         }
     }
 
@@ -1177,76 +2378,123 @@ pub(crate) fn render_file_body(
 impl Render for Changes {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let resolved = self.resolved(cx);
+        let active = self.active_diff(cx);
+        let scope = self.scope;
+        let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let phase = if self.state.read(cx).selected_chat_row().is_none() {
+        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let phase = if no_chat {
             DiffPhase::Clean
         } else {
-            diff_phase(resolved.as_ref())
+            diff_phase(active.as_ref())
         };
         let error = self.error.clone();
-
-        let content: AnyElement = match phase {
-            DiffPhase::Preparing => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(Theme::SPACE_SM))
-                .child(crate::loaders::gradient_spinner(
-                    "changes-preparing",
-                    &theme,
-                    3.0,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from("Preparing diff…")),
-                )
-                .into_any_element(),
-            DiffPhase::Clean => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from("No uncommitted changes"))
-                .into_any_element(),
-            DiffPhase::List => {
-                if self.parsed.is_some() {
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .children(self.render_header_strip(&theme))
-                        .child(
-                            list(self.list.clone(), cx.processor(Self::render_row))
-                                .flex_1()
-                                .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-                        )
-                        .into_any_element()
+        // Scoped fetch failures replace the content area. "no turn recorded"
+        // is the expected pre-first-turn state, not an error; "unknown
+        // method" is version skew — the chat's host engine predates
+        // GetCheckoutDiff (a still-running daemon after an app update, or a
+        // remote device behind on releases) — say that instead of leaking
+        // the raw RPC error (user report).
+        let scoped_notice: Option<(SharedString, bool)> = (!no_chat
+            && scope != DiffScope::WorkingTree)
+            .then(|| self.scoped_error.clone())
+            .flatten()
+            .map(|message| {
+                if message.contains("no turn recorded") {
+                    (
+                        SharedString::from("No turn recorded yet — send a message first"),
+                        false,
+                    )
+                } else if message.contains("unknown method") {
+                    (
+                        SharedString::from(
+                            "This chat's device is running an older Comet — update it to view branch and turn diffs",
+                        ),
+                        false,
+                    )
                 } else {
-                    // Diff known, parse still running.
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(crate::loaders::gradient_spinner(
-                            "changes-parsing",
-                            &theme,
-                            3.0,
-                            cx.entity_id(),
-                            cx,
-                        ))
-                        .into_any_element()
+                    (message, true)
+                }
+            });
+
+        let content: AnyElement = if let Some((message, warn)) = scoped_notice {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .px(px(Theme::SPACE_LG))
+                .text_size(px(12.0))
+                .text_color(if warn {
+                    theme.warning.opacity(0.85)
+                } else {
+                    theme.text_faint
+                })
+                .child(message)
+                .into_any_element()
+        } else {
+            match phase {
+                DiffPhase::Preparing => div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .child(crate::loaders::gradient_spinner(
+                        "changes-preparing",
+                        &theme,
+                        3.0,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from("Preparing diff…")),
+                    )
+                    .into_any_element(),
+                DiffPhase::Clean => div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(clean_message(scope, base.as_deref())))
+                    .into_any_element(),
+                    DiffPhase::List => {
+                    if self.parsed.is_some() {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .children(self.render_header_strip(&theme))
+                            .child(
+                                list(self.list.clone(), cx.processor(Self::render_row))
+                                    .flex_1()
+                                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
+                            )
+                            .into_any_element()
+                    } else {
+                        // Diff known, parse still running.
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(crate::loaders::gradient_spinner(
+                                "changes-parsing",
+                                &theme,
+                                3.0,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                            .into_any_element()
+                    }
                 }
             }
         };
@@ -1409,6 +2657,116 @@ rename to new_name.rs
     }
 
     #[test]
+    fn rows_flatten_to_line_granularity() {
+        let files = parse_patch(PATCH);
+        let (rows, ranges) = flatten_rows(&files, |_| false);
+        assert_eq!(ranges.len(), files.len());
+        // Every file's span starts with its header…
+        for (ix, range) in ranges.iter().enumerate() {
+            assert_eq!(rows[range.start], DiffRow::FileHeader { file: ix as u32 });
+            // …and spans exactly header + analytic body rows.
+            assert_eq!(range.len(), 1 + body_row_count(&files[ix]));
+        }
+        // Spans tile the whole row vec.
+        assert_eq!(ranges.last().unwrap().end, rows.len());
+
+        // src/main.rs: header, 2 hunk headers, 8 lines, pad.
+        let main_rows = &rows[ranges[0].clone()];
+        assert_eq!(main_rows.len(), 1 + 2 + 8 + 1);
+        assert_eq!(main_rows[1], DiffRow::HunkHeader { file: 0, hunk: 0 });
+        // Flat line indices run across hunks (they key the highlight slot).
+        let flats: Vec<u32> = main_rows
+            .iter()
+            .filter_map(|r| match r {
+                DiffRow::Line { flat, .. } => Some(*flat),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flats, (0..8).collect::<Vec<u32>>());
+        assert_eq!(*main_rows.last().unwrap(), DiffRow::BodyPad { file: 0 });
+
+        // A collapsed file contributes its header row only.
+        let (rows, ranges) = flatten_rows(&files, |ix| ix == 0);
+        assert_eq!(ranges[0].len(), 1);
+        assert_eq!(rows[ranges[1].start], DiffRow::FileHeader { file: 1 });
+
+        // Notices lead the body: the added file carries "New file".
+        let added_rows = &rows[ranges[1].clone()];
+        assert_eq!(added_rows[1], DiffRow::Notice { file: 1, notice: 0 });
+    }
+
+    #[test]
+    fn truncate_caps_lines_and_appends_notice() {
+        let mut file = parse_patch(PATCH).remove(0); // 2 hunks, 8 lines
+        let untouched = file.clone();
+        truncate_file_lines(&mut file, 10);
+        assert_eq!(file, untouched, "under the cap: untouched");
+
+        truncate_file_lines(&mut file, 6);
+        let lines: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
+        assert_eq!(lines, 6);
+        assert_eq!(file.hunks.len(), 2);
+        assert!(
+            file_notices(&file)
+                .iter()
+                .any(|n| n.contains("first 6 of 8 lines"))
+        );
+        // body_height stays consistent with what actually renders.
+        assert_eq!(
+            body_height(&file),
+            NOTICE_HEIGHT
+                + 2.0 * HUNK_HEADER_HEIGHT
+                + 6.0 * DIFF_LINE_HEIGHT
+                + BODY_BOTTOM_PAD
+        );
+
+        // A cap below the first hunk's length drops later hunks entirely.
+        let mut file = parse_patch(PATCH).remove(0);
+        truncate_file_lines(&mut file, 3);
+        assert_eq!(file.hunks.len(), 1);
+        assert_eq!(file.hunks[0].lines.len(), 3);
+    }
+
+    #[test]
+    fn gutters_fit_the_largest_line_number() {
+        let files = parse_patch(PATCH);
+        // src/main.rs second hunk ends at old 11 / new 12.
+        assert_eq!(files[0].max_line, 12);
+        assert_eq!(gutter_width(&files[0]), GUTTER_WIDTH);
+
+        // Every digit count keeps ≥6px clear of the accent bar on the left
+        // of the number (digits×6.6 + 8px right pad + 6px gap), and the
+        // column never shrinks below the classic 36px.
+        let mut file = files[0].clone();
+        for digits in 1..=7u32 {
+            file.max_line = 10u32.pow(digits) - 1;
+            let w = gutter_width(&file);
+            assert!(w >= GUTTER_WIDTH);
+            let left_gap = w - (digits as f32 * 6.6 + 8.0);
+            assert!(
+                left_gap >= 6.0,
+                "{digits} digits: left gap {left_gap} < 6px"
+            );
+        }
+        // 4 digits outgrow the classic column now (the old formula left
+        // them 1.6px off the bar — visually touching).
+        file.max_line = 9999;
+        assert!(gutter_width(&file) > GUTTER_WIDTH);
+        file.max_line = 27404;
+        assert!(gutter_width(&file) > gutter_width(&{
+            let mut f = file.clone();
+            f.max_line = 9999;
+            f
+        }));
+
+        // Truncation refits the gutter to what actually renders: the first
+        // 3 lines are ctx(1,1) / del(2,·) / add(·,2) — max line 2.
+        let mut file = files[0].clone();
+        truncate_file_lines(&mut file, 3);
+        assert_eq!(file.max_line, 2);
+    }
+
+    #[test]
     fn body_height_is_analytic() {
         let files = parse_patch(PATCH);
         let main = &files[0];
@@ -1508,6 +2866,84 @@ rename to new_name.rs
         assert_eq!(uncommitted_label(0), "0 Uncommitted changes");
         assert_eq!(uncommitted_label(1), "1 Uncommitted change");
         assert_eq!(uncommitted_label(4), "4 Uncommitted changes");
+    }
+
+    #[test]
+    fn scope_labels_and_clean_messages() {
+        assert_eq!(
+            scope_label(DiffScope::WorkingTree, 2, None),
+            "2 Uncommitted changes"
+        );
+        assert_eq!(
+            scope_label(DiffScope::Branch, 1, Some("main")),
+            "1 Changed file vs main"
+        );
+        assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 Changed files");
+        assert_eq!(
+            scope_label(DiffScope::LatestTurn, 2, None),
+            "2 Changed files this turn"
+        );
+        assert_eq!(
+            clean_message(DiffScope::WorkingTree, None),
+            "No uncommitted changes"
+        );
+        assert_eq!(
+            clean_message(DiffScope::Branch, Some("develop")),
+            "No changes vs develop"
+        );
+        assert_eq!(
+            clean_message(DiffScope::LatestTurn, None),
+            "No changes this turn"
+        );
+    }
+
+    #[test]
+    fn base_ref_defaults_to_repo_default_then_main() {
+        let branches = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|n| n.to_string()).collect()
+        };
+        // Engine order puts the repo default first — take it when it isn't
+        // the checked-out branch itself.
+        let b = branches(&["main", "feature"]);
+        assert_eq!(
+            default_base_ref(&b, Some("feature")).as_deref(),
+            Some("main")
+        );
+        // No origin/HEAD: engine "default" is the current branch — fall
+        // through to main/master.
+        let b = branches(&["feature", "main"]);
+        assert_eq!(
+            default_base_ref(&b, Some("feature")).as_deref(),
+            Some("main")
+        );
+        let b = branches(&["feature", "master"]);
+        assert_eq!(
+            default_base_ref(&b, Some("feature")).as_deref(),
+            Some("master")
+        );
+        // No main/master: any branch that isn't the current one.
+        let b = branches(&["feature", "develop"]);
+        assert_eq!(
+            default_base_ref(&b, Some("feature")).as_deref(),
+            Some("develop")
+        );
+        // Checked out ON main: comparing main with itself is the honest
+        // default (empty branch diff).
+        let b = branches(&["main", "feature"]);
+        assert_eq!(default_base_ref(&b, Some("main")).as_deref(), Some("main"));
+        // Single-branch repo, and empty list.
+        let b = branches(&["main"]);
+        assert_eq!(default_base_ref(&b, Some("main")).as_deref(), Some("main"));
+        assert_eq!(default_base_ref(&[], Some("main")), None);
+    }
+
+    #[test]
+    fn scope_modes_are_wire_stable() {
+        // `mode` is the GetCheckoutDiff wire contract — engine matches on it.
+        assert_eq!(DiffScope::WorkingTree.mode(), "workingTree");
+        assert_eq!(DiffScope::Branch.mode(), "branch");
+        assert_eq!(DiffScope::LatestTurn.mode(), "turn");
+        assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
     }
 
     #[test]

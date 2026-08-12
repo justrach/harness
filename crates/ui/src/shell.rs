@@ -36,6 +36,7 @@ use crate::settings::appearance::AppearancePage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
+use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
@@ -148,16 +149,18 @@ pub enum SettingsSection {
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
+    Notifications,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 6] = [
+    pub const ALL: [SettingsSection; 7] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
         SettingsSection::Appearance,
+        SettingsSection::Notifications,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
     ];
@@ -170,6 +173,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
+            SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -455,10 +459,12 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
+    notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
+    notifications_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
     chat_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_dialog: Option<RenameChatDialog>,
@@ -474,10 +480,6 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
-    /// When the dropdown was closed by an outside mouse-down; lets the
-    /// trigger's click tell "toggle closed" apart from "just dismissed by
-    /// this same click" (same guard as `user_menu_dismissed_at`).
-    spaces_menu_dismissed_at: Option<std::time::Instant>,
     /// Chat id whose STATUS CORNER is under the pointer — just that corner
     /// swaps to the archive button (t3code's settle-on-hover); hovering the
     /// row body leaves the status readable.
@@ -490,9 +492,6 @@ pub struct Shell {
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, comet_proto::SessionStatus>,
     user_menu: popover::Popup<()>,
-    /// Outside-click dismissal instant — suppresses the trigger click that
-    /// follows the same mouse-down from instantly reopening the menu.
-    user_menu_dismissed_at: Option<std::time::Instant>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
@@ -536,8 +535,13 @@ pub struct Shell {
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
     right_tween: Option<WidthTween>,
-    /// Latest viewport width, used to keep a persisted right-pane width inside
-    /// the physical space available after the left sidebar.
+    /// Changes-panel takeover (the header's expand button): the panel fills
+    /// everything right of the sidebar and the conversation column collapses
+    /// to zero. Session-local view state — never persisted, reset on close.
+    right_pane_expanded: bool,
+    /// Viewport width stamped each frame at render — the expanded panel's
+    /// width target and the physical ceiling for free-form resizing
+    /// ([`Self::right_target`] has no `Window`).
     viewport_width: f32,
     terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
@@ -581,12 +585,24 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        // Own-send re-engages the stick-to-bottom pin with a smooth scroll.
+        // The first send stages prompt-at-top → follow-tail; later sends keep
+        // the transcript's original follow-tail behavior.
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Sent { .. } => {
-                    transcript.update(cx, |t, cx| t.on_own_send(cx));
+                ComposerEvent::Sent {
+                    chat_id,
+                    message_id,
+                    started_empty,
+                } => {
+                    transcript.update(cx, |t, cx| {
+                        t.on_own_send(
+                            chat_id.clone(),
+                            message_id.clone(),
+                            *started_empty,
+                            cx,
+                        )
+                    });
                 }
             }
         });
@@ -625,6 +641,7 @@ impl Shell {
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
+            Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
@@ -670,10 +687,12 @@ impl Shell {
             devices_page: None,
             archived_page: None,
             appearance_page: None,
+            notifications_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
             shortcuts_sub: None,
+            notifications_sub: None,
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
@@ -682,13 +701,11 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             spaces_menu: popover::Popup::default(),
-            spaces_menu_dismissed_at: None,
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             user_menu: popover::Popup::default(),
-            user_menu_dismissed_at: None,
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
@@ -711,7 +728,8 @@ impl Shell {
             debug_gate,
             sidebar_tween: None,
             right_tween: None,
-            viewport_width: 0.0,
+            right_pane_expanded: false,
+            viewport_width: 1280.0,
             terminal_tween: None,
             fullscreen: None,
             titlebar_tween: None,
@@ -755,7 +773,10 @@ impl Shell {
         // question rings whenever a session flips to AwaitingInput, a
         // completion rings on the Working→Idle edge — for ANY session on any
         // device. A row's first appearance only seeds the baseline, so boot
-        // (restored rows) and fresh sends stay silent.
+        // (restored rows) and fresh sends stay silent. Desktop banners
+        // (`notify::post`) ride the SAME edges and gates behind their own
+        // settings flag — one detector, two outputs, so the banner can never
+        // fire where the chime wouldn't.
         //
         // STALENESS-GATED like the dot (`effective_indicator`), for the same
         // reason: raw row statuses include the past. A dead turn's Working row
@@ -776,7 +797,8 @@ impl Shell {
         // still ring.
         {
             let now = Utc::now();
-            let sessions: Vec<(String, comet_proto::SessionStatus, bool)> = {
+            type Ping = (String, comet_proto::SessionStatus, bool, Option<String>);
+            let sessions: Vec<Ping> = {
                 let state = state.read(cx);
                 state
                     .sessions
@@ -790,18 +812,39 @@ impl Shell {
                             Indicator::None => comet_proto::SessionStatus::Idle,
                         };
                         let send_pending = state.send_pending(&s.chat_id, now);
-                        (s.chat_id.clone(), status, send_pending)
+                        let title = state
+                            .chats
+                            .iter()
+                            .find(|c| c.id == s.chat_id)
+                            .and_then(|c| c.title.clone());
+                        (s.chat_id.clone(), status, send_pending, title)
                     })
                     .collect()
             };
-            for (chat_id, status, send_pending) in sessions {
+            // Background-only banners: `active_window()` is app-level (any
+            // Comet window being key), so a ping for a *background chat* in a
+            // focused app still stays a chime — you're already looking at
+            // Comet; the sidebar dot carries the rest.
+            let app_focused = cx.active_window().is_some();
+            for (chat_id, status, send_pending, title) in sessions {
                 let prev = self.sound_prev.insert(chat_id, status);
                 if let Some(prev) = prev
-                    && self.settings.sound_enabled
                     && let Some(sound) = crate::sound::sound_for_transition(prev, status)
                     && !(send_pending && sound == crate::sound::Sound::Done)
                 {
-                    crate::sound::play(sound);
+                    if self.settings.sound_enabled {
+                        crate::sound::play(sound);
+                    }
+                    if self.settings.notifications_enabled
+                        && !(self.settings.notifications_background_only && app_focused)
+                    {
+                        let title = title.unwrap_or_else(|| "New session".into());
+                        let body = match sound {
+                            crate::sound::Sound::Done => "Run finished",
+                            crate::sound::Sound::Request => "Waiting on your input",
+                        };
+                        crate::notify::post(&title, body);
+                    }
                 }
             }
         }
@@ -947,15 +990,18 @@ impl Shell {
     }
 
     fn right_target(&self, cx: &App) -> f32 {
-        if self.right_pane_open(cx) {
-            let available = if self.viewport_width > 0.0 {
-                (self.viewport_width - self.sidebar_target()).max(RIGHT_PANE_MIN)
-            } else {
-                self.settings.right_pane_width
-            };
-            self.settings.right_pane_width.min(available)
-        } else {
+        if !self.right_pane_open(cx) {
             0.0
+        } else {
+            // Everything physically available to the right of the sidebar.
+            // Rides the sidebar tween so toggling it remains seamless.
+            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+            let available = (self.viewport_width - sidebar_now).max(RIGHT_PANE_MIN);
+            if self.right_pane_expanded {
+                available
+            } else {
+                self.settings.right_pane_width.min(available)
+            }
         }
     }
 
@@ -975,6 +1021,11 @@ impl Shell {
         let from = self.right_target(cx);
         let key = self.panel_key(cx);
         let open = self.panels.toggle_changes(&key);
+        if !open {
+            // Closing always leaves takeover mode — reopening at full bleed
+            // with the conversation gone read as a broken chat.
+            self.right_pane_expanded = false;
+        }
         self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         if open {
             // Lazy: the Changes entity (and its WatchCheckoutDiffs) exists only
@@ -1241,6 +1292,39 @@ impl Shell {
                     self.appearance_page = Some(cx.new(AppearancePage::new));
                 }
                 match &self.appearance_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Notifications => {
+                if self.notifications_page.is_none() {
+                    let page = cx.new(|cx| {
+                        NotificationsPage::new(
+                            self.settings.sound_enabled,
+                            self.settings.notifications_enabled,
+                            self.settings.notifications_background_only,
+                            cx,
+                        )
+                    });
+                    // Persist the flags whenever the page flips one.
+                    self.notifications_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &NotificationsEvent, cx| {
+                            let NotificationsEvent::Changed {
+                                sound,
+                                desktop,
+                                background_only,
+                            } = *event;
+                            this.settings.sound_enabled = sound;
+                            this.settings.notifications_enabled = desktop;
+                            this.settings.notifications_background_only = background_only;
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.notifications_page = Some(page);
+                }
+                match &self.notifications_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -1842,6 +1926,7 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
+            SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
@@ -2420,13 +2505,23 @@ impl Shell {
         };
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
         let tone = if failed { theme.danger } else { theme.accent };
-        // The chip fill is the sidebar's WHITE wash language, not an accent
-        // tint: an indigo fill over the glass composited into a dark slab that
-        // blocked the blur (user report) — the accent lives in the icon/text.
+        // Dark-purple GLASS tint (user request), not the 400-level accent as
+        // a fill: deep pigment at partial alpha tints the blur showing
+        // through instead of compositing into the slab that a bright indigo
+        // fill produced (earlier user report). Light chrome gets a lavender
+        // accent wash instead — dark purple under indigo-600 text goes muddy.
         let (chip_bg, chip_bg_hover) = if failed {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
-            (crate::theme::wash(0.11), crate::theme::wash(0.16))
+            match theme.appearance {
+                crate::theme::Appearance::Dark => {
+                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
+                    (purple.opacity(0.45), purple.opacity(0.60))
+                }
+                crate::theme::Appearance::Light => {
+                    (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
+                }
+            }
         };
 
         let mut strip = div()
@@ -2441,19 +2536,9 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
             .text_size(px(11.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(tone)
-            .child(
-                icon(if failed {
-                    icons::DANGER_TRIANGLE
-                } else {
-                    icons::RESTART
-                })
-                .size(px(14.0))
-                .text_color(tone),
-            )
             .child(div().flex_1().min_w_0().child(label));
         if clickable {
             strip = strip
@@ -2577,16 +2662,16 @@ impl Shell {
                 )
             })
             .on_hover(motion::hover_listener("user-menu-trigger"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
-                // A click that just dismissed the menu (outside-click on the
-                // trigger) must not instantly reopen it.
-                let just_dismissed = this
-                    .user_menu_dismissed_at
-                    .is_some_and(|at| at.elapsed() < Duration::from_millis(400));
-                this.user_menu_dismissed_at = None;
-                if this.user_menu.is_open() {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.user_menu.take_press_was_open() {
                     this.close_user_menu(cx);
-                } else if !just_dismissed {
+                } else {
                     this.user_menu.open(());
                 }
                 cx.notify();
@@ -2642,7 +2727,6 @@ impl Shell {
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.user_menu_dismissed_at = Some(std::time::Instant::now());
                     this.close_user_menu(cx);
                 }))
                 .flex()
@@ -3080,14 +3164,23 @@ impl Shell {
                 // report). The jump pill floats outside the fade scope,
                 // anchored above the measured stack.
                 {
-                    let stack_h = self.bottom_stack.get();
+                    // The terminal dock is NOT glass the transcript may slide
+                    // under: with the dock's translucent fill, transcript text
+                    // ghosted through the grid (user report). The underlay
+                    // ends at the dock's top instead, riding the same height
+                    // tween the dock animates with; `stack_h` below is only
+                    // the chrome that still overlaps the transcript (status
+                    // strip + composer).
+                    let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+                    let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
                     // Opaque from the composer PILL's top (the reserved
                     // status strip above it is empty air), zero at the
-                    // window's bottom edge.
+                    // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
                     div()
                         .absolute()
                         .inset_0()
+                        .bottom(px(term_h))
                         .child(crate::edge_fade::edge_faded(
                             Theme::TRANSCRIPT_FADE_BAND,
                             true,
@@ -3266,14 +3359,18 @@ impl Shell {
             );
 
         // Fixed-height inner clipped by the animated container: content never
-        // reflows mid-transition (same trick as the side panes).
+        // reflows mid-transition (same trick as the side panes). The handle
+        // FLOATS over the panel's top edge (painted after, so it wins hit
+        // testing) instead of stacking above it — stacked, its 5px read as
+        // dead air between the seam and the tab bar (user report).
         let inner = div()
             .h(px(height))
             .w_full()
+            .relative()
             .flex()
             .flex_col()
-            .child(handle)
-            .child(div().flex_1().min_h_0().child(panel));
+            .child(div().flex_1().min_h_0().child(panel))
+            .child(handle.absolute().top_0().left_0().right_0());
 
         div()
             .w_full()
@@ -3374,34 +3471,48 @@ impl Shell {
         } else {
             gpui::Empty.into_any_element()
         };
-        // Its OWN inset card (user request): the conversation card's right
-        // gutter is the gap; padding (not margins) keeps the tweened width
-        // container clean. The resize grabber lives outside this clipped
-        // container, on the seam assembled by the root layout.
-        let card = div()
+        // Flush panel (user request — the inset card is gone): full window
+        // height with a left hairline, glass-friendly like the terminal dock
+        // (translucent over the frost; solid otherwise). The resize grabber
+        // lives outside this clipped container, on the root layout's seam.
+        let panel_bg = if theme.is_glass() { bg.opacity(0.4) } else { bg };
+        let panel = div()
             .size_full()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(bg)
+            .flex()
+            .flex_col()
+            // In takeover the panel's left edge IS the sidebar seam, which
+            // already carries the sidebar tone's right hairline — a second
+            // border there doubled up (user report).
+            .when(!self.right_pane_expanded, |el| {
+                el.border_l_1().border_color(theme.border)
+            })
+            .bg(panel_bg)
             .overflow_hidden()
+            // The titlebar is a glass overlay over the full-height content
+            // row; the panel's own chrome starts below it.
+            .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
         let target = self.right_target(cx);
         self.pane_container(
             self.right_tween,
             target,
-            // Flush under the titlebar (the full-height content row puts the
-            // chrome overlay above us, so the pad IS the titlebar height),
-            // 8px bottom/right gutters.
             div()
                 .h_full()
                 .relative()
-                .pt(px(Theme::TITLEBAR_HEIGHT))
-                .pb(px(8.0))
-                .pr(px(8.0))
-                .child(card)
+                .child(panel)
                 .into_any_element(),
         )
+    }
+
+    /// Toggle the changes-panel takeover (the header's expand button, t3code
+    /// parity): the panel grows to fill everything right of the sidebar,
+    /// hiding the conversation column; toggling back restores the saved
+    /// width. Rides the same width tween as open/close so the jump glides.
+    fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
+        let from = self.right_target(cx);
+        self.right_pane_expanded = !self.right_pane_expanded;
+        self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
+        cx.notify();
     }
 
     fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
@@ -4132,8 +4243,16 @@ impl Render for Shell {
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
-                let main_width = viewport - self.sidebar_target() - self.right_target(cx) - 10.0;
-                let stack_h = self.bottom_stack.get();
+                // Stamped for `right_target` — the expanded changes panel
+                // sizes itself to the viewport.
+                self.viewport_width = viewport;
+                let main_width =
+                    (viewport - self.sidebar_target() - self.right_target(cx) - 10.0).max(0.0);
+                // Clearance excludes the terminal dock: the transcript
+                // viewport ends at the dock's top (see the underlay in
+                // `render_main`), so only the chrome above it overlaps.
+                let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+                let stack_h = (self.bottom_stack.get() - term_h).max(0.0);
                 self.transcript.update(cx, |t, cx| {
                     t.set_rail_enabled(rail::rail_visible(main_width), cx);
                     t.set_bottom_clearance(stack_h, cx);
@@ -4153,7 +4272,9 @@ impl Render for Shell {
                 // intact for the return trip.
                 let on_chat = matches!(self.route, Route::Chat);
                 let right_open = on_chat && self.right_pane_open(cx);
-                let right_handle = right_open.then(|| {
+                // Takeover mode derives its width from the viewport, so a
+                // manual drag handle would fight the expanded target.
+                let right_handle = (right_open && !self.right_pane_expanded).then(|| {
                     self.resize_handle(
                         "right-pane-resize",
                         || RightPaneResize,
@@ -4161,7 +4282,7 @@ impl Render for Shell {
                         cx,
                     )
                     // A forgiving transparent hit target centered on the
-                    // seam; the card's 1px border remains the visual divider.
+                    // seam; the panel's 1px border remains the visual divider.
                     .w(px(12.0))
                     .absolute()
                     .top_0()
@@ -4174,15 +4295,11 @@ impl Render for Shell {
                     Empty.into_any_element()
                 };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // The signature frame: the conversation card and — when the
-                // changes pane is open — a SECOND inset card beside it, both
-                // rounded hairline-bordered floats on the frost shell (the
-                // changes card is built inside `render_right_pane`).
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
-                // No inset card (user request): the conversation column sits
+                // No inset cards (user request): the conversation column sits
                 // flush and unbordered, the transcript directly on the frost
-                // glass — only the changes pane keeps its floating card
+                // glass; the changes pane is a flush left-bordered glass panel
                 // (built inside `render_right_pane`).
                 let card: AnyElement = div()
                     .flex_1()
@@ -4241,7 +4358,7 @@ impl Render for Shell {
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
-                // must NOT underlap (sidebar content, the changes card,
+                // must NOT underlap (sidebar content, the changes panel,
                 // settings) pad themselves down by the titlebar height.
                 let page = div()
                     .size_full()
