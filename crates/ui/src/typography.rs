@@ -233,17 +233,44 @@ fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u
     }
 }
 
+/// Families that contain the Latin glyph GPUI relies on for text metrics.
+///
+/// `all_font_names` intentionally reports every system family, including
+/// script-specific and symbol fonts. GPUI must reject a face without `m`, but
+/// doing that only after it has been selected both falls back silently and
+/// emits a warning. Inspect the installed files first so those families never
+/// appear in an interface-font picker.
+fn installed_families_with_latin_metrics() -> BTreeSet<String> {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+
+    database
+        .faces()
+        .filter(|face| {
+            database
+                .with_face_data(face.id, |data, index| {
+                    ttf_parser::Face::parse(data, index)
+                        .is_ok_and(|font| font.glyph_index('m').is_some())
+                })
+                .unwrap_or(false)
+        })
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect()
+}
+
 /// Register each family independently so one bad optional asset cannot hide
 /// the rest of the catalog.
 pub fn register_fonts(cx: &App) -> FontAvailability {
     // Capture device fonts before adding ours so the Installed section only
     // contains families supplied by the OS/user, not our embedded assets.
+    let families_with_latin_metrics = installed_families_with_latin_metrics();
     let system_names: BTreeSet<_> = cx
         .text_system()
         .all_font_names()
         .into_iter()
         .filter(|name| !name.starts_with('.'))
         .filter(|name| name != "Geist" && name != "Geist Mono")
+        .filter(|name| families_with_latin_metrics.contains(name))
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
@@ -435,6 +462,12 @@ mod tests {
             serde_json::from_str::<UiFontFamily>(r#""atkinsonHyperlegibleNext""#).unwrap(),
             UiFontFamily::Installed("Atkinson Hyperlegible Next".into())
         );
+    }
+
+    #[test]
+    fn latin_metric_filter_requires_the_glyph_gpui_measures() {
+        let latin = ttf_parser::Face::parse(GEIST[0], 0).unwrap();
+        assert!(latin.glyph_index('m').is_some());
     }
 
     #[test]

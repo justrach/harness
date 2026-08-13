@@ -24,6 +24,8 @@ pulldown-cmark.workspace = true
 alacritty_terminal.workspace = true
 base64 = "0.22"
 unicode-segmentation.workspace = true
+fontdb.workspace = true
+ttf-parser.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
@@ -34,4 +36,3 @@ objc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
-ttf-parser = "0.25.1"

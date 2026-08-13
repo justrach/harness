@@ -96,6 +96,8 @@ portable-pty = "0.8"
 alacritty_terminal = "0.26"
 pulldown-cmark = "0.12"
 unicode-segmentation = "1"
+fontdb = "0.23"
+ttf-parser = "0.25.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 ignore = "0.4"
 
@@ -111,5 +113,4 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
-
 
