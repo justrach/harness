@@ -38,8 +38,8 @@ impl AppearancePage {
     }
 
     fn commit_font(&mut self, cx: &mut Context<Self>) {
-        if typography::is_available(self.selected_font, cx) {
-            typography::set_family(self.selected_font, cx);
+        if typography::is_available(&self.selected_font, cx) {
+            typography::set_family(self.selected_font.clone(), cx);
             self.selected_font = typography::effective(cx);
             self.close_font_menu(cx);
             cx.notify();
@@ -113,7 +113,7 @@ impl AppearancePage {
                     self.font_menu_dismissed_at = None;
                     self.toggle_font_menu(cx);
                 }
-                self.selected_font = step_font(self.selected_font, -1, availability);
+                self.selected_font = step_font(&self.selected_font, -1, &availability);
                 cx.notify();
             }
             "down" | "right" => {
@@ -121,7 +121,7 @@ impl AppearancePage {
                     self.font_menu_dismissed_at = None;
                     self.toggle_font_menu(cx);
                 }
-                self.selected_font = step_font(self.selected_font, 1, availability);
+                self.selected_font = step_font(&self.selected_font, 1, &availability);
                 cx.notify();
             }
             "home" => {
@@ -129,7 +129,7 @@ impl AppearancePage {
                     self.font_menu_dismissed_at = None;
                     self.toggle_font_menu(cx);
                 }
-                self.selected_font = first_available(availability);
+                self.selected_font = first_available(&availability);
                 cx.notify();
             }
             "end" => {
@@ -137,7 +137,7 @@ impl AppearancePage {
                     self.font_menu_dismissed_at = None;
                     self.toggle_font_menu(cx);
                 }
-                self.selected_font = last_available(availability);
+                self.selected_font = last_available(&availability);
                 cx.notify();
             }
             "enter" | "space" => {
@@ -218,34 +218,43 @@ impl AppearancePage {
     }
 }
 
-fn step_font(current: UiFontFamily, delta: isize, availability: FontAvailability) -> UiFontFamily {
-    let current = UiFontFamily::ALL
+fn step_font(
+    current: &UiFontFamily,
+    delta: isize,
+    availability: &FontAvailability,
+) -> UiFontFamily {
+    let choices = availability.choices();
+    let current = choices
         .iter()
-        .position(|family| *family == current)
+        .position(|family| family == current)
         .unwrap_or_default() as isize;
     let mut ix = current + delta.signum();
-    while (0..UiFontFamily::ALL.len() as isize).contains(&ix) {
-        let candidate = UiFontFamily::ALL[ix as usize];
+    while (0..choices.len() as isize).contains(&ix) {
+        let candidate = &choices[ix as usize];
         if availability.is_available(candidate) {
-            return candidate;
+            return candidate.clone();
         }
         ix += delta.signum();
     }
-    UiFontFamily::ALL[current as usize]
+    choices[current as usize].clone()
 }
 
-fn first_available(availability: FontAvailability) -> UiFontFamily {
-    UiFontFamily::ALL
-        .into_iter()
-        .find(|family| availability.is_available(*family))
+fn first_available(availability: &FontAvailability) -> UiFontFamily {
+    availability
+        .choices()
+        .iter()
+        .find(|family| availability.is_available(family))
+        .cloned()
         .unwrap_or(UiFontFamily::System)
 }
 
-fn last_available(availability: FontAvailability) -> UiFontFamily {
-    UiFontFamily::ALL
-        .into_iter()
+fn last_available(availability: &FontAvailability) -> UiFontFamily {
+    availability
+        .choices()
+        .iter()
         .rev()
-        .find(|family| availability.is_available(*family))
+        .find(|family| availability.is_available(family))
+        .cloned()
         .unwrap_or(UiFontFamily::System)
 }
 
@@ -408,43 +417,46 @@ impl Render for AppearancePage {
                 }))
         });
 
-        let font_rows: Vec<AnyElement> = UiFontFamily::ALL
-            .into_iter()
+        let font_rows: Vec<AnyElement> = availability
+            .choices()
+            .iter()
+            .cloned()
             .enumerate()
             .map(|(ix, family)| {
-                let available = availability.is_available(family);
+                let available = availability.is_available(&family);
+                let selected = family == effective_font;
+                let focused = family == self.selected_font;
+                let label = SharedString::from(family.label().to_owned());
                 popover::menu_row_nav(
                     &theme,
-                    family == effective_font,
-                    family == self.selected_font,
+                    selected,
+                    focused,
                     format!("interface-font-option-{ix}"),
                 )
                 .id(("interface-font-option", ix))
                 .when(available, |row| {
                     row.on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.selected_font = family;
+                        this.selected_font = family.clone();
                         this.commit_font(cx);
                     }))
                 })
                 .when(!available, |row| row.opacity(0.45))
-                .child(div().flex_1().min_w_0().truncate().child(family.label()))
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .flex_none()
-                        .when(family == effective_font, |slot| {
-                            slot.child(icon(icons::CHECK).size(px(14.0)).text_color(theme.accent))
-                        }),
-                )
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(div().w(px(18.0)).flex_none().when(selected, |slot| {
+                    slot.child(icon(icons::CHECK).size(px(14.0)).text_color(theme.accent))
+                }))
                 .into_any_element()
             })
             .collect();
 
         let font_menu = popover::popover_card(&theme)
+            .id("interface-font-scroll")
             .w(px(220.0))
             .font_family(fixed.clone())
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_font_menu(cx)))
+            .max_h(px(320.0))
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -483,7 +495,7 @@ impl Render for AppearancePage {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(effective_font.label()),
+                    .child(SharedString::from(effective_font.label().to_owned())),
             )
             .child(
                 icon(icons::ALT_ARROW_DOWN)
@@ -715,17 +727,12 @@ mod tests {
 
     #[test]
     fn font_options_appear_once_in_stable_order() {
-        let labels = UiFontFamily::ALL.map(UiFontFamily::label);
+        let catalog = FontAvailability::all();
+        let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
         assert_eq!(labels.len(), 5);
         assert_eq!(
             labels,
-            [
-                "Geist",
-                "Geist Mono",
-                "System UI",
-                "Inter",
-                "Atkinson Hyperlegible Next"
-            ]
+            ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]
         );
         let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), 5);
@@ -734,15 +741,18 @@ mod tests {
     #[test]
     fn font_keyboard_navigation_stops_at_edges_and_skips_unavailable() {
         let all = FontAvailability::all();
-        assert_eq!(step_font(UiFontFamily::Geist, -1, all), UiFontFamily::Geist);
         assert_eq!(
-            step_font(UiFontFamily::AtkinsonHyperlegibleNext, 1, all),
-            UiFontFamily::AtkinsonHyperlegibleNext
+            step_font(&UiFontFamily::Geist, -1, &all),
+            UiFontFamily::Geist
         );
-        let without_inter = all.without(UiFontFamily::Inter);
         assert_eq!(
-            step_font(UiFontFamily::System, 1, without_inter),
-            UiFontFamily::AtkinsonHyperlegibleNext
+            step_font(&UiFontFamily::Installed("Menlo".into()), 1, &all),
+            UiFontFamily::Installed("Menlo".into())
+        );
+        let without_arial = all.without(&UiFontFamily::Installed("Arial".into()));
+        assert_eq!(
+            step_font(&UiFontFamily::System, 1, &without_arial),
+            UiFontFamily::Installed("Menlo".into())
         );
     }
 

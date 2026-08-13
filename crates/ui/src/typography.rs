@@ -1,71 +1,39 @@
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use gpui::{App, Global, Rems, SharedString, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::settings::{self, SavePolicy};
 
-/// Stable, device-local interface font choices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// A bundled, virtual, or device-local interface font choice.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum UiFontFamily {
     #[default]
     Geist,
     GeistMono,
     System,
-    Inter,
-    AtkinsonHyperlegibleNext,
+    Installed(String),
 }
 
 impl UiFontFamily {
-    pub const ALL: [Self; 5] = [
-        Self::Geist,
-        Self::GeistMono,
-        Self::System,
-        Self::Inter,
-        Self::AtkinsonHyperlegibleNext,
-    ];
-
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             Self::Geist => "Geist",
             Self::GeistMono => "Geist Mono",
             Self::System => "System UI",
-            Self::Inter => "Inter",
-            Self::AtkinsonHyperlegibleNext => "Atkinson Hyperlegible Next",
+            Self::Installed(name) => name,
         }
     }
 
-    pub fn family_name(self) -> &'static str {
+    pub fn family_name(&self) -> &str {
         match self {
             Self::Geist => "Geist",
             Self::GeistMono => "Geist Mono",
             Self::System => ".SystemUIFont",
-            Self::Inter => "Inter",
-            Self::AtkinsonHyperlegibleNext => "Atkinson Hyperlegible Next",
-        }
-    }
-
-    fn wire_name(self) -> &'static str {
-        match self {
-            Self::Geist => "geist",
-            Self::GeistMono => "geistMono",
-            Self::System => "system",
-            Self::Inter => "inter",
-            Self::AtkinsonHyperlegibleNext => "atkinsonHyperlegibleNext",
-        }
-    }
-
-    fn from_wire_name(value: &str) -> Self {
-        match value {
-            "geist" => Self::Geist,
-            "geistMono" => Self::GeistMono,
-            "system" => Self::System,
-            "inter" => Self::Inter,
-            "atkinsonHyperlegibleNext" => Self::AtkinsonHyperlegibleNext,
-            _ => Self::Geist,
+            Self::Installed(name) => name,
         }
     }
 }
@@ -75,7 +43,12 @@ impl Serialize for UiFontFamily {
     where
         S: Serializer,
     {
-        serializer.serialize_str(self.wire_name())
+        match self {
+            Self::Geist => serializer.serialize_str("geist"),
+            Self::GeistMono => serializer.serialize_str("geistMono"),
+            Self::System => serializer.serialize_str("system"),
+            Self::Installed(name) => serializer.serialize_str(&format!("installed:{name}")),
+        }
     }
 }
 
@@ -85,7 +58,19 @@ impl<'de> Deserialize<'de> for UiFontFamily {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Ok(Self::from_wire_name(&value))
+        Ok(match value.as_str() {
+            "geist" => Self::Geist,
+            "geistMono" => Self::GeistMono,
+            "system" => Self::System,
+            // Preserve selections written by the previous fixed catalog. They
+            // now resolve only when the family is installed on this device.
+            "inter" => Self::Installed("Inter".into()),
+            "atkinsonHyperlegibleNext" => Self::Installed("Atkinson Hyperlegible Next".into()),
+            value if value.starts_with("installed:") && value.len() > "installed:".len() => {
+                Self::Installed(value["installed:".len()..].to_owned())
+            }
+            _ => Self::Geist,
+        })
     }
 }
 
@@ -135,35 +120,43 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
 }
 
 /// Which catalog families successfully registered during this process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontAvailability {
     geist: bool,
     geist_mono: bool,
-    inter: bool,
-    atkinson: bool,
+    choices: Vec<UiFontFamily>,
 }
 
 impl FontAvailability {
+    #[cfg(test)]
     pub fn all() -> Self {
         Self {
             geist: true,
             geist_mono: true,
-            inter: true,
-            atkinson: true,
+            choices: vec![
+                UiFontFamily::Geist,
+                UiFontFamily::GeistMono,
+                UiFontFamily::System,
+                UiFontFamily::Installed("Arial".into()),
+                UiFontFamily::Installed("Menlo".into()),
+            ],
         }
     }
 
-    pub fn is_available(self, family: UiFontFamily) -> bool {
+    pub fn choices(&self) -> &[UiFontFamily] {
+        &self.choices
+    }
+
+    pub fn is_available(&self, family: &UiFontFamily) -> bool {
         match family {
             UiFontFamily::Geist => self.geist,
             UiFontFamily::GeistMono => self.geist_mono,
             UiFontFamily::System => true,
-            UiFontFamily::Inter => self.inter,
-            UiFontFamily::AtkinsonHyperlegibleNext => self.atkinson,
+            UiFontFamily::Installed(_) => self.choices.contains(family),
         }
     }
 
-    fn fallback(self) -> UiFontFamily {
+    fn fallback(&self) -> UiFontFamily {
         if self.geist {
             UiFontFamily::Geist
         } else {
@@ -172,13 +165,12 @@ impl FontAvailability {
     }
 
     #[cfg(test)]
-    pub(crate) fn without(mut self, family: UiFontFamily) -> Self {
+    pub(crate) fn without(mut self, family: &UiFontFamily) -> Self {
         match family {
             UiFontFamily::Geist => self.geist = false,
             UiFontFamily::GeistMono => self.geist_mono = false,
             UiFontFamily::System => {}
-            UiFontFamily::Inter => self.inter = false,
-            UiFontFamily::AtkinsonHyperlegibleNext => self.atkinson = false,
+            UiFontFamily::Installed(_) => self.choices.retain(|choice| choice != family),
         }
         self
     }
@@ -186,7 +178,11 @@ impl FontAvailability {
 
 impl Default for FontAvailability {
     fn default() -> Self {
-        Self::all()
+        Self {
+            geist: false,
+            geist_mono: false,
+            choices: vec![UiFontFamily::System],
+        }
     }
 }
 
@@ -226,29 +222,7 @@ const GEIST_MONO: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/GeistMono-BoldItalic.ttf"),
 ];
 
-const INTER: [&[u8]; 8] = [
-    include_bytes!("../assets/fonts/Inter-Regular.ttf"),
-    include_bytes!("../assets/fonts/Inter-Italic.ttf"),
-    include_bytes!("../assets/fonts/Inter-Medium.ttf"),
-    include_bytes!("../assets/fonts/Inter-MediumItalic.ttf"),
-    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/Inter-SemiBoldItalic.ttf"),
-    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
-    include_bytes!("../assets/fonts/Inter-BoldItalic.ttf"),
-];
-
-const ATKINSON: [&[u8]; 8] = [
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Regular.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Italic.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Medium.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-MediumItalic.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-SemiBoldItalic.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-Bold.ttf"),
-    include_bytes!("../assets/fonts/AtkinsonHyperlegibleNext-BoldItalic.ttf"),
-];
-
-fn register_family(cx: &App, family: UiFontFamily, faces: &'static [&'static [u8]]) -> bool {
+fn register_family(cx: &App, family: &UiFontFamily, faces: &'static [&'static [u8]]) -> bool {
     let fonts = faces.iter().map(|face| Cow::Borrowed(*face)).collect();
     match cx.text_system().add_fonts(fonts) {
         Ok(()) => true,
@@ -262,17 +236,33 @@ fn register_family(cx: &App, family: UiFontFamily, faces: &'static [&'static [u8
 /// Register each family independently so one bad optional asset cannot hide
 /// the rest of the catalog.
 pub fn register_fonts(cx: &App) -> FontAvailability {
+    // Capture device fonts before adding ours so the Installed section only
+    // contains families supplied by the OS/user, not our embedded assets.
+    let system_names: BTreeSet<_> = cx
+        .text_system()
+        .all_font_names()
+        .into_iter()
+        .filter(|name| !name.starts_with('.'))
+        .filter(|name| name != "Geist" && name != "Geist Mono")
+        .collect();
+    let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
+    let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
+    let mut choices = vec![
+        UiFontFamily::Geist,
+        UiFontFamily::GeistMono,
+        UiFontFamily::System,
+    ];
+    choices.extend(system_names.into_iter().map(UiFontFamily::Installed));
     FontAvailability {
-        geist: register_family(cx, UiFontFamily::Geist, &GEIST),
-        geist_mono: register_family(cx, UiFontFamily::GeistMono, &GEIST_MONO),
-        inter: register_family(cx, UiFontFamily::Inter, &INTER),
-        atkinson: register_family(cx, UiFontFamily::AtkinsonHyperlegibleNext, &ATKINSON),
+        geist,
+        geist_mono,
+        choices,
     }
 }
 
-fn resolve_effective(requested: UiFontFamily, availability: FontAvailability) -> UiFontFamily {
+fn resolve_effective(requested: &UiFontFamily, availability: &FontAvailability) -> UiFontFamily {
     if availability.is_available(requested) {
-        requested
+        requested.clone()
     } else {
         availability.fallback()
     }
@@ -285,7 +275,7 @@ pub fn init(
     availability: FontAvailability,
     cx: &mut App,
 ) {
-    let effective = resolve_effective(requested, availability);
+    let effective = resolve_effective(&requested, &availability);
     cx.set_global(TypographyState {
         requested,
         effective,
@@ -297,13 +287,13 @@ pub fn init(
 
 pub fn requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.requested)
+        .map(|state| state.requested.clone())
         .unwrap_or_default()
 }
 
 pub fn effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.effective)
+        .map(|state| state.effective.clone())
         .unwrap_or_default()
 }
 
@@ -319,7 +309,7 @@ pub fn font_size(cx: &App) -> UiFontSize {
 
 pub fn availability(cx: &App) -> FontAvailability {
     cx.try_global::<TypographyState>()
-        .map(|state| state.availability)
+        .map(|state| state.availability.clone())
         .unwrap_or_default()
 }
 
@@ -332,7 +322,7 @@ pub fn generation(cx: &App) -> u32 {
         .unwrap_or_default()
 }
 
-pub fn is_available(family: UiFontFamily, cx: &App) -> bool {
+pub fn is_available(family: &UiFontFamily, cx: &App) -> bool {
     availability(cx).is_available(family)
 }
 
@@ -342,17 +332,17 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
     let Some(state) = cx.try_global::<TypographyState>() else {
         return false;
     };
-    if !state.availability.is_available(family) {
+    if !state.availability.is_available(&family) {
         return false;
     }
-    let effective = resolve_effective(family, state.availability);
+    let effective = resolve_effective(&family, &state.availability);
     if state.requested == family && state.effective == effective {
         return false;
     }
 
     let effective_changed = state.effective != effective;
     let state = cx.global_mut::<TypographyState>();
-    state.requested = family;
+    state.requested = family.clone();
     state.effective = effective;
 
     if effective_changed {
@@ -396,7 +386,12 @@ mod tests {
 
     #[test]
     fn wire_values_round_trip_and_unknown_falls_back() {
-        for family in UiFontFamily::ALL {
+        for family in [
+            UiFontFamily::Geist,
+            UiFontFamily::GeistMono,
+            UiFontFamily::System,
+            UiFontFamily::Installed("Helvetica Neue".into()),
+        ] {
             let json = serde_json::to_string(&family).unwrap();
             assert_eq!(serde_json::from_str::<UiFontFamily>(&json).unwrap(), family);
         }
@@ -408,25 +403,37 @@ mod tests {
 
     #[test]
     fn unavailable_family_resolves_to_geist() {
-        let availability = FontAvailability::all().without(UiFontFamily::Inter);
+        let unavailable = UiFontFamily::Installed("Inter".into());
+        let availability = FontAvailability::all().without(&unavailable);
         assert_eq!(
-            resolve_effective(UiFontFamily::Inter, availability),
+            resolve_effective(&unavailable, &availability),
             UiFontFamily::Geist
         );
-        assert!(availability.is_available(UiFontFamily::System));
+        assert!(availability.is_available(&UiFontFamily::System));
     }
 
     #[test]
-    fn catalog_order_is_stable() {
+    fn catalog_keeps_bundled_and_virtual_choices_first() {
+        let availability = FontAvailability::all();
         assert_eq!(
-            UiFontFamily::ALL.map(UiFontFamily::label),
+            availability.choices()[..3],
             [
-                "Geist",
-                "Geist Mono",
-                "System UI",
-                "Inter",
-                "Atkinson Hyperlegible Next"
+                UiFontFamily::Geist,
+                UiFontFamily::GeistMono,
+                UiFontFamily::System
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_optional_families_become_installed_choices() {
+        assert_eq!(
+            serde_json::from_str::<UiFontFamily>(r#""inter""#).unwrap(),
+            UiFontFamily::Installed("Inter".into())
+        );
+        assert_eq!(
+            serde_json::from_str::<UiFontFamily>(r#""atkinsonHyperlegibleNext""#).unwrap(),
+            UiFontFamily::Installed("Atkinson Hyperlegible Next".into())
         );
     }
 
@@ -443,8 +450,6 @@ mod tests {
         for (expected_family, faces) in [
             ("Geist", GEIST.as_slice()),
             ("Geist Mono", GEIST_MONO.as_slice()),
-            ("Inter", INTER.as_slice()),
-            ("Atkinson Hyperlegible Next", ATKINSON.as_slice()),
         ] {
             let mut found = Vec::new();
             for bytes in faces {

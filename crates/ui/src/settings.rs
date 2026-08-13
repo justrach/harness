@@ -515,7 +515,7 @@ mod tests {
                 ..KeymapConfig::default()
             },
             appearance: crate::appearance::AppearanceMode::Light,
-            ui_font_family: crate::typography::UiFontFamily::Inter,
+            ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
         };
         settings.save(dir.path()).unwrap();
@@ -537,7 +537,7 @@ mod tests {
         store.revision += 1;
         let (stale, stale_revision) = store.snapshot();
 
-        store.current.ui_font_family = crate::typography::UiFontFamily::Inter;
+        store.current.ui_font_family = crate::typography::UiFontFamily::Installed("Arial".into());
         store.revision += 1;
         stale.save(dir.path()).unwrap();
         assert!(!store.mark_saved(stale_revision));
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(reloaded.sidebar_width, 300.0);
         assert_eq!(
             reloaded.ui_font_family,
-            crate::typography::UiFontFamily::Inter
+            crate::typography::UiFontFamily::Installed("Arial".into())
         );
     }
 

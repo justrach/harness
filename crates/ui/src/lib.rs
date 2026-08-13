@@ -114,7 +114,7 @@ pub fn run_app(config: UiConfig) {
         // Typography first, appearance second: Theme::install reads the
         // effective family, so the first frame has both final style choices.
         typography::init(
-            settings.ui_font_family,
+            settings.ui_font_family.clone(),
             settings.ui_font_size,
             font_availability,
             cx,
