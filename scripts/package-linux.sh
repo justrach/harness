@@ -35,7 +35,7 @@ install -m 644 "$ROOT/dist/comet.png" "$STAGE/comet.png"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# Install Comet into ~/.local (no root needed).
+# Install Zeron into ~/.local (no root needed).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -Dm755 "$HERE/comet" "$HOME/.local/bin/comet"

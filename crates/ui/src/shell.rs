@@ -615,10 +615,6 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
-    /// When the dropdown was closed by an outside mouse-down; lets the
-    /// trigger's click tell "toggle closed" apart from "just dismissed by
-    /// this same click" (same guard as `user_menu_dismissed_at`).
-    spaces_menu_dismissed_at: Option<std::time::Instant>,
     /// Chat id whose STATUS CORNER is under the pointer — just that corner
     /// swaps to the archive button (t3code's settle-on-hover); hovering the
     /// row body leaves the status readable.
@@ -631,9 +627,6 @@ pub struct Shell {
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, comet_proto::SessionStatus>,
     user_menu: popover::Popup<()>,
-    /// Outside-click dismissal instant — suppresses the trigger click that
-    /// follows the same mouse-down from instantly reopening the menu.
-    user_menu_dismissed_at: Option<std::time::Instant>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
@@ -845,13 +838,11 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             spaces_menu: popover::Popup::default(),
-            spaces_menu_dismissed_at: None,
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             user_menu: popover::Popup::default(),
-            user_menu_dismissed_at: None,
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
@@ -2935,7 +2926,7 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new `Comet.app` under the data dir
+    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
@@ -3030,16 +3021,16 @@ impl Shell {
                 )
             })
             .on_hover(motion::hover_listener("user-menu-trigger"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
-                // A click that just dismissed the menu (outside-click on the
-                // trigger) must not instantly reopen it.
-                let just_dismissed = this
-                    .user_menu_dismissed_at
-                    .is_some_and(|at| at.elapsed() < Duration::from_millis(400));
-                this.user_menu_dismissed_at = None;
-                if this.user_menu.is_open() {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.user_menu.take_press_was_open() {
                     this.close_user_menu(cx);
-                } else if !just_dismissed {
+                } else {
                     this.user_menu.open(());
                 }
                 cx.notify();
@@ -3095,7 +3086,6 @@ impl Shell {
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.user_menu_dismissed_at = Some(std::time::Instant::now());
                     this.close_user_menu(cx);
                 }))
                 .flex()
@@ -4218,7 +4208,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (comet App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Comet", copy, full-width white Log in button.
+            // logo, "Log in to Zeron", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -4244,7 +4234,7 @@ impl Shell {
                         .text_size(px(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Comet")),
+                        .child(SharedString::from("Log in to Zeron")),
                 )
                 .child(
                     div()
@@ -4399,11 +4389,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Comet is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Comet is organized around workspaces — create one for yourself or your team."
+                "Zeron is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };

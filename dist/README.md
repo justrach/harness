@@ -11,8 +11,7 @@ Produces `target/package/comet-<version>-linux-<arch>.tar.gz` containing:
 
 - `comet` — the binary (headed by default; `comet headless` runs the engine alone)
 - `comet.desktop` — XDG desktop entry
-- `comet.png` — 1024×1024 app icon (the comet mark from the original app;
-  vector source `comet.svg`)
+- `comet.png` — 1024×1024 Zeron app icon
 - `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and
@@ -24,11 +23,12 @@ The release profile in the root `Cargo.toml` sets `lto = "thin"` and
 scripts/package-macos.sh    # → target/package/comet-<version>-macos-<arch>.dmg
 ```
 
-Builds the release binary, assembles `Comet.app` (Info.plist + icns), ad-hoc
+Builds the release binary, assembles `Zeron.app` (Info.plist + icns), ad-hoc
 signs it (set `CODESIGN_IDENTITY` for a real Developer ID), and wraps it in a
-dmg. CI runs this on tags (`.github/workflows/release.yml`). The manual steps
-it automates, for reference (run on a macOS host — gpui needs Metal; no
-cross-build from Linux):
+dmg. The auto-update tarball retains an internal `Comet.app` path so older
+installed builds can update into Zeron. CI runs this on tags
+(`.github/workflows/release.yml`). The manual steps it automates, for reference
+(run on a macOS host — gpui needs Metal; no cross-build from Linux):
 
 1. Build the universal (or per-arch) binary:
    ```sh
@@ -40,21 +40,21 @@ cross-build from Linux):
    ```
 2. Assemble the bundle:
    ```sh
-   mkdir -p Comet.app/Contents/{MacOS,Resources}
-   cp comet Comet.app/Contents/MacOS/comet
+   mkdir -p Zeron.app/Contents/{MacOS,Resources}
+   cp comet Zeron.app/Contents/MacOS/comet
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
-     dist/macos/Info.plist > Comet.app/Contents/Info.plist
+     dist/macos/Info.plist > Zeron.app/Contents/Info.plist
    ```
-3. Icon: generate `comet.icns` from `dist/comet.png` (`iconutil`) and place it at
-   `Comet.app/Contents/Resources/comet.icns`:
+3. Icon: generate `zeron.icns` from `dist/comet.png` (`iconutil`) and place it at
+   `Zeron.app/Contents/Resources/zeron.icns`:
    ```sh
-   mkdir comet.iconset && sips -z 256 256 dist/comet.png --out comet.iconset/icon_256x256.png
-   iconutil -c icns comet.iconset -o Comet.app/Contents/Resources/comet.icns
+   mkdir zeron.iconset && sips -z 256 256 dist/comet.png --out zeron.iconset/icon_256x256.png
+   iconutil -c icns zeron.iconset -o Zeron.app/Contents/Resources/zeron.icns
    ```
 4. Sign + notarize (required for distribution):
    ```sh
-   codesign --deep --force --options runtime --sign "Developer ID Application: …" Comet.app
+   codesign --deep --force --options runtime --sign "Developer ID Application: …" Zeron.app
    xcrun notarytool submit Comet.zip --keychain-profile … --wait
-   xcrun stapler staple Comet.app
+   xcrun stapler staple Zeron.app
    ```
-5. Ship as a `.dmg` (`hdiutil create -volname Comet -srcfolder Comet.app -ov -format UDZO Comet.dmg`).
+5. Ship as a `.dmg` (`hdiutil create -volname Zeron -srcfolder Zeron.app -ov -format UDZO Zeron.dmg`).
