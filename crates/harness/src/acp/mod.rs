@@ -2,8 +2,9 @@
 //! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s. One
 //! implementation covers every ACP agent; [`AcpHarness::grok`] configures it
 //! for xAI's Grok Build (`grok agent stdio`), the first registered agent —
-//! [`AcpHarness::hermes`] (Nous Research, `hermes acp`) and [`AcpHarness::pi`]
-//! (pi.dev via `pi-acp`) followed.
+//! [`AcpHarness::hermes`] (Nous Research, `hermes acp`), [`AcpHarness::pi`]
+//! (pi.dev via `pi-acp`) and [`AcpHarness::cursor`] (`cursor-agent acp`)
+//! followed.
 //!
 //! - `initialize` (protocolVersion 1, fs/terminal capabilities declined) →
 //!   `session/new`, or `session/load` with a fresh-session fallback when
@@ -16,6 +17,10 @@
 //!   plans → Todo, `available_commands_update` → [`AgentEvent::AvailableCommands`].
 //! - Permission requests are auto-accepted with the agent's preferred allow
 //!   option — parity with the claude/codex harnesses' unattended yolo mode.
+//! - Cursor's `cursor/*` extension methods get answered rather than refused:
+//!   `ask_question` and `create_plan` BLOCK the turn until the client replies,
+//!   so an unanswered one wedges the run. `ask_question` routes to the input
+//!   bridge, `create_plan` auto-accepts, and todos render as a chip.
 //! - Steering: agents advertising the `_session/steering` extension
 //!   (`initialize._meta.steering.supported`) get mid-turn injection; others
 //!   (Grok today) queue steers and deliver them as the next `session/prompt`
@@ -24,6 +29,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod cursor;
 mod normalize;
 
 use std::collections::VecDeque;
@@ -47,7 +53,7 @@ use comet_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
-use normalize::{map_update, parse_commands, preferred_allow_option};
+use normalize::{cursor_todo_events, map_update, parse_commands, preferred_allow_option};
 
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
@@ -297,6 +303,67 @@ fn grok_spec() -> AcpAgentSpec {
     }
 }
 
+fn cursor_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".local").join("bin").join("cursor-agent"));
+        dirs.push(home.join(".cursor").join("bin").join("cursor-agent"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/cursor-agent"));
+    dirs.push(PathBuf::from("/usr/local/bin/cursor-agent"));
+    dirs
+}
+
+fn cursor_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Cursor,
+        display_name: "Cursor",
+        executable: "cursor-agent",
+        env_override: "CURSOR_EXECUTABLE",
+        // Native ACP server — no adapter package in between.
+        args: &["acp"],
+        npx_package: None,
+        extra_paths: cursor_install_paths,
+        cli_executable: "cursor-agent",
+        cli_extra_paths: cursor_install_paths,
+        install_hint: "cursor-agent (searched PATH, the login shell's PATH, ~/.local/bin, \
+             ~/.cursor/bin, /opt/homebrew/bin, and /usr/local/bin; install with \
+             `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`; \
+             set CURSOR_EXECUTABLE to override)",
+        // Fallback only: `session/new` advertises the account's models and
+        // the wire always wins. Keep this list to well-known public ids.
+        models: || {
+            vec![
+                Model {
+                    id: "auto-smart".into(),
+                    label: "Auto".into(),
+                    description: Some("Cursor picks the model per request".into()),
+                    reasoning_levels: Vec::new(),
+                    options: vec![cursor::optimize_for_option(Some("balanced"))],
+                },
+                Model {
+                    id: "composer-2.5".into(),
+                    label: "Composer 2.5".into(),
+                    description: Some("Cursor's own fast coding model".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+            ]
+        },
+        // No `_session/steering` extension: steers deliver at turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // Descriptor ladder stays empty; live discovery fills it for families
+        // that actually advertise effort variants (see `cursor::enrich_models`).
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        // Cursor has no thought_level config option — effort rides the model
+        // id. When a collapsed family exposes a Reasoning ladder, these
+        // tokens pick the matching sibling via `cursor::pick_model_id`.
+        effort_values: |reasoning, _| reasoning.map(cursor::effort_tokens).unwrap_or_default(),
+        ladder_extras: &[],
+    }
+}
+
 fn hermes_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -452,6 +519,11 @@ impl AcpHarness {
         Self::with_spec(codex_spec())
     }
 
+    /// Cursor Agent (`cursor-agent acp`) — Cursor's native ACP server.
+    pub fn cursor() -> Self {
+        Self::with_spec(cursor_spec())
+    }
+
     /// Grok Build (`grok agent stdio`) — xAI's native ACP agent.
     pub fn grok() -> Self {
         Self::with_spec(grok_spec())
@@ -562,7 +634,9 @@ impl AcpHarness {
             }
         };
         let discovery = async {
-            let init = client.request("initialize", initialize_params()).await?;
+            let init = client
+                .request("initialize", initialize_params(self.spec.id))
+                .await?;
             let mut commands = scan_available_commands(&init);
             if commands.is_empty() {
                 let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".into());
@@ -624,12 +698,19 @@ impl AcpHarness {
             }
         };
         let discovery = async {
-            client.request("initialize", initialize_params()).await?;
+            client
+                .request("initialize", initialize_params(self.spec.id))
+                .await?;
             let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".into());
             let session = client
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
+            // Cursor: parameterized picker (base ids + optimize_for / effort /
+            // fast) when the client opts in; exploded-variant fallback otherwise.
+            if self.spec.id == HarnessId::Cursor {
+                models = cursor::enrich_models(models, &session);
+            }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
@@ -974,7 +1055,17 @@ struct Session {
     stderr_tail: crate::StderrTail,
 }
 
-fn initialize_params() -> Value {
+fn initialize_params(harness: HarnessId) -> Value {
+    let mut capabilities = json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+    });
+    // Cursor's ACP server exposes Auto's Optimize For (and other model
+    // parameters) when the client opts into parameterizedModelPicker;
+    // without it the catalog uses exploded variant ids.
+    if harness == HarnessId::Cursor {
+        capabilities["_meta"] = json!({ "parameterizedModelPicker": true });
+    }
     json!({
         "protocolVersion": 1,
         "clientInfo": {
@@ -985,10 +1076,7 @@ fn initialize_params() -> Value {
         // Declined: agents fall back to their own fs/terminal access, which
         // is what comet wants — the working tree is the source of truth for
         // the diff pane, and commands belong to the agent's own sandbox.
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-        },
+        "clientCapabilities": capabilities,
     })
 }
 
@@ -1132,25 +1220,43 @@ fn config_option_sets(
             .collect();
 
         let wanted: Option<Value> = match (kind, category) {
-            ("select", Some("model")) => model
-                .and_then(|m| pick_model_value(m, &available, context_1m))
-                .map(Value::String),
+            ("select", Some("model")) => {
+                // Parameterized Cursor uses base ids; a saved exploded id
+                // (`auto-smart[optimize_for=cost]`) still has to match. When
+                // the catalog is still exploded, effort siblings switch via
+                // `pick_model_id`.
+                let requested = model.map(cursor::strip_variant_suffix);
+                requested
+                    .and_then(|m| cursor::pick_model_id(m, efforts, &available))
+                    .or_else(|| requested.and_then(|m| pick_model_value(m, &available, context_1m)))
+                    .or_else(|| model.and_then(|m| pick_model_value(m, &available, context_1m)))
+                    .map(Value::String)
+            }
             // Unattended parity with the retired custom adapters (claude
             // bypassPermissions / codex approvalPolicy never): pick the
             // no-prompts mode when the agent offers one. claude-agent-acp
             // calls it `bypassPermissions`, codex-acp `agent-full-access`
             // (approvalPolicy "never" + danger-full-access sandbox).
-            ("select", Some("mode")) => [
-                "bypassPermissions",
-                "bypass_permissions",
-                "yolo",
-                "agent-full-access",
-                "danger-full-access",
-                "full-access",
-            ]
-            .into_iter()
-            .find(|v| available.contains(v))
-            .map(|v| Value::String(v.to_owned())),
+            // Cursor instead exposes agent/plan/ask — those arrive as a
+            // Traits "Mode" option and win when the run selected one.
+            ("select", Some("mode")) => model_options
+                .get("mode")
+                .and_then(Value::as_str)
+                .filter(|c| available.contains(c))
+                .map(|c| Value::String(c.to_owned()))
+                .or_else(|| {
+                    [
+                        "bypassPermissions",
+                        "bypass_permissions",
+                        "yolo",
+                        "agent-full-access",
+                        "danger-full-access",
+                        "full-access",
+                    ]
+                    .into_iter()
+                    .find(|v| available.contains(v))
+                    .map(|v| Value::String(v.to_owned()))
+                }),
             ("select", Some("thought_level")) => efforts
                 .iter()
                 .find(|c| available.contains(*c))
@@ -1263,23 +1369,63 @@ fn prompt_turn(
 /// sessions run unattended). Everything else (fs, terminal, elicitation) was
 /// declined at initialize, so a stray request gets method-not-found rather
 /// than wedging the agent.
-fn handle_server_request(client: &RpcClient, id: Value, method: &str, params: &Value) {
-    if method != "session/request_permission" {
-        tracing::debug!(target: "comet_harness::acp", "unhandled server request: {method}");
-        client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
-        return;
-    }
-    let options: Vec<Value> = params
-        .get("options")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    match preferred_allow_option(&options) {
-        Some(option_id) => client.respond(
-            &id,
-            json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
-        ),
-        None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
+fn handle_server_request(
+    client: &RpcClient,
+    id: Value,
+    method: &str,
+    params: &Value,
+) -> Vec<AgentEvent> {
+    match method {
+        "session/request_permission" => {
+            let options: Vec<Value> = params
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            match preferred_allow_option(&options) {
+                Some(option_id) => client.respond(
+                    &id,
+                    json!({ "outcome": { "outcome": "selected", "optionId": option_id } }),
+                ),
+                None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
+            }
+            Vec::new()
+        }
+        // Cursor blocks the turn on plan approval; unattended parity means
+        // accepting it and rendering the phases as a todo chip.
+        CURSOR_CREATE_PLAN => {
+            client.respond(&id, json!({ "outcome": { "outcome": "accepted" } }));
+            cursor_todo_events(params, CURSOR_PLAN_CHIP)
+        }
+        CURSOR_UPDATE_TODOS => {
+            let todos = params
+                .get("todos")
+                .cloned()
+                .unwrap_or(Value::Array(Vec::new()));
+            client.respond(
+                &id,
+                json!({ "outcome": { "outcome": "accepted", "todos": todos } }),
+            );
+            cursor_todo_events(params, CURSOR_TODOS_CHIP)
+        }
+        // Subagent tasks run inside cursor-agent; this only reports one
+        // finished. Image generation has nowhere to land in a comet session.
+        CURSOR_TASK => {
+            client.respond(&id, json!({ "outcome": { "outcome": "completed" } }));
+            Vec::new()
+        }
+        CURSOR_GENERATE_IMAGE => {
+            client.respond(
+                &id,
+                json!({ "outcome": { "outcome": "rejected", "reason": "comet cannot render generated images" } }),
+            );
+            Vec::new()
+        }
+        _ => {
+            tracing::debug!(target: "comet_harness::acp", "unhandled server request: {method}");
+            client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
+            Vec::new()
+        }
     }
 }
 
@@ -1316,10 +1462,14 @@ fn handle_server_request_live(
     method: &str,
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
-) {
+    open_questions: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> Vec<AgentEvent> {
+    if method == CURSOR_ASK_QUESTION {
+        ask_cursor_questions(client, id, params, request_input, open_questions);
+        return Vec::new();
+    }
     if method != "session/request_permission" {
-        handle_server_request(client, id, method, params);
-        return;
+        return handle_server_request(client, id, method, params);
     }
     let options: Vec<Value> = params
         .get("options")
@@ -1327,8 +1477,7 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     if !is_user_question(&options) {
-        handle_server_request(client, id, method, params);
-        return;
+        return handle_server_request(client, id, method, params);
     }
     let names: Vec<String> = options
         .iter()
@@ -1353,6 +1502,10 @@ fn handle_server_request_live(
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
+    // Pending questions block the agent — the quiet-settle must not read
+    // that silence as a finished turn.
+    let open_questions = std::sync::Arc::clone(open_questions);
+    open_questions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     tokio::spawn(async move {
         let answers = (request_input)(vec![question.clone()])
             .await
@@ -1374,7 +1527,161 @@ fn handle_server_request_live(
             ),
             None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
         }
+        open_questions.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     });
+    Vec::new()
+}
+
+/// Cursor's ACP extension methods (`https://cursor.com/docs/cli/acp`).
+/// `ask_question` and `create_plan` BLOCK the agent until answered, so every
+/// one of these gets a response even when comet has nothing to do with it.
+const CURSOR_ASK_QUESTION: &str = "cursor/ask_question";
+const CURSOR_CREATE_PLAN: &str = "cursor/create_plan";
+const CURSOR_UPDATE_TODOS: &str = "cursor/update_todos";
+const CURSOR_TASK: &str = "cursor/task";
+const CURSOR_GENERATE_IMAGE: &str = "cursor/generate_image";
+
+/// Stable chip ids so repeated todo/plan updates refresh in place, matching
+/// the `acp-plan` convention in the normalizer.
+const CURSOR_PLAN_CHIP: &str = "cursor-plan";
+const CURSOR_TODOS_CHIP: &str = "cursor-todos";
+
+/// The same extension methods arriving without an id: nothing to answer, and
+/// only the todo-carrying ones have anything to render. The docs describe
+/// todos/task/image as fire-and-forget while also giving them response
+/// shapes, so both arrival styles are handled.
+fn cursor_notification_events(method: &str, params: &Value) -> Vec<AgentEvent> {
+    match method {
+        CURSOR_UPDATE_TODOS => cursor_todo_events(params, CURSOR_TODOS_CHIP),
+        CURSOR_CREATE_PLAN => cursor_todo_events(params, CURSOR_PLAN_CHIP),
+        _ => Vec::new(),
+    }
+}
+
+/// `cursor/ask_question` → the engine's input bridge. Unlike a permission
+/// question this carries a LIST of questions, each with its own labelled
+/// options and multi-select flag, and answers go back as option ids. Handled
+/// in a subtask so the message loop keeps draining while the user decides;
+/// a dropped resolver degrades to `cancelled`, never a silent pick.
+fn ask_cursor_questions(
+    client: &RpcClient,
+    id: Value,
+    params: &Value,
+    request_input: &std::sync::Arc<RequestInputFn>,
+    open_questions: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let asked = cursor_questions(params);
+    if asked.is_empty() {
+        client.respond(
+            &id,
+            json!({ "outcome": { "outcome": "skipped", "reason": "no answerable questions" } }),
+        );
+        return;
+    }
+    let client = client.clone();
+    let request_input = std::sync::Arc::clone(request_input);
+    let open_questions = std::sync::Arc::clone(open_questions);
+    open_questions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tokio::spawn(async move {
+        let answers = (request_input)(asked.iter().map(|q| q.question.clone()).collect())
+            .await
+            .unwrap_or_default();
+        client.respond(&id, cursor_answer_outcome(&asked, &answers));
+        open_questions.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
+/// One `cursor/ask_question` entry: the comet-side question plus what is
+/// needed to answer it — the wire id, and the label→optionId table (comet's
+/// input bridge speaks labels, cursor expects option ids).
+struct CursorQuestion {
+    wire_id: String,
+    question: UserInputQuestion,
+    choices: Vec<(String, String)>,
+}
+
+fn cursor_questions(params: &Value) -> Vec<CursorQuestion> {
+    let header = params
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Agent question");
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|q| {
+            let wire_id = q.get("id").and_then(Value::as_str)?.to_owned();
+            let choices: Vec<(String, String)> = q
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|a| a.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|o| {
+                    let oid = o.get("id").and_then(Value::as_str)?;
+                    let label = o.get("label").and_then(Value::as_str).unwrap_or(oid);
+                    Some((label.to_owned(), oid.to_owned()))
+                })
+                .collect();
+            // An option-less question has no answer comet could send back.
+            if choices.is_empty() {
+                return None;
+            }
+            Some(CursorQuestion {
+                wire_id,
+                question: UserInputQuestion {
+                    // Comet-minted: cursor's ids ("q1") repeat across turns.
+                    id: new_message_id(),
+                    header: header.to_owned(),
+                    question: q
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("The agent needs your input.")
+                        .to_owned(),
+                    options: choices.iter().map(|(label, _)| label.clone()).collect(),
+                    multi_select: q
+                        .get("allowMultiple")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                },
+                choices,
+            })
+        })
+        .collect()
+}
+
+/// Chosen labels → the `answered` outcome. Nothing recognisable coming back
+/// (dropped resolver, unknown labels) degrades to `cancelled` so the agent
+/// unblocks without comet inventing a pick.
+fn cursor_answer_outcome(asked: &[CursorQuestion], answers: &[UserInputAnswer]) -> Value {
+    let picked: Vec<Value> = asked
+        .iter()
+        .filter_map(|asked| {
+            let labels = &answers
+                .iter()
+                .find(|a| a.question_id == asked.question.id)?
+                .labels;
+            let ids: Vec<&str> = labels
+                .iter()
+                .filter_map(|label| {
+                    asked
+                        .choices
+                        .iter()
+                        .find(|(l, _)| l == label)
+                        .map(|(_, oid)| oid.as_str())
+                })
+                .collect();
+            (!ids.is_empty())
+                .then(|| json!({ "questionId": asked.wire_id, "selectedOptionIds": ids }))
+        })
+        .collect();
+    if picked.is_empty() {
+        json!({ "outcome": { "outcome": "cancelled" } })
+    } else {
+        json!({ "outcome": { "outcome": "answered", "answers": picked } })
+    }
 }
 
 /// Await a setup request while draining incoming messages, so a `session/load`
@@ -1423,6 +1730,39 @@ fn prompt_like_request(
     Box::pin(async move { client.request(method, params).await })
 }
 
+/// Track the liveness signals the blanket quiet-settle keys on: content
+/// proves the turn produced something; an open tool call or a pending
+/// question proves silence is legitimate.
+fn track_turn_signals(
+    ev: &AgentEvent,
+    content_seen: &mut bool,
+    open_tools: &mut std::collections::HashSet<String>,
+) {
+    match ev {
+        AgentEvent::TextDelta { text } if !text.is_empty() => *content_seen = true,
+        AgentEvent::ToolCall { id, .. } => {
+            *content_seen = true;
+            open_tools.insert(id.clone());
+        }
+        AgentEvent::ToolResult { id, .. } => {
+            open_tools.remove(id);
+        }
+        _ => {}
+    }
+}
+
+/// True for the session's terminal accounting frame: a `usage_update`
+/// carrying `cost`, which claude-agent-acp derives once per turn from the
+/// CLI's result message — the turn-is-over tell that survives even when the
+/// prompt response itself is dropped (the starved-turn bug).
+fn is_turn_end_cost_update(params: &Value, session_id: &str) -> bool {
+    params.get("sessionId").and_then(Value::as_str) == Some(session_id)
+        && params.get("update").is_some_and(|u| {
+            u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+                && u.get("cost").is_some()
+        })
+}
+
 /// A mid-turn `_session/steering` call. `idleBehavior: promptRequired`
 /// covers the turn-ended race: the agent hands the text back instead of
 /// firing an untracked turn.
@@ -1466,7 +1806,9 @@ async fn run_session(session: Session) {
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
-        let init = client.request("initialize", initialize_params()).await?;
+        let init = client
+            .request("initialize", initialize_params(harness))
+            .await?;
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
@@ -1518,13 +1860,59 @@ async fn run_session(session: Session) {
         // session's advertised config options (ACP has no per-prompt model
         // field). Best-effort: a rejected set is logged, never fatal — the
         // agent's default runs.
+        //
+        // Cursor parameterized mode only lists parameters for the *current*
+        // model. Set the model first, then apply optimize_for / effort / fast
+        // against the refreshed configOptions in the response.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
+        let requested_model = request.model.as_deref().map(cursor::strip_variant_suffix);
+        let mut options_snapshot = session_response;
+        if harness == HarnessId::Cursor {
+            let model_sets = config_option_sets(
+                &options_snapshot,
+                requested_model,
+                &[],
+                &serde_json::Map::new(),
+            );
+            if let Some((_, payload)) = model_sets.iter().find(|(id, _)| id == "model") {
+                let mut params = serde_json::Map::new();
+                params.insert("sessionId".into(), session_id.clone().into());
+                params.insert("configId".into(), "model".into());
+                if let Some(payload) = payload.as_object() {
+                    for (k, v) in payload {
+                        params.insert(k.clone(), v.clone());
+                    }
+                }
+                match request_draining(
+                    &client,
+                    &mut incoming,
+                    "session/set_config_option",
+                    Value::Object(params),
+                )
+                .await
+                {
+                    Ok(resp) if resp.get("configOptions").is_some() => {
+                        options_snapshot = resp;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "comet_harness::acp",
+                            "session/set_config_option model rejected (agent default runs): {e}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
         for (config_id, payload) in config_option_sets(
-            &session_response,
-            request.model.as_deref(),
+            &options_snapshot,
+            requested_model,
             &efforts,
             &request.model_options,
         ) {
+            if harness == HarnessId::Cursor && config_id == "model" {
+                continue;
+            }
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
             params.insert("configId".into(), config_id.clone().into());
@@ -1628,8 +2016,7 @@ async fn run_session(session: Session) {
     // deadlocks against a full incoming channel when the agent floods
     // updates (the reader blocks on the channel and never parses the
     // steering response).
-    let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> =
-        None;
+    let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupted = false;
@@ -1637,11 +2024,81 @@ async fn run_session(session: Session) {
     let mut done_current = false;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    // Starved-turn recovery (2026-08-12 stuck-Working incident): a
+    // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
+    // background-task re-invocation no prompt started) starves —
+    // claude-agent-acp does not track turns it did not start, so the merged
+    // turn's result is never attributed to the pending prompt (reproduced
+    // against 0.66.0; the prompt's TEXT still reaches the model, queued by
+    // the CLI). The tell is protocol evidence, not timing: a steering call
+    // answered `promptRequired`/`noRunningTurn` while OUR prompt is
+    // outstanding means the adapter has no turn that could ever settle it.
+    // A short grace covers the true turn-end race (its response lands within
+    // milliseconds); past it, the dead prompt is closed out with a Done and
+    // the queued steer is promoted to a fresh turn.
+    const STARVE_GRACE: Duration = Duration::from_secs(2);
+    let mut starve_deadline: Option<tokio::time::Instant> = None;
+    // Deterministic turn-end hint (claude-agent-acp, verified against
+    // 0.66.0): the adapter derives exactly one cost-bearing `usage_update`
+    // per turn from the CLI's terminal result — INCLUDING turns whose
+    // prompt response it then drops (the starve above; the cost frame and
+    // the response share a timestamp in every healthy trace). While our
+    // prompt is outstanding, that update means the turn is already over:
+    // give the real response a short head start (it lands within
+    // milliseconds when it lands at all), then settle via the recovery arm.
+    // This is what keeps a dropped reply's stuck-Working window near zero
+    // instead of watchdog-length. Gated to Claude — the one adapter whose
+    // cost semantics are verified end-of-turn-only.
+    const COST_HINT_GRACE: Duration = Duration::from_secs(1);
+    let cost_hint_enabled = harness == HarnessId::ClaudeCode;
+    // BLANKET dropped-reply settle, adapter-agnostic: any ACP agent whose
+    // prompt response goes missing must not strand the turn. Signals that
+    // exist in core ACP stand in for the adapter-specific cost frame: once
+    // the turn has streamed content, every tool call it opened has resolved,
+    // no permission/question round-trip is pending, and the stream has been
+    // quiet past the window, the turn is settled through the same recovery
+    // arm. A false settle is recoverable by design (the engine folds any
+    // later output as a self-continued segment and re-arms Working; a late
+    // response resolves a dropped channel), which is what makes a tight
+    // window safe where a hard per-turn timeout was rejected.
+    // `COMET_ACP_QUIET_SETTLE_MS` overrides; 0 disables.
+    let quiet_settle: Option<Duration> = match std::env::var("COMET_ACP_QUIET_SETTLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(Duration::from_secs(30)),
+    };
+    let mut last_update_at = tokio::time::Instant::now();
+    let mut turn_content_seen = false;
+    // A steering injection makes the cost hint unsafe for the REST of the
+    // turn: the adapter emits a cost-bearing usage_update for the injected
+    // message itself, mid-turn, indistinguishable in shape from the
+    // terminal one (verified against 0.66.0 — premature Done exactly one
+    // grace after injection). Steered turns settle off their real response
+    // (healthy in every trace); the quiet settle stays as their backstop.
+    let mut steered_this_turn = false;
+    let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let open_questions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // PREVENTION, ahead of all the recovery above: never send a
+    // `session/prompt` into a session that is visibly mid SELF-CONTINUED
+    // turn — that prompt's reply is what the adapter drops (the verified
+    // starve). Visibly busy = an open tool call, or stream traffic within
+    // BUSY_RECENT, with no prompt of ours outstanding. The discipline is
+    // Zed's, verified against the real adapter: `session/cancel` the
+    // unowned turn, give it CANCEL_FLUSH to die and drain, then prompt.
+    // This makes the interactive path starve-free; the settle layers below
+    // remain for the notification race a client cannot see coming.
+    const BUSY_RECENT: Duration = Duration::from_secs(3);
+    const CANCEL_FLUSH: Duration = Duration::from_secs(2);
+    let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
     'main: loop {
         tokio::select! {
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
+                starve_deadline = None;
                 // Settle an in-flight `_session/steering` call BEFORE closing
                 // the turn: its response rides the same stdout as the prompt
                 // response, so by now it is (nearly always) already parsed —
@@ -1698,10 +2155,13 @@ async fn run_session(session: Session) {
                 let mut consumer_gone = false;
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
-                        Incoming::Notification { method, params }
-                            if method == "session/update" =>
-                        {
-                            for ev in session_update_events(&params, &session_id) {
+                        Incoming::Notification { method, params } => {
+                            let events = if method == "session/update" {
+                                session_update_events(&params, &session_id)
+                            } else {
+                                cursor_notification_events(&method, &params)
+                            };
+                            for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
                                     break;
@@ -1709,13 +2169,19 @@ async fn run_session(session: Session) {
                             }
                         }
                         Incoming::Request { id, method, params } => {
-                            handle_server_request_live(
+                            for ev in handle_server_request_live(
                                 &client,
                                 id,
                                 &method,
                                 &params,
                                 &request_input,
-                            );
+                                &open_questions,
+                            ) {
+                                if !send(&event_tx, ev).await {
+                                    consumer_gone = true;
+                                    break;
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1780,6 +2246,10 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
+                    turn_content_seen = false;
+                    steered_this_turn = false;
+                    open_tools.clear();
+                    last_update_at = tokio::time::Instant::now();
                     turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
                 } else if !steering_open {
                     break 'main;
@@ -1788,18 +2258,57 @@ async fn run_session(session: Session) {
 
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
-                    if method == "session/update" {
-                        for ev in session_update_events(&params, &session_id) {
-                            if !send(&event_tx, ev).await {
-                                break 'main;
-                            }
-                        }
+                    last_update_at = tokio::time::Instant::now();
+                    // Turn-end cost hint (see COST_HINT_GRACE above): arm the
+                    // fast settle when the turn's terminal accounting frame
+                    // arrives with our prompt still unsettled.
+                    if cost_hint_enabled
+                        && turn.is_some()
+                        && !interrupted
+                        && !steered_this_turn
+                        // An in-flight steering call means an injection cost
+                        // frame may already be on the wire ahead of its
+                        // response (select order is not the pipe order).
+                        && steering_call.is_none()
+                        && starve_deadline.is_none()
+                        && method == "session/update"
+                        && is_turn_end_cost_update(&params, &session_id)
+                    {
+                        tracing::debug!(
+                            target: "comet_harness::acp",
+                            "turn-end cost update observed with the prompt \
+                             unsettled; arming fast settle"
+                        );
+                        starve_deadline =
+                            Some(tokio::time::Instant::now() + COST_HINT_GRACE);
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
+                    let events = if method == "session/update" {
+                        session_update_events(&params, &session_id)
+                    } else {
+                        cursor_notification_events(&method, &params)
+                    };
+                    for ev in events {
+                        track_turn_signals(&ev, &mut turn_content_seen, &mut open_tools);
+                        if !send(&event_tx, ev).await {
+                            break 'main;
+                        }
+                    }
                 }
                 Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request_live(&client, id, &method, &params, &request_input);
+                    for ev in handle_server_request_live(
+                        &client,
+                        id,
+                        &method,
+                        &params,
+                        &request_input,
+                        &open_questions,
+                    ) {
+                        if !send(&event_tx, ev).await {
+                            break 'main;
+                        }
+                    }
                 }
                 Some(Incoming::Eof) | None => {
                     // The turn ends via a request RESPONSE, which races EOF
@@ -1875,6 +2384,11 @@ async fn run_session(session: Session) {
                     // and no Done ever coming — the stranded-Working /
                     // eternal-timer bug. Post-turn: nothing left to do.
                     if turn.is_some() {
+                        steered_this_turn = true;
+                        // The injection proves the turn is LIVE: any settle
+                        // deadline armed off a cost frame that raced this
+                        // response is invalid evidence.
+                        starve_deadline = None;
                         // Pre-injection updates can still sit in `incoming`
                         // (responses bypass that queue): drain them into the
                         // CURRENT segment first, or text the agent streamed
@@ -1883,10 +2397,13 @@ async fn run_session(session: Session) {
                         let mut consumer_gone = false;
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
-                                Incoming::Notification { method, params }
-                                    if method == "session/update" =>
-                                {
-                                    for ev in session_update_events(&params, &session_id) {
+                                Incoming::Notification { method, params } => {
+                                    let events = if method == "session/update" {
+                                        session_update_events(&params, &session_id)
+                                    } else {
+                                        cursor_notification_events(&method, &params)
+                                    };
+                                    for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
@@ -1894,13 +2411,19 @@ async fn run_session(session: Session) {
                                     }
                                 }
                                 Incoming::Request { id, method, params } => {
-                                    handle_server_request_live(
+                                    for ev in handle_server_request_live(
                                         &client,
                                         id,
                                         &method,
                                         &params,
                                         &request_input,
-                                    );
+                                        &open_questions,
+                                    ) {
+                                        if !send(&event_tx, ev).await {
+                                            consumer_gone = true;
+                                            break;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1926,7 +2449,27 @@ async fn run_session(session: Session) {
                     }
                 } else if turn.is_some() {
                     // Raced the turn end: redeliver at the boundary the
-                    // loop is about to hit.
+                    // loop is about to hit. `noRunningTurn` is stronger —
+                    // the adapter says nothing is running while our prompt
+                    // is still outstanding: the starved-turn signature. Arm
+                    // the grace deadline; if the prompt's response does not
+                    // land first, the recovery arm below settles the dead
+                    // turn and promotes this steer.
+                    if res
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.get("reason"))
+                        .and_then(Value::as_str)
+                        == Some("noRunningTurn")
+                    {
+                        tracing::warn!(
+                            target: "comet_harness::acp",
+                            "steering answered noRunningTurn with a prompt \
+                             outstanding; arming starved-turn recovery"
+                        );
+                        starve_deadline =
+                            Some(tokio::time::Instant::now() + STARVE_GRACE);
+                    }
                     queued_steers.push_back(text);
                 } else {
                     // The turn ended while the call was in flight and its
@@ -1945,6 +2488,10 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     done_current = false;
+                    turn_content_seen = false;
+                    steered_this_turn = false;
+                    open_tools.clear();
+                    last_update_at = tokio::time::Instant::now();
                     turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
@@ -1958,12 +2505,174 @@ async fn run_session(session: Session) {
                 }
             },
 
+            // Busy-session cancel flushed (see BUSY_RECENT/CANCEL_FLUSH
+            // above): the unowned self-continued turn had its cancel and a
+            // drain window; the queued steer becomes a fresh prompt on a
+            // now-idle agent.
+            _ = tokio::time::sleep_until(
+                cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if cancel_flush_deadline.is_some() && !interrupted => {
+                cancel_flush_deadline = None;
+                if turn.is_none()
+                    && let Some(text) = queued_steers.pop_front()
+                {
+                    let (prev, next) = rotate(&mut assistant_message_id);
+                    if !send(
+                        &event_tx,
+                        AgentEvent::Steered {
+                            assistant_message_id: Some(prev),
+                            next_assistant_message_id: Some(next),
+                        },
+                    )
+                    .await
+                    {
+                        break 'main;
+                    }
+                    done_current = false;
+                    turn_content_seen = false;
+                    steered_this_turn = false;
+                    open_tools.clear();
+                    last_update_at = tokio::time::Instant::now();
+                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                } else if turn.is_none() && !steering_open {
+                    // Mailbox closed while the flush waited: nothing left.
+                    break 'main;
+                }
+            },
+
+            // BLANKET quiet settle (see `quiet_settle` above), adapter-
+            // agnostic: content streamed, every tool resolved, no question
+            // pending, stream quiet past the window with the prompt still
+            // unsettled. Feeds the recovery arm below by expiring its
+            // deadline — one settle path for all three evidence sources.
+            _ = tokio::time::sleep_until(
+                last_update_at + quiet_settle.unwrap_or_default()
+            ), if quiet_settle.is_some()
+                && starve_deadline.is_none()
+                && turn.is_some()
+                && !interrupted
+                && turn_content_seen
+                && open_tools.is_empty()
+                && open_questions.load(std::sync::atomic::Ordering::SeqCst) == 0 =>
+            {
+                tracing::warn!(
+                    target: "comet_harness::acp",
+                    quiet_ms = quiet_settle.unwrap_or_default().as_millis() as u64,
+                    "turn quiet past the settle window with completed output; \
+                     treating the prompt response as dropped"
+                );
+                starve_deadline = Some(tokio::time::Instant::now());
+            },
+
+            // Starved-turn recovery: the grace elapsed with the prompt still
+            // unsettled after turn-end evidence — the turn's terminal cost
+            // frame (COST_HINT_GRACE, ~immediate), a steering call answered
+            // noRunningTurn (STARVE_GRACE), or the blanket quiet settle
+            // above. Close the dead turn out
+            // with a Done — its output already streamed as session/updates
+            // and its text was delivered via the CLI's own queue — then
+            // promote any queued steer to a fresh prompt, which settles
+            // normally on a now-idle agent (verified against the real
+            // adapter).
+            _ = tokio::time::sleep_until(
+                starve_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if starve_deadline.is_some() && turn.is_some() && !interrupted => {
+                starve_deadline = None;
+                tracing::warn!(
+                    target: "comet_harness::acp",
+                    "prompt response missing past turn-end evidence; settling \
+                     the dead turn (and promoting any queued steer)"
+                );
+                // Drop the dead future: a response that somehow arrives later
+                // resolves a closed channel harmlessly.
+                turn = None;
+                let (prev, _next) = rotate(&mut assistant_message_id);
+                if !send(
+                    &event_tx,
+                    AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                )
+                .await
+                {
+                    break 'main;
+                }
+                done_current = true;
+                if !send(
+                    &event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    },
+                )
+                .await
+                {
+                    break 'main;
+                }
+                if let Some(text) = queued_steers.pop_front() {
+                    let (prev, next) = rotate(&mut assistant_message_id);
+                    if !send(
+                        &event_tx,
+                        AgentEvent::Steered {
+                            assistant_message_id: Some(prev),
+                            next_assistant_message_id: Some(next),
+                        },
+                    )
+                    .await
+                    {
+                        break 'main;
+                    }
+                    done_current = false;
+                    turn_content_seen = false;
+                    steered_this_turn = false;
+                    open_tools.clear();
+                    last_update_at = tokio::time::Instant::now();
+                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                } else if !steering_open {
+                    // Mirror the normal turn-settled exit: mailbox closed
+                    // and nothing left to run — the session is over.
+                    break 'main;
+                }
+            },
+
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if turn.is_none() {
+                    if turn.is_none() && cancel_flush_deadline.is_some() {
+                        // A busy-session cancel is already in flight: this
+                        // steer lines up behind it and dispatches at flush.
+                        queued_steers.push_back(text);
+                    } else if turn.is_none()
+                        && !cost_hint_enabled
+                        && (!open_tools.is_empty()
+                            || last_update_at.elapsed() < BUSY_RECENT)
+                    {
+                        // Mid self-continued turn (see BUSY_RECENT above):
+                        // cancel it rather than prompt into the starve.
+                        //
+                        // Claude skips this branch ON PURPOSE and prompts
+                        // straight in — its NATIVE semantics: the CLI queues
+                        // the message and folds it into the running turn (no
+                        // work lost, verified from live session data). The
+                        // adapter drops that prompt's reply, and the
+                        // cost-frame settle reconstructs it ~1s after the
+                        // merged turn really ends. Only adapters with no
+                        // verified turn-end frame pay the cancel.
+                        tracing::info!(
+                            target: "comet_harness::acp",
+                            "steer into a self-continuing session; cancelling \
+                             the unowned turn before prompting"
+                        );
+                        client.notify(
+                            "session/cancel",
+                            Some(json!({ "sessionId": session_id })),
+                        );
+                        queued_steers.push_back(text);
+                        cancel_flush_deadline =
+                            Some(tokio::time::Instant::now() + CANCEL_FLUSH);
+                    } else if turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
                         let (prev, next) = rotate(&mut assistant_message_id);
                         if !send(
@@ -1978,6 +2687,10 @@ async fn run_session(session: Session) {
                             break 'main;
                         }
                         done_current = false;
+                        turn_content_seen = false;
+                        steered_this_turn = false;
+                        open_tools.clear();
+                        last_update_at = tokio::time::Instant::now();
                         turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
@@ -2067,6 +2780,7 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comet_proto::{TodoItem, ToolCall};
 
     #[test]
     fn steering_capability_reads_initialize_meta() {
@@ -2306,7 +3020,13 @@ mod tests {
         let models = models_from_session(&response, &[]);
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec!["default", "opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"]
+            vec![
+                "default",
+                "opus[1m]",
+                "claude-fable-5[1m]",
+                "sonnet",
+                "haiku"
+            ]
         );
         assert!(models.iter().all(|m| m.options.is_empty()));
     }
@@ -2328,6 +3048,270 @@ mod tests {
         assert!(models[0].options.iter().any(|o| o.id == "serviceTier"));
         // …unknown ids get none.
         assert!(models[1].options.is_empty());
+    }
+
+    /// `cursor/ask_question` carries several questions at once, each with its
+    /// own labelled options — the round trip must answer with OPTION IDS,
+    /// keyed by cursor's wire ids, not the labels comet showed the user.
+    #[test]
+    fn cursor_questions_round_trip_labels_back_to_option_ids() {
+        let asked = cursor_questions(&json!({
+            "toolCallId": "call_123",
+            "title": "Need input",
+            "questions": [
+                {
+                    "id": "q1",
+                    "prompt": "Which mode?",
+                    "options": [
+                        { "id": "agent", "label": "Agent" },
+                        { "id": "plan", "label": "Plan" },
+                    ],
+                },
+                {
+                    "id": "q2",
+                    "prompt": "Which targets?",
+                    "options": [
+                        { "id": "ios", "label": "iOS" },
+                        { "id": "mac", "label": "macOS" },
+                    ],
+                    "allowMultiple": true,
+                },
+                // No options: unanswerable, so it never reaches the user.
+                { "id": "q3", "prompt": "Anything else?" },
+            ],
+        }));
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[0].question.header, "Need input");
+        assert_eq!(asked[0].question.question, "Which mode?");
+        assert_eq!(asked[0].question.options, vec!["Agent", "Plan"]);
+        assert!(!asked[0].question.multi_select);
+        assert!(asked[1].question.multi_select);
+        // Cursor's repeatable ids never leak into comet's question ids.
+        assert_ne!(asked[0].question.id, "q1");
+
+        let answers = vec![
+            UserInputAnswer {
+                question_id: asked[0].question.id.clone(),
+                labels: vec!["Plan".into()],
+            },
+            UserInputAnswer {
+                question_id: asked[1].question.id.clone(),
+                labels: vec!["iOS".into(), "macOS".into()],
+            },
+        ];
+        assert_eq!(
+            cursor_answer_outcome(&asked, &answers),
+            json!({
+                "outcome": {
+                    "outcome": "answered",
+                    "answers": [
+                        { "questionId": "q1", "selectedOptionIds": ["plan"] },
+                        { "questionId": "q2", "selectedOptionIds": ["ios", "mac"] },
+                    ],
+                }
+            })
+        );
+    }
+
+    /// A dropped resolver (or labels from a stale panel) must unblock the
+    /// agent as `cancelled` — never a silent pick of some default option.
+    #[test]
+    fn cursor_answers_degrade_to_cancelled_not_a_silent_pick() {
+        let asked = cursor_questions(&json!({
+            "questions": [{
+                "id": "q1",
+                "prompt": "Ship it?",
+                "options": [{ "id": "yes", "label": "Yes" }],
+            }],
+        }));
+        let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
+        assert_eq!(cursor_answer_outcome(&asked, &[]), cancelled);
+        let stale = vec![UserInputAnswer {
+            question_id: asked[0].question.id.clone(),
+            labels: vec!["Maybe".into()],
+        }];
+        assert_eq!(cursor_answer_outcome(&asked, &stale), cancelled);
+    }
+
+    /// Cursor's todo-bearing extension methods render as chips with stable
+    /// ids, so a stream of updates refreshes one chip instead of stacking.
+    #[test]
+    fn cursor_todo_notifications_map_to_stable_chips() {
+        let todos = json!({
+            "toolCallId": "call_125",
+            "merge": true,
+            "todos": [
+                { "id": "1", "content": "Set up project", "status": "completed" },
+                { "id": "2", "content": "Add auth", "status": "in_progress" },
+            ],
+        });
+        let chip_id = |events: &[AgentEvent]| match &events[0] {
+            AgentEvent::ToolCall { id, .. } => id.clone(),
+            other => panic!("expected a tool call, got {other:?}"),
+        };
+        let updated = cursor_notification_events(CURSOR_UPDATE_TODOS, &todos);
+        assert_eq!(chip_id(&updated), CURSOR_TODOS_CHIP);
+        assert_eq!(
+            updated[0],
+            AgentEvent::ToolCall {
+                id: CURSOR_TODOS_CHIP.into(),
+                call: ToolCall::Todo {
+                    items: vec![
+                        TodoItem {
+                            text: "Set up project".into(),
+                            done: true
+                        },
+                        TodoItem {
+                            text: "Add auth".into(),
+                            done: false
+                        },
+                    ]
+                },
+            }
+        );
+        // A plan lands on its own chip, so the two never overwrite each other.
+        let planned = cursor_notification_events(CURSOR_CREATE_PLAN, &todos);
+        assert_eq!(chip_id(&planned), CURSOR_PLAN_CHIP);
+        // Everything else is noise comet has nothing to render for.
+        assert!(cursor_notification_events(CURSOR_TASK, &todos).is_empty());
+        assert!(cursor_notification_events(CURSOR_GENERATE_IMAGE, &todos).is_empty());
+        assert!(cursor_notification_events("cursor/unknown", &todos).is_empty());
+    }
+
+    /// The Cursor slot drives `cursor-agent acp` directly — no adapter
+    /// package — and opts into the parameterized model picker.
+    #[test]
+    fn cursor_spec_targets_the_native_acp_server() {
+        let spec = cursor_spec();
+        assert_eq!(spec.id, HarnessId::Cursor);
+        assert_eq!(spec.display_name, "Cursor");
+        assert_eq!(spec.executable, "cursor-agent");
+        assert_eq!(spec.args, &["acp"]);
+        assert!(spec.npx_package.is_none());
+        assert_eq!(spec.steering_mode, SteeringMode::TurnBoundary);
+        assert!(spec.reasoning_levels.is_empty());
+        assert!(
+            (spec.models)()
+                .iter()
+                .all(|m| m.reasoning_levels.is_empty())
+        );
+        let auto = (spec.models)()
+            .into_iter()
+            .find(|m| m.id == "auto-smart")
+            .expect("static Auto");
+        assert!(auto.options.iter().any(|o| o.id == "optimize_for"));
+        assert_eq!(
+            (spec.effort_values)(Some(ReasoningLevel::Low), None),
+            vec!["low"]
+        );
+        assert_eq!(
+            initialize_params(HarnessId::Cursor)["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
+            json!(true)
+        );
+        assert!(
+            initialize_params(HarnessId::Grok)["clientCapabilities"]
+                .get("_meta")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cursor_mode_trait_wins_over_no_prompt_fallback() {
+        let cursor = json!({
+            "sessionId": "s-1",
+            "configOptions": [{
+                "id": "mode",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "agent",
+                "options": [
+                    { "value": "agent" },
+                    { "value": "plan" },
+                    { "value": "ask" },
+                ],
+            }, {
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "example[reasoning_effort=high]",
+                "options": [
+                    { "value": "example[reasoning_effort=high]" },
+                    { "value": "example-low[]" },
+                    { "value": "example-medium[]" },
+                ],
+            }],
+        });
+        let mut opts = serde_json::Map::new();
+        opts.insert("mode".into(), json!("plan"));
+        assert_eq!(
+            config_option_sets(&cursor, None, &[], &opts),
+            vec![("mode".to_owned(), json!({ "value": "plan" }))]
+        );
+        // Reasoning Low switches the effort family to the -low sibling.
+        assert_eq!(
+            config_option_sets(
+                &cursor,
+                Some("example[reasoning_effort=high]"),
+                &["low"],
+                &serde_json::Map::new()
+            ),
+            vec![("model".to_owned(), json!({ "value": "example-low[]" }))]
+        );
+    }
+
+    #[test]
+    fn cursor_optimize_for_sets_on_parameterized_auto() {
+        let cursor = json!({
+            "sessionId": "s-1",
+            "configOptions": [{
+                "id": "mode",
+                "category": "mode",
+                "type": "select",
+                "currentValue": "agent",
+                "options": [
+                    { "value": "agent" },
+                    { "value": "plan" },
+                    { "value": "ask" },
+                ],
+            }, {
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "composer-2.5",
+                "options": [
+                    { "value": "auto-smart" },
+                    { "value": "composer-2.5" },
+                ],
+            }, {
+                "id": "optimize_for",
+                "category": "model_config",
+                "type": "select",
+                "currentValue": "balanced",
+                "options": [
+                    { "value": "intelligence" },
+                    { "value": "balanced" },
+                    { "value": "cost" },
+                ],
+            }],
+        });
+        let mut opts = serde_json::Map::new();
+        opts.insert("optimize_for".into(), json!("cost"));
+        let sets = config_option_sets(
+            &cursor,
+            Some("auto-smart[optimize_for=balanced]"),
+            &[],
+            &opts,
+        );
+        assert!(
+            sets.iter()
+                .any(|(id, v)| id == "model" && v == &json!({ "value": "auto-smart" })),
+            "{sets:?}"
+        );
+        assert!(
+            sets.iter()
+                .any(|(id, v)| id == "optimize_for" && v == &json!({ "value": "cost" })),
+            "{sets:?}"
+        );
     }
 
     #[test]

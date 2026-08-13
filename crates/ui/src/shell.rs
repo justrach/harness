@@ -36,6 +36,7 @@ use crate::settings::appearance::AppearancePage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
+use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SIDEBAR_DEFAULT,
@@ -148,16 +149,18 @@ pub enum SettingsSection {
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
+    Notifications,
     Shortcuts,
     Archived,
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 6] = [
+    pub const ALL: [SettingsSection; 7] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
         SettingsSection::Agents,
         SettingsSection::Appearance,
+        SettingsSection::Notifications,
         SettingsSection::Shortcuts,
         SettingsSection::Archived,
     ];
@@ -170,6 +173,7 @@ impl SettingsSection {
             SettingsSection::Harnesses => "Agents",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
+            SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -455,10 +459,12 @@ pub struct Shell {
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
+    notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
+    notifications_sub: Option<Subscription>,
     /// Session-row context menu: (chat id, window position).
     chat_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_dialog: Option<RenameChatDialog>,
@@ -474,10 +480,6 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
-    /// When the dropdown was closed by an outside mouse-down; lets the
-    /// trigger's click tell "toggle closed" apart from "just dismissed by
-    /// this same click" (same guard as `user_menu_dismissed_at`).
-    spaces_menu_dismissed_at: Option<std::time::Instant>,
     /// Chat id whose STATUS CORNER is under the pointer — just that corner
     /// swaps to the archive button (t3code's settle-on-hover); hovering the
     /// row body leaves the status readable.
@@ -490,9 +492,6 @@ pub struct Shell {
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, comet_proto::SessionStatus>,
     user_menu: popover::Popup<()>,
-    /// Outside-click dismissal instant — suppresses the trigger click that
-    /// follows the same mouse-down from instantly reopening the menu.
-    user_menu_dismissed_at: Option<std::time::Instant>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
@@ -584,12 +583,24 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        // Own-send re-engages the stick-to-bottom pin with a smooth scroll.
+        // The first send stages prompt-at-top → follow-tail; later sends keep
+        // the transcript's original follow-tail behavior.
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
-                ComposerEvent::Sent { .. } => {
-                    transcript.update(cx, |t, cx| t.on_own_send(cx));
+                ComposerEvent::Sent {
+                    chat_id,
+                    message_id,
+                    started_empty,
+                } => {
+                    transcript.update(cx, |t, cx| {
+                        t.on_own_send(
+                            chat_id.clone(),
+                            message_id.clone(),
+                            *started_empty,
+                            cx,
+                        )
+                    });
                 }
             }
         });
@@ -628,6 +639,7 @@ impl Shell {
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
+            Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
             Some("settings/archived") => Route::Settings(SettingsSection::Archived),
             // `new` pins the new-chat canvas (suppresses boot auto-select).
@@ -673,10 +685,12 @@ impl Shell {
             devices_page: None,
             archived_page: None,
             appearance_page: None,
+            notifications_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
             shortcuts_sub: None,
+            notifications_sub: None,
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
@@ -685,13 +699,11 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             spaces_menu: popover::Popup::default(),
-            spaces_menu_dismissed_at: None,
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             user_menu: popover::Popup::default(),
-            user_menu_dismissed_at: None,
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
@@ -758,7 +770,10 @@ impl Shell {
         // question rings whenever a session flips to AwaitingInput, a
         // completion rings on the Working→Idle edge — for ANY session on any
         // device. A row's first appearance only seeds the baseline, so boot
-        // (restored rows) and fresh sends stay silent.
+        // (restored rows) and fresh sends stay silent. Desktop banners
+        // (`notify::post`) ride the SAME edges and gates behind their own
+        // settings flag — one detector, two outputs, so the banner can never
+        // fire where the chime wouldn't.
         //
         // STALENESS-GATED like the dot (`effective_indicator`), for the same
         // reason: raw row statuses include the past. A dead turn's Working row
@@ -779,7 +794,8 @@ impl Shell {
         // still ring.
         {
             let now = Utc::now();
-            let sessions: Vec<(String, comet_proto::SessionStatus, bool)> = {
+            type Ping = (String, comet_proto::SessionStatus, bool, Option<String>);
+            let sessions: Vec<Ping> = {
                 let state = state.read(cx);
                 state
                     .sessions
@@ -793,18 +809,39 @@ impl Shell {
                             Indicator::None => comet_proto::SessionStatus::Idle,
                         };
                         let send_pending = state.send_pending(&s.chat_id, now);
-                        (s.chat_id.clone(), status, send_pending)
+                        let title = state
+                            .chats
+                            .iter()
+                            .find(|c| c.id == s.chat_id)
+                            .and_then(|c| c.title.clone());
+                        (s.chat_id.clone(), status, send_pending, title)
                     })
                     .collect()
             };
-            for (chat_id, status, send_pending) in sessions {
+            // Background-only banners: `active_window()` is app-level (any
+            // Comet window being key), so a ping for a *background chat* in a
+            // focused app still stays a chime — you're already looking at
+            // Comet; the sidebar dot carries the rest.
+            let app_focused = cx.active_window().is_some();
+            for (chat_id, status, send_pending, title) in sessions {
                 let prev = self.sound_prev.insert(chat_id, status);
                 if let Some(prev) = prev
-                    && self.settings.sound_enabled
                     && let Some(sound) = crate::sound::sound_for_transition(prev, status)
                     && !(send_pending && sound == crate::sound::Sound::Done)
                 {
-                    crate::sound::play(sound);
+                    if self.settings.sound_enabled {
+                        crate::sound::play(sound);
+                    }
+                    if self.settings.notifications_enabled
+                        && !(self.settings.notifications_background_only && app_focused)
+                    {
+                        let title = title.unwrap_or_else(|| "New session".into());
+                        let body = match sound {
+                            crate::sound::Sound::Done => "Run finished",
+                            crate::sound::Sound::Request => "Waiting on your input",
+                        };
+                        crate::notify::post(&title, body);
+                    }
                 }
             }
         }
@@ -1229,6 +1266,39 @@ impl Shell {
                     self.appearance_page = Some(cx.new(AppearancePage::new));
                 }
                 match &self.appearance_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Notifications => {
+                if self.notifications_page.is_none() {
+                    let page = cx.new(|cx| {
+                        NotificationsPage::new(
+                            self.settings.sound_enabled,
+                            self.settings.notifications_enabled,
+                            self.settings.notifications_background_only,
+                            cx,
+                        )
+                    });
+                    // Persist the flags whenever the page flips one.
+                    self.notifications_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &NotificationsEvent, cx| {
+                            let NotificationsEvent::Changed {
+                                sound,
+                                desktop,
+                                background_only,
+                            } = *event;
+                            this.settings.sound_enabled = sound;
+                            this.settings.notifications_enabled = desktop;
+                            this.settings.notifications_background_only = background_only;
+                            this.schedule_save(cx);
+                            cx.notify();
+                        },
+                    ));
+                    self.notifications_page = Some(page);
+                }
+                match &self.notifications_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -1830,6 +1900,7 @@ impl Shell {
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
+            SettingsSection::Notifications => icons::BELL,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
@@ -2472,7 +2543,7 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new `Comet.app` under the data dir
+    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
@@ -2565,16 +2636,16 @@ impl Shell {
                 )
             })
             .on_hover(motion::hover_listener("user-menu-trigger"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
-                // A click that just dismissed the menu (outside-click on the
-                // trigger) must not instantly reopen it.
-                let just_dismissed = this
-                    .user_menu_dismissed_at
-                    .is_some_and(|at| at.elapsed() < Duration::from_millis(400));
-                this.user_menu_dismissed_at = None;
-                if this.user_menu.is_open() {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.user_menu.take_press_was_open() {
                     this.close_user_menu(cx);
-                } else if !just_dismissed {
+                } else {
                     this.user_menu.open(());
                 }
                 cx.notify();
@@ -2630,7 +2701,6 @@ impl Shell {
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.user_menu_dismissed_at = Some(std::time::Instant::now());
                     this.close_user_menu(cx);
                 }))
                 .flex()
@@ -3470,7 +3540,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (comet App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Comet", copy, full-width white Log in button.
+            // logo, "Log in to Zeron", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -3496,7 +3566,7 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Comet")),
+                        .child(SharedString::from("Log in to Zeron")),
                 )
                 .child(
                     div()
@@ -3650,11 +3720,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Comet is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Comet is organized around workspaces — create one for yourself or your team."
+                "Zeron is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };

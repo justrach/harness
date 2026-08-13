@@ -54,14 +54,14 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                 .unwrap_or_else(super::dirs_data_dir);
             let staged = comet_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
             comet_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Comet to finish.", bundle.display());
+            println!("updated {} — relaunch Zeron to finish.", bundle.display());
             Ok(())
         }
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
                  Linux: curl -fsSL https://comet.zeron.sh/install.sh | sh\n\
-                 macOS: download the new Comet.app dmg, or rebuild from source."
+                 macOS: download the new Zeron.app dmg, or rebuild from source."
             )
         }
     }
