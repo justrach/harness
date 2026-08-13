@@ -13,7 +13,7 @@
 //!   installer): download the headless tarball into a new versioned dir, flip
 //!   the symlink, restart the service. Same flow the installer script performs,
 //!   natively.
-//! - **MacApp** (running out of `Comet.app`): download the app tarball, swap the
+//! - **MacApp** (running out of an app bundle): download the app tarball, swap the
 //!   bundle directory, relaunch. Driven by the UI.
 //! - **Unmanaged** (source builds, hand-copied binaries): report only.
 
@@ -84,7 +84,7 @@ pub fn headless_artifact(version: &str) -> String {
     format!("comet-{version}-{os}-{arch}.tar.gz")
 }
 
-/// `comet-<ver>-macos-<arch>-app.tar.gz` — the packaged `Comet.app` bundle.
+/// `comet-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
     format!("comet-{version}-macos-{arch}-app.tar.gz")
@@ -369,7 +369,9 @@ pub fn restart_service() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Comet.app`
-/// (idempotent). Returns the staged bundle path.
+/// (idempotent). The payload keeps this legacy internal name so installed
+/// Comet builds can update into Zeron without a bootstrap release. Returns the
+/// staged bundle path.
 pub async fn stage_mac_app(
     edge_url: &str,
     manifest: &Manifest,
