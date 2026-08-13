@@ -585,23 +585,17 @@ impl Shell {
         });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        // The first send stages prompt-at-top → follow-tail; later sends keep
-        // the transcript's original follow-tail behavior.
+        // Every send glides the prompt to the viewport top and reserves the
+        // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
             move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,
-                    started_empty,
                 } => {
                     transcript.update(cx, |t, cx| {
-                        t.on_own_send(
-                            chat_id.clone(),
-                            message_id.clone(),
-                            *started_empty,
-                            cx,
-                        )
+                        t.on_own_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
             }
@@ -2569,7 +2563,7 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new `Comet.app` under the data dir
+    /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
@@ -3548,7 +3542,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (comet App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Comet", copy, full-width white Log in button.
+            // logo, "Log in to Zeron", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -3574,7 +3568,7 @@ impl Shell {
                         .text_size(px(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Comet")),
+                        .child(SharedString::from("Log in to Zeron")),
                 )
                 .child(
                     div()
@@ -3728,11 +3722,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Comet is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Comet is organized around workspaces — create one for yourself or your team."
+                "Zeron is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };

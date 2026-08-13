@@ -251,13 +251,13 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, true)
+        self.dispatch_with(chat_id, harness_id, request, message_id, false)
             .await
     }
 
-    /// [`Self::dispatch`] with resume injection controllable: the failed-resume
-    /// retry re-dispatches with `inject_resume = false` so a session id the
-    /// harness just rejected can never be re-injected from the journal.
+    /// [`Self::dispatch`] with the startup-crash retry marker: the retry
+    /// re-dispatches with `startup_retry = true`, which makes that attempt
+    /// final (its own startup death surfaces instead of retrying again).
     /// Boxed future: `drive_run` re-enters this for that retry, and the
     /// erasure breaks the opaque-type cycle the recursion would otherwise form.
     fn dispatch_with<'a>(
@@ -266,9 +266,9 @@ impl SessionsEngine {
         harness_id: HarnessId,
         request: RunRequest,
         message_id: Option<String>,
-        inject_resume: bool,
+        startup_retry: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, inject_resume))
+        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry))
     }
 
     async fn dispatch_inner(
@@ -277,7 +277,7 @@ impl SessionsEngine {
         harness_id: HarnessId,
         mut request: RunRequest,
         mut message_id: Option<String>,
-        inject_resume: bool,
+        startup_retry: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
@@ -349,9 +349,12 @@ impl SessionsEngine {
         // Engine-owned resume (comet sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
         // the engine threads the chat's prior harness session back in so a new
-        // process (app restart) continues the same harness conversation.
+        // process (app restart) continues the same harness conversation. The
+        // startup-crash retry injects too — a stale id is the harness's
+        // problem now (`session/load` falls back to `session/new` internally),
+        // and starting the retry fresh silently dropped a good conversation.
         let mut resume_injected = false;
-        if request.resume.is_none() && inject_resume {
+        if request.resume.is_none() {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
         }
@@ -426,6 +429,7 @@ impl SessionsEngine {
             RunResumeState {
                 user_message_id: user_id,
                 resume_injected,
+                startup_retry,
             },
         ));
         Ok(run_id)
@@ -832,21 +836,12 @@ impl Inner {
         }
     }
 
-    /// A harness rejected the stored session id: tombstone it (empty string on
-    /// the row, cleared cache) so no lookup source — including the journal,
-    /// which still names the dead id — can re-inject it.
-    fn forget_harness_session(&self, chat_id: &str) {
-        lock(&self.harness_sessions).insert(
-            chat_id.to_string(),
-            HarnessSessionRef {
-                session_id: String::new(),
-                cwd: String::new(),
-            },
-        );
-        if let Some(ws) = self.workspace() {
-            ws.set_chat_harness_session(chat_id, "", "");
-        }
-    }
+    // NB: there is deliberately no `forget_harness_session` anymore. The old
+    // tombstone fired on "run died before SessionStarted", which — since the
+    // ACP conversion made stale ids a harness-internal fallback — only ever
+    // meant a child STARTUP failure, and permanently severed good
+    // conversations (user incident 2026-08-13). A truly stale id simply
+    // yields a fresh session whose SessionStarted overwrites the row.
 
     /// The session id to resume for a run in `chat_id` launching from `cwd`
     /// (comet sessions.ts:736, looked up on every dispatch):
@@ -1021,13 +1016,15 @@ fn expand_home(cwd: &str) -> String {
     }
 }
 
-/// Resume bookkeeping for one run task: which user entry the run answers (so a
-/// failed-resume retry re-dispatches idempotently against the same doc entry)
-/// and whether `dispatch` injected the resume id itself (only engine-injected
-/// resumes are retried fresh — a caller-specified resume fails loudly).
+/// Resume bookkeeping for one run task: which user entry the run answers (so
+/// the startup-crash retry re-dispatches idempotently against the same doc
+/// entry), whether `dispatch` injected the resume id itself (only
+/// engine-injected resumes retry — a caller-specified resume fails loudly),
+/// and whether this run already IS the retry (one attempt only).
 struct RunResumeState {
     user_message_id: String,
     resume_injected: bool,
+    startup_retry: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1048,8 +1045,9 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
-    // Kept whole for the failed-resume retry (fresh session, same user entry).
-    // Option so the retry branch (inside the event loop) can take ownership.
+    // Kept whole for the startup-crash retry (same user entry; dispatch
+    // re-injects the stored resume id). Option so the retry branch (inside
+    // the event loop) can take ownership.
     let mut retry_request = Some(RunRequest {
         resume: None,
         ..request.clone()
@@ -1119,6 +1117,50 @@ async fn drive_run(
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
+    // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
+    // that loses a turn's Done — the adapter never settles `session/prompt`
+    // even though the agent finished — strands Working forever: the live
+    // heartbeat above keeps the row fresh, and there is no per-turn timeout
+    // by design. This is NOT that stall timeout: it never ends the run or
+    // errors anything. When the stream has been silent past the window AND
+    // the fold shows completed output with nothing in flight (no unresolved
+    // tool, no open question), the turn parks exactly like a Done would —
+    // segment finalized Complete, status Idle, child and mailbox warm. A
+    // false trip (the agent was quietly waiting on something invisible)
+    // costs a status dip: the parked-resume path below re-arms Working the
+    // moment output flows again, and nothing is lost. `COMET_TURN_QUIESCE_MS`
+    // overrides the window; 0 disables.
+    let quiesce_after: Option<std::time::Duration> = match std::env::var("COMET_TURN_QUIESCE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        None => Some(std::time::Duration::from_secs(120)),
+    };
+    let mut last_stream_activity = tokio::time::Instant::now();
+    // SELF-CONTINUED turns get a much SHORTER quiesce window. A turn the
+    // agent starts on its own (background-task wake) can never receive a
+    // harness Done: the adapter has no `session/prompt` outstanding to
+    // settle — verified in claude-agent-acp's autonomous-result lane, which
+    // consumes the SDK's turn-end without emitting anything; codex shows
+    // the same shape. The watchdog is that turn shape's ONLY settle path,
+    // so the default 120s window read as 2min of stuck-Working after every
+    // background notification (user report 2026-08-13). The in-flight
+    // fold gate below still protects running tools; reasoning heartbeats
+    // push the window during real thinking. `COMET_SELF_TURN_QUIESCE_MS`
+    // overrides; 0 falls back to the normal window. An explicit
+    // `COMET_TURN_QUIESCE_MS=0` still disables the watchdog entirely.
+    let self_quiesce_after: Option<std::time::Duration> =
+        match std::env::var("COMET_SELF_TURN_QUIESCE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(ms) => Some(std::time::Duration::from_millis(ms)),
+            None => Some(std::time::Duration::from_secs(20)),
+        };
+    let mut self_continued_turn = false;
 
     let final_status = loop {
         let event: AgentEvent = tokio::select! {
@@ -1203,11 +1245,69 @@ async fn drive_run(
                 dirty = false;
                 continue;
             }
+            // Turn-quiesce watchdog (see the knob above). Armed only when the
+            // fold says nothing is in flight: an unresolved tool part is a
+            // command still running (legitimately silent for minutes — the
+            // rejected stall-timeout case), an unresolved input part is a
+            // question awaiting the user. The live-plan chip is exempt from
+            // the tool check: it is a singleton that never resolves. An EMPTY
+            // fold still arms — a Steered boundary that no output ever
+            // follows is one of the wedge shapes — it just parks without
+            // writing a segment (an empty finalize would leave a stub entry).
+            _ = tokio::time::sleep_until({
+                let mut window = quiesce_after.unwrap_or_default();
+                if self_continued_turn && let Some(short) = self_quiesce_after {
+                    window = window.min(short);
+                }
+                last_stream_activity + window
+            }), if quiesce_after.is_some()
+                && idle_since.is_none()
+                && !interrupted
+                && steerable
+                && !folded.iter().any(|p| match p {
+                    MessagePart::Tool { id, resolved: false, .. } => {
+                        id != comet_proto::LIVE_PLAN_TOOL_ID
+                    }
+                    MessagePart::Input { resolved: false, .. } => true,
+                    _ => false,
+                }) =>
+            {
+                tracing::warn!(
+                    chat = %chat_id,
+                    quiet_ms = quiesce_after.unwrap_or_default().as_millis() as u64,
+                    "turn quiesced: stream silent after completed output with no \
+                     turn-end; parking (suspected missing harness Done)"
+                );
+                if !folded.is_empty() || writer.is_some() {
+                    if let Err(err) = finish_segment(
+                        doc_ref,
+                        writer.take(),
+                        &entry_id,
+                        &device_id,
+                        segment_started,
+                        &folded,
+                        MessageStatus::Complete,
+                    ) {
+                        tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
+                    }
+                    inner.note_message(&chat_id, &folded_text(&folded));
+                }
+                folded.clear();
+                dirty = false;
+                entry_id = new_id();
+                segment_started = now_ms();
+                idle_since = Some(tokio::time::Instant::now());
+                self_continued_turn = false;
+                inner.set_status(&chat_id, SessionStatus::Idle, false);
+                continue;
+            }
         };
 
         // Any stream activity proves the run is alive — keep the session's
-        // freshness inside the UI's 45s staleness window (throttled).
+        // freshness inside the UI's 45s staleness window (throttled), and
+        // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
+        last_stream_activity = tokio::time::Instant::now();
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
@@ -1231,40 +1331,82 @@ async fn drive_run(
                 continue;
             }
         }
-        // PARKED: only a steer boundary (or an input round-trip / terminal
-        // Done) re-opens the session. The ACP child keeps forwarding
-        // `session/update` frames after a turn completes — late
-        // tool_call_updates for long-running commands, command refreshes,
-        // reasoning heartbeats. Treating those as "the next turn" re-armed
-        // Working with no Done ever coming (the eternally-running session
-        // bug) and folded orphan parts into a phantom segment.
+        // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
+        // re-opens the session; everything else stays gated. The ACP child
+        // keeps forwarding `session/update` frames after a turn completes,
+        // and they split two ways:
+        //
+        // - Post-turn NOISE — late tool_call_updates for commands folded in a
+        //   prior segment, command refreshes, reasoning heartbeats. Treating
+        //   those as "the next turn" re-armed Working with no Done ever
+        //   coming (the eternally-running session bug) and folded orphan
+        //   parts into a phantom segment. Still dropped.
+        // - SELF-CONTINUED WORK — Claude Code re-invokes itself when a
+        //   background task finishes (turns no prompt started) and streams
+        //   real output for them. Dropping those LOST transcript content
+        //   (2026-08-12: "Build finished successfully…" streamed by the
+        //   agent, absent from the doc). Fresh text or a genuinely new tool
+        //   call resumes the session: new segment, Working, and the turn
+        //   settles again via Done — or via the quiesce watchdog, which is
+        //   what makes this resume safe where the naive version was not.
+        //
+        // The RESUME_GATE separates the two by arrival time: a finished
+        // turn's tail flush lands within milliseconds of its Done, while a
+        // self-continued turn starts a whole new agent round trip (seconds
+        // at minimum, minutes in the incident). Inside the gate everything
+        // non-boundary stays inert, exactly as before.
+        const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {
-            match &event {
-                AgentEvent::Steered { .. } => {
-                    idle_since = None;
-                    inner.set_status(&chat_id, SessionStatus::Working, true);
-                }
-                AgentEvent::Done { .. } => {
-                    idle_since = None;
-                }
-                // A question with NO turn behind it (post-turn permission
-                // noise): answer it empty right here. Un-parking into
-                // AwaitingInput would disarm the idle reaper with no Done
-                // ever coming — stranded status, leaked warm child.
-                AgentEvent::InputRequested { request_id, .. } => {
-                    let resolver = lock(&inner.runs)
-                        .get(&chat_id)
-                        .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                    if let Some(tx) = resolver {
-                        let _ = tx.send(Vec::new());
+            let self_continued = idle_since
+                .is_some_and(|parked_at| parked_at.elapsed() >= RESUME_GATE)
+                && (matches!(
+                    &event,
+                    AgentEvent::TextDelta { text } if !text.is_empty()
+                ) || matches!(
+                    &event,
+                    AgentEvent::ToolCall { id, .. }
+                        if id == comet_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+                ));
+            if self_continued {
+                tracing::info!(
+                    chat = %chat_id,
+                    "parked session resumed by self-continued agent output"
+                );
+                idle_since = None;
+                self_continued_turn = true;
+                // The park cleared the fold; rotate to a fresh entry and
+                // fall through — this event is the new segment's first part.
+                entry_id = new_id();
+                segment_started = now_ms();
+                inner.set_status(&chat_id, SessionStatus::Working, true);
+            } else {
+                match &event {
+                    AgentEvent::Steered { .. } => {
+                        idle_since = None;
+                        inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
-                    tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
-                    continue;
+                    AgentEvent::Done { .. } => {
+                        idle_since = None;
+                    }
+                    // A question with NO turn behind it (post-turn permission
+                    // noise): answer it empty right here. Un-parking into
+                    // AwaitingInput would disarm the idle reaper with no Done
+                    // ever coming — stranded status, leaked warm child.
+                    AgentEvent::InputRequested { request_id, .. } => {
+                        let resolver = lock(&inner.runs)
+                            .get(&chat_id)
+                            .and_then(|h| lock(&h.pending_inputs).remove(request_id));
+                        if let Some(tx) = resolver {
+                            let _ = tx.send(Vec::new());
+                        }
+                        tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
+                        continue;
+                    }
+                    // A stale answer settling after its turn already closed:
+                    // nothing is running — stay parked.
+                    AgentEvent::InputResolved { .. } => continue,
+                    _ => continue,
                 }
-                // A stale answer settling after its turn already closed:
-                // nothing is running — stay parked.
-                AgentEvent::InputResolved { .. } => continue,
-                _ => continue,
             }
         }
         // Empty reasoning deltas are PURE heartbeats: redacted thinking and
@@ -1308,13 +1450,19 @@ async fn drive_run(
             _ => {}
         }
 
-        // Failed-resume fallback: an engine-injected `--resume` naming a session
-        // the harness no longer knows dies before ever starting (claude exits
-        // without an init frame; codex falls back internally via thread/start).
-        // Signature: errored Done, no SessionStarted, nothing streamed. Retry
-        // ONCE as a fresh session against the same user entry — tombstone the
-        // dead id first so no lookup source (journal included) re-injects it.
+        // Startup-crash retry: a run that dies before ever starting (errored
+        // Done, no SessionStarted, nothing streamed) means the AGENT CHILD
+        // failed to come up — not that the injected resume id was bad. Since
+        // the ACP conversion (2026-08-08) a stale id is handled inside the
+        // harness (`session/load` falls back to `session/new`), so the old
+        // guess here — tombstone the id, retry fresh — fired only on child
+        // startup failures and permanently severed GOOD conversations (user
+        // incident 2026-08-13). The id stays; retry ONCE against the same
+        // user entry, resume and all, in case the crash was transient. A
+        // helper that is down hard fails the retry too and surfaces its
+        // crash text (the harness now appends exit status + stderr).
         if resume_state.resume_injected
+            && !resume_state.startup_retry
             && !saw_session_started
             && folded.is_empty()
             && !interrupted
@@ -1329,9 +1477,8 @@ async fn drive_run(
         {
             tracing::warn!(
                 chat = %chat_id,
-                "harness rejected injected resume id; retrying as a fresh session"
+                "run died before session start; retrying once (resume kept)"
             );
-            inner.forget_harness_session(&chat_id);
             inner.remove_run(&chat_id, &run_id);
             let engine = SessionsEngine {
                 inner: inner.clone(),
@@ -1339,13 +1486,13 @@ async fn drive_run(
             let chat = chat_id.clone();
             let message_id = resume_state.user_message_id.clone();
             tokio::spawn(async move {
-                // `inject_resume = false`: the retry must start fresh. The user
-                // entry write inside dispatch is idempotent by message id.
+                // The user entry write inside dispatch is idempotent by
+                // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
-                    .dispatch_with(&chat, harness_id, retry, Some(message_id), false)
+                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true)
                     .await
                 {
-                    tracing::error!(chat = %chat, error = %err, "fresh-session retry dispatch failed");
+                    tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
                     // No run is coming: leaving the row Working would spin
                     // the session forever with nothing behind it.
                     engine
@@ -1363,6 +1510,9 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
+            // A steer boundary means a real prompt owns the turn again — its
+            // Done will come; the short self-continued window stands down.
+            self_continued_turn = false;
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -1505,6 +1655,7 @@ async fn drive_run(
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
+                self_continued_turn = false;
                 inner.set_status(&chat_id, SessionStatus::Idle, false);
                 continue;
             }
