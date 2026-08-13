@@ -1282,6 +1282,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "comet-syntax"
+version = "0.1.54"
+dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "comet-ui"
 version = "0.1.57"
 dependencies = [
@@ -1294,6 +1301,7 @@ dependencies = [
  "comet-engine",
  "comet-proto",
  "comet-rpc",
+ "comet-syntax",
  "comet-update",
  "futures",
  "gpui",
