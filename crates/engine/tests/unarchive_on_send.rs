@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use zeron_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
@@ -136,10 +136,10 @@ async fn sending_a_message_unarchives_the_chat() {
     )
     .expect("engine core assembles");
 
-    let client = comet_rpc::memory_client(core.rpc_service());
+    let client = zeron_rpc::memory_client(core.rpc_service());
     client
         .call(
-            comet_rpc::methods::MUTATE,
+            zeron_rpc::methods::MUTATE,
             serde_json::json!({
                 "op": "createChat",
                 "chatId": CHAT,
@@ -162,7 +162,10 @@ async fn sending_a_message_unarchives_the_chat() {
     core.doc_host
         .queue_command(CHAT, run_payload("msg-ua-1"))
         .expect("queue run command");
-    assert!(!archived(&core), "sending a message must unarchive the chat");
+    assert!(
+        !archived(&core),
+        "sending a message must unarchive the chat"
+    );
     wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
 
     // A non-message command must NOT revive it.

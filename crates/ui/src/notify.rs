@@ -19,12 +19,12 @@
 //!   desktop).
 //! - Windows: no-op for now — toasts require a registered AppUserModelID
 //!   (an installer concern); the chime still covers it.
-//! - `COMET_DISABLE_NOTIFICATIONS` env kill-switch + the
+//! - `ZERON_DISABLE_NOTIFICATIONS` env kill-switch + the
 //!   `notificationsEnabled` ui-setting (checked by the caller);
 //! - failures are logged and swallowed — a missing notifier must never
 //!   bother the session flow.
 
-const DISABLE_ENV: &str = "COMET_DISABLE_NOTIFICATIONS";
+const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";
 
 /// Post a desktop banner. Call from the main thread (the macOS native path
 /// talks to AppKit); slow paths (spawning a CLI) hop to a background thread.
@@ -63,7 +63,7 @@ fn post_impl(title: &str, body: &str) {
 /// The identity banners are attributed to — the packaged app's bundle id
 /// (`dist/macos/Info.plist`), which the center resolves to its name + icon.
 #[cfg(target_os = "macos")]
-const MACOS_BUNDLE_ID: &std::ffi::CStr = c"dev.comet.native";
+const MACOS_BUNDLE_ID: &std::ffi::CStr = c"sh.zeron.app";
 
 /// Deliver through the app's notification center; false when the process has
 /// no bundle (dev runs — `defaultUserNotificationCenter` is nil there) and
@@ -133,12 +133,11 @@ mod delegate {
     pub(super) fn always_present() -> *mut Object {
         static DELEGATE: OnceLock<usize> = OnceLock::new();
         *DELEGATE.get_or_init(|| unsafe {
-            let mut decl = ClassDecl::new("CometNotifyDelegate", class!(NSObject))
-                .expect("CometNotifyDelegate registered twice");
+            let mut decl = ClassDecl::new("ZeronNotifyDelegate", class!(NSObject))
+                .expect("ZeronNotifyDelegate registered twice");
             decl.add_method(
                 sel!(userNotificationCenter:shouldPresentNotification:),
-                should_present
-                    as extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
+                should_present as extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
             );
             let class = decl.register();
             let instance: *mut Object = msg_send![class, new];

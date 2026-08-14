@@ -1,8 +1,8 @@
-//! comet-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
+//! zeron-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
 //! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
-//! byte transports), matching the shape of comet's Effect RPC without the Effect runtime:
+//! byte transports), matching the shape of zeron's Effect RPC without the Effect runtime:
 //!
 //! - client → server: `{id, method, params}` to invoke, `{id, cancel: true}` to stop a stream;
 //! - server → client: `{id, ok}` / `{id, err}` for unary calls,
@@ -45,7 +45,7 @@ pub mod methods {
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
     pub const PROBE_SYNC: &str = "ProbeSync";
-    /// Live sync introspection (`comet sync` / debug surfaces): per-room
+    /// Live sync introspection (`zeron sync` / debug surfaces): per-room
     /// connection state, last pushed-frame/ack ages, rejoin/probe/resync
     /// counters for the workspace room and every open chat doc. No params;
     /// IPC-only.
@@ -62,6 +62,15 @@ pub mod methods {
     /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
     /// the answer is about whichever engine you are directly connected to).
     pub const LOCAL_DEVICE: &str = "LocalDevice";
+    /// This engine runtime's fixed device and workspace identity.
+    pub const ENGINE_INFO: &str = "EngineInfo";
+    /// Readiness barrier for the engine runtime. The call completes once stores
+    /// and journals are assembled, or fails with the assembly error.
+    pub const ENGINE_READY: &str = "EngineReady";
+    /// Ask a headless IPC owner to drain its runtime and exit successfully.
+    /// Headed IPC owners do not implement this method: closing another app's
+    /// engine behind its windows would leave that process unusable.
+    pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";

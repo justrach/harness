@@ -8,12 +8,12 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use comet_engine::{
+use zeron_engine::{
     EngineCore, HarnessRegistry, Repos, Terminals, capture_diff, capture_diff_against,
     capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree, working_diff_base,
 };
-use comet_proto::{GitHistoryRefKind, TerminalEvent};
-use comet_rpc::methods;
+use zeron_proto::{GitHistoryRefKind, TerminalEvent};
+use zeron_rpc::methods;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -72,7 +72,7 @@ fn assemble(dir: &Path) -> EngineCore {
     EngineCore::assemble(
         dir,
         Arc::new(HarnessRegistry::new()),
-        comet_proto::HarnessId::Mock,
+        zeron_proto::HarnessId::Mock,
         None,
     )
     .expect("engine assembles")
@@ -147,13 +147,13 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert_eq!(branches[0], "main", "default branch first: {branches:?}");
     assert!(branches.contains(&"feature/x".to_string()));
 
-    // Worktree add: comet/<name> branch, isolated dir under the test root.
+    // Worktree add: zeron/<name> branch, isolated dir under the test root.
     let worktree = repos
         .create_worktree(&repo_dir, "main")
         .await
         .expect("worktree");
     assert!(
-        worktree.branch.starts_with("comet/"),
+        worktree.branch.starts_with("zeron/"),
         "branch: {}",
         worktree.branch
     );
@@ -171,7 +171,7 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert!(branches.contains(&worktree.branch));
 
     // Refs carry checkout state: `main` is current (main folder), the
-    // worktree's comet/<name> branch maps to its linked-checkout path, and
+    // worktree's zeron/<name> branch maps to its linked-checkout path, and
     // a plain branch has neither.
     let refs = repos.refs(&repo_dir).await.expect("refs");
     let by_name = |name: &str| refs.iter().find(|r| r.name == name).expect("ref row");
@@ -198,7 +198,7 @@ async fn repos_round_trip_add_branches_worktrees() {
         .expect("wt identity");
     assert_ne!(main_identity.id, wt_identity.id);
 
-    // Delete: dir removed, comet branch removed, refs pruned.
+    // Delete: dir removed, zeron branch removed, refs pruned.
     repos
         .delete_worktree(&repo_dir, Path::new(&worktree.path))
         .await
@@ -210,7 +210,7 @@ async fn repos_round_trip_add_branches_worktrees() {
         .expect("branches after delete");
     assert!(
         !branches.contains(&worktree.branch),
-        "comet branch deleted: {branches:?}"
+        "zeron branch deleted: {branches:?}"
     );
 
     // CreateRepo: sanitized name, initialized on main.
@@ -542,7 +542,7 @@ async fn diff_file_text_returns_both_checked_sources() {
     assert!(!pair.binary);
     assert!(!pair.truncated);
 
-    let escape = comet_proto::DiffFileSummary {
+    let escape = zeron_proto::DiffFileSummary {
         path: "../outside.txt".into(),
         old_path: None,
         status: "modified".into(),
@@ -620,7 +620,7 @@ async fn diff_capture_truncates_at_patch_cap() {
     let snapshot = capture_diff(&repos, &repo_dir).await.expect("capture");
     assert!(snapshot.truncated, "patch cap hit");
     assert!(snapshot.patch.len() <= 3 * 1024 * 1024 + 64);
-    assert!(snapshot.patch.contains("# Comet diff truncated"));
+    assert!(snapshot.patch.contains("# Zeron diff truncated"));
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +815,7 @@ async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
     let snapshot = capture_diff(&core.repos, &repo_dir)
         .await
         .expect("diff snapshot");
-    let client = comet_rpc::memory_client(core.rpc_service());
+    let client = zeron_rpc::memory_client(core.rpc_service());
 
     let response = client
         .call(
@@ -830,7 +830,7 @@ async fn checkout_file_diff_text_rpc_fits_the_default_worker_stack() {
         )
         .await
         .expect("GetCheckoutFileDiffText");
-    let response: comet_proto::CheckoutFileDiffText =
+    let response: zeron_proto::CheckoutFileDiffText =
         serde_json::from_value(response).expect("typed response");
     assert_eq!(response.old_text.as_deref(), Some("one\ntwo\n"));
     assert_eq!(response.new_text.as_deref(), Some("one\ntwo edited\n"));
@@ -972,9 +972,9 @@ async fn rpc_dispatch_for_m5_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // EngineCore's Repos resolves the worktree root from the env; keep test
     // worktrees out of $HOME. (Process-global — this is the only test that sets it.)
-    unsafe { std::env::set_var("COMET_WORKTREES_DIR", tmp.path().join("worktrees")) };
+    unsafe { std::env::set_var("ZERON_WORKTREES_DIR", tmp.path().join("worktrees")) };
     let core = assemble(&tmp.path().join("data"));
-    let client = comet_rpc::memory_client(core.rpc_service());
+    let client = zeron_rpc::memory_client(core.rpc_service());
 
     // CreateRepo → ListRepos.
     let created = client
@@ -1102,7 +1102,7 @@ async fn rpc_dispatch_for_m5_methods() {
         worktree["branch"]
             .as_str()
             .expect("branch")
-            .starts_with("comet/")
+            .starts_with("zeron/")
     );
     assert!(worktree["checkoutId"].is_string());
     let deleted = client

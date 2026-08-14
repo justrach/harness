@@ -10,7 +10,7 @@
 use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
 use std::time::{Duration, Instant};
 
-use comet_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use crate::motion;
 use crate::popover;
@@ -218,12 +218,12 @@ impl GlideTimeline {
     }
 }
 
-/// `COMET_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
-/// the smoothness measurement knob (same family as `COMET_FRAME_STATS`).
+/// `ZERON_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
+/// the smoothness measurement knob (same family as `ZERON_FRAME_STATS`).
 fn scroll_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("COMET_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
+        std::env::var("ZERON_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -433,7 +433,26 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         }
         let tick_rows: Vec<usize> = pairs.iter().map(|(_, row)| *row).collect();
-        let top_row = self.list_state().logical_scroll_top().item_ix;
+        // Active detection reads from the READING line, not the raw clip top:
+        // the titlebar overlays the list, so a row whose top sits within that
+        // chrome band is what you're reading — the sliver of the previous row
+        // above it is behind the blur. Concretely, the own-turn hold parks the
+        // newest prompt exactly at the chrome inset, and crediting the row at
+        // the raw clip top kept the PREVIOUS tick lit for the whole runway
+        // (user report). Walk forward over measured rows whose tops are at or
+        // above the reading line; unmeasured rows (None bounds) stop the walk,
+        // leaving the raw top row — the pre-fix behavior.
+        let mut top_row = self.list_state().logical_scroll_top().item_ix;
+        let read_top = f32::from(self.list_state().viewport_bounds().top())
+            + crate::transcript::OWN_SEND_TOP_INSET_PX
+            + 0.5;
+        while let Some(bounds) = self.list_state().bounds_for_item(top_row + 1) {
+            if f32::from(bounds.top()) <= read_top {
+                top_row += 1;
+            } else {
+                break;
+            }
+        }
         let active = active_tick(&tick_rows, top_row);
         let hover = self.rail_hover();
         let theme = Theme::of(cx).clone();
@@ -515,7 +534,7 @@ impl Transcript {
                         });
                     // Mounted straight through deferred/anchored (not a popover
                     // mount helper), so the frost wrap happens here.
-                    crate::frost::frosted(12.0, 16.0, card).into_any_element()
+                    crate::frost::frosted(12.0, crate::frost::MENU_BLUR, card).into_any_element()
                 });
                 div()
                     .id(("rail-tick", ix))
@@ -555,7 +574,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_doc::MessageStatus;
+    use zeron_doc::MessageStatus;
 
     fn entry(id: &str, role: MessageRole, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {

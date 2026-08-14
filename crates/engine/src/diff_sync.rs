@@ -1,5 +1,5 @@
 //! CheckoutDiffSync — checkout-scoped working-tree diff production (feature-inventory
-//! §3.5; port of comet's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
+//! §3.5; port of zeron's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
 //!
 //! Chats do not own working-tree state: a concrete Git checkout does. This service
 //! groups this device's chats by their canonical checkout identity (`chat.cwd` →
@@ -34,8 +34,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
-use comet_proto::{Chat, CheckoutDiff, DiffFileSummary};
+use zeron_proto::{Chat, CheckoutDiff, DiffFileSummary};
 
 use crate::EngineError;
 use crate::doc_host::EdgeConfig;
@@ -135,6 +136,10 @@ struct DiffSyncInner {
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
+    /// The tasks hold `Weak` refs, but an in-flight iteration holds an
+    /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
+    cancel: CancellationToken,
+    supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -166,13 +171,29 @@ impl CheckoutDiffSync {
                 entries: Mutex::new(HashMap::new()),
                 diffs_tx,
                 turn_trees: Mutex::new(HashMap::new()),
+                cancel: CancellationToken::new(),
+                supervisor: Mutex::new(None),
             }),
         };
-        tokio::spawn(diff_sync_task(
+        let task = tokio::spawn(diff_sync_task(
             Arc::downgrade(&sync.inner),
             workspace.watch_chats(),
+            sync.inner.cancel.clone(),
         ));
+        *lock(&sync.inner.supervisor) = Some(task);
         sync
+    }
+
+    /// Stop the sync graph and wait for the supervisor to exit. Per-entry
+    /// tasks observe the same token, so an in-flight `sync_entry` drops its
+    /// sidecar POST instead of finishing it under a replaced runtime.
+    /// Idempotent.
+    pub async fn shutdown(&self) {
+        self.inner.cancel.cancel();
+        let task = lock(&self.inner.supervisor).take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
     }
 
     /// `WatchCheckoutDiffs` source: every tracked checkout's latest diff.
@@ -410,6 +431,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         Arc::downgrade(inner),
         Arc::downgrade(&entry),
         kick_rx,
+        inner.cancel.clone(),
     ));
     let _ = kick_tx.send(()); // initial snapshot
 }
@@ -420,6 +442,7 @@ async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
     mut kick_rx: mpsc::UnboundedReceiver<()>,
+    cancel: CancellationToken,
 ) {
     while kick_rx.recv().await.is_some() {
         // Trailing debounce: wait for the burst to settle.
@@ -433,7 +456,12 @@ async fn entry_task(
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
-        sync_entry(&inner, &entry).await;
+        // The upgraded Arc would let a sync outlive shutdown — race the token
+        // so an in-flight sidecar POST is dropped, not completed.
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = sync_entry(&inner, &entry) => {}
+        }
     }
 }
 
@@ -554,13 +582,18 @@ fn publish_watch(inner: &Arc<DiffSyncInner>) {
 }
 
 /// Chat-watch follower + repair tick. Holds only weak handles so dropping the
-/// service tears the loop down.
-async fn diff_sync_task(inner: Weak<DiffSyncInner>, mut chats_rx: watch::Receiver<Vec<Chat>>) {
+/// service tears the loop down; the token ends it eagerly on shutdown.
+async fn diff_sync_task(
+    inner: Weak<DiffSyncInner>,
+    mut chats_rx: watch::Receiver<Vec<Chat>>,
+    cancel: CancellationToken,
+) {
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => break,
             changed = chats_rx.changed() => {
                 if changed.is_err() {
                     break;
@@ -957,7 +990,7 @@ pub async fn capture_diff_against(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Comet diff truncated\n");
+        patch.push_str("\n# Zeron diff truncated\n");
     }
 
     // `?? path` records; rename records (`R  new\0old`) consume their extra field.
@@ -1072,7 +1105,7 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
 /// capture already does.
 pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     let index = std::env::temp_dir().join(format!(
-        "comet-turn-index-{}-{}",
+        "zeron-turn-index-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_micros()
     ));
@@ -1178,7 +1211,7 @@ pub async fn capture_turn_diff(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Comet diff truncated\n");
+        patch.push_str("\n# Zeron diff truncated\n");
     }
 
     let additions: u32 = files.iter().map(|f| f.additions).sum();
