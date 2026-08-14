@@ -210,6 +210,18 @@ pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
     STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
 }
 
+/// The staged-comments chip row: one 24px pill on its own line above the
+/// input, same top inset as the attachment strip. Constant, because the chip
+/// collapses every staged comment into a single "N comments" label.
+pub const COMMENT_CHIP_HEIGHT: f32 = 24.0;
+
+pub fn comment_strip_height(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    STRIP_PAD_TOP + COMMENT_CHIP_HEIGHT
+}
+
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
 /// two pill layouts. The original has no height transition (its shell carries
 /// only `transition-colors`), so this is a native nicety: ONE committed flip
@@ -3555,8 +3567,59 @@ impl Composer {
 
     /// Drop a deleted chat's per-chat composer state — staged attachments hold
     /// raw image bytes, and a deleted chat's stage could never be sent again.
-    pub fn purge_chat(&mut self, chat_id: &str) {
+    pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
+        self.state.update(cx, |state, _| {
+            state.purge_diff_comments(chat_id);
+        });
+    }
+
+    /// Diff comments staged for the chat the composer is aimed at. They live
+    /// in `AppState` because the changes pane writes them — the composer only
+    /// shows the count and folds them into the next prompt.
+    fn staged_comments(&self, cx: &App) -> Vec<crate::comments::DiffComment> {
+        self.state
+            .read(cx)
+            .diff_comments(&self.current_key)
+            .to_vec()
+    }
+
+    /// The "N comments" chip: a read-only ghost pill above the input, the same
+    /// tone as the footer picker chips. It reports what will ride the next
+    /// prompt; the comments themselves are edited in the changes pane, so
+    /// there is nothing to click here.
+    fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
+        let count = self.staged_comments(cx).len();
+        if count == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .px(px(STRIP_PAD_X))
+                .pt(px(STRIP_PAD_TOP))
+                .child(
+                    div()
+                        .h(px(COMMENT_CHIP_HEIGHT))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(8.0))
+                        .rounded(px(8.0))
+                        .bg(crate::theme::ink(0.06))
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child(
+                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted.opacity(0.7)),
+                        )
+                        .child(SharedString::from(crate::comments::chip_label(count))),
+                ),
+        )
     }
 
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
@@ -4379,9 +4442,11 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
+        let no_content =
+            text.is_empty() && self.staged().is_empty() && self.staged_comments(cx).is_empty();
         match self.button_mode(cx) {
             SendButtonMode::Stop => self.interrupt(cx),
-            _ if text.is_empty() && self.staged().is_empty() => {}
+            _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
             SendButtonMode::Steer => self.send(text, true, cx),
@@ -4459,6 +4524,21 @@ impl Composer {
             .attachments
             .remove(&self.current_key)
             .unwrap_or_default();
+        // Diff comments ride the prompt as plain text and clear on the same
+        // beat — the chip empties the instant the message carrying them goes
+        // out. `typed` keeps the user's own words for the failure hand-back:
+        // restoring the folded prompt would paste the comment block into the
+        // input as literal text.
+        let key = self.current_key.clone();
+        let comments = self.state.update(cx, |state, cx| {
+            let taken = state.take_diff_comments(&key);
+            if !taken.is_empty() {
+                cx.notify();
+            }
+            taken
+        });
+        let typed = text.clone();
+        let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -4521,7 +4601,7 @@ impl Composer {
         cx.notify();
 
         let steer_cmd = steer && !is_new;
-        let restore_text = text.clone();
+        let restore_text = typed;
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
         self.send_task = Some(cx.spawn(async move |this, cx| {
@@ -4740,6 +4820,13 @@ impl Composer {
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
+                        // Comments back on the stage, under the chat's key —
+                        // a new chat's send has already re-keyed the composer
+                        // to the minted id by now, exactly like the staged
+                        // files below.
+                        for comment in &comments {
+                            s.add_diff_comment(&err_chat_id, comment.clone());
+                        }
                         cx.notify();
                     });
                     composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
@@ -5419,12 +5506,14 @@ impl Render for Composer {
         let staged_count = self.staged().len();
         let strip_width_hint = if last_width > 0.0 { last_width } else { 720.0 };
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        // Staged diff comments add one chip row on the same terms.
+        let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if expanded {
             composer_total_height(content_height)
         } else {
             COMPACT_TOTAL_HEIGHT
         };
-        let target_height = base_height + strip_h;
+        let target_height = base_height + strip_h + comment_strip_h;
         let (pill_height, morph_t, morphing) = match self.flip_morph {
             Some(m) if !m.done(now_ms) => {
                 (m.height(target_height, now_ms), m.progress(now_ms), true)
@@ -5468,8 +5557,10 @@ impl Render for Composer {
                     .text_color(theme.text_muted),
             );
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
-        // the input inside the pill in both modes.
+        // the input inside the pill in both modes. The comments chip sits
+        // above it — comments are about the diff, images about the prompt.
         let strip = self.render_attachment_strip(&theme, cx);
+        let comments_chip = self.render_comments_chip(&theme, cx);
 
         // The pill chrome (zeron composer.tsx): `rounded-[26px] border
         // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
@@ -5507,6 +5598,7 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
+                .children(comments_chip)
                 .children(strip)
                 .child(
                     div()
@@ -5559,6 +5651,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
+                .children(comments_chip)
                 .children(strip)
                 .child(
                     div()

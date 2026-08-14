@@ -3696,6 +3696,8 @@ fn detail_body(
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     match detail {
+        // No comment layer: an inline tool diff is a record of what the
+        // agent already did, not a review surface.
         ToolDetail::Diff { file, .. } => body
             .child(crate::changes::render_file_body_with_syntax(
                 file,
