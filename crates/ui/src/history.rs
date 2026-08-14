@@ -3,21 +3,23 @@
 //! The pane is hosted by the current Changes surface for now, but owns its
 //! data and rendering so it can move intact into the future right-panel tabs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use chrono::DateTime;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, ListAlignment, ListState,
-    PathBuilder, Render, SharedString, Subscription, Task, Window, canvas, container_query, div,
-    list, point, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Image, ImageFormat,
+    ListAlignment, ListState, ObjectFit, PathBuilder, Render, SharedString, Subscription, Task,
+    Window, canvas, container_query, div, img, list, point, prelude::*, px,
 };
 use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
 use zeron_rpc::methods;
 
 use crate::popover::{self, Popup};
-use crate::settings::{GitHistoryColumns, UiSettings};
+use crate::settings::{GitHistoryAuthorDisplay, GitHistoryColumns, UiSettings};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -77,6 +79,7 @@ struct GraphFocus {
 
 struct HistoryColumnPreferences {
     columns: GitHistoryColumns,
+    author_display: GitHistoryAuthorDisplay,
     data_dir: PathBuf,
 }
 
@@ -89,12 +92,25 @@ enum OptionalHistoryColumn {
     Sha,
 }
 
-pub fn init(columns: GitHistoryColumns, data_dir: PathBuf, cx: &mut App) {
-    cx.set_global(HistoryColumnPreferences { columns, data_dir });
+pub fn init(
+    columns: GitHistoryColumns,
+    author_display: GitHistoryAuthorDisplay,
+    data_dir: PathBuf,
+    cx: &mut App,
+) {
+    cx.set_global(HistoryColumnPreferences {
+        columns,
+        author_display,
+        data_dir,
+    });
 }
 
 pub fn configured_columns(cx: &App) -> GitHistoryColumns {
     cx.global::<HistoryColumnPreferences>().columns
+}
+
+pub fn configured_author_display(cx: &App) -> GitHistoryAuthorDisplay {
+    cx.global::<HistoryColumnPreferences>().author_display
 }
 
 #[derive(Debug, Clone)]
@@ -457,6 +473,65 @@ impl Render for HistoryRefTooltip {
     }
 }
 
+struct HistoryAuthorTooltip {
+    name: SharedString,
+}
+
+impl Render for HistoryAuthorTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let width = (self.name.chars().count() as f32 * 6.2 + 16.0).clamp(72.0, 260.0);
+        div()
+            .w(px(width))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .truncate()
+            .whitespace_nowrap()
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .child(self.name.clone())
+    }
+}
+
+fn history_author_name(name: &str) -> SharedString {
+    if name.trim().is_empty() {
+        "Unknown".into()
+    } else {
+        name.to_string().into()
+    }
+}
+
+fn history_author_initial(name: &str) -> SharedString {
+    name.chars()
+        .find(|character| !character.is_whitespace())
+        .map(|character| character.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".to_string())
+        .into()
+}
+
+fn decode_history_avatar(encoded: &str) -> Option<Arc<Image>> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let format = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        ImageFormat::Png
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        ImageFormat::Jpeg
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        ImageFormat::Gif
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        ImageFormat::Webp
+    } else {
+        return None;
+    };
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
 pub struct GitHistory {
     state: Entity<AppState>,
     started: bool,
@@ -473,7 +548,9 @@ pub struct GitHistory {
     hovered_path: Option<usize>,
     graph_hover_active: bool,
     graph_hover_clear_task: Option<Task<()>>,
+    avatar_images: HashMap<String, Arc<Image>>,
     column_menu: Popup<gpui::Point<gpui::Pixels>>,
+    author_menu: Popup<gpui::Point<gpui::Pixels>>,
     copied_sha: Option<String>,
     request_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
@@ -649,7 +726,9 @@ impl GitHistory {
             hovered_path: None,
             graph_hover_active: false,
             graph_hover_clear_task: None,
+            avatar_images: HashMap::new(),
             column_menu: Popup::default(),
+            author_menu: Popup::default(),
             copied_sha: None,
             request_task: None,
             copy_task: None,
@@ -687,6 +766,7 @@ impl GitHistory {
             self.hovered_path = None;
             self.graph_hover_active = false;
             self.graph_hover_clear_task = None;
+            self.avatar_images.clear();
             self.loading = false;
             return;
         };
@@ -714,6 +794,7 @@ impl GitHistory {
         self.hovered_path = None;
         self.graph_hover_active = false;
         self.graph_hover_clear_task = None;
+        self.avatar_images.clear();
         self.fetch_page(key, cwd, target, 0, true, cx);
     }
 
@@ -794,6 +875,70 @@ impl GitHistory {
         self.fetch_page(key, cwd, target, cursor, false, cx);
     }
 
+    fn resolve_avatars(
+        &mut self,
+        key: String,
+        cwd: String,
+        target: Option<String>,
+        cursor: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let mut unique_authors = HashMap::new();
+        for commit in &self.commits {
+            let email = commit.author_email.trim().to_ascii_lowercase();
+            if !email.is_empty() {
+                unique_authors
+                    .entry(email)
+                    .or_insert_with(|| (commit.sha.clone(), commit.author_email.clone()));
+            }
+        }
+        let authors: Vec<_> = unique_authors
+            .into_values()
+            .map(|(sha, email)| serde_json::json!({ "sha": sha, "email": email }))
+            .collect();
+        if authors.is_empty() {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let mut params = serde_json::Map::new();
+        params.insert("cwd".into(), serde_json::Value::String(cwd));
+        params.insert("authors".into(), serde_json::Value::Array(authors));
+        params.insert("cursor".into(), serde_json::json!(cursor));
+        params.insert("limit".into(), serde_json::json!(HISTORY_PAGE_SIZE));
+        if let Some(target) = target {
+            params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+        }
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::RESOLVE_GIT_AVATARS,
+                    serde_json::Value::Object(params),
+                )
+                .await;
+            this.update(cx, |history, cx| {
+                if history.target_key.as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                if let Ok(avatars) = result.and_then(|value| {
+                    serde_json::from_value::<HashMap<String, String>>(value)
+                        .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))
+                }) {
+                    history.avatar_images.extend(avatars.into_iter().filter_map(
+                        |(email, encoded)| {
+                            decode_history_avatar(&encoded).map(|image| (email, image))
+                        },
+                    ));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn fetch_page(
         &mut self,
         key: String,
@@ -814,10 +959,10 @@ impl GitHistory {
         cx.notify();
         self.request_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
-            params.insert("cwd".into(), serde_json::Value::String(cwd));
+            params.insert("cwd".into(), serde_json::Value::String(cwd.clone()));
             params.insert("cursor".into(), serde_json::json!(cursor));
             params.insert("limit".into(), serde_json::json!(HISTORY_PAGE_SIZE));
-            if let Some(target) = target {
+            if let Some(target) = target.clone() {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
             }
             let result = engine
@@ -874,6 +1019,13 @@ impl GitHistory {
                                 new_item_count - old_commit_count,
                             );
                         }
+                        history.resolve_avatars(
+                            key.clone(),
+                            cwd.clone(),
+                            target.clone(),
+                            cursor,
+                            cx,
+                        );
                     }
                     Err(error) => history.error = Some(error.to_string().into()),
                 }
@@ -1014,6 +1166,7 @@ impl GitHistory {
     }
 
     fn open_column_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.close_author_menu(cx);
         self.column_menu.open(position);
         cx.notify();
     }
@@ -1022,6 +1175,71 @@ impl GitHistory {
         if self.column_menu.begin_close() {
             popover::reap_popup(cx, |history: &mut Self| &mut history.column_menu);
         }
+    }
+
+    fn open_author_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.close_column_menu(cx);
+        self.author_menu.open(position);
+        cx.notify();
+    }
+
+    fn close_author_menu(&mut self, cx: &mut Context<Self>) {
+        if self.author_menu.begin_close() {
+            popover::reap_popup(cx, |history: &mut Self| &mut history.author_menu);
+        }
+    }
+
+    fn toggle_author_display(&mut self, cx: &mut Context<Self>) {
+        let (display, data_dir) = {
+            let preferences = cx.global_mut::<HistoryColumnPreferences>();
+            preferences.author_display = match preferences.author_display {
+                GitHistoryAuthorDisplay::Avatar => GitHistoryAuthorDisplay::Name,
+                GitHistoryAuthorDisplay::Name => GitHistoryAuthorDisplay::Avatar,
+            };
+            (preferences.author_display, preferences.data_dir.clone())
+        };
+        let mut settings = UiSettings::load(&data_dir);
+        settings.git_history_author_display = display;
+        if let Err(error) = settings.save(&data_dir) {
+            tracing::warn!(%error, "could not persist Git history author display");
+        }
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    fn render_author_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let show_name = configured_author_display(cx) == GitHistoryAuthorDisplay::Name;
+        popover::popover_card(theme)
+            .w(px(116.0))
+            .p(px(3.0))
+            .rounded(px(9.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_author_menu(cx)))
+            .child(
+                popover::menu_row(theme, false, "history-author-display-name")
+                    .id("history-author-display-name")
+                    .gap(px(0.0))
+                    .px(px(7.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
+                    .text_size(px(11.5))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_author_display(cx);
+                        this.close_author_menu(cx);
+                    }))
+                    .child(div().flex_1().child("Name"))
+                    .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
+                        show_name,
+                        |element| {
+                            element.child(
+                                crate::icons::icon(crate::icons::CHECK)
+                                    .size(px(10.0))
+                                    .text_color(theme.text_muted),
+                            )
+                        },
+                    )),
+            )
+            .into_any_element()
     }
 
     fn render_column_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1496,6 +1714,14 @@ impl GitHistory {
         let commit_refs = commit.refs;
         let commit_theme = theme.clone();
         let columns = configured_columns(cx);
+        let author_display = configured_author_display(cx);
+        let author_name = history_author_name(&commit.author_name);
+        let author_initial = history_author_initial(&author_name);
+        let avatar_image = self
+            .avatar_images
+            .get(&commit.author_email.trim().to_ascii_lowercase())
+            .cloned();
+        let has_avatar = avatar_image.is_some();
         let graph_focus = self.graph_focus(cx);
         let row_is_focused =
             graph_focus.is_some_and(|focus| focus.color_id == graph_row.node_color_id);
@@ -1565,15 +1791,52 @@ impl GitHistory {
                     div()
                         .w(px(88.0))
                         .flex_none()
-                        .truncate()
                         .pr(px(8.0))
                         .opacity(row_content_opacity)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if commit.author_name.is_empty() {
-                            "Unknown".to_string()
-                        } else {
-                            commit.author_name
-                        })),
+                        .when(
+                            author_display == GitHistoryAuthorDisplay::Avatar,
+                            |author| {
+                                let tooltip_name = author_name.clone();
+                                author.child(
+                                    div()
+                                        .id(("history-author-avatar", index))
+                                        .size(px(20.0))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .overflow_hidden()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(crate::theme::hairline(0.12))
+                                        .bg(crate::theme::wash(0.08))
+                                        .when_some(avatar_image, |avatar, image| {
+                                            avatar.child(
+                                                img(image).size_full().object_fit(ObjectFit::Cover),
+                                            )
+                                        })
+                                        .when(!has_avatar, |avatar| {
+                                            avatar
+                                                .text_size(px(9.0))
+                                                .text_color(theme.text_faint)
+                                                .child(author_initial)
+                                        })
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| HistoryAuthorTooltip {
+                                                name: tooltip_name.clone(),
+                                            })
+                                            .into()
+                                        })
+                                        .tooltip_show_delay(Duration::from_millis(300)),
+                                )
+                            },
+                        )
+                        .when(author_display == GitHistoryAuthorDisplay::Name, |author| {
+                            author
+                                .truncate()
+                                .text_color(theme.text_muted)
+                                .child(author_name)
+                        }),
                 )
             })
             .when(columns.date, |element| {
@@ -1637,6 +1900,12 @@ impl Render for GitHistory {
         let column_menu = column_menu_position.map(|position| {
             let closing = self.column_menu.closing_since();
             let menu = self.render_column_menu(&theme, cx);
+            (position, menu, closing)
+        });
+        let author_menu_position = self.author_menu.get().copied();
+        let author_menu = author_menu_position.map(|position| {
+            let closing = self.author_menu.closing_since();
+            let menu = self.render_author_menu(&theme, cx);
             (position, menu, closing)
         });
 
@@ -1763,7 +2032,26 @@ impl Render for GitHistory {
                         .child(div().w(px(graph_column)).flex_none())
                         .child(div().flex_1().min_w(px(80.0)).child("Commit"))
                         .when(columns.author, |header| {
-                            header.child(div().w(px(88.0)).flex_none().child("Author"))
+                            header.child(
+                                div()
+                                    .id("history-author-header")
+                                    .w(px(88.0))
+                                    .h_full()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(
+                                            |this, event: &gpui::MouseDownEvent, window, cx| {
+                                                window.prevent_default();
+                                                cx.stop_propagation();
+                                                this.open_author_menu(event.position, cx);
+                                            },
+                                        ),
+                                    )
+                                    .child("Author"),
+                            )
                         })
                         .when(columns.date, |header| {
                             header.child(div().w(px(88.0)).flex_none().child("Date"))
@@ -1814,6 +2102,14 @@ impl Render for GitHistory {
                     closing,
                 ))
             })
+            .when_some(author_menu, |element, (position, menu, closing)| {
+                element.child(popover::menu_at(
+                    "history-author-menu",
+                    position,
+                    menu,
+                    closing,
+                ))
+            })
     }
 }
 
@@ -1831,6 +2127,21 @@ mod tests {
             authored_at: "2026-08-12T12:00:00Z".into(),
             refs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn author_avatar_fallback_uses_the_first_visible_initial() {
+        assert_eq!(history_author_name(""), SharedString::from("Unknown"));
+        assert_eq!(history_author_initial("  josé"), SharedString::from("J"));
+        assert_eq!(history_author_initial("   "), SharedString::from("?"));
+    }
+
+    #[test]
+    fn github_avatar_payload_decodes_into_a_gpui_image() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"\xff\xd8\xffpayload");
+        let image = decode_history_avatar(&encoded).expect("jpeg payload");
+        assert_eq!(image.format, ImageFormat::Jpeg);
+        assert!(decode_history_avatar("not base64").is_none());
     }
 
     #[test]

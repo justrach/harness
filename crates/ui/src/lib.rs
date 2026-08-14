@@ -144,7 +144,12 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         appearance::init(ui_settings.appearance, data_dir.clone(), cx);
-        history::init(ui_settings.git_history_columns, data_dir, cx);
+        history::init(
+            ui_settings.git_history_columns,
+            ui_settings.git_history_author_display,
+            data_dir,
+            cx,
+        );
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);

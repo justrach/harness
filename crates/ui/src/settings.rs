@@ -61,6 +61,14 @@ impl Default for GitHistoryColumns {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHistoryAuthorDisplay {
+    #[default]
+    Avatar,
+    Name,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -114,6 +122,8 @@ pub struct UiSettings {
     pub appearance: crate::appearance::AppearanceMode,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
+    /// How authors are represented in Git History rows.
+    pub git_history_author_display: GitHistoryAuthorDisplay,
 }
 
 impl Default for UiSettings {
@@ -137,6 +147,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
+            git_history_author_display: GitHistoryAuthorDisplay::default(),
         }
     }
 }
@@ -405,6 +416,7 @@ mod tests {
                 date: true,
                 sha: false,
             },
+            git_history_author_display: GitHistoryAuthorDisplay::Name,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -437,6 +449,11 @@ mod tests {
             loaded.git_history_columns,
             GitHistoryColumns::default(),
             "pre-column files show the complete History table"
+        );
+        assert_eq!(
+            loaded.git_history_author_display,
+            GitHistoryAuthorDisplay::Avatar,
+            "pre-author-display files default to avatars"
         );
     }
 

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
@@ -36,6 +37,7 @@ const FOLDER_LIST_MAX_ENTRIES: usize = 500;
 const FILE_SEARCH_MAX_RESULTS: usize = 8;
 /// A dead network mount must not leave the composer search spinning forever.
 const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(6);
+const GITHUB_AVATAR_TIMEOUT: Duration = Duration::from_secs(6);
 pub const GIT_HISTORY_DEFAULT_LIMIT: usize = 100;
 pub const GIT_HISTORY_MAX_LIMIT: usize = 200;
 
@@ -87,6 +89,9 @@ struct ReposInner {
     device_id: String,
     worktrees_root: PathBuf,
     file_searches: std::sync::Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    http: reqwest::Client,
+    github_avatars: std::sync::Mutex<HashMap<String, String>>,
+    github_avatar_pages: std::sync::Mutex<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -109,6 +114,13 @@ impl Repos {
                 device_id: device_id.to_string(),
                 worktrees_root,
                 file_searches: std::sync::Mutex::new(HashMap::new()),
+                http: reqwest::Client::builder()
+                    .timeout(GITHUB_AVATAR_TIMEOUT)
+                    .user_agent("Comet-Git-History")
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new()),
+                github_avatars: std::sync::Mutex::new(HashMap::new()),
+                github_avatar_pages: std::sync::Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -537,6 +549,166 @@ impl Repos {
             total_count,
             head_commit_count,
         })
+    }
+
+    /// Best-effort GitHub profile images for the authors in one history page.
+    /// Git itself only stores names and emails, so this resolves the hosting
+    /// metadata separately and caches it by both commit and normalized email.
+    pub async fn history_avatar_urls(
+        &self,
+        repo_path: &Path,
+        authors: &[(String, String)],
+        cursor: usize,
+        limit: usize,
+    ) -> HashMap<String, String> {
+        let Ok(remote) = self
+            .git(&["remote", "get-url", "origin"], Some(repo_path))
+            .await
+        else {
+            return HashMap::new();
+        };
+        let Some((owner, repo)) = parse_github_remote(&remote) else {
+            return HashMap::new();
+        };
+        let repo_key = format!("{owner}/{repo}").to_ascii_lowercase();
+        let per_page = limit.clamp(1, 100);
+        let page = cursor / per_page + 1;
+        let page_key = format!("{repo_key}|{page}|{per_page}");
+        let should_fetch = self
+            .inner
+            .github_avatar_pages
+            .lock()
+            .map(|mut pages| pages.insert(page_key.clone()))
+            .unwrap_or(false);
+
+        if should_fetch {
+            let url = format!("https://api.github.com/repos/{owner}/{repo}/commits");
+            let mut request = self.inner.http.get(url).query(&[
+                ("per_page", per_page.to_string()),
+                ("page", page.to_string()),
+            ]);
+            if let Some(token) = std::env::var("GITHUB_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty())
+                .or_else(|| {
+                    std::env::var("GH_TOKEN")
+                        .ok()
+                        .filter(|token| !token.is_empty())
+                })
+            {
+                request = request.bearer_auth(token);
+            }
+
+            let rows = match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    response.json::<Vec<GitHubCommitAvatar>>().await.ok()
+                }
+                _ => None,
+            };
+            if let Some(rows) = rows {
+                let mut identities_by_url: HashMap<String, Vec<(String, String)>> = HashMap::new();
+                for row in rows {
+                    let Some(author) = row.author else {
+                        continue;
+                    };
+                    if !author.avatar_url.starts_with("https://") {
+                        continue;
+                    }
+                    let avatar_url = if author.avatar_url.contains('?') {
+                        format!("{}&s=40", author.avatar_url)
+                    } else {
+                        format!("{}?s=40", author.avatar_url)
+                    };
+                    identities_by_url.entry(avatar_url).or_default().push((
+                        row.sha.to_ascii_lowercase(),
+                        row.commit.author.email.trim().to_ascii_lowercase(),
+                    ));
+                }
+                let downloads = stream::iter(identities_by_url.into_iter().map(
+                    |(url, identities)| async move {
+                        self.cache_github_avatar(&url)
+                            .await
+                            .map(|path| (identities, path))
+                    },
+                ))
+                .buffer_unordered(8)
+                .filter_map(|download| async move { download })
+                .collect::<Vec<_>>()
+                .await;
+                if let Ok(mut cache) = self.inner.github_avatars.lock() {
+                    for (identities, path) in downloads {
+                        for (sha, email) in identities {
+                            cache.insert(format!("{repo_key}|sha|{sha}"), path.clone());
+                            if !email.is_empty() {
+                                cache.insert(format!("{repo_key}|email|{email}"), path.clone());
+                            }
+                        }
+                    }
+                }
+            } else if let Ok(mut pages) = self.inner.github_avatar_pages.lock() {
+                // A transient network/auth failure may be retried on refresh.
+                pages.remove(&page_key);
+            }
+        }
+
+        let Ok(cache) = self.inner.github_avatars.lock() else {
+            return HashMap::new();
+        };
+        authors
+            .iter()
+            .filter_map(|(sha, email)| {
+                let avatar = cache
+                    .get(&format!("{repo_key}|sha|{}", sha.to_ascii_lowercase()))
+                    .or_else(|| {
+                        cache.get(&format!(
+                            "{repo_key}|email|{}",
+                            email.trim().to_ascii_lowercase()
+                        ))
+                    })?;
+                Some((email.trim().to_ascii_lowercase(), avatar.clone()))
+            })
+            .collect()
+    }
+
+    async fn cache_github_avatar(&self, url: &str) -> Option<String> {
+        const MAX_AVATAR_BYTES: u64 = 2 * 1024 * 1024;
+
+        let digest = Sha256::digest(url.as_bytes());
+        let cache_dir = self.inner.data_dir.join("cache").join("git-avatars");
+        let path = cache_dir.join(format!("{}.img", hex(&digest[..16])));
+        if tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .is_some_and(|metadata| metadata.len() > 0)
+        {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+        let response = self.inner.http.get(url).send().await.ok()?;
+        if !response.status().is_success()
+            || response
+                .content_length()
+                .is_some_and(|size| size > MAX_AVATAR_BYTES)
+        {
+            return None;
+        }
+        let bytes = response.bytes().await.ok()?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_AVATAR_BYTES {
+            return None;
+        }
+        let temporary = cache_dir.join(format!(
+            ".{}.{}.tmp",
+            hex(&digest[..8]),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&temporary, &bytes).await.ok()?;
+        if tokio::fs::rename(&temporary, &path).await.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            if !path.is_file() {
+                return None;
+            }
+        }
+        Some(path.to_string_lossy().into_owned())
     }
 
     /// Whether `candidate` is the repository root or one of its linked
@@ -1108,6 +1280,55 @@ fn bounded_field(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+#[derive(serde::Deserialize)]
+struct GitHubCommitAvatar {
+    sha: String,
+    author: Option<GitHubAvatarUser>,
+    commit: GitHubCommitMetadata,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubAvatarUser {
+    avatar_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubCommitMetadata {
+    author: GitHubCommitAuthor,
+}
+
+#[derive(serde::Deserialize)]
+struct GitHubCommitAuthor {
+    email: String,
+}
+
+fn parse_github_remote(remote: &str) -> Option<(String, String)> {
+    let remote = remote.trim();
+    let path = remote
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote.strip_prefix("http://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("git@github.com:"))?;
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if owner.is_empty()
+        || repo.is_empty()
+        || parts.next().is_some()
+        || !owner
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        || !repo.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
 fn parse_history_log(
     output: &str,
     refs_by_sha: &HashMap<String, Vec<GitHistoryRef>>,
@@ -1218,6 +1439,58 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_common_github_remote_forms() {
+        let expected = Some(("openai".to_string(), "codex".to_string()));
+        assert_eq!(
+            parse_github_remote("https://github.com/openai/codex.git"),
+            expected
+        );
+        assert_eq!(
+            parse_github_remote("git@github.com:openai/codex.git"),
+            expected
+        );
+        assert_eq!(parse_github_remote("https://gitlab.com/openai/codex"), None);
+    }
+
+    #[tokio::test]
+    async fn github_avatar_downloads_once_into_the_local_cache() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let bytes = b"\xff\xd8\xffavatar".to_vec();
+        let served = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        served.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&served).await.unwrap();
+        });
+
+        let data = tempfile::tempdir().unwrap();
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        let url = format!("http://{address}/avatar.jpg");
+        let first = repos.cache_github_avatar(&url).await.expect("downloaded");
+        server.await.unwrap();
+        assert_eq!(tokio::fs::read(&first).await.unwrap(), bytes);
+        assert_eq!(
+            repos.cache_github_avatar(&url).await.as_deref(),
+            Some(first.as_str())
+        );
+    }
 
     #[test]
     fn fuzzy_score_matches_a_path_subsequence() {
