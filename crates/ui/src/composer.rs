@@ -79,8 +79,9 @@ pub const DRAG_SCROLL_FRAME_MS: u64 = 16;
 /// capacity — expanding and collapsing share no boundary, so a width right at
 /// the flip threshold can't oscillate between the two layouts.
 pub const COLLAPSE_HYSTERESIS: f32 = 32.0;
-/// During an interactive window resize the current mode is frozen until the
-/// measured widths have been stable this long.
+/// During an interactive resize, collapsing back to the compact mode waits
+/// until the measured widths have been stable this long. Expansion remains
+/// immediate so a narrowing panel never traps the controls in a compact row.
 pub const RESIZE_SETTLE_MS: u64 = 150;
 
 /// Compact↔expanded flip with hysteresis. `capacity` is the *compact-mode*
@@ -88,7 +89,7 @@ pub const RESIZE_SETTLE_MS: u64 = 150;
 /// container-width deltas while expanded — never the post-flip measured width,
 /// which differs per mode and would feed back into the decision):
 /// - a newline always expands;
-/// - while `resizing`, the current mode is kept (no flip until sizes settle);
+/// - while `resizing`, an expanded composer stays expanded until sizes settle;
 /// - a too-narrow pill (`capacity < MIN_COMPACT_INPUT_WIDTH`) always expands;
 /// - compact expands only when `text_width > capacity`; expanded collapses
 ///   only when `text_width < capacity - COLLAPSE_HYSTERESIS`.
@@ -102,14 +103,11 @@ pub fn composer_flip(
     if has_newline {
         return true;
     }
-    if resizing {
-        return expanded;
-    }
     if capacity < MIN_COMPACT_INPUT_WIDTH {
         return true;
     }
     if expanded {
-        text_width >= capacity - COLLAPSE_HYSTERESIS
+        resizing || text_width >= capacity - COLLAPSE_HYSTERESIS
     } else {
         text_width > capacity
     }
@@ -1225,6 +1223,10 @@ pub enum ComposerInputEvent {
     Submitted,
     Edited,
     CursorMoved,
+    /// The measured input width changed during layout. The wrapper's layout
+    /// mode depends on this value, so it needs a fresh render even when no
+    /// edit, focus event, or caret blink happens to request one.
+    LayoutChanged,
     ViewportChanged,
     MentionNavigate(isize),
     MentionAccept,
@@ -2437,7 +2439,7 @@ impl ComposerInput {
         width: Pixels,
         style: &TextStyle,
         window: &mut Window,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> f32 {
         // Rebuild this even for an empty draft. Otherwise deleting the final
         // mention can leave its previous paint geometry alive while the
@@ -2538,8 +2540,14 @@ impl ComposerInput {
         self.line_starts = line_starts;
         self.content_height = content_height.max(INPUT_LINE_HEIGHT);
         self.max_line_width = if is_placeholder { 0.0 } else { max_line_width };
-        self.last_width = f32::from(width);
+        let measured_width = f32::from(width);
+        let width_changed =
+            self.last_width <= 0.0 || (measured_width - self.last_width).abs() > 0.5;
+        self.last_width = measured_width;
         self.layout_epoch += 1;
+        if width_changed {
+            cx.emit(ComposerInputEvent::LayoutChanged);
+        }
         self.content_height
     }
 
@@ -3336,8 +3344,8 @@ pub struct Composer {
     expanded_anchor: f32,
     /// Last input width seen in the current mode (resize detection).
     last_seen_width: f32,
-    /// Set while an interactive resize is in flight; mode is frozen until
-    /// widths have settled for [`RESIZE_SETTLE_MS`].
+    /// Set while an interactive resize is in flight; collapse is deferred
+    /// until widths have settled for [`RESIZE_SETTLE_MS`].
     width_changed_at: Option<Instant>,
     settle_task: Option<Task<()>>,
     /// In-flight compact↔expanded morph (one per committed flip; manual
@@ -3381,7 +3389,7 @@ impl Composer {
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
                 this.on_input_edited(cx)
             }
-            ComposerInputEvent::ViewportChanged => cx.notify(),
+            ComposerInputEvent::LayoutChanged | ComposerInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
             // completion key routing; they are mutually exclusive by token
             // shape (`/` at offset 0 vs `@` at a token boundary).
@@ -5229,7 +5237,8 @@ impl Render for Composer {
         let measured_since_flip = epoch > self.flip_epoch && last_width > 0.0;
         if measured_since_flip {
             // A same-mode width change is an interactive window/pane resize:
-            // freeze the mode until sizes settle for RESIZE_SETTLE_MS.
+            // defer collapse until sizes settle for RESIZE_SETTLE_MS. Expansion
+            // remains live so compact controls never squeeze the input away.
             if self.last_seen_width > 0.0 && (last_width - self.last_seen_width).abs() > 0.5 {
                 self.width_changed_at = Some(now);
             }
@@ -5966,13 +5975,15 @@ mod tests {
     }
 
     #[test]
-    fn flip_frozen_during_interactive_resize() {
-        // While resizing, both modes hold even across their thresholds…
-        assert!(!composer_flip(false, 500.0, 300.0, false, true));
+    fn resize_expands_live_but_defers_collapse() {
+        // A compact composer expands immediately as its text or controls stop
+        // fitting, even while the divider is moving.
+        assert!(composer_flip(false, 500.0, 300.0, false, true));
+        assert!(composer_flip(false, 10.0, 150.0, false, true));
+        // An expanded composer waits for the drag to settle before collapsing,
+        // avoiding mode chatter while the user reverses direction.
         assert!(composer_flip(true, 0.0, 300.0, false, true));
-        // …including the narrow-column force-expand.
-        assert!(!composer_flip(false, 10.0, 150.0, false, true));
-        // Once settled, the same inputs flip.
+        // Once settled, the same wide layout may collapse.
         assert!(composer_flip(false, 500.0, 300.0, false, false));
         assert!(!composer_flip(true, 0.0, 300.0, false, false));
         assert!(composer_flip(false, 10.0, 150.0, false, false));
