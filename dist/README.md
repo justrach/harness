@@ -45,10 +45,12 @@ installed builds can update into Zeron. CI runs this on tags
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
      dist/macos/Info.plist > Zeron.app/Contents/Info.plist
    ```
-3. Icon: generate `zeron.icns` from `dist/comet.png` (`iconutil`) and place it at
+3. Icon: generate `zeron.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
+   variant of the artwork — squircle mask, margins, and shadow pre-baked, since
+   `sips` can't apply an alpha mask) and place it at
    `Zeron.app/Contents/Resources/zeron.icns`:
    ```sh
-   mkdir zeron.iconset && sips -z 256 256 dist/comet.png --out zeron.iconset/icon_256x256.png
+   mkdir zeron.iconset && sips -z 256 256 dist/macos/icon-1024.png --out zeron.iconset/icon_256x256.png
    iconutil -c icns zeron.iconset -o Zeron.app/Contents/Resources/zeron.icns
    ```
 4. Sign + notarize (required for distribution):
