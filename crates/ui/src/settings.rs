@@ -51,6 +51,51 @@ pub struct GitHistoryColumns {
     pub sha: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHistoryColumn {
+    Author,
+    Date,
+    Sha,
+}
+
+/// Stable order for the optional Git History columns. Hidden columns remain in
+/// the sequence so showing one again restores the position chosen by the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GitHistoryColumnOrder(pub Vec<GitHistoryColumn>);
+
+impl GitHistoryColumnOrder {
+    pub fn normalized(mut self) -> Self {
+        let mut columns = Vec::with_capacity(3);
+        for column in self.0.drain(..) {
+            if !columns.contains(&column) {
+                columns.push(column);
+            }
+        }
+        for column in [
+            GitHistoryColumn::Author,
+            GitHistoryColumn::Date,
+            GitHistoryColumn::Sha,
+        ] {
+            if !columns.contains(&column) {
+                columns.push(column);
+            }
+        }
+        Self(columns)
+    }
+}
+
+impl Default for GitHistoryColumnOrder {
+    fn default() -> Self {
+        Self(vec![
+            GitHistoryColumn::Author,
+            GitHistoryColumn::Date,
+            GitHistoryColumn::Sha,
+        ])
+    }
+}
+
 /// Persisted widths for the fixed Git History data columns. The commit column
 /// remains elastic and occupies the space left after these columns and the
 /// topology graph, so resizing its first divider adjusts the adjacent column.
@@ -167,6 +212,8 @@ pub struct UiSettings {
     pub git_history_columns: GitHistoryColumns,
     /// User-adjusted widths for the resizable Git History columns.
     pub git_history_column_widths: GitHistoryColumnWidths,
+    /// User-selected order for the optional Git History columns.
+    pub git_history_column_order: GitHistoryColumnOrder,
     /// How authors are represented in Git History rows.
     pub git_history_author_display: GitHistoryAuthorDisplay,
 }
@@ -193,6 +240,7 @@ impl Default for UiSettings {
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
+            git_history_column_order: GitHistoryColumnOrder::default(),
             git_history_author_display: GitHistoryAuthorDisplay::default(),
         }
     }
@@ -386,6 +434,7 @@ impl UiSettings {
             TERMINAL_DEFAULT_HEIGHT,
         );
         self.git_history_column_widths = self.git_history_column_widths.clamped();
+        self.git_history_column_order = self.git_history_column_order.normalized();
         self
     }
 
@@ -468,6 +517,11 @@ mod tests {
                 date: 104.0,
                 sha: 82.0,
             },
+            git_history_column_order: GitHistoryColumnOrder(vec![
+                GitHistoryColumn::Sha,
+                GitHistoryColumn::Author,
+                GitHistoryColumn::Date,
+            ]),
             git_history_author_display: GitHistoryAuthorDisplay::Name,
         };
         settings.save(dir.path()).unwrap();
@@ -508,6 +562,11 @@ mod tests {
             "pre-resize files use the original History column widths"
         );
         assert_eq!(
+            loaded.git_history_column_order,
+            GitHistoryColumnOrder::default(),
+            "pre-reorder files use the original History column order"
+        );
+        assert_eq!(
             loaded.git_history_author_display,
             GitHistoryAuthorDisplay::Avatar,
             "pre-author-display files default to avatars"
@@ -546,6 +605,24 @@ mod tests {
         assert_eq!(widths.author, GitHistoryColumnWidths::AUTHOR_MAX);
         assert_eq!(widths.date, GitHistoryColumnWidths::default().date);
         assert_eq!(widths.sha, GitHistoryColumnWidths::SHA_MIN);
+    }
+
+    #[test]
+    fn git_history_column_order_deduplicates_and_restores_missing_columns() {
+        let order = GitHistoryColumnOrder(vec![
+            GitHistoryColumn::Sha,
+            GitHistoryColumn::Sha,
+            GitHistoryColumn::Author,
+        ])
+        .normalized();
+        assert_eq!(
+            order,
+            GitHistoryColumnOrder(vec![
+                GitHistoryColumn::Sha,
+                GitHistoryColumn::Author,
+                GitHistoryColumn::Date,
+            ])
+        );
     }
 
     #[test]

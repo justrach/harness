@@ -20,8 +20,8 @@ use zeron_rpc::methods;
 
 use crate::popover::{self, Popup};
 use crate::settings::{
-    GitHistoryAuthorDisplay, GitHistoryColumnWidths, GitHistoryColumns, SAVE_DEBOUNCE_MS,
-    UiSettings,
+    GitHistoryAuthorDisplay, GitHistoryColumn, GitHistoryColumnOrder, GitHistoryColumnWidths,
+    GitHistoryColumns, SAVE_DEBOUNCE_MS, UiSettings,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -83,18 +83,12 @@ struct GraphFocus {
 struct HistoryColumnPreferences {
     columns: GitHistoryColumns,
     widths: GitHistoryColumnWidths,
+    order: GitHistoryColumnOrder,
     author_display: GitHistoryAuthorDisplay,
     data_dir: PathBuf,
 }
 
 impl gpui::Global for HistoryColumnPreferences {}
-
-#[derive(Debug, Clone, Copy)]
-enum OptionalHistoryColumn {
-    Author,
-    Date,
-    Sha,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryDataColumn {
@@ -115,7 +109,23 @@ struct HistoryColumnDragAnchor {
 
 struct HistoryColumnResize;
 
+#[derive(Clone)]
+struct HistoryColumnDrag {
+    column: GitHistoryColumn,
+    label: SharedString,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoryColumnDragState {
+    from: usize,
+    over: usize,
+}
+
 struct HistoryResizeGhost;
+
+struct HistoryColumnGhost {
+    label: SharedString,
+}
 
 impl Render for HistoryResizeGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -123,9 +133,32 @@ impl Render for HistoryResizeGhost {
     }
 }
 
+impl Render for HistoryColumnGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .h(px(24.0))
+            .min_w(px(64.0))
+            .px(px(9.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .text_size(px(10.5))
+            .text_color(theme.text_muted)
+            .opacity(0.9)
+            .child(self.label.clone())
+    }
+}
+
 pub fn init(
     columns: GitHistoryColumns,
     widths: GitHistoryColumnWidths,
+    order: GitHistoryColumnOrder,
     author_display: GitHistoryAuthorDisplay,
     data_dir: PathBuf,
     cx: &mut App,
@@ -133,6 +166,7 @@ pub fn init(
     cx.set_global(HistoryColumnPreferences {
         columns,
         widths,
+        order,
         author_display,
         data_dir,
     });
@@ -146,8 +180,106 @@ pub fn configured_column_widths(cx: &App) -> GitHistoryColumnWidths {
     cx.global::<HistoryColumnPreferences>().widths
 }
 
+pub fn configured_column_order(cx: &App) -> GitHistoryColumnOrder {
+    cx.global::<HistoryColumnPreferences>().order.clone()
+}
+
 pub fn configured_author_display(cx: &App) -> GitHistoryAuthorDisplay {
     cx.global::<HistoryColumnPreferences>().author_display
+}
+
+fn history_column_label(column: GitHistoryColumn) -> &'static str {
+    match column {
+        GitHistoryColumn::Author => "Author",
+        GitHistoryColumn::Date => "Date",
+        GitHistoryColumn::Sha => "SHA",
+    }
+}
+
+fn history_column_is_visible(column: GitHistoryColumn, columns: GitHistoryColumns) -> bool {
+    match column {
+        GitHistoryColumn::Author => columns.author,
+        GitHistoryColumn::Date => columns.date,
+        GitHistoryColumn::Sha => columns.sha,
+    }
+}
+
+fn visible_history_columns(
+    order: &GitHistoryColumnOrder,
+    columns: GitHistoryColumns,
+) -> Vec<GitHistoryColumn> {
+    order
+        .0
+        .iter()
+        .copied()
+        .filter(|column| history_column_is_visible(*column, columns))
+        .collect()
+}
+
+fn history_data_column(column: GitHistoryColumn) -> HistoryDataColumn {
+    match column {
+        GitHistoryColumn::Author => HistoryDataColumn::Author,
+        GitHistoryColumn::Date => HistoryDataColumn::Date,
+        GitHistoryColumn::Sha => HistoryDataColumn::Sha,
+    }
+}
+
+fn history_optional_width(column: GitHistoryColumn, widths: GitHistoryColumnWidths) -> f32 {
+    history_column_width(history_data_column(column), widths)
+}
+
+fn history_column_drop_index(
+    relative_x: f32,
+    rendered_width: f32,
+    columns: &[GitHistoryColumn],
+    widths: GitHistoryColumnWidths,
+) -> usize {
+    if columns.is_empty() || rendered_width <= 0.0 {
+        return 0;
+    }
+    let desired_width = columns
+        .iter()
+        .map(|column| history_optional_width(*column, widths))
+        .sum::<f32>();
+    let x = relative_x.clamp(0.0, rendered_width) * desired_width / rendered_width;
+    let mut cursor = 0.0;
+    for (index, column) in columns.iter().enumerate() {
+        let width = history_optional_width(*column, widths);
+        if x < cursor + width / 2.0 {
+            return index;
+        }
+        cursor += width;
+    }
+    columns.len() - 1
+}
+
+fn reordered_history_columns(
+    order: &GitHistoryColumnOrder,
+    dragged: GitHistoryColumn,
+    target: GitHistoryColumn,
+) -> GitHistoryColumnOrder {
+    if dragged == target {
+        return order.clone();
+    }
+    let Some(from) = order.0.iter().position(|column| *column == dragged) else {
+        return order.clone();
+    };
+    let Some(over) = order.0.iter().position(|column| *column == target) else {
+        return order.clone();
+    };
+    let mut columns = order.0.clone();
+    columns.remove(from);
+    let target_after_removal = columns
+        .iter()
+        .position(|column| *column == target)
+        .unwrap_or(columns.len());
+    let insertion = if from < over {
+        target_after_removal + 1
+    } else {
+        target_after_removal
+    };
+    columns.insert(insertion.min(columns.len()), dragged);
+    GitHistoryColumnOrder(columns)
 }
 
 fn history_column_width(column: HistoryDataColumn, widths: GitHistoryColumnWidths) -> f32 {
@@ -650,6 +782,7 @@ pub struct GitHistory {
     graph_hover_active: bool,
     graph_hover_clear_task: Option<Task<()>>,
     column_drag_anchor: Option<HistoryColumnDragAnchor>,
+    column_drag: Option<HistoryColumnDragState>,
     column_save_task: Option<Task<()>>,
     avatar_images: HashMap<String, Arc<Image>>,
     column_menu: Popup<gpui::Point<gpui::Pixels>>,
@@ -830,6 +963,7 @@ impl GitHistory {
             graph_hover_active: false,
             graph_hover_clear_task: None,
             column_drag_anchor: None,
+            column_drag: None,
             column_save_task: None,
             avatar_images: HashMap::new(),
             column_menu: Popup::default(),
@@ -1246,19 +1380,24 @@ impl GitHistory {
         self.set_graph_hover(hovered_graph_path(row, local_x, local_y), cx);
     }
 
-    fn toggle_column(&mut self, column: OptionalHistoryColumn, cx: &mut Context<Self>) {
-        let (columns, data_dir) = {
+    fn toggle_column(&mut self, column: GitHistoryColumn, cx: &mut Context<Self>) {
+        let (columns, widths, order, data_dir) = {
             let preferences = cx.global_mut::<HistoryColumnPreferences>();
             match column {
-                OptionalHistoryColumn::Author => {
+                GitHistoryColumn::Author => {
                     preferences.columns.author = !preferences.columns.author
                 }
-                OptionalHistoryColumn::Date => preferences.columns.date = !preferences.columns.date,
-                OptionalHistoryColumn::Sha => preferences.columns.sha = !preferences.columns.sha,
+                GitHistoryColumn::Date => preferences.columns.date = !preferences.columns.date,
+                GitHistoryColumn::Sha => preferences.columns.sha = !preferences.columns.sha,
             }
-            (preferences.columns, preferences.data_dir.clone())
+            (
+                preferences.columns,
+                preferences.widths,
+                preferences.order.clone(),
+                preferences.data_dir.clone(),
+            )
         };
-        Self::persist_columns(columns, &data_dir);
+        Self::persist_column_layout(columns, widths, &order, &data_dir);
         cx.refresh_windows();
         cx.notify();
     }
@@ -1266,50 +1405,47 @@ impl GitHistory {
     fn reset_columns(&mut self, cx: &mut Context<Self>) {
         let columns = GitHistoryColumns::default();
         let widths = GitHistoryColumnWidths::default();
+        let order = GitHistoryColumnOrder::default();
         let data_dir = {
             let preferences = cx.global_mut::<HistoryColumnPreferences>();
             preferences.columns = columns;
             preferences.widths = widths;
+            preferences.order = order.clone();
             preferences.data_dir.clone()
         };
-        Self::persist_columns_and_widths(columns, widths, &data_dir);
+        Self::persist_column_layout(columns, widths, &order, &data_dir);
         cx.refresh_windows();
         cx.notify();
     }
 
-    fn persist_columns(columns: GitHistoryColumns, data_dir: &std::path::Path) {
+    fn persist_column_layout(
+        columns: GitHistoryColumns,
+        widths: GitHistoryColumnWidths,
+        order: &GitHistoryColumnOrder,
+        data_dir: &std::path::Path,
+    ) {
         // Reload before writing because Shell and Appearance own other fields
         // in this same file and may have persisted them since boot.
         let mut settings = UiSettings::load(data_dir);
         settings.git_history_columns = columns;
-        if let Err(error) = settings.save(data_dir) {
-            tracing::warn!(%error, "could not persist Git history columns");
-        }
-    }
-
-    fn persist_columns_and_widths(
-        columns: GitHistoryColumns,
-        widths: GitHistoryColumnWidths,
-        data_dir: &std::path::Path,
-    ) {
-        let mut settings = UiSettings::load(data_dir);
-        settings.git_history_columns = columns;
         settings.git_history_column_widths = widths;
+        settings.git_history_column_order = order.clone();
         if let Err(error) = settings.save(data_dir) {
             tracing::warn!(%error, "could not persist Git history column layout");
         }
     }
 
-    fn schedule_column_width_save(&mut self, cx: &mut Context<Self>) {
+    fn schedule_column_layout_save(&mut self, cx: &mut Context<Self>) {
         self.column_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
                 .await;
             this.update(cx, |_, cx| {
                 let preferences = cx.global::<HistoryColumnPreferences>();
-                Self::persist_columns_and_widths(
+                Self::persist_column_layout(
                     preferences.columns,
                     preferences.widths,
+                    &preferences.order,
                     &preferences.data_dir,
                 );
             })
@@ -1350,7 +1486,7 @@ impl GitHistory {
             resized_history_column_widths(configured_column_widths(cx), anchor, requested_delta);
 
         cx.global_mut::<HistoryColumnPreferences>().widths = widths;
-        self.schedule_column_width_save(cx);
+        self.schedule_column_layout_save(cx);
         cx.refresh_windows();
         cx.notify();
     }
@@ -1358,7 +1494,7 @@ impl GitHistory {
     fn reset_column_widths(&mut self, cx: &mut Context<Self>) {
         cx.global_mut::<HistoryColumnPreferences>().widths = GitHistoryColumnWidths::default();
         self.column_drag_anchor = None;
-        self.schedule_column_width_save(cx);
+        self.schedule_column_layout_save(cx);
         cx.refresh_windows();
         cx.notify();
     }
@@ -1408,6 +1544,130 @@ impl GitHistory {
                 }),
             )
             .into_any_element()
+    }
+
+    fn render_column_header_cell(
+        &self,
+        column: GitHistoryColumn,
+        left: HistoryDataColumn,
+        index: usize,
+        drag: Option<HistoryColumnDragState>,
+        widths: GitHistoryColumnWidths,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let data_column = history_data_column(column);
+        let width = history_optional_width(column, widths);
+        let (min_width, _) = history_column_limits(data_column);
+        let label = history_column_label(column);
+        let id = match column {
+            GitHistoryColumn::Author => "history-author-header",
+            GitHistoryColumn::Date => "history-date-header",
+            GitHistoryColumn::Sha => "history-sha-header",
+        };
+        let resize = self.column_resize_handle(left, data_column, theme, cx);
+        let indicator = drag
+            .filter(|state| state.over == index && state.from != state.over)
+            .map(|state| {
+                let place_after = state.from < state.over;
+                div()
+                    .absolute()
+                    .top(px(3.0))
+                    .bottom(px(3.0))
+                    .w(px(2.0))
+                    .rounded_full()
+                    .bg(theme.accent)
+                    .when(place_after, |line| line.right_0())
+                    .when(!place_after, |line| line.left_0())
+            });
+        let ghost_label: SharedString = label.into();
+        div()
+            .id(id)
+            .relative()
+            .w(px(width))
+            .min_w(px(min_width))
+            .h_full()
+            .flex_shrink(1.0)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(column == GitHistoryColumn::Author, |header| {
+                header.justify_center().on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.open_author_menu(event.position, cx);
+                    }),
+                )
+            })
+            .on_drag(
+                HistoryColumnDrag {
+                    column,
+                    label: ghost_label,
+                },
+                |payload, _point, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| HistoryColumnGhost {
+                        label: payload.label.clone(),
+                    })
+                },
+            )
+            .children(indicator)
+            .child(label)
+            // Paint last so this narrow hitbox wins over the header drag.
+            .child(resize)
+            .into_any_element()
+    }
+
+    fn on_column_drag_move(
+        &mut self,
+        event: &gpui::DragMoveEvent<HistoryColumnDrag>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let payload = event.drag(cx);
+        let columns = configured_columns(cx);
+        let order = configured_column_order(cx);
+        let visible = visible_history_columns(&order, columns);
+        let Some(from) = visible.iter().position(|column| *column == payload.column) else {
+            return;
+        };
+        let relative_x = f32::from(event.event.position.x) - f32::from(event.bounds.left());
+        let over = history_column_drop_index(
+            relative_x,
+            f32::from(event.bounds.size.width),
+            &visible,
+            configured_column_widths(cx),
+        );
+        if self
+            .column_drag
+            .is_some_and(|state| state.from == from && state.over == over)
+        {
+            return;
+        }
+        self.column_drag = Some(HistoryColumnDragState { from, over });
+        cx.notify();
+    }
+
+    fn commit_column_reorder(&mut self, dragged: GitHistoryColumn, cx: &mut Context<Self>) {
+        let columns = configured_columns(cx);
+        let current = configured_column_order(cx);
+        let visible = visible_history_columns(&current, columns);
+        let target = self
+            .column_drag
+            .and_then(|state| visible.get(state.over).copied())
+            .unwrap_or(dragged);
+        let reordered = reordered_history_columns(&current, dragged, target);
+        self.column_drag = None;
+        if reordered == current {
+            cx.notify();
+            return;
+        }
+        cx.global_mut::<HistoryColumnPreferences>().order = reordered;
+        self.schedule_column_layout_save(cx);
+        cx.refresh_windows();
+        cx.notify();
     }
 
     fn open_column_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
@@ -1493,10 +1753,11 @@ impl GitHistory {
     fn render_column_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let columns = configured_columns(cx);
         let widths = configured_column_widths(cx);
+        let order = configured_column_order(cx);
         let option =
             |label: &'static str,
              checked: bool,
-             column: OptionalHistoryColumn,
+             column: GitHistoryColumn,
              index: usize,
              cx: &mut Context<Self>| {
                 popover::menu_row(
@@ -1527,7 +1788,9 @@ impl GitHistory {
                 ))
             };
         let defaults = GitHistoryColumns::default();
-        let can_reset = columns != defaults || widths != GitHistoryColumnWidths::default();
+        let can_reset = columns != defaults
+            || widths != GitHistoryColumnWidths::default()
+            || order != GitHistoryColumnOrder::default();
 
         popover::popover_card(theme)
             .w(px(132.0))
@@ -1542,24 +1805,12 @@ impl GitHistory {
                     .child(option(
                         "Author",
                         columns.author,
-                        OptionalHistoryColumn::Author,
+                        GitHistoryColumn::Author,
                         0,
                         cx,
                     ))
-                    .child(option(
-                        "Date",
-                        columns.date,
-                        OptionalHistoryColumn::Date,
-                        1,
-                        cx,
-                    ))
-                    .child(option(
-                        "SHA",
-                        columns.sha,
-                        OptionalHistoryColumn::Sha,
-                        2,
-                        cx,
-                    ))
+                    .child(option("Date", columns.date, GitHistoryColumn::Date, 1, cx))
+                    .child(option("SHA", columns.sha, GitHistoryColumn::Sha, 2, cx))
                     .when(can_reset, |menu| {
                         menu.child(
                             div()
@@ -1877,6 +2128,129 @@ impl GitHistory {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render_author_cell(
+        index: usize,
+        width: f32,
+        display: GitHistoryAuthorDisplay,
+        name: SharedString,
+        initial: SharedString,
+        avatar_image: Option<Arc<Image>>,
+        opacity: f32,
+        theme: &Theme,
+    ) -> AnyElement {
+        let has_avatar = avatar_image.is_some();
+        div()
+            .w(px(width))
+            .min_w(px(GitHistoryColumnWidths::AUTHOR_MIN))
+            .flex_shrink(1.0)
+            .opacity(opacity)
+            .when(display == GitHistoryAuthorDisplay::Avatar, |author| {
+                let tooltip_name = name.clone();
+                author.flex().items_center().justify_center().child(
+                    div()
+                        .id(("history-author-avatar", index))
+                        .size(px(20.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .overflow_hidden()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.12))
+                        .bg(crate::theme::wash(0.08))
+                        .when_some(avatar_image, |avatar, image| {
+                            avatar.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                        })
+                        .when(!has_avatar, |avatar| {
+                            avatar
+                                .text_size(px(9.0))
+                                .text_color(theme.text_faint)
+                                .child(initial)
+                        })
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| HistoryAuthorTooltip {
+                                name: tooltip_name.clone(),
+                            })
+                            .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(300)),
+                )
+            })
+            .when(display == GitHistoryAuthorDisplay::Name, |author| {
+                author
+                    .pr(px(8.0))
+                    .truncate()
+                    .text_color(theme.text_muted)
+                    .child(name)
+            })
+            .into_any_element()
+    }
+
+    fn render_date_cell(width: f32, authored_at: &str, opacity: f32, theme: &Theme) -> AnyElement {
+        div()
+            .w(px(width))
+            .min_w(px(GitHistoryColumnWidths::DATE_MIN))
+            .flex_shrink(1.0)
+            .truncate()
+            .pr(px(8.0))
+            .text_size(px(10.5))
+            .opacity(opacity)
+            .text_color(theme.text_muted)
+            .child(SharedString::from(format_date(authored_at)))
+            .into_any_element()
+    }
+
+    fn render_sha_cell(
+        index: usize,
+        width: f32,
+        sha: String,
+        copied: bool,
+        opacity: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = if copied {
+            "Copied".to_string()
+        } else {
+            sha.chars().take(7).collect()
+        };
+        div()
+            .w(px(width))
+            .min_w(px(GitHistoryColumnWidths::SHA_MIN))
+            .h_full()
+            .pr(px(6.0))
+            .flex_shrink(1.0)
+            .flex()
+            .items_center()
+            .opacity(opacity)
+            .child(
+                div()
+                    .id(SharedString::from(format!("history-sha-{index}")))
+                    .w_full()
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(crate::theme::ink(0.07)))
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(10.5))
+                    .text_color(if copied {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.copy_sha(sha.clone(), cx)
+                    }))
+                    .child(SharedString::from(label)),
+            )
+            .into_any_element()
+    }
+
     fn render_row(
         &mut self,
         index: usize,
@@ -1964,6 +2338,7 @@ impl GitHistory {
         let commit_theme = theme.clone();
         let columns = configured_columns(cx);
         let column_widths = configured_column_widths(cx);
+        let column_order = configured_column_order(cx);
         let author_display = configured_author_display(cx);
         let author_name = history_author_name(&commit.author_name);
         let author_initial = history_author_initial(&author_name);
@@ -1971,7 +2346,6 @@ impl GitHistory {
             .avatar_images
             .get(&commit.author_email.trim().to_ascii_lowercase())
             .cloned();
-        let has_avatar = avatar_image.is_some();
         let graph_focus = self.graph_focus(cx);
         let row_is_focused =
             graph_focus.is_some_and(|focus| focus.color_id == graph_row.node_color_id);
@@ -1983,6 +2357,36 @@ impl GitHistory {
             .filter(|_| row_is_focused)
             .map(|focus| crate::theme::ink(0.018 * focus.amount));
         let graph_lane_count = self.graph.max_lane_count;
+        let optional_cells = visible_history_columns(&column_order, columns)
+            .into_iter()
+            .map(|column| match column {
+                GitHistoryColumn::Author => Self::render_author_cell(
+                    index,
+                    column_widths.author,
+                    author_display,
+                    author_name.clone(),
+                    author_initial.clone(),
+                    avatar_image.clone(),
+                    row_content_opacity,
+                    &theme,
+                ),
+                GitHistoryColumn::Date => Self::render_date_cell(
+                    column_widths.date,
+                    &commit.authored_at,
+                    row_content_opacity,
+                    &theme,
+                ),
+                GitHistoryColumn::Sha => Self::render_sha_cell(
+                    index,
+                    column_widths.sha,
+                    sha.clone(),
+                    copied,
+                    row_content_opacity,
+                    &theme,
+                    cx,
+                ),
+            })
+            .collect::<Vec<_>>();
 
         div()
             .id(("history-row", index))
@@ -2036,115 +2440,14 @@ impl GitHistory {
                 .min_w(px(HISTORY_COMMIT_SUBJECT_MIN_WIDTH))
                 .overflow_hidden(),
             )
-            .when(columns.author, |element| {
-                element.child(
-                    div()
-                        .w(px(column_widths.author))
-                        .min_w(px(GitHistoryColumnWidths::AUTHOR_MIN))
-                        .flex_shrink(1.0)
-                        .opacity(row_content_opacity)
-                        .when(
-                            author_display == GitHistoryAuthorDisplay::Avatar,
-                            |author| {
-                                let tooltip_name = author_name.clone();
-                                author.flex().items_center().justify_center().child(
-                                    div()
-                                        .id(("history-author-avatar", index))
-                                        .size(px(20.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .overflow_hidden()
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_color(crate::theme::hairline(0.12))
-                                        .bg(crate::theme::wash(0.08))
-                                        .when_some(avatar_image, |avatar, image| {
-                                            avatar.child(
-                                                img(image).size_full().object_fit(ObjectFit::Cover),
-                                            )
-                                        })
-                                        .when(!has_avatar, |avatar| {
-                                            avatar
-                                                .text_size(px(9.0))
-                                                .text_color(theme.text_faint)
-                                                .child(author_initial)
-                                        })
-                                        .tooltip(move |_, cx| {
-                                            cx.new(|_| HistoryAuthorTooltip {
-                                                name: tooltip_name.clone(),
-                                            })
-                                            .into()
-                                        })
-                                        .tooltip_show_delay(Duration::from_millis(300)),
-                                )
-                            },
-                        )
-                        .when(author_display == GitHistoryAuthorDisplay::Name, |author| {
-                            author
-                                .pr(px(8.0))
-                                .truncate()
-                                .text_color(theme.text_muted)
-                                .child(author_name)
-                        }),
-                )
-            })
-            .when(columns.date, |element| {
-                element.child(
-                    div()
-                        .w(px(column_widths.date))
-                        .min_w(px(GitHistoryColumnWidths::DATE_MIN))
-                        .flex_shrink(1.0)
-                        .truncate()
-                        .pr(px(8.0))
-                        .text_size(px(10.5))
-                        .opacity(row_content_opacity)
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format_date(&commit.authored_at))),
-                )
-            })
-            .when(columns.sha, |element| {
-                element.child(
-                    div()
-                        .w(px(column_widths.sha))
-                        .min_w(px(GitHistoryColumnWidths::SHA_MIN))
-                        .h_full()
-                        .pr(px(6.0))
-                        .flex_shrink(1.0)
-                        .flex()
-                        .items_center()
-                        .opacity(row_content_opacity)
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("history-sha-{index}")))
-                                .w_full()
-                                .h(px(24.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(crate::theme::ink(0.07)))
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(10.5))
-                                .text_color(if copied {
-                                    theme.accent
-                                } else {
-                                    theme.text_muted
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    // The sha chip must not ALSO open the commit tab.
-                                    cx.stop_propagation();
-                                    this.copy_sha(sha.clone(), cx)
-                                }))
-                                .child(SharedString::from(if copied {
-                                    "Copied".to_string()
-                                } else {
-                                    commit.sha.chars().take(7).collect()
-                                })),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink(1.0)
+                    .children(optional_cells),
+            )
             .into_any_element()
     }
 }
@@ -2152,37 +2455,43 @@ impl GitHistory {
 impl Render for GitHistory {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_loaded(cx);
+        if !cx.has_active_drag() {
+            self.column_drag = None;
+        }
         let theme = Theme::of(cx).clone();
         let graph_column = graph_width(self.graph.max_lane_count);
         let graph_focus = self.graph_focus(cx);
         let columns = configured_columns(cx);
         let column_widths = configured_column_widths(cx);
-        let author_resize = columns.author.then(|| {
-            self.column_resize_handle(
-                HistoryDataColumn::Commit,
-                HistoryDataColumn::Author,
+        let column_order = configured_column_order(cx);
+        let visible_columns = visible_history_columns(&column_order, columns);
+        let mut previous = HistoryDataColumn::Commit;
+        let mut header_cells = Vec::with_capacity(visible_columns.len());
+        for (index, column) in visible_columns.iter().copied().enumerate() {
+            header_cells.push(self.render_column_header_cell(
+                column,
+                previous,
+                index,
+                self.column_drag,
+                column_widths,
                 &theme,
                 cx,
-            )
-        });
-        let date_left = if columns.author {
-            HistoryDataColumn::Author
-        } else {
-            HistoryDataColumn::Commit
-        };
-        let date_resize = columns
-            .date
-            .then(|| self.column_resize_handle(date_left, HistoryDataColumn::Date, &theme, cx));
-        let sha_left = if columns.date {
-            HistoryDataColumn::Date
-        } else if columns.author {
-            HistoryDataColumn::Author
-        } else {
-            HistoryDataColumn::Commit
-        };
-        let sha_resize = columns
-            .sha
-            .then(|| self.column_resize_handle(sha_left, HistoryDataColumn::Sha, &theme, cx));
+            ));
+            previous = history_data_column(column);
+        }
+        let optional_headers = div()
+            .id("history-optional-column-headers")
+            .h_full()
+            .flex()
+            .flex_row()
+            .flex_shrink(1.0)
+            .on_drag_move::<HistoryColumnDrag>(cx.listener(Self::on_column_drag_move))
+            .on_drop::<HistoryColumnDrag>(cx.listener(
+                |this, payload: &HistoryColumnDrag, _, cx| {
+                    this.commit_column_reorder(payload.column, cx);
+                },
+            ))
+            .children(header_cells);
         let column_menu_position = self.column_menu.get().copied();
         let column_menu = column_menu_position.map(|position| {
             let closing = self.column_menu.closing_since();
@@ -2319,60 +2628,7 @@ impl Render for GitHistory {
                         .text_color(theme.text_faint)
                         .child(div().w(px(graph_column)).flex_none())
                         .child(div().flex_1().min_w(px(80.0)).child("Commit"))
-                        .when(columns.author, |header| {
-                            header.child(
-                                div()
-                                    .id("history-author-header")
-                                    .relative()
-                                    .w(px(column_widths.author))
-                                    .min_w(px(GitHistoryColumnWidths::AUTHOR_MIN))
-                                    .h_full()
-                                    .flex_shrink(1.0)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Right,
-                                        cx.listener(
-                                            |this, event: &gpui::MouseDownEvent, window, cx| {
-                                                window.prevent_default();
-                                                cx.stop_propagation();
-                                                this.open_author_menu(event.position, cx);
-                                            },
-                                        ),
-                                    )
-                                    .children(author_resize)
-                                    .child("Author"),
-                            )
-                        })
-                        .when(columns.date, |header| {
-                            header.child(
-                                div()
-                                    .relative()
-                                    .w(px(column_widths.date))
-                                    .min_w(px(GitHistoryColumnWidths::DATE_MIN))
-                                    .h_full()
-                                    .flex_shrink(1.0)
-                                    .flex()
-                                    .items_center()
-                                    .children(date_resize)
-                                    .child("Date"),
-                            )
-                        })
-                        .when(columns.sha, |header| {
-                            header.child(
-                                div()
-                                    .relative()
-                                    .w(px(column_widths.sha))
-                                    .min_w(px(GitHistoryColumnWidths::SHA_MIN))
-                                    .h_full()
-                                    .flex_shrink(1.0)
-                                    .flex()
-                                    .items_center()
-                                    .children(sha_resize)
-                                    .child("SHA"),
-                            )
-                        })
+                        .child(optional_headers)
                         .child(
                             div()
                                 .id("history-columns-button")
@@ -2632,6 +2888,62 @@ mod tests {
         let clamped = resized_history_column_widths(widths, anchor, 1_000.0);
         assert_eq!(clamped.date, GitHistoryColumnWidths::DATE_MIN);
         assert_eq!(clamped.author, 108.0);
+    }
+
+    #[test]
+    fn visible_columns_follow_persisted_order_and_skip_hidden_entries() {
+        let order = GitHistoryColumnOrder(vec![
+            GitHistoryColumn::Sha,
+            GitHistoryColumn::Author,
+            GitHistoryColumn::Date,
+        ]);
+        let columns = GitHistoryColumns {
+            author: false,
+            date: true,
+            sha: true,
+        };
+        assert_eq!(
+            visible_history_columns(&order, columns),
+            vec![GitHistoryColumn::Sha, GitHistoryColumn::Date]
+        );
+    }
+
+    #[test]
+    fn reordering_visible_columns_preserves_hidden_columns() {
+        let order = GitHistoryColumnOrder::default();
+        let reordered =
+            reordered_history_columns(&order, GitHistoryColumn::Sha, GitHistoryColumn::Date);
+        assert_eq!(
+            reordered,
+            GitHistoryColumnOrder(vec![
+                GitHistoryColumn::Author,
+                GitHistoryColumn::Sha,
+                GitHistoryColumn::Date,
+            ])
+        );
+    }
+
+    #[test]
+    fn reorder_drop_index_respects_uneven_column_widths() {
+        let columns = [
+            GitHistoryColumn::Author,
+            GitHistoryColumn::Date,
+            GitHistoryColumn::Sha,
+        ];
+        let widths = GitHistoryColumnWidths::default();
+        let rendered = widths.author + widths.date + widths.sha;
+        assert_eq!(
+            history_column_drop_index(10.0, rendered, &columns, widths),
+            0
+        );
+        assert_eq!(
+            history_column_drop_index(100.0, rendered, &columns, widths),
+            1
+        );
+        assert_eq!(
+            history_column_drop_index(240.0, rendered, &columns, widths),
+            2
+        );
     }
 
     #[test]

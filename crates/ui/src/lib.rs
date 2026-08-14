@@ -147,6 +147,7 @@ pub fn run_app(config: UiConfig) {
         history::init(
             ui_settings.git_history_columns,
             ui_settings.git_history_column_widths,
+            ui_settings.git_history_column_order,
             ui_settings.git_history_author_display,
             data_dir,
             cx,
