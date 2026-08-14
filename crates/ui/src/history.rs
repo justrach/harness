@@ -18,6 +18,7 @@ use gpui::{
 use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
 use zeron_rpc::methods;
 
+use crate::motion::AnimationExt;
 use crate::popover::{self, Popup};
 use crate::settings::{
     GitHistoryAuthorDisplay, GitHistoryColumn, GitHistoryColumnOrder, GitHistoryColumnWidths,
@@ -85,6 +86,80 @@ pub enum GitHistoryViewMode {
     #[default]
     AllCommits,
     BranchTips,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryRowTransition {
+    Stable,
+    Entering,
+    Exiting,
+}
+
+struct HistoryViewTransition {
+    rows: Vec<HistoryRowTransition>,
+    final_commits: Vec<GitHistoryCommit>,
+    final_collapsed_counts: HashMap<String, usize>,
+    epoch: usize,
+}
+
+/// Build a temporary list that preserves every old row while introducing the
+/// target rows in their final order. Old-only rows sit beside their previous
+/// stable anchor, so contracting them pulls the surrounding commits together
+/// instead of making the list flash to a different ordering first.
+fn history_transition_rows(
+    old: &[GitHistoryCommit],
+    target: &[GitHistoryCommit],
+) -> (Vec<GitHistoryCommit>, Vec<HistoryRowTransition>) {
+    let target_shas: HashSet<&str> = target.iter().map(|commit| commit.sha.as_str()).collect();
+    let old_shas: HashSet<&str> = old.iter().map(|commit| commit.sha.as_str()).collect();
+    let mut before_first = Vec::new();
+    let mut after_anchor: HashMap<String, Vec<GitHistoryCommit>> = HashMap::new();
+    let mut anchor: Option<String> = None;
+
+    for commit in old {
+        if target_shas.contains(commit.sha.as_str()) {
+            anchor = Some(commit.sha.clone());
+        } else if let Some(anchor) = anchor.as_ref() {
+            after_anchor
+                .entry(anchor.clone())
+                .or_default()
+                .push(commit.clone());
+        } else {
+            before_first.push(commit.clone());
+        }
+    }
+
+    let mut commits = Vec::with_capacity(target.len() + old.len());
+    let mut rows = Vec::with_capacity(target.len() + old.len());
+    for commit in before_first {
+        commits.push(commit);
+        rows.push(HistoryRowTransition::Exiting);
+    }
+    for commit in target {
+        commits.push(commit.clone());
+        rows.push(if old_shas.contains(commit.sha.as_str()) {
+            HistoryRowTransition::Stable
+        } else {
+            HistoryRowTransition::Entering
+        });
+        if let Some(exiting) = after_anchor.remove(commit.sha.as_str()) {
+            for commit in exiting {
+                commits.push(commit);
+                rows.push(HistoryRowTransition::Exiting);
+            }
+        }
+    }
+
+    // This is only reachable when old contains duplicate anchors or an old
+    // sequence has no shared row. Keeping the rows is safer than dropping the
+    // exit animation, and the settled target still removes them afterwards.
+    for exiting in after_anchor.into_values() {
+        for commit in exiting {
+            commits.push(commit);
+            rows.push(HistoryRowTransition::Exiting);
+        }
+    }
+    (commits, rows)
 }
 
 fn branch_ref_key(reference: &GitHistoryRef) -> Option<String> {
@@ -898,6 +973,8 @@ pub struct GitHistory {
     branch_tips: Vec<GitHistoryCommit>,
     view_mode: GitHistoryViewMode,
     view_epoch: usize,
+    view_transition: Option<HistoryViewTransition>,
+    view_transition_task: Option<Task<()>>,
     collapsed_branches: HashSet<String>,
     collapsed_counts: HashMap<String, usize>,
     head_sha: Option<String>,
@@ -1163,6 +1240,8 @@ impl GitHistory {
             branch_tips: Vec::new(),
             view_mode: GitHistoryViewMode::default(),
             view_epoch: 0,
+            view_transition: None,
+            view_transition_task: None,
             collapsed_branches: HashSet::new(),
             collapsed_counts: HashMap::new(),
             head_sha: None,
@@ -1357,6 +1436,8 @@ impl GitHistory {
     }
 
     fn rebuild_view(&mut self, cx: &mut Context<Self>) {
+        self.view_transition = None;
+        self.view_transition_task = None;
         self.recompute_view();
         let item_count = self.visible_commits.len()
             + usize::from(
@@ -1364,6 +1445,93 @@ impl GitHistory {
             );
         self.list
             .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        self.hovered_path = None;
+        self.graph_hover_active = false;
+        self.graph_hover_clear_task = None;
+        cx.notify();
+    }
+
+    fn settle_view_transition(&mut self, cx: &mut Context<Self>) {
+        let Some(transition) = self.view_transition.take() else {
+            return;
+        };
+        self.visible_commits = transition.final_commits;
+        self.collapsed_counts = transition.final_collapsed_counts;
+        self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+        let item_count = self.visible_commits.len()
+            + usize::from(
+                self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
+            );
+        self.list
+            .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        self.view_transition_task = None;
+        cx.notify();
+    }
+
+    fn animate_view_change(&mut self, cx: &mut Context<Self>) {
+        // A second click during the short tween starts from the previous
+        // destination, preventing zero-height transitional rows from leaking
+        // into the next merge.
+        if self.view_transition.is_some() {
+            self.settle_view_transition(cx);
+        }
+        let old_commits = self.visible_commits.clone();
+        self.recompute_view();
+        let final_commits = std::mem::take(&mut self.visible_commits);
+        let final_collapsed_counts = std::mem::take(&mut self.collapsed_counts);
+
+        let unchanged = old_commits.len() == final_commits.len()
+            && old_commits
+                .iter()
+                .zip(&final_commits)
+                .all(|(old, new)| old.sha == new.sha);
+        if unchanged || crate::motion::reduced_motion(cx) {
+            self.visible_commits = final_commits;
+            self.collapsed_counts = final_collapsed_counts;
+            self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+            let item_count = self.visible_commits.len()
+                + usize::from(
+                    self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
+                );
+            self.list
+                .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+            cx.notify();
+            return;
+        }
+
+        let (transition_commits, rows) = history_transition_rows(&old_commits, &final_commits);
+        self.visible_commits = transition_commits;
+        self.collapsed_counts = final_collapsed_counts.clone();
+        self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+        let item_count = self.visible_commits.len()
+            + usize::from(
+                self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
+            );
+        self.list
+            .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        let epoch = self.view_epoch;
+        self.view_transition = Some(HistoryViewTransition {
+            rows,
+            final_commits,
+            final_collapsed_counts,
+            epoch,
+        });
+        let duration = crate::motion::COLLAPSE
+            .total()
+            .mul_f32(crate::motion::speed_scale());
+        self.view_transition_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            this.update(cx, |history, cx| {
+                if history
+                    .view_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.epoch == epoch)
+                {
+                    history.settle_view_transition(cx);
+                }
+            })
+            .ok();
+        }));
         self.hovered_path = None;
         self.graph_hover_active = false;
         self.graph_hover_clear_task = None;
@@ -1381,7 +1549,7 @@ impl GitHistory {
         }
         self.view_mode = mode;
         self.view_epoch = self.view_epoch.wrapping_add(1);
-        self.rebuild_view(cx);
+        self.animate_view_change(cx);
     }
 
     fn toggle_branch_ref(&mut self, reference: GitHistoryRef, cx: &mut Context<Self>) {
@@ -1393,7 +1561,7 @@ impl GitHistory {
         if !self.collapsed_branches.remove(&key) {
             self.collapsed_branches.insert(key);
         }
-        self.rebuild_view(cx);
+        self.animate_view_change(cx);
     }
 
     fn load_older(&mut self, cx: &mut Context<Self>) {
@@ -2150,7 +2318,6 @@ impl GitHistory {
         canvas(
             |_, _, _| (),
             move |viewport_bounds, _, window, _| {
-                let middle = HISTORY_ROW_HEIGHT / 2.0;
                 let pass_count = if focus.is_some() { 2 } else { 1 };
                 for pass in 0..pass_count {
                     let selected_pass = focus.is_some() && pass == 1;
@@ -2159,8 +2326,7 @@ impl GitHistory {
                             .filter(|_| selected_pass)
                             .map(|focus| {
                                 HISTORY_STROKE_WIDTH
-                                    + (HISTORY_GRAPH_FOCUSED_STROKE_WIDTH
-                                        - HISTORY_STROKE_WIDTH)
+                                    + (HISTORY_GRAPH_FOCUSED_STROKE_WIDTH - HISTORY_STROKE_WIDTH)
                                         * focus.amount
                             })
                             .unwrap_or(HISTORY_STROKE_WIDTH);
@@ -2176,6 +2342,13 @@ impl GitHistory {
                             {
                                 continue;
                             }
+                            let row_height = f32::from(row_bounds.size.height);
+                            if row_height <= 0.5 {
+                                continue;
+                            }
+                            let middle = row_height / 2.0;
+                            let overlap = HISTORY_GRAPH_ROW_OVERLAP
+                                * (row_height / HISTORY_ROW_HEIGHT).clamp(0.0, 1.0);
                             for segment in row.segments.iter().filter(|segment| {
                                 segment.color_id % palette.len() == color_index
                                     && focus.is_none_or(|focus| {
@@ -2187,61 +2360,62 @@ impl GitHistory {
                                 let to_x = lane_x(segment.to_lane);
                                 let origin = row_bounds.origin;
                                 match segment.shape {
-                                SegmentShape::Incoming => {
-                                    builder.move_to(point(
-                                        origin.x + px(from_x),
-                                        origin.y - px(HISTORY_GRAPH_ROW_OVERLAP),
-                                    ));
-                                    builder.cubic_bezier_to(
-                                        point(origin.x + px(to_x), origin.y + px(middle)),
-                                        point(origin.x + px(from_x), origin.y + px(middle * 0.55)),
-                                        point(origin.x + px(to_x), origin.y + px(middle * 0.55)),
-                                    );
-                                }
-                                SegmentShape::Outgoing => {
-                                    builder.move_to(point(
-                                        origin.x + px(from_x),
-                                        origin.y + px(middle),
-                                    ));
-                                    builder.cubic_bezier_to(
-                                        point(
-                                            origin.x + px(to_x),
-                                            origin.y
-                                                + px(
-                                                    HISTORY_ROW_HEIGHT
-                                                        + HISTORY_GRAPH_ROW_OVERLAP,
-                                                ),
-                                        ),
-                                        point(
+                                    SegmentShape::Incoming => {
+                                        builder.move_to(point(
                                             origin.x + px(from_x),
-                                            origin.y + px(middle * 1.45),
-                                        ),
-                                        point(
-                                            origin.x + px(to_x),
-                                            origin.y + px(middle * 1.45),
-                                        ),
-                                    );
-                                }
-                                SegmentShape::Through => {
-                                    builder.move_to(point(
-                                        origin.x + px(from_x),
-                                        origin.y - px(HISTORY_GRAPH_ROW_OVERLAP),
-                                    ));
-                                    let end = point(
-                                        origin.x + px(to_x),
-                                        origin.y
-                                            + px(HISTORY_ROW_HEIGHT + HISTORY_GRAPH_ROW_OVERLAP),
-                                    );
-                                    if segment.from_lane == segment.to_lane {
-                                        builder.line_to(end);
-                                    } else {
+                                            origin.y - px(overlap),
+                                        ));
                                         builder.cubic_bezier_to(
-                                            end,
-                                            point(origin.x + px(from_x), origin.y + px(middle)),
                                             point(origin.x + px(to_x), origin.y + px(middle)),
+                                            point(
+                                                origin.x + px(from_x),
+                                                origin.y + px(middle * 0.55),
+                                            ),
+                                            point(
+                                                origin.x + px(to_x),
+                                                origin.y + px(middle * 0.55),
+                                            ),
                                         );
                                     }
-                                }
+                                    SegmentShape::Outgoing => {
+                                        builder.move_to(point(
+                                            origin.x + px(from_x),
+                                            origin.y + px(middle),
+                                        ));
+                                        builder.cubic_bezier_to(
+                                            point(
+                                                origin.x + px(to_x),
+                                                origin.y + px(row_height + overlap),
+                                            ),
+                                            point(
+                                                origin.x + px(from_x),
+                                                origin.y + px(middle * 1.45),
+                                            ),
+                                            point(
+                                                origin.x + px(to_x),
+                                                origin.y + px(middle * 1.45),
+                                            ),
+                                        );
+                                    }
+                                    SegmentShape::Through => {
+                                        builder.move_to(point(
+                                            origin.x + px(from_x),
+                                            origin.y - px(overlap),
+                                        ));
+                                        let end = point(
+                                            origin.x + px(to_x),
+                                            origin.y + px(row_height + overlap),
+                                        );
+                                        if segment.from_lane == segment.to_lane {
+                                            builder.line_to(end);
+                                        } else {
+                                            builder.cubic_bezier_to(
+                                                end,
+                                                point(origin.x + px(from_x), origin.y + px(middle)),
+                                                point(origin.x + px(to_x), origin.y + px(middle)),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2251,8 +2425,8 @@ impl GitHistory {
                             if let Some(focus) = focus
                                 && !selected_pass
                             {
-                                paint_color.a *= 1.0
-                                    - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+                                paint_color.a *=
+                                    1.0 - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
                             }
                             window.paint_path(path, paint_color);
                         }
@@ -2759,7 +2933,7 @@ impl GitHistory {
             })
             .collect::<Vec<_>>();
 
-        div()
+        let row = div()
             .id(("history-row", index))
             .h(px(HISTORY_ROW_HEIGHT))
             .w_full()
@@ -2818,8 +2992,39 @@ impl GitHistory {
                     .flex_row()
                     .flex_shrink(1.0)
                     .children(optional_cells),
-            )
-            .into_any_element()
+            );
+
+        let transition = self
+            .view_transition
+            .as_ref()
+            .and_then(|transition| transition.rows.get(index).copied());
+        match transition {
+            Some(HistoryRowTransition::Entering | HistoryRowTransition::Exiting) => {
+                let entering = transition == Some(HistoryRowTransition::Entering);
+                let epoch = self.view_epoch;
+                let sha = commit.sha;
+                div()
+                    .w_full()
+                    .flex_none()
+                    .overflow_hidden()
+                    .child(row)
+                    .with_animation(
+                        SharedString::from(format!(
+                            "history-row-fold-{epoch}-{sha}-{}",
+                            if entering { "in" } else { "out" }
+                        )),
+                        crate::motion::COLLAPSE.animation(),
+                        move |element, progress| {
+                            let amount = if entering { progress } else { 1.0 - progress };
+                            element
+                                .h(px(HISTORY_ROW_HEIGHT * amount))
+                                .opacity(0.35 + 0.65 * amount)
+                        },
+                    )
+                    .into_any_element()
+            }
+            _ => row.into_any_element(),
+        }
     }
 }
 
@@ -2943,16 +3148,6 @@ impl Render for GitHistory {
                 )
                 .into_any_element()
         };
-        let body = if self.view_epoch == 0 {
-            body
-        } else {
-            crate::motion::fade_quick(
-                SharedString::from(format!("history-view-transition-{}", self.view_epoch)),
-                div().flex_1().min_h_0().flex().child(body),
-            )
-            .into_any_element()
-        };
-
         div()
             .size_full()
             .flex()
@@ -3121,6 +3316,62 @@ mod tests {
         );
         assert_eq!(visible[0].parent_shas, vec!["base"]);
         assert_eq!(counts.get("local:feature"), Some(&1));
+    }
+
+    #[test]
+    fn transition_rows_fold_old_commits_beside_their_stable_anchor() {
+        let old = vec![
+            commit("tip", &["one"]),
+            commit("one", &["two"]),
+            commit("two", &["base"]),
+            commit("base", &[]),
+        ];
+        let target = vec![commit("tip", &["base"]), commit("base", &[])];
+        let (rows, transitions) = history_transition_rows(&old, &target);
+
+        assert_eq!(
+            rows.iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tip", "one", "two", "base"]
+        );
+        assert_eq!(
+            transitions,
+            vec![
+                HistoryRowTransition::Stable,
+                HistoryRowTransition::Exiting,
+                HistoryRowTransition::Exiting,
+                HistoryRowTransition::Stable,
+            ]
+        );
+    }
+
+    #[test]
+    fn transition_rows_expand_new_commits_in_their_final_order() {
+        let old = vec![commit("tip", &["base"]), commit("base", &[])];
+        let target = vec![
+            commit("tip", &["one"]),
+            commit("one", &["two"]),
+            commit("two", &["base"]),
+            commit("base", &[]),
+        ];
+        let (rows, transitions) = history_transition_rows(&old, &target);
+
+        assert_eq!(
+            rows.iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tip", "one", "two", "base"]
+        );
+        assert_eq!(
+            transitions,
+            vec![
+                HistoryRowTransition::Stable,
+                HistoryRowTransition::Entering,
+                HistoryRowTransition::Entering,
+                HistoryRowTransition::Stable,
+            ]
+        );
     }
 
     #[test]
