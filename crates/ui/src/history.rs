@@ -34,7 +34,7 @@ const HISTORY_HEAD_RING_PADDING: f32 = 2.0;
 const HISTORY_STROKE_WIDTH: f32 = 1.5;
 const HISTORY_GRAPH_SATURATION: f32 = 0.72;
 const HISTORY_GRAPH_SIDE_PADDING: f32 = 5.0;
-const HISTORY_GRAPH_TRAILING_PADDING: f32 = 10.0;
+const HISTORY_GRAPH_TRAILING_PADDING: f32 = 20.0;
 const HISTORY_GRAPH_ROW_OVERLAP: f32 = 0.75;
 const HISTORY_GRAPH_HIT_RADIUS: f32 = 5.5;
 const HISTORY_GRAPH_FOCUSED_STROKE_WIDTH: f32 = 2.25;
@@ -78,6 +78,22 @@ struct GraphLayout {
 struct GraphFocus {
     color_id: usize,
     amount: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GitHistoryViewMode {
+    #[default]
+    AllCommits,
+    BranchTips,
+}
+
+fn branch_ref_key(reference: &GitHistoryRef) -> Option<String> {
+    let prefix = match reference.kind {
+        GitHistoryRefKind::Branch => "local",
+        GitHistoryRefKind::Remote => "remote",
+        GitHistoryRefKind::Tag => return None,
+    };
+    Some(format!("{prefix}:{}", reference.label))
 }
 
 struct HistoryColumnPreferences {
@@ -480,6 +496,114 @@ fn layout_graph(commits: &[GitHistoryCommit], head_sha: Option<&str>) -> GraphLa
     }
 }
 
+/// Remove the linear portions of selected branch lanes while retaining refs,
+/// roots, merges and branch points. Parents that cross a hidden run are
+/// contracted to the nearest visible ancestors so the compact graph never
+/// paints a line toward a row that no longer exists.
+fn collapse_branch_runs(
+    commits: &[GitHistoryCommit],
+    collapsed_refs: &HashSet<String>,
+    head_sha: Option<&str>,
+) -> (Vec<GitHistoryCommit>, HashMap<String, usize>) {
+    if collapsed_refs.is_empty() || commits.is_empty() {
+        return (commits.to_vec(), HashMap::new());
+    }
+
+    let source_graph = layout_graph(commits, head_sha);
+    let mut colors_by_ref = HashMap::new();
+    for (commit, row) in commits.iter().zip(&source_graph.rows) {
+        for reference in &commit.refs {
+            if let Some(key) = branch_ref_key(reference)
+                && collapsed_refs.contains(&key)
+            {
+                colors_by_ref.insert(key, row.node_color_id);
+            }
+        }
+    }
+    if colors_by_ref.is_empty() {
+        return (commits.to_vec(), HashMap::new());
+    }
+
+    let collapsed_colors: HashSet<_> = colors_by_ref.values().copied().collect();
+    let mut child_counts: HashMap<&str, usize> = HashMap::new();
+    for commit in commits {
+        for parent in &commit.parent_shas {
+            *child_counts.entry(parent.as_str()).or_default() += 1;
+        }
+    }
+
+    let mut visible = HashSet::new();
+    let mut hidden_counts = HashMap::new();
+    for (commit, row) in commits.iter().zip(&source_graph.rows) {
+        let is_selected_tip = commit.refs.iter().any(|reference| {
+            branch_ref_key(reference).is_some_and(|key| collapsed_refs.contains(&key))
+        });
+        let is_junction = commit.parent_shas.len() != 1
+            || child_counts
+                .get(commit.sha.as_str())
+                .copied()
+                .unwrap_or_default()
+                > 1;
+        let hide = collapsed_colors.contains(&row.node_color_id)
+            && !is_selected_tip
+            && commit.refs.is_empty()
+            && !is_junction;
+        if hide {
+            for (key, color) in &colors_by_ref {
+                if *color == row.node_color_id {
+                    *hidden_counts.entry(key.clone()).or_default() += 1;
+                }
+            }
+        } else {
+            visible.insert(commit.sha.clone());
+        }
+    }
+
+    let by_sha: HashMap<_, _> = commits
+        .iter()
+        .map(|commit| (commit.sha.as_str(), commit))
+        .collect();
+    fn nearest_visible_parents(
+        sha: &str,
+        visible: &HashSet<String>,
+        by_sha: &HashMap<&str, &GitHistoryCommit>,
+        visiting: &mut HashSet<String>,
+    ) -> Vec<String> {
+        if visible.contains(sha) || !by_sha.contains_key(sha) {
+            return vec![sha.to_string()];
+        }
+        if !visiting.insert(sha.to_string()) {
+            return Vec::new();
+        }
+        let parents = by_sha[sha]
+            .parent_shas
+            .iter()
+            .flat_map(|parent| nearest_visible_parents(parent, visible, by_sha, visiting))
+            .collect::<Vec<_>>();
+        visiting.remove(sha);
+        parents
+    }
+
+    let compact = commits
+        .iter()
+        .filter(|commit| visible.contains(&commit.sha))
+        .cloned()
+        .map(|mut commit| {
+            let mut seen = HashSet::new();
+            commit.parent_shas = commit
+                .parent_shas
+                .iter()
+                .flat_map(|parent| {
+                    nearest_visible_parents(parent, &visible, &by_sha, &mut HashSet::new())
+                })
+                .filter(|parent| seen.insert(parent.clone()))
+                .collect();
+            commit
+        })
+        .collect();
+    (compact, hidden_counts)
+}
+
 fn lane_x(lane: usize) -> f32 {
     HISTORY_GRAPH_SIDE_PADDING + HISTORY_NODE_RADIUS + lane as f32 * HISTORY_LANE_SPACING
 }
@@ -770,6 +894,12 @@ pub struct GitHistory {
     started: bool,
     target_key: Option<String>,
     commits: Vec<GitHistoryCommit>,
+    visible_commits: Vec<GitHistoryCommit>,
+    branch_tips: Vec<GitHistoryCommit>,
+    view_mode: GitHistoryViewMode,
+    view_epoch: usize,
+    collapsed_branches: HashSet<String>,
+    collapsed_counts: HashMap<String, usize>,
     head_sha: Option<String>,
     next_cursor: Option<usize>,
     total_count: Option<usize>,
@@ -815,7 +945,22 @@ pub struct GitHistoryFetchButton {
     _observe: Subscription,
 }
 
+pub struct GitHistoryViewButton {
+    history: Entity<GitHistory>,
+    _observe: Subscription,
+}
+
 impl GitHistoryFetchButton {
+    pub fn new(history: Entity<GitHistory>, cx: &mut Context<Self>) -> Self {
+        let observe = cx.observe(&history, |_, _, cx| cx.notify());
+        Self {
+            history,
+            _observe: observe,
+        }
+    }
+}
+
+impl GitHistoryViewButton {
     pub fn new(history: Entity<GitHistory>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&history, |_, _, cx| cx.notify());
         Self {
@@ -890,6 +1035,69 @@ impl Render for GitHistoryFetchButton {
     }
 }
 
+impl Render for GitHistoryViewButton {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        let showing_tips = self.history.read(cx).view_mode == GitHistoryViewMode::BranchTips;
+        let history = self.history.clone();
+        let tooltip = if showing_tips {
+            "Show all commits"
+        } else {
+            "Show branch tips"
+        };
+
+        div()
+            .id("history-view-trigger")
+            .size(px(24.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .bg(if showing_tips {
+                theme.accent.opacity(0.12)
+            } else {
+                crate::motion::hover_blend(
+                    "history-view-trigger",
+                    crate::theme::wash(0.0),
+                    crate::theme::wash(0.14),
+                )
+            })
+            .on_hover(crate::motion::hover_listener("history-view-trigger"))
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                history.update(cx, |history, cx| {
+                    let mode = if history.view_mode == GitHistoryViewMode::BranchTips {
+                        GitHistoryViewMode::AllCommits
+                    } else {
+                        GitHistoryViewMode::BranchTips
+                    };
+                    history.set_view_mode(mode, cx);
+                });
+            })
+            .child(
+                crate::icons::icon(crate::icons::FOLD_VERTICAL)
+                    .size(px(12.0))
+                    .text_color(if showing_tips {
+                        theme.accent
+                    } else {
+                        theme.text_muted
+                    }),
+            )
+            .tooltip(move |_, cx| {
+                cx.new(|_| HistoryRefTooltip {
+                    descriptions: vec![tooltip.into()],
+                })
+                .into()
+            })
+            .tooltip_show_delay(Duration::from_millis(350))
+    }
+}
 impl GitHistoryCount {
     pub fn new(history: Entity<GitHistory>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&history, |_, _, cx| cx.notify());
@@ -951,6 +1159,12 @@ impl GitHistory {
             started: false,
             target_key: None,
             commits: Vec::new(),
+            visible_commits: Vec::new(),
+            branch_tips: Vec::new(),
+            view_mode: GitHistoryViewMode::default(),
+            view_epoch: 0,
+            collapsed_branches: HashSet::new(),
+            collapsed_counts: HashMap::new(),
             head_sha: None,
             next_cursor: None,
             total_count: None,
@@ -998,6 +1212,10 @@ impl GitHistory {
             self.fetch_error = None;
             self.target_key = None;
             self.commits.clear();
+            self.visible_commits.clear();
+            self.branch_tips.clear();
+            self.collapsed_branches.clear();
+            self.collapsed_counts.clear();
             self.total_count = None;
             self.head_commit_count = None;
             self.graph = GraphLayout::default();
@@ -1023,6 +1241,10 @@ impl GitHistory {
         self.loading = false;
         self.target_key = Some(key.clone());
         self.commits.clear();
+        self.visible_commits.clear();
+        self.branch_tips.clear();
+        self.collapsed_branches.clear();
+        self.collapsed_counts.clear();
         self.head_sha = None;
         self.next_cursor = None;
         self.total_count = None;
@@ -1102,6 +1324,76 @@ impl GitHistory {
             .read(cx)
             .selected_chat_row()
             .and_then(|chat| chat.branch.clone())
+    }
+
+    fn recompute_view(&mut self) {
+        match self.view_mode {
+            GitHistoryViewMode::AllCommits => {
+                let (visible, counts) = collapse_branch_runs(
+                    &self.commits,
+                    &self.collapsed_branches,
+                    self.head_sha.as_deref(),
+                );
+                self.visible_commits = visible;
+                self.collapsed_counts = counts;
+            }
+            GitHistoryViewMode::BranchTips => {
+                // Immediate parents generally are not tips themselves. Clear
+                // them rather than painting false dangling connections; the
+                // branch badges carry the stable identity in this overview.
+                self.visible_commits = self
+                    .branch_tips
+                    .iter()
+                    .cloned()
+                    .map(|mut commit| {
+                        commit.parent_shas.clear();
+                        commit
+                    })
+                    .collect();
+                self.collapsed_counts.clear();
+            }
+        }
+        self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+    }
+
+    fn rebuild_view(&mut self, cx: &mut Context<Self>) {
+        self.recompute_view();
+        let item_count = self.visible_commits.len()
+            + usize::from(
+                self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
+            );
+        self.list
+            .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        self.hovered_path = None;
+        self.graph_hover_active = false;
+        self.graph_hover_clear_task = None;
+        cx.notify();
+    }
+
+    fn set_view_mode(&mut self, mode: GitHistoryViewMode, cx: &mut Context<Self>) {
+        let cleared_individual =
+            mode == GitHistoryViewMode::AllCommits && !self.collapsed_branches.is_empty();
+        if cleared_individual {
+            self.collapsed_branches.clear();
+        }
+        if self.view_mode == mode && !cleared_individual {
+            return;
+        }
+        self.view_mode = mode;
+        self.view_epoch = self.view_epoch.wrapping_add(1);
+        self.rebuild_view(cx);
+    }
+
+    fn toggle_branch_ref(&mut self, reference: GitHistoryRef, cx: &mut Context<Self>) {
+        let Some(key) = branch_ref_key(&reference) else {
+            return;
+        };
+        self.view_mode = GitHistoryViewMode::AllCommits;
+        self.view_epoch = self.view_epoch.wrapping_add(1);
+        if !self.collapsed_branches.remove(&key) {
+            self.collapsed_branches.insert(key);
+        }
+        self.rebuild_view(cx);
     }
 
     fn load_older(&mut self, cx: &mut Context<Self>) {
@@ -1233,11 +1525,15 @@ impl GitHistory {
                         .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))
                 }) {
                     Ok(page) => {
-                        let old_commit_count = history.commits.len();
-                        let old_item_count =
-                            old_commit_count + usize::from(history.next_cursor.is_some());
+                        let old_visible_count = history.visible_commits.len();
+                        let old_item_count = old_visible_count
+                            + usize::from(
+                                history.view_mode == GitHistoryViewMode::AllCommits
+                                    && history.next_cursor.is_some(),
+                            );
                         if reset {
                             history.commits = page.commits;
+                            history.branch_tips = page.branch_tips;
                             history.total_count = page.total_count;
                             history.head_commit_count = page.head_commit_count;
                         } else {
@@ -1260,18 +1556,19 @@ impl GitHistory {
                         }
                         history.head_sha = page.head_sha;
                         history.next_cursor = page.next_cursor;
-                        history.graph = layout_graph(&history.commits, history.head_sha.as_deref());
-                        let new_item_count =
-                            history.commits.len() + usize::from(history.next_cursor.is_some());
-                        if reset {
-                            history
-                                .list
-                                .reset_with_uniform_height(new_item_count, px(HISTORY_ROW_HEIGHT));
-                        } else {
+                        let incremental_all = !reset
+                            && history.view_mode == GitHistoryViewMode::AllCommits
+                            && history.collapsed_branches.is_empty();
+                        if incremental_all {
+                            history.recompute_view();
+                            let new_item_count = history.visible_commits.len()
+                                + usize::from(history.next_cursor.is_some());
                             history.list.splice(
-                                old_commit_count..old_item_count,
-                                new_item_count - old_commit_count,
+                                old_visible_count..old_item_count,
+                                new_item_count - old_visible_count,
                             );
+                        } else {
+                            history.rebuild_view(cx);
                         }
                         history.resolve_avatars(
                             key.clone(),
@@ -1999,6 +2296,78 @@ impl GitHistory {
                 .map(|focus| focus.amount * 0.75)
                 .unwrap_or_default();
         let node_x = lane_x(row.node_lane);
+        let fold_reference = (self.view_mode == GitHistoryViewMode::AllCommits)
+            .then(|| {
+                self.visible_commits.get(row_index).and_then(|commit| {
+                    commit
+                        .refs
+                        .iter()
+                        .find(|reference| branch_ref_key(reference).is_some())
+                        .cloned()
+                })
+            })
+            .flatten();
+        let fold_control = fold_reference.map(|reference| {
+            let key = branch_ref_key(&reference).unwrap_or_default();
+            let collapsed = self.collapsed_branches.contains(&key);
+            let hidden_count = self.collapsed_counts.get(&key).copied().unwrap_or_default();
+            let tooltip = if collapsed {
+                format!(
+                    "Expand {}{}",
+                    reference.label,
+                    if hidden_count == 0 {
+                        String::new()
+                    } else {
+                        format!(" ({hidden_count} hidden)")
+                    }
+                )
+            } else {
+                format!("Collapse {}", reference.label)
+            };
+            let history = cx.entity();
+            div()
+                .id(("history-graph-fold", row_index))
+                .absolute()
+                .left(px(node_x + HISTORY_NODE_RADIUS + 3.0))
+                .top(px((HISTORY_ROW_HEIGHT - 16.0) / 2.0))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(color.opacity(0.32))
+                .bg(theme.bg.opacity(0.96))
+                .cursor_pointer()
+                .opacity(if collapsed { 1.0 } else { 0.0 })
+                .group_hover("history-graph-tip", |style| style.opacity(1.0))
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    history.update(cx, |history, cx| {
+                        history.toggle_branch_ref(reference.clone(), cx)
+                    });
+                })
+                .child(
+                    crate::icons::icon(if collapsed {
+                        crate::icons::EXPAND_ARROWS
+                    } else {
+                        crate::icons::FOLD_VERTICAL
+                    })
+                    .size(px(9.0))
+                    .text_color(color.opacity(0.9)),
+                )
+                .tooltip(move |_, cx| {
+                    cx.new(|_| HistoryRefTooltip {
+                        descriptions: vec![tooltip.clone().into()],
+                    })
+                    .into()
+                })
+                .tooltip_show_delay(Duration::from_millis(250))
+        });
         let node = div()
             .absolute()
             .left(px(node_x - node_radius))
@@ -2009,6 +2378,7 @@ impl GitHistory {
         div()
             .id(("history-graph-cell", row_index))
             .relative()
+            .group("history-graph-tip")
             .w(px(width))
             .h(px(HISTORY_ROW_HEIGHT))
             .flex_none()
@@ -2038,6 +2408,7 @@ impl GitHistory {
                 )
             })
             .child(node)
+            .children(fold_control)
             .into_any_element()
     }
 
@@ -2257,7 +2628,7 @@ impl GitHistory {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if index >= self.commits.len() {
+        if index >= self.visible_commits.len() {
             let theme = Theme::of(cx).clone();
             let has_error = self.error.is_some();
             let label = if self.loading {
@@ -2319,7 +2690,7 @@ impl GitHistory {
                 .child(button)
                 .into_any_element();
         }
-        let Some(commit) = self.commits.get(index).cloned() else {
+        let Some(commit) = self.visible_commits.get(index).cloned() else {
             return gpui::Empty.into_any_element();
         };
         let Some(graph_row) = self.graph.rows.get(index).cloned() else {
@@ -2537,11 +2908,14 @@ impl Render for GitHistory {
                         .child("Loading history…"),
                 )
                 .into_any_element()
-        } else if self.commits.is_empty() {
-            let message = self
-                .error
-                .clone()
-                .unwrap_or_else(|| SharedString::from("No commits found"));
+        } else if self.visible_commits.is_empty() {
+            let message = self.error.clone().unwrap_or_else(|| {
+                SharedString::from(if self.view_mode == GitHistoryViewMode::BranchTips {
+                    "No branch tips found"
+                } else {
+                    "No commits found"
+                })
+            });
             div()
                 .flex_1()
                 .flex()
@@ -2569,6 +2943,15 @@ impl Render for GitHistory {
                 )
                 .into_any_element()
         };
+        let body = if self.view_epoch == 0 {
+            body
+        } else {
+            crate::motion::fade_quick(
+                SharedString::from(format!("history-view-transition-{}", self.view_epoch)),
+                div().flex_1().min_h_0().flex().child(body),
+            )
+            .into_any_element()
+        };
 
         div()
             .size_full()
@@ -2593,7 +2976,9 @@ impl Render for GitHistory {
                 )
             })
             .when_some(
-                self.error.clone().filter(|_| !self.commits.is_empty()),
+                self.error
+                    .clone()
+                    .filter(|_| !self.visible_commits.is_empty()),
                 |element, error| {
                     element.child(
                         div()
@@ -2612,7 +2997,7 @@ impl Render for GitHistory {
                     )
                 },
             )
-            .when(!self.commits.is_empty(), |element| {
+            .when(!self.visible_commits.is_empty(), |element| {
                 element.child(
                     div()
                         .id("history-column-header")
@@ -2697,6 +3082,62 @@ mod tests {
             authored_at: "2026-08-12T12:00:00Z".into(),
             refs: Vec::new(),
         }
+    }
+
+    fn with_branch(
+        mut commit: GitHistoryCommit,
+        kind: GitHistoryRefKind,
+        label: &str,
+    ) -> GitHistoryCommit {
+        commit.refs.push(GitHistoryRef {
+            kind,
+            label: label.into(),
+        });
+        commit
+    }
+
+    #[test]
+    fn collapsing_a_branch_contracts_linear_parents_and_keeps_junctions() {
+        let commits = vec![
+            with_branch(
+                commit("feature", &["middle"]),
+                GitHistoryRefKind::Branch,
+                "feature",
+            ),
+            commit("middle", &["base"]),
+            with_branch(commit("main", &["base"]), GitHistoryRefKind::Branch, "main"),
+            commit("base", &["root"]),
+            commit("root", &[]),
+        ];
+        let collapsed = HashSet::from(["local:feature".to_string()]);
+        let (visible, counts) = collapse_branch_runs(&commits, &collapsed, Some("main"));
+
+        assert_eq!(
+            visible
+                .iter()
+                .map(|commit| commit.sha.as_str())
+                .collect::<Vec<_>>(),
+            vec!["feature", "main", "base", "root"]
+        );
+        assert_eq!(visible[0].parent_shas, vec!["base"]);
+        assert_eq!(counts.get("local:feature"), Some(&1));
+    }
+
+    #[test]
+    fn branch_fold_keys_keep_local_and_remote_identity() {
+        let local = GitHistoryRef {
+            kind: GitHistoryRefKind::Branch,
+            label: "main".into(),
+        };
+        let remote = GitHistoryRef {
+            kind: GitHistoryRefKind::Remote,
+            label: "origin/main".into(),
+        };
+        assert_eq!(branch_ref_key(&local).as_deref(), Some("local:main"));
+        assert_eq!(
+            branch_ref_key(&remote).as_deref(),
+            Some("remote:origin/main")
+        );
     }
 
     #[test]

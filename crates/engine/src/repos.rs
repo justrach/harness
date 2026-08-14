@@ -491,6 +491,7 @@ impl Repos {
         if head_sha.is_none() && refs_by_sha.is_empty() {
             return Ok(GitHistoryPage {
                 commits: Vec::new(),
+                branch_tips: Vec::new(),
                 head_sha: None,
                 next_cursor: None,
                 total_count: Some(0),
@@ -520,6 +521,30 @@ impl Repos {
         let has_next = commits.len() > limit;
         commits.truncate(limit);
 
+        // Branch tips are deliberately independent from history pagination.
+        // `--no-walk` resolves every local/remote tip while deduplicating refs
+        // that point at the same commit. Include HEAD as a useful anchor for a
+        // detached checkout, but do not let tags seed extra overview rows.
+        let branch_tips = if cursor == 0 {
+            let mut tip_args = vec![
+                "log",
+                "--no-walk=sorted",
+                "--no-color",
+                "--no-decorate",
+                "--no-show-signature",
+                "--no-patch",
+                "--format=%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00",
+            ];
+            if head_sha.is_some() {
+                tip_args.push("HEAD");
+            }
+            tip_args.extend(["--branches", "--remotes"]);
+            let tips = self.git(&tip_args, Some(repo_path)).await?;
+            parse_history_log(&tips, &refs_by_sha)
+        } else {
+            Vec::new()
+        };
+
         let total_count = if cursor == 0 {
             let mut count_args = vec!["rev-list", "--count"];
             if head_sha.is_some() {
@@ -545,6 +570,7 @@ impl Repos {
         Ok(GitHistoryPage {
             next_cursor: has_next.then_some(cursor + commits.len()),
             commits,
+            branch_tips,
             head_sha,
             total_count,
             head_commit_count,

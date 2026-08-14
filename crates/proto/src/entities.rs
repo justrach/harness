@@ -251,6 +251,11 @@ pub struct GitHistoryCommit {
 #[serde(rename_all = "camelCase")]
 pub struct GitHistoryPage {
     pub commits: Vec<GitHistoryCommit>,
+    /// Deduplicated tips of every public local/remote branch. Populated with
+    /// the first page so clients can switch to the compact overview without
+    /// another round trip or loading the complete history.
+    #[serde(default)]
+    pub branch_tips: Vec<GitHistoryCommit>,
     pub head_sha: Option<String>,
     pub next_cursor: Option<usize>,
     pub total_count: Option<usize>,
