@@ -1791,13 +1791,12 @@ impl GitHistory {
                     div()
                         .w(px(88.0))
                         .flex_none()
-                        .pr(px(8.0))
                         .opacity(row_content_opacity)
                         .when(
                             author_display == GitHistoryAuthorDisplay::Avatar,
                             |author| {
                                 let tooltip_name = author_name.clone();
-                                author.child(
+                                author.flex().items_center().justify_center().child(
                                     div()
                                         .id(("history-author-avatar", index))
                                         .size(px(20.0))
@@ -1833,6 +1832,7 @@ impl GitHistory {
                         )
                         .when(author_display == GitHistoryAuthorDisplay::Name, |author| {
                             author
+                                .pr(px(8.0))
                                 .truncate()
                                 .text_color(theme.text_muted)
                                 .child(author_name)
@@ -2040,6 +2040,7 @@ impl Render for GitHistory {
                                     .flex_none()
                                     .flex()
                                     .items_center()
+                                    .justify_center()
                                     .on_mouse_down(
                                         gpui::MouseButton::Right,
                                         cx.listener(
