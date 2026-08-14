@@ -210,16 +210,14 @@ pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
     STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
 }
 
-/// The staged-comments chip row: one 24px pill on its own line above the
-/// input, same top inset as the attachment strip. Constant, because the chip
-/// collapses every staged comment into a single "N comments" label.
-pub const COMMENT_CHIP_HEIGHT: f32 = 24.0;
-
+/// The staged-badge chip row: one pill on its own line above the input, same
+/// top inset as the attachment strip. Constant, because each badge collapses
+/// its whole staged set into a single label.
 pub fn comment_strip_height(count: usize) -> f32 {
     if count == 0 {
         return 0.0;
     }
-    STRIP_PAD_TOP + COMMENT_CHIP_HEIGHT
+    STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
 }
 
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
@@ -3599,26 +3597,13 @@ impl Composer {
                 .flex_row()
                 .px(px(STRIP_PAD_X))
                 .pt(px(STRIP_PAD_TOP))
-                .child(
-                    div()
-                        .h(px(COMMENT_CHIP_HEIGHT))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .rounded(px(8.0))
-                        .bg(crate::theme::ink(0.06))
-                        .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_muted)
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted.opacity(0.7)),
-                        )
-                        .child(SharedString::from(crate::comments::chip_label(count))),
-                ),
+                .child(crate::badges::render(
+                    &crate::badges::MessageBadge {
+                        icon: crate::icons::CHAT_ROUND_LINE,
+                        label: crate::comments::chip_label(count).into(),
+                    },
+                    theme,
+                )),
         )
     }
 

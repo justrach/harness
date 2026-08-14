@@ -6,8 +6,9 @@
 //! is no second data model — nothing to persist, nothing to sync, and the
 //! agent reads `path:line` in the prompt exactly as a human would. The
 //! composer projects the staged set to one chip while it is being composed;
-//! once sent, the message is ordinary text and the transcript renders it as
-//! such, the same way file mentions carry their own Markdown.
+//! once sent, [`extract_badge`] lifts the same block back out for the
+//! transcript (see `badges.rs`), so the reader sees that one chip again
+//! rather than the bullets the agent reads.
 
 use std::collections::HashMap;
 
@@ -92,10 +93,44 @@ pub fn with_comments(text: &str, comments: &[DiffComment]) -> String {
     } else {
         text
     };
-    format!(
-        "{body}\n\nComments on the diff (each cites the file and line it belongs to; L = line number in the original file, R = in the changed file):\n{}",
-        bullets.join("\n")
-    )
+    format!("{body}\n\n{COMMENT_BLOCK_HEADER}\n{}", bullets.join("\n"))
+}
+
+/// The line that opens the appended block. Exact, and shared with
+/// [`extract_badge`] — the transcript finds the block by matching this string,
+/// so the two can never drift.
+pub const COMMENT_BLOCK_HEADER: &str = "Comments on the diff (each cites the file and line it belongs to; L = line number in the original file, R = in the changed file):";
+
+/// [`crate::badges::Extractor`] for the comment block: strip the trailing
+/// bullets off a sent message and report them as one pill.
+///
+/// The header is matched at a paragraph break at the very end of the message,
+/// which is the only place [`with_comments`] ever writes it — a prompt that
+/// merely quotes the sentence mid-body is left alone.
+pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
+    let marker = format!("\n\n{COMMENT_BLOCK_HEADER}\n");
+    let at = text.rfind(&marker)?;
+    let bullets = &text[at + marker.len()..];
+    // The block is bullets and their indented continuation lines, nothing
+    // else — anything else means this is not a block we wrote, and the text
+    // stays untouched rather than being silently truncated.
+    let count = bullets
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .count();
+    let well_formed = bullets
+        .lines()
+        .all(|line| line.starts_with("- ") || line.starts_with("  "));
+    if count == 0 || !well_formed {
+        return None;
+    }
+    Some((
+        text[..at].to_string(),
+        crate::badges::MessageBadge {
+            icon: crate::icons::CHAT_ROUND_LINE,
+            label: chip_label(count).into(),
+        },
+    ))
 }
 
 /// Composer chip label — "1 comment" / "4 comments".
