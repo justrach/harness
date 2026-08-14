@@ -28,6 +28,10 @@ const HISTORY_GRAPH_SATURATION: f32 = 0.72;
 const HISTORY_GRAPH_SIDE_PADDING: f32 = 5.0;
 const HISTORY_GRAPH_TRAILING_PADDING: f32 = 10.0;
 const HISTORY_GRAPH_ROW_OVERLAP: f32 = 0.75;
+const HISTORY_GRAPH_HIT_RADIUS: f32 = 5.5;
+const HISTORY_GRAPH_FOCUSED_STROKE_WIDTH: f32 = 2.25;
+const HISTORY_GRAPH_UNFOCUSED_OPACITY: f32 = 0.24;
+const HISTORY_ROW_UNFOCUSED_OPACITY: f32 = 0.6;
 const HISTORY_COMMIT_SUBJECT_MIN_WIDTH: f32 = 80.0;
 const HISTORY_REF_AREA_RATIO: f32 = 0.45;
 const HISTORY_REF_BADGE_MAX_WIDTH: f32 = 112.0;
@@ -60,6 +64,12 @@ struct GraphRow {
 struct GraphLayout {
     rows: Vec<GraphRow>,
     max_lane_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphFocus {
+    color_id: usize,
+    amount: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +218,104 @@ fn graph_width(lane_count: usize) -> f32 {
         + (count - 1) as f32 * HISTORY_LANE_SPACING
 }
 
+fn cubic_coordinate(start: f32, control_1: f32, control_2: f32, end: f32, t: f32) -> f32 {
+    let inverse = 1.0 - t;
+    inverse.powi(3) * start
+        + 3.0 * inverse.powi(2) * t * control_1
+        + 3.0 * inverse * t.powi(2) * control_2
+        + t.powi(3) * end
+}
+
+fn point_to_segment_distance(
+    point_x: f32,
+    point_y: f32,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+) -> f32 {
+    let delta_x = end_x - start_x;
+    let delta_y = end_y - start_y;
+    let length_squared = delta_x * delta_x + delta_y * delta_y;
+    if length_squared <= f32::EPSILON {
+        return ((point_x - start_x).powi(2) + (point_y - start_y).powi(2)).sqrt();
+    }
+    let projection = (((point_x - start_x) * delta_x + (point_y - start_y) * delta_y)
+        / length_squared)
+        .clamp(0.0, 1.0);
+    let closest_x = start_x + projection * delta_x;
+    let closest_y = start_y + projection * delta_y;
+    ((point_x - closest_x).powi(2) + (point_y - closest_y).powi(2)).sqrt()
+}
+
+fn segment_distance(segment: &GraphSegment, point_x: f32, point_y: f32) -> f32 {
+    let middle = HISTORY_ROW_HEIGHT / 2.0;
+    let from_x = lane_x(segment.from_lane);
+    let to_x = lane_x(segment.to_lane);
+    let (start_y, end_y, control_1_y, control_2_y) = match segment.shape {
+        SegmentShape::Incoming => (
+            -HISTORY_GRAPH_ROW_OVERLAP,
+            middle,
+            middle * 0.55,
+            middle * 0.55,
+        ),
+        SegmentShape::Outgoing => (
+            middle,
+            HISTORY_ROW_HEIGHT + HISTORY_GRAPH_ROW_OVERLAP,
+            middle * 1.45,
+            middle * 1.45,
+        ),
+        SegmentShape::Through => (
+            -HISTORY_GRAPH_ROW_OVERLAP,
+            HISTORY_ROW_HEIGHT + HISTORY_GRAPH_ROW_OVERLAP,
+            middle,
+            middle,
+        ),
+    };
+    if segment.shape == SegmentShape::Through && segment.from_lane == segment.to_lane {
+        return point_to_segment_distance(point_x, point_y, from_x, start_y, to_x, end_y);
+    }
+
+    // A short polyline approximation is enough for pointer hit testing and
+    // keeps the interactive target in lockstep with the painted Bezier.
+    const SAMPLES: usize = 10;
+    let mut closest = f32::MAX;
+    let mut previous_x = from_x;
+    let mut previous_y = start_y;
+    for sample in 1..=SAMPLES {
+        let t = sample as f32 / SAMPLES as f32;
+        let current_x = cubic_coordinate(from_x, from_x, to_x, to_x, t);
+        let current_y = cubic_coordinate(start_y, control_1_y, control_2_y, end_y, t);
+        closest = closest.min(point_to_segment_distance(
+            point_x, point_y, previous_x, previous_y, current_x, current_y,
+        ));
+        previous_x = current_x;
+        previous_y = current_y;
+    }
+    closest
+}
+
+fn hovered_graph_path(row: &GraphRow, point_x: f32, point_y: f32) -> Option<usize> {
+    let node_x = lane_x(row.node_lane);
+    let node_y = HISTORY_ROW_HEIGHT / 2.0;
+    let node_distance = ((point_x - node_x).powi(2) + (point_y - node_y).powi(2)).sqrt();
+    if node_distance <= HISTORY_GRAPH_HIT_RADIUS + HISTORY_NODE_RADIUS {
+        return Some(row.node_color_id);
+    }
+
+    row.segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.color_id,
+                segment_distance(segment, point_x, point_y),
+            )
+        })
+        .filter(|(_, distance)| *distance <= HISTORY_GRAPH_HIT_RADIUS)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(color_id, _)| color_id)
+}
+
 fn estimated_ref_badge_width(reference: &GitHistoryRef) -> f32 {
     // 10 px icon + 2 px gap + 10 px horizontal padding + the 10 px label.
     (22.0 + reference.label.chars().count() as f32 * 5.7).min(HISTORY_REF_BADGE_MAX_WIDTH)
@@ -337,6 +445,9 @@ pub struct GitHistory {
     error: Option<SharedString>,
     graph: GraphLayout,
     list: ListState,
+    hovered_path: Option<usize>,
+    graph_hover_active: bool,
+    graph_hover_clear_task: Option<Task<()>>,
     copied_sha: Option<String>,
     request_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
@@ -509,6 +620,9 @@ impl GitHistory {
             error: None,
             graph: GraphLayout::default(),
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
+            hovered_path: None,
+            graph_hover_active: false,
+            graph_hover_clear_task: None,
             copied_sha: None,
             request_task: None,
             copy_task: None,
@@ -543,6 +657,9 @@ impl GitHistory {
             self.head_commit_count = None;
             self.graph = GraphLayout::default();
             self.list.reset(0);
+            self.hovered_path = None;
+            self.graph_hover_active = false;
+            self.graph_hover_clear_task = None;
             self.loading = false;
             return;
         };
@@ -567,6 +684,9 @@ impl GitHistory {
         self.error = None;
         self.graph = GraphLayout::default();
         self.list.reset(0);
+        self.hovered_path = None;
+        self.graph_hover_active = false;
+        self.graph_hover_clear_task = None;
         self.fetch_page(key, cwd, target, 0, true, cx);
     }
 
@@ -751,7 +871,83 @@ impl GitHistory {
         }));
     }
 
-    fn graph_paths(&self, theme: &Theme) -> AnyElement {
+    fn graph_hover_key(cx: &Context<Self>) -> String {
+        format!("history-graph-focus-{}", cx.entity_id())
+    }
+
+    fn graph_focus(&self, cx: &Context<Self>) -> Option<GraphFocus> {
+        self.hovered_path.map(|color_id| GraphFocus {
+            color_id,
+            amount: crate::motion::hover_t(&Self::graph_hover_key(cx)),
+        })
+    }
+
+    fn set_graph_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(path) = path {
+            if self.graph_hover_active && self.hovered_path == Some(path) {
+                return;
+            }
+            self.graph_hover_clear_task = None;
+            self.graph_hover_active = true;
+            self.hovered_path = Some(path);
+            crate::motion::set_hover(
+                &Self::graph_hover_key(cx),
+                true,
+                crate::motion::reduced_motion(cx),
+            );
+            cx.notify();
+            return;
+        }
+
+        if !self.graph_hover_active {
+            return;
+        }
+        self.graph_hover_active = false;
+        let reduced_motion = crate::motion::reduced_motion(cx);
+        crate::motion::set_hover(&Self::graph_hover_key(cx), false, reduced_motion);
+        if reduced_motion {
+            self.hovered_path = None;
+            self.graph_hover_clear_task = None;
+        } else {
+            let fading_path = self.hovered_path;
+            let duration = crate::motion::HOVER_FADE
+                .total()
+                .mul_f32(crate::motion::speed_scale());
+            self.graph_hover_clear_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                this.update(cx, |history, cx| {
+                    if !history.graph_hover_active && history.hovered_path == fading_path {
+                        history.hovered_path = None;
+                        history.graph_hover_clear_task = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }));
+        }
+        cx.notify();
+    }
+
+    fn update_graph_hover(
+        &mut self,
+        row_index: usize,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.list.bounds_for_item(row_index) else {
+            self.set_graph_hover(None, cx);
+            return;
+        };
+        let Some(row) = self.graph.rows.get(row_index) else {
+            self.set_graph_hover(None, cx);
+            return;
+        };
+        let local_x = f32::from(position.x - bounds.left());
+        let local_y = f32::from(position.y - bounds.top());
+        self.set_graph_hover(hovered_graph_path(row, local_x, local_y), cx);
+    }
+
+    fn graph_paths(&self, theme: &Theme, focus: Option<GraphFocus>) -> AnyElement {
         let palette = [
             graph_color(theme.accent),
             graph_color(theme.busy),
@@ -766,29 +962,42 @@ impl GitHistory {
             |_, _, _| (),
             move |viewport_bounds, _, window, _| {
                 let middle = HISTORY_ROW_HEIGHT / 2.0;
-                for (color_index, color) in palette.iter().enumerate() {
-                    let mut builder = PathBuilder::stroke(px(HISTORY_STROKE_WIDTH));
-                    let mut has_segments = false;
+                let pass_count = if focus.is_some() { 2 } else { 1 };
+                for pass in 0..pass_count {
+                    let selected_pass = focus.is_some() && pass == 1;
+                    for (color_index, color) in palette.iter().enumerate() {
+                        let stroke_width = focus
+                            .filter(|_| selected_pass)
+                            .map(|focus| {
+                                HISTORY_STROKE_WIDTH
+                                    + (HISTORY_GRAPH_FOCUSED_STROKE_WIDTH
+                                        - HISTORY_STROKE_WIDTH)
+                                        * focus.amount
+                            })
+                            .unwrap_or(HISTORY_STROKE_WIDTH);
+                        let mut builder = PathBuilder::stroke(px(stroke_width));
+                        let mut has_segments = false;
 
-                    for (index, row) in rows.iter().enumerate() {
-                        let Some(row_bounds) = list.bounds_for_item(index) else {
-                            continue;
-                        };
-                        if row_bounds.bottom() < viewport_bounds.top()
-                            || row_bounds.top() > viewport_bounds.bottom()
-                        {
-                            continue;
-                        }
-                        for segment in row
-                            .segments
-                            .iter()
-                            .filter(|segment| segment.color_id % palette.len() == color_index)
-                        {
-                            has_segments = true;
-                            let from_x = lane_x(segment.from_lane);
-                            let to_x = lane_x(segment.to_lane);
-                            let origin = row_bounds.origin;
-                            match segment.shape {
+                        for (index, row) in rows.iter().enumerate() {
+                            let Some(row_bounds) = list.bounds_for_item(index) else {
+                                continue;
+                            };
+                            if row_bounds.bottom() < viewport_bounds.top()
+                                || row_bounds.top() > viewport_bounds.bottom()
+                            {
+                                continue;
+                            }
+                            for segment in row.segments.iter().filter(|segment| {
+                                segment.color_id % palette.len() == color_index
+                                    && focus.is_none_or(|focus| {
+                                        (segment.color_id == focus.color_id) == selected_pass
+                                    })
+                            }) {
+                                has_segments = true;
+                                let from_x = lane_x(segment.from_lane);
+                                let to_x = lane_x(segment.to_lane);
+                                let origin = row_bounds.origin;
+                                match segment.shape {
                                 SegmentShape::Incoming => {
                                     builder.move_to(point(
                                         origin.x + px(from_x),
@@ -844,12 +1053,20 @@ impl GitHistory {
                                         );
                                     }
                                 }
+                                }
                             }
                         }
-                    }
 
-                    if has_segments && let Ok(path) = builder.build() {
-                        window.paint_path(path, *color);
+                        if has_segments && let Ok(path) = builder.build() {
+                            let mut paint_color = *color;
+                            if let Some(focus) = focus
+                                && !selected_pass
+                            {
+                                paint_color.a *= 1.0
+                                    - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+                            }
+                            window.paint_path(path, paint_color);
+                        }
                     }
                 }
             },
@@ -859,7 +1076,15 @@ impl GitHistory {
         .into_any_element()
     }
 
-    fn graph_cell(row: GraphRow, lane_count: usize, theme: &Theme) -> AnyElement {
+    fn graph_cell(
+        &mut self,
+        row_index: usize,
+        row: GraphRow,
+        lane_count: usize,
+        focus: Option<GraphFocus>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let width = graph_width(lane_count);
         let palette = [
             graph_color(theme.accent),
@@ -869,29 +1094,51 @@ impl GitHistory {
             graph_color(theme.danger),
             graph_color(theme.text_muted),
         ];
-        let color = palette[row.node_color_id % palette.len()];
+        let mut color = palette[row.node_color_id % palette.len()];
+        let selected = focus.is_some_and(|focus| focus.color_id == row.node_color_id);
+        if let Some(focus) = focus
+            && !selected
+        {
+            color.a *= 1.0 - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+        }
+        let node_radius = HISTORY_NODE_RADIUS
+            + focus
+                .filter(|_| selected)
+                .map(|focus| focus.amount * 0.75)
+                .unwrap_or_default();
         let node_x = lane_x(row.node_lane);
         let node = div()
             .absolute()
-            .left(px(node_x - HISTORY_NODE_RADIUS))
-            .top(px(HISTORY_ROW_HEIGHT / 2.0 - HISTORY_NODE_RADIUS))
-            .size(px(HISTORY_NODE_RADIUS * 2.0))
+            .left(px(node_x - node_radius))
+            .top(px(HISTORY_ROW_HEIGHT / 2.0 - node_radius))
+            .size(px(node_radius * 2.0))
             .rounded_full()
             .bg(color);
         div()
+            .id(("history-graph-cell", row_index))
             .relative()
             .w(px(width))
             .h(px(HISTORY_ROW_HEIGHT))
             .flex_none()
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    this.update_graph_hover(row_index, event.position, cx);
+                }),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.set_graph_hover(None, cx);
+                }
+            }))
             .when(row.is_head, |element| {
                 element.child(
                     div()
                         .absolute()
-                        .left(px(node_x - HISTORY_NODE_RADIUS - HISTORY_HEAD_RING_PADDING))
+                        .left(px(node_x - node_radius - HISTORY_HEAD_RING_PADDING))
                         .top(px(HISTORY_ROW_HEIGHT / 2.0
-                            - HISTORY_NODE_RADIUS
+                            - node_radius
                             - HISTORY_HEAD_RING_PADDING))
-                        .size(px((HISTORY_NODE_RADIUS + HISTORY_HEAD_RING_PADDING) * 2.0))
+                        .size(px((node_radius + HISTORY_HEAD_RING_PADDING) * 2.0))
                         .rounded_full()
                         .border_1()
                         .border_color(color)
@@ -1074,6 +1321,17 @@ impl GitHistory {
         };
         let commit_refs = commit.refs;
         let commit_theme = theme.clone();
+        let graph_focus = self.graph_focus(cx);
+        let row_is_focused =
+            graph_focus.is_some_and(|focus| focus.color_id == graph_row.node_color_id);
+        let row_content_opacity = graph_focus
+            .filter(|_| !row_is_focused)
+            .map(|focus| 1.0 - (1.0 - HISTORY_ROW_UNFOCUSED_OPACITY) * focus.amount)
+            .unwrap_or(1.0);
+        let focused_row_wash = graph_focus
+            .filter(|_| row_is_focused)
+            .map(|focus| crate::theme::ink(0.018 * focus.amount));
+        let graph_lane_count = self.graph.max_lane_count;
 
         div()
             .id(("history-row", index))
@@ -1087,17 +1345,14 @@ impl GitHistory {
             .border_color(crate::theme::hairline(0.04))
             .text_size(px(11.0))
             .cursor_pointer()
+            .when_some(focused_row_wash, |element, wash| element.bg(wash))
             .hover(|style| style.bg(crate::theme::ink(0.025)))
             // A commit row click opens the commit as its own diff tab (the
             // host — the right pane's surface strip — listens; user request).
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(GitHistoryEvent::OpenCommit(open_commit.clone()));
             }))
-            .child(Self::graph_cell(
-                graph_row,
-                self.graph.max_lane_count,
-                &theme,
-            ))
+            .child(self.graph_cell(index, graph_row, graph_lane_count, graph_focus, &theme, cx))
             .child(
                 container_query(move |size, _, _| {
                     let refs_width = ref_area_width(f32::from(size.width));
@@ -1127,6 +1382,7 @@ impl GitHistory {
                 })
                 .flex_1()
                 .min_w(px(HISTORY_COMMIT_SUBJECT_MIN_WIDTH))
+                .opacity(row_content_opacity)
                 .overflow_hidden(),
             )
             .child(
@@ -1135,6 +1391,7 @@ impl GitHistory {
                     .flex_none()
                     .truncate()
                     .pr(px(8.0))
+                    .opacity(row_content_opacity)
                     .text_color(theme.text_muted)
                     .child(SharedString::from(if commit.author_name.is_empty() {
                         "Unknown".to_string()
@@ -1149,6 +1406,7 @@ impl GitHistory {
                     .truncate()
                     .pr(px(8.0))
                     .text_size(px(10.5))
+                    .opacity(row_content_opacity)
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format_date(&commit.authored_at))),
             )
@@ -1163,6 +1421,7 @@ impl GitHistory {
                     .items_center()
                     .rounded(px(4.0))
                     .cursor_pointer()
+                    .opacity(row_content_opacity)
                     .hover(|style| style.bg(crate::theme::ink(0.07)))
                     .font_family(theme.font_mono.clone())
                     .text_size(px(10.5))
@@ -1191,6 +1450,7 @@ impl Render for GitHistory {
         self.ensure_loaded(cx);
         let theme = Theme::of(cx).clone();
         let graph_column = graph_width(self.graph.max_lane_count);
+        let graph_focus = self.graph_focus(cx);
 
         let body: AnyElement = if self.target_key.is_none() {
             div()
@@ -1248,7 +1508,7 @@ impl Render for GitHistory {
                 .relative()
                 .flex_1()
                 .min_h_0()
-                .child(self.graph_paths(&theme))
+                .child(self.graph_paths(&theme, graph_focus))
                 .child(
                     list(self.list.clone(), cx.processor(Self::render_row))
                         .size_full()
@@ -1371,6 +1631,68 @@ mod tests {
         assert_eq!(muted.l, source.l);
         assert_eq!(muted.a, source.a);
         assert!((muted.s - source.s * HISTORY_GRAPH_SATURATION).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn graph_hover_detects_vertical_and_curved_paths() {
+        let vertical = GraphRow {
+            sha: "vertical".into(),
+            node_lane: 0,
+            node_color_id: 1,
+            segments: vec![GraphSegment {
+                from_lane: 1,
+                to_lane: 1,
+                color_id: 7,
+                shape: SegmentShape::Through,
+            }],
+            is_head: false,
+        };
+        assert_eq!(hovered_graph_path(&vertical, lane_x(1), 5.0), Some(7));
+
+        let curved_segment = GraphSegment {
+            from_lane: 0,
+            to_lane: 1,
+            color_id: 9,
+            shape: SegmentShape::Outgoing,
+        };
+        let middle = HISTORY_ROW_HEIGHT / 2.0;
+        let curve_x = cubic_coordinate(lane_x(0), lane_x(0), lane_x(1), lane_x(1), 0.5);
+        let curve_y = cubic_coordinate(
+            middle,
+            middle * 1.45,
+            middle * 1.45,
+            HISTORY_ROW_HEIGHT + HISTORY_GRAPH_ROW_OVERLAP,
+            0.5,
+        );
+        let curved = GraphRow {
+            sha: "curved".into(),
+            node_lane: 0,
+            node_color_id: 1,
+            segments: vec![curved_segment],
+            is_head: false,
+        };
+        assert_eq!(hovered_graph_path(&curved, curve_x, curve_y), Some(9));
+    }
+
+    #[test]
+    fn graph_hover_prefers_the_node_and_ignores_empty_space() {
+        let row = GraphRow {
+            sha: "node".into(),
+            node_lane: 1,
+            node_color_id: 11,
+            segments: vec![GraphSegment {
+                from_lane: 0,
+                to_lane: 1,
+                color_id: 4,
+                shape: SegmentShape::Incoming,
+            }],
+            is_head: false,
+        };
+        assert_eq!(
+            hovered_graph_path(&row, lane_x(1), HISTORY_ROW_HEIGHT / 2.0),
+            Some(11)
+        );
+        assert_eq!(hovered_graph_path(&row, graph_width(4) - 1.0, 2.0), None);
     }
 
     #[test]
