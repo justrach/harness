@@ -142,11 +142,9 @@ pub fn run_app(config: UiConfig) {
         // final one on the very first frame, or the window flashes the wrong
         // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
-        appearance::init(
-            settings::UiSettings::load(&data_dir).appearance,
-            data_dir,
-            cx,
-        );
+        let ui_settings = settings::UiSettings::load(&data_dir);
+        appearance::init(ui_settings.appearance, data_dir.clone(), cx);
+        history::init(ui_settings.git_history_columns, data_dir, cx);
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);

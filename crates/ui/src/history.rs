@@ -4,6 +4,7 @@
 //! data and rendering so it can move intact into the future right-panel tabs.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::DateTime;
@@ -15,6 +16,8 @@ use gpui::{
 use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
 use zeron_rpc::methods;
 
+use crate::popover::{self, Popup};
+use crate::settings::{GitHistoryColumns, UiSettings};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -70,6 +73,28 @@ struct GraphLayout {
 struct GraphFocus {
     color_id: usize,
     amount: f32,
+}
+
+struct HistoryColumnPreferences {
+    columns: GitHistoryColumns,
+    data_dir: PathBuf,
+}
+
+impl gpui::Global for HistoryColumnPreferences {}
+
+#[derive(Debug, Clone, Copy)]
+enum OptionalHistoryColumn {
+    Author,
+    Date,
+    Sha,
+}
+
+pub fn init(columns: GitHistoryColumns, data_dir: PathBuf, cx: &mut App) {
+    cx.set_global(HistoryColumnPreferences { columns, data_dir });
+}
+
+pub fn configured_columns(cx: &App) -> GitHistoryColumns {
+    cx.global::<HistoryColumnPreferences>().columns
 }
 
 #[derive(Debug, Clone)]
@@ -448,6 +473,7 @@ pub struct GitHistory {
     hovered_path: Option<usize>,
     graph_hover_active: bool,
     graph_hover_clear_task: Option<Task<()>>,
+    column_menu: Popup<gpui::Point<gpui::Pixels>>,
     copied_sha: Option<String>,
     request_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
@@ -623,6 +649,7 @@ impl GitHistory {
             hovered_path: None,
             graph_hover_active: false,
             graph_hover_clear_task: None,
+            column_menu: Popup::default(),
             copied_sha: None,
             request_task: None,
             copy_task: None,
@@ -945,6 +972,153 @@ impl GitHistory {
         let local_x = f32::from(position.x - bounds.left());
         let local_y = f32::from(position.y - bounds.top());
         self.set_graph_hover(hovered_graph_path(row, local_x, local_y), cx);
+    }
+
+    fn toggle_column(&mut self, column: OptionalHistoryColumn, cx: &mut Context<Self>) {
+        let (columns, data_dir) = {
+            let preferences = cx.global_mut::<HistoryColumnPreferences>();
+            match column {
+                OptionalHistoryColumn::Author => {
+                    preferences.columns.author = !preferences.columns.author
+                }
+                OptionalHistoryColumn::Date => preferences.columns.date = !preferences.columns.date,
+                OptionalHistoryColumn::Sha => preferences.columns.sha = !preferences.columns.sha,
+            }
+            (preferences.columns, preferences.data_dir.clone())
+        };
+        Self::persist_columns(columns, &data_dir);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    fn reset_columns(&mut self, cx: &mut Context<Self>) {
+        let columns = GitHistoryColumns::default();
+        let data_dir = {
+            let preferences = cx.global_mut::<HistoryColumnPreferences>();
+            preferences.columns = columns;
+            preferences.data_dir.clone()
+        };
+        Self::persist_columns(columns, &data_dir);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    fn persist_columns(columns: GitHistoryColumns, data_dir: &std::path::Path) {
+        // Reload before writing because Shell and Appearance own other fields
+        // in this same file and may have persisted them since boot.
+        let mut settings = UiSettings::load(data_dir);
+        settings.git_history_columns = columns;
+        if let Err(error) = settings.save(data_dir) {
+            tracing::warn!(%error, "could not persist Git history columns");
+        }
+    }
+
+    fn open_column_menu(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.column_menu.open(position);
+        cx.notify();
+    }
+
+    fn close_column_menu(&mut self, cx: &mut Context<Self>) {
+        if self.column_menu.begin_close() {
+            popover::reap_popup(cx, |history: &mut Self| &mut history.column_menu);
+        }
+    }
+
+    fn render_column_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let columns = configured_columns(cx);
+        let option =
+            |label: &'static str,
+             checked: bool,
+             column: OptionalHistoryColumn,
+             index: usize,
+             cx: &mut Context<Self>| {
+                popover::menu_row(
+                    theme,
+                    false,
+                    SharedString::from(format!("history-column-option-{index}")),
+                )
+                .id(("history-column-option", index))
+                .gap(px(0.0))
+                .px(px(7.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_column(column, cx);
+                }))
+                .child(div().flex_1().child(label))
+                .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
+                    checked,
+                    |element| {
+                        element.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(10.0))
+                                .text_color(theme.text_muted),
+                        )
+                    },
+                ))
+            };
+        let defaults = GitHistoryColumns::default();
+        let can_reset = columns != defaults;
+
+        popover::popover_card(theme)
+            .w(px(132.0))
+            .p(px(3.0))
+            .rounded(px(9.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_column_menu(cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(option(
+                        "Author",
+                        columns.author,
+                        OptionalHistoryColumn::Author,
+                        0,
+                        cx,
+                    ))
+                    .child(option(
+                        "Date",
+                        columns.date,
+                        OptionalHistoryColumn::Date,
+                        1,
+                        cx,
+                    ))
+                    .child(option(
+                        "SHA",
+                        columns.sha,
+                        OptionalHistoryColumn::Sha,
+                        2,
+                        cx,
+                    ))
+                    .when(can_reset, |menu| {
+                        menu.child(
+                            div()
+                                .h(px(1.0))
+                                .mx(px(5.0))
+                                .my(px(2.0))
+                                .bg(crate::theme::hairline(0.08)),
+                        )
+                        .child(
+                            popover::menu_row(theme, false, "history-columns-reset")
+                                .id("history-columns-reset")
+                                .px(px(7.0))
+                                .py(px(4.0))
+                                .rounded(px(6.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.reset_columns(cx);
+                                    this.close_column_menu(cx);
+                                }))
+                                .child("Reset"),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     fn graph_paths(&self, theme: &Theme, focus: Option<GraphFocus>) -> AnyElement {
@@ -1321,6 +1495,7 @@ impl GitHistory {
         };
         let commit_refs = commit.refs;
         let commit_theme = theme.clone();
+        let columns = configured_columns(cx);
         let graph_focus = self.graph_focus(cx);
         let row_is_focused =
             graph_focus.is_some_and(|focus| focus.color_id == graph_row.node_color_id);
@@ -1385,62 +1560,68 @@ impl GitHistory {
                 .min_w(px(HISTORY_COMMIT_SUBJECT_MIN_WIDTH))
                 .overflow_hidden(),
             )
-            .child(
-                div()
-                    .w(px(88.0))
-                    .flex_none()
-                    .truncate()
-                    .pr(px(8.0))
-                    .opacity(row_content_opacity)
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(if commit.author_name.is_empty() {
-                        "Unknown".to_string()
-                    } else {
-                        commit.author_name
-                    })),
-            )
-            .child(
-                div()
-                    .w(px(88.0))
-                    .flex_none()
-                    .truncate()
-                    .pr(px(8.0))
-                    .text_size(px(10.5))
-                    .opacity(row_content_opacity)
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(format_date(&commit.authored_at))),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("history-sha-{index}")))
-                    .w(px(68.0))
-                    .h(px(24.0))
-                    .mr(px(6.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .opacity(row_content_opacity)
-                    .hover(|style| style.bg(crate::theme::ink(0.07)))
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(10.5))
-                    .text_color(if copied {
-                        theme.accent
-                    } else {
-                        theme.text_muted
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // The sha chip must not ALSO open the commit tab.
-                        cx.stop_propagation();
-                        this.copy_sha(sha.clone(), cx)
-                    }))
-                    .child(SharedString::from(if copied {
-                        "Copied".to_string()
-                    } else {
-                        commit.sha.chars().take(7).collect()
-                    })),
-            )
+            .when(columns.author, |element| {
+                element.child(
+                    div()
+                        .w(px(88.0))
+                        .flex_none()
+                        .truncate()
+                        .pr(px(8.0))
+                        .opacity(row_content_opacity)
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(if commit.author_name.is_empty() {
+                            "Unknown".to_string()
+                        } else {
+                            commit.author_name
+                        })),
+                )
+            })
+            .when(columns.date, |element| {
+                element.child(
+                    div()
+                        .w(px(88.0))
+                        .flex_none()
+                        .truncate()
+                        .pr(px(8.0))
+                        .text_size(px(10.5))
+                        .opacity(row_content_opacity)
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format_date(&commit.authored_at))),
+                )
+            })
+            .when(columns.sha, |element| {
+                element.child(
+                    div()
+                        .id(SharedString::from(format!("history-sha-{index}")))
+                        .w(px(68.0))
+                        .h(px(24.0))
+                        .mr(px(6.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .opacity(row_content_opacity)
+                        .hover(|style| style.bg(crate::theme::ink(0.07)))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(10.5))
+                        .text_color(if copied {
+                            theme.accent
+                        } else {
+                            theme.text_muted
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // The sha chip must not ALSO open the commit tab.
+                            cx.stop_propagation();
+                            this.copy_sha(sha.clone(), cx)
+                        }))
+                        .child(SharedString::from(if copied {
+                            "Copied".to_string()
+                        } else {
+                            commit.sha.chars().take(7).collect()
+                        })),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1451,6 +1632,13 @@ impl Render for GitHistory {
         let theme = Theme::of(cx).clone();
         let graph_column = graph_width(self.graph.max_lane_count);
         let graph_focus = self.graph_focus(cx);
+        let columns = configured_columns(cx);
+        let column_menu_position = self.column_menu.get().copied();
+        let column_menu = column_menu_position.map(|position| {
+            let closing = self.column_menu.closing_since();
+            let menu = self.render_column_menu(&theme, cx);
+            (position, menu, closing)
+        });
 
         let body: AnyElement = if self.target_key.is_none() {
             div()
@@ -1561,6 +1749,9 @@ impl Render for GitHistory {
             .when(!self.commits.is_empty(), |element| {
                 element.child(
                     div()
+                        .id("history-column-header")
+                        .group("history-column-header")
+                        .relative()
                         .h(px(24.0))
                         .flex_none()
                         .flex()
@@ -1569,14 +1760,68 @@ impl Render for GitHistory {
                         .border_color(crate::theme::hairline(0.06))
                         .text_size(px(9.5))
                         .text_color(theme.text_faint)
+                        .on_mouse_down(
+                            gpui::MouseButton::Right,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                this.open_column_menu(event.position, cx);
+                            }),
+                        )
                         .child(div().w(px(graph_column)).flex_none())
                         .child(div().flex_1().min_w(px(80.0)).child("Commit"))
-                        .child(div().w(px(88.0)).flex_none().child("Author"))
-                        .child(div().w(px(88.0)).flex_none().child("Date"))
-                        .child(div().w(px(74.0)).flex_none().child("SHA")),
+                        .when(columns.author, |header| {
+                            header.child(div().w(px(88.0)).flex_none().child("Author"))
+                        })
+                        .when(columns.date, |header| {
+                            header.child(div().w(px(88.0)).flex_none().child("Date"))
+                        })
+                        .when(columns.sha, |header| {
+                            header.child(div().w(px(74.0)).flex_none().child("SHA"))
+                        })
+                        .child(
+                            div()
+                                .id("history-columns-button")
+                                .absolute()
+                                .right(px(3.0))
+                                .top(px(2.0))
+                                .size(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.0))
+                                .cursor_pointer()
+                                .opacity(0.0)
+                                .group_hover("history-column-header", |style| style.opacity(1.0))
+                                .when(self.column_menu.is_open(), |button| button.opacity(1.0))
+                                .hover(|style| style.bg(crate::theme::ink(0.08)))
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(
+                                        |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                            this.open_column_menu(event.position, cx);
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    crate::icons::icon(crate::icons::CHECKLIST)
+                                        .size(px(12.0))
+                                        .text_color(theme.text_muted),
+                                ),
+                        ),
                 )
             })
             .child(body)
+            .when_some(column_menu, |element, (position, menu, closing)| {
+                element.child(popover::menu_at(
+                    "history-columns-menu",
+                    position,
+                    menu,
+                    closing,
+                ))
+            })
     }
 }
 

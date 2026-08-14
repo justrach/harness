@@ -43,6 +43,24 @@ pub const SAVE_DEBOUNCE_MS: u64 = 400;
 
 const FILE_NAME: &str = "ui-settings.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GitHistoryColumns {
+    pub author: bool,
+    pub date: bool,
+    pub sha: bool,
+}
+
+impl Default for GitHistoryColumns {
+    fn default() -> Self {
+        Self {
+            author: true,
+            date: true,
+            sha: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -94,6 +112,8 @@ pub struct UiSettings {
     pub keymap: KeymapConfig,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// Optional columns shown in every Git History pane.
+    pub git_history_columns: GitHistoryColumns,
 }
 
 impl Default for UiSettings {
@@ -116,6 +136,7 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
+            git_history_columns: GitHistoryColumns::default(),
         }
     }
 }
@@ -379,6 +400,11 @@ mod tests {
                 ..KeymapConfig::default()
             },
             appearance: crate::appearance::AppearanceMode::Light,
+            git_history_columns: GitHistoryColumns {
+                author: false,
+                date: true,
+                sha: false,
+            },
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -406,6 +432,11 @@ mod tests {
         assert!(
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
+        );
+        assert_eq!(
+            loaded.git_history_columns,
+            GitHistoryColumns::default(),
+            "pre-column files show the complete History table"
         );
     }
 
