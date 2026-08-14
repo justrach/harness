@@ -256,13 +256,15 @@ pub enum ShortcutId {
     ToggleSidebar,
     ToggleChanges,
     ToggleTerminal,
+    NewSession,
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 3] = [
+    pub const ALL: [ShortcutId; 4] = [
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
+        ShortcutId::NewSession,
     ];
 
     /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
@@ -271,6 +273,7 @@ impl ShortcutId {
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
             ShortcutId::ToggleChanges => "Toggle right sidebar",
             ShortcutId::ToggleTerminal => "Toggle terminal",
+            ShortcutId::NewSession => "New session",
         }
     }
 
@@ -279,6 +282,7 @@ impl ShortcutId {
             ShortcutId::ToggleSidebar => "mod-s",
             ShortcutId::ToggleChanges => "mod-b",
             ShortcutId::ToggleTerminal => "mod-j",
+            ShortcutId::NewSession => "mod-n",
         }
     }
 }
@@ -291,6 +295,7 @@ pub struct KeymapConfig {
     pub toggle_sidebar: String,
     pub toggle_changes: String,
     pub toggle_terminal: String,
+    pub new_session: String,
 }
 
 impl Default for KeymapConfig {
@@ -299,6 +304,7 @@ impl Default for KeymapConfig {
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
+            new_session: ShortcutId::NewSession.default_combo().into(),
         }
     }
 }
@@ -309,6 +315,7 @@ impl KeymapConfig {
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
+            ShortcutId::NewSession => &self.new_session,
         }
     }
 
@@ -317,6 +324,7 @@ impl KeymapConfig {
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
+            ShortcutId::NewSession => self.new_session = combo,
         }
     }
 
