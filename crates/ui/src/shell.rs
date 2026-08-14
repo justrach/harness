@@ -41,8 +41,8 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS, SIDEBAR_DEFAULT,
-    SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    CHAT_PANEL_MIN, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
+    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -195,6 +195,14 @@ impl SettingsSection {
 pub enum Route {
     Chat,
     Settings(SettingsSection),
+}
+
+/// Maximum width the right pane may occupy while retaining the conversation
+/// floor. On unusually small windows this deliberately falls below the right
+/// pane's preferred minimum: the chat remains usable and the side surface
+/// yields the scarce space.
+fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
+    (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
 }
 
 /// One right-pane surface tab (t3code RightPanelSurface, narrowed to our two
@@ -1376,10 +1384,11 @@ impl Shell {
         if !self.right_pane_open(cx) {
             0.0
         } else {
-            // Everything physically available to the right of the sidebar.
-            // Rides the sidebar tween so toggling it remains seamless.
+            // Preserve a usable conversation column while giving everything
+            // else physically available to the right pane. Rides the sidebar
+            // tween so toggling it remains seamless.
             let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-            let available = (self.viewport_width - sidebar_now).max(RIGHT_PANE_MIN);
+            let available = right_pane_max_width(self.viewport_width, sidebar_now);
             if self.right_pane_expanded {
                 available
             } else {
@@ -1714,10 +1723,14 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - f32::from(event.event.position.x);
-        // No arbitrary percentage or pixel ceiling: the pane can consume all
-        // space to the right of the left sidebar. The chat flexes down to zero.
-        let max = (viewport - self.sidebar_target()).max(RIGHT_PANE_MIN);
-        self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max);
+        // No arbitrary percentage ceiling, but retain the chat's usable 300px
+        // floor instead of allowing the conversation to collapse to zero.
+        let max = right_pane_max_width(viewport, self.sidebar_target());
+        self.settings.right_pane_width = if max >= RIGHT_PANE_MIN {
+            width.clamp(RIGHT_PANE_MIN, max)
+        } else {
+            max
+        };
         self.right_tween = None;
         self.schedule_save(cx);
         cx.notify();
@@ -6464,6 +6477,16 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_pane_ceiling_preserves_the_chat_floor() {
+        assert_eq!(right_pane_max_width(1200.0, 256.0), 644.0);
+        assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
+        // The chat floor wins over the right pane's preferred 360px minimum
+        // when the whole window is unusually narrow.
+        assert_eq!(right_pane_max_width(800.0, 256.0), 244.0);
+        assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
+    }
 
     #[tokio::test]
     async fn remote_shutdown_waits_for_ipc_release() {
