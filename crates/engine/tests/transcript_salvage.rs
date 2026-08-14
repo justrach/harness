@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_proto::HarnessId;
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionDoc, SessionMessageEntry};
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_proto::HarnessId;
 
 const CHAT: &str = "chat-salvage";
 
@@ -18,7 +18,12 @@ fn assemble(dir: &std::path::Path) -> EngineCore {
         .expect("engine core assembles")
 }
 
-fn entry(id: &str, role: MessageRole, text: &str, status: Option<MessageStatus>) -> SessionMessageEntry {
+fn entry(
+    id: &str,
+    role: MessageRole,
+    text: &str,
+    status: Option<MessageStatus>,
+) -> SessionMessageEntry {
     SessionMessageEntry {
         id: id.into(),
         role,
@@ -42,10 +47,10 @@ async fn blank_journaled_chat_recovers_entries_from_fat_rollback() {
     // the doc itself never gets a single entry, like a post-loss reopen.
     {
         let core = assemble(&dir);
-        let client = comet_rpc::memory_client(core.rpc_service());
+        let client = zeron_rpc::memory_client(core.rpc_service());
         client
             .call(
-                comet_rpc::methods::MUTATE,
+                zeron_rpc::methods::MUTATE,
                 serde_json::json!({
                     "op": "createChat",
                     "chatId": CHAT,
@@ -68,8 +73,13 @@ async fn blank_journaled_chat_recovers_entries_from_fat_rollback() {
     )
     .unwrap();
     let fat = SessionDoc::init(CHAT).unwrap();
-    fat.push_message(&entry("u-1", MessageRole::User, "the codeword is PINEAPPLE", None))
-        .unwrap();
+    fat.push_message(&entry(
+        "u-1",
+        MessageRole::User,
+        "the codeword is PINEAPPLE",
+        None,
+    ))
+    .unwrap();
     fat.push_message(&entry(
         "a-1",
         MessageRole::Assistant,
@@ -79,7 +89,7 @@ async fn blank_journaled_chat_recovers_entries_from_fat_rollback() {
     .unwrap();
     let fat_bytes = fat.export_snapshot().unwrap();
     {
-        let store = comet_sync::DocsStore::open(&org_dir).unwrap();
+        let store = zeron_sync::DocsStore::open(&org_dir).unwrap();
         store
             .save_snapshot(&format!("{CHAT}.pre-chat2"), &fat_bytes)
             .unwrap();
@@ -120,6 +130,10 @@ async fn blank_journaled_chat_recovers_entries_from_fat_rollback() {
         .ok()
         .and_then(|h| h.doc().read_entries().ok())
         .unwrap_or_default();
-    assert_eq!(after.len(), 2, "salvage duplicated entries on reboot: {after:?}");
+    assert_eq!(
+        after.len(),
+        2,
+        "salvage duplicated entries on reboot: {after:?}"
+    );
     core.shutdown().await;
 }

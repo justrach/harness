@@ -1,5 +1,5 @@
-//! comet-update — release checking and self-update, shared by the engine (the
-//! background checker + `ApplyUpdate`), the CLI (`comet update`), and the UI
+//! zeron-update — release checking and self-update, shared by the engine (the
+//! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
 //! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
@@ -9,7 +9,7 @@
 //! releases published before the manifest existed.
 //!
 //! Install kinds and their update paths:
-//! - **Managed** (`~/.comet-native/app/<ver>` + `current` symlink — the curl|sh
+//! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
 //!   installer): download the headless tarball into a new versioned dir, flip
 //!   the symlink, restart the service. Same flow the installer script performs,
 //!   natively.
@@ -78,16 +78,16 @@ pub fn platform_key() -> (&'static str, &'static str) {
     (os, arch)
 }
 
-/// `comet-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+/// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
 pub fn headless_artifact(version: &str) -> String {
     let (os, arch) = platform_key();
-    format!("comet-{version}-{os}-{arch}.tar.gz")
+    format!("zeron-{version}-{os}-{arch}.tar.gz")
 }
 
-/// `comet-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+/// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
-    format!("comet-{version}-macos-{arch}-app.tar.gz")
+    format!("zeron-{version}-macos-{arch}-app.tar.gz")
 }
 
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
@@ -152,7 +152,7 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
-        .user_agent(concat!("comet/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building http client")
 }
@@ -164,8 +164,8 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
 /// How this binary was installed — decides the update path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
-    /// `~/.comet-native/app/<ver>/comet` behind the `current` symlink
-    /// (curl|sh installer / a previous `comet update`).
+    /// `~/.zeron/app/<ver>/zeron` behind the `current` symlink
+    /// (curl|sh installer / a previous `zeron update`).
     Managed { app_root: PathBuf },
     /// Running out of a macOS `.app` bundle.
     MacApp { bundle: PathBuf },
@@ -184,7 +184,7 @@ pub fn detect_install() -> InstallKind {
 fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
-        let app_root = home.join(".comet-native").join("app");
+        let app_root = home.join(".zeron").join("app");
         if exe.starts_with(&app_root) {
             return InstallKind::Managed { app_root };
         }
@@ -284,7 +284,7 @@ pub async fn stage_headless(
 ) -> anyhow::Result<PathBuf> {
     let version = &manifest.version;
     let dest = app_root.join(version);
-    if dest.join("comet").exists() {
+    if dest.join("zeron").exists() {
         return Ok(dest);
     }
     let file = headless_artifact(version);
@@ -308,13 +308,13 @@ pub async fn stage_headless(
                 "--strip-components=1",
             ],
         )?;
-        if !unpacked.join("comet").is_file() {
-            bail!("tarball {file} did not contain a comet binary");
+        if !unpacked.join("zeron").is_file() {
+            bail!("tarball {file} did not contain a zeron binary");
         }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("comet").exists() => {}
+            Err(_) if dest.join("zeron").exists() => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -332,7 +332,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let target = app_root.join(version);
-        if !target.join("comet").exists() {
+        if !target.join("zeron").exists() {
             bail!("{} is not a staged install", target.display());
         }
         let tmp = app_root.join(format!(".current-{}", std::process::id()));
@@ -348,7 +348,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Restart the installed engine service (the same units `comet daemon` and the
+/// Restart the installed engine service (the same units `zeron daemon` and the
 /// curl|sh installer manage). Called after a symlink swap so the running daemon
 /// picks up the new binary.
 pub fn restart_service() -> anyhow::Result<()> {
@@ -357,10 +357,10 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.comet")],
+            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
         )
     } else {
-        run("systemctl", &["--user", "restart", "comet-native.service"])
+        run("systemctl", &["--user", "restart", "zeron.service"])
     }
 }
 
@@ -368,10 +368,8 @@ pub fn restart_service() -> anyhow::Result<()> {
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Comet.app`
-/// (idempotent). The payload keeps this legacy internal name so installed
-/// Comet builds can update into Zeron without a bootstrap release. Returns the
-/// staged bundle path.
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Zeron.app`
+/// (idempotent). Returns the staged bundle path.
 pub async fn stage_mac_app(
     edge_url: &str,
     manifest: &Manifest,
@@ -379,8 +377,8 @@ pub async fn stage_mac_app(
 ) -> anyhow::Result<PathBuf> {
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
-    let staged = dir.join("Comet.app");
-    if staged.join("Contents/MacOS/comet").exists() {
+    let staged = dir.join("Zeron.app");
+    if staged.join("Contents/MacOS/zeron").exists() {
         return Ok(staged);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -398,8 +396,8 @@ pub async fn stage_mac_app(
         ],
     )?;
     std::fs::remove_file(&tarball).ok();
-    if !staged.join("Contents/MacOS/comet").exists() {
-        bail!("app tarball {file} did not contain Comet.app");
+    if !staged.join("Contents/MacOS/zeron").exists() {
+        bail!("app tarball {file} did not contain Zeron.app");
     }
     Ok(staged)
 }
@@ -493,9 +491,9 @@ impl UpdateStatus {
     }
 }
 
-/// `COMET_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
+/// `ZERON_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
 fn auto_update_enabled() -> bool {
-    std::env::var("COMET_AUTO_UPDATE")
+    std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
 }
@@ -506,7 +504,7 @@ pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Background release checker: polls `{edge}/releases` on a 6h cadence and
 /// publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
-/// stream). Managed installs with `COMET_AUTO_UPDATE` set stage + apply + service
+/// stream). Managed installs with `ZERON_AUTO_UPDATE` set stage + apply + service
 /// restart on their own — but only in a quiet window: while `quiescent` reports
 /// activity, the apply defers and re-probes every [`IDLE_RECHECK`].
 #[derive(Clone)]
@@ -724,30 +722,30 @@ mod tests {
     fn install_kind_detection() {
         assert_eq!(
             detect_install_from(
-                Path::new("/home/u/.comet-native/app/0.1.1/comet"),
+                Path::new("/home/u/.zeron/app/0.1.1/zeron"),
                 Some(Path::new("/home/u")),
             ),
             InstallKind::Managed {
-                app_root: PathBuf::from("/home/u/.comet-native/app")
+                app_root: PathBuf::from("/home/u/.zeron/app")
             }
         );
         assert_eq!(
             detect_install_from(
-                Path::new("/Applications/Comet.app/Contents/MacOS/comet"),
+                Path::new("/Applications/Zeron.app/Contents/MacOS/zeron"),
                 Some(Path::new("/Users/u")),
             ),
             InstallKind::MacApp {
-                bundle: PathBuf::from("/Applications/Comet.app")
+                bundle: PathBuf::from("/Applications/Zeron.app")
             }
         );
         // A path merely containing `.app` without the bundle layout is not a bundle.
         assert_eq!(
-            detect_install_from(Path::new("/tmp/foo.app/comet"), None),
+            detect_install_from(Path::new("/tmp/foo.app/zeron"), None),
             InstallKind::Unmanaged
         );
         assert_eq!(
             detect_install_from(
-                Path::new("/src/target/release/comet"),
+                Path::new("/src/target/release/zeron"),
                 Some(Path::new("/home/u"))
             ),
             InstallKind::Unmanaged
@@ -757,10 +755,10 @@ mod tests {
     #[test]
     fn artifact_names_match_packaging() {
         let (os, arch) = platform_key();
-        assert!(headless_artifact("0.2.0").starts_with("comet-0.2.0-"));
+        assert!(headless_artifact("0.2.0").starts_with("zeron-0.2.0-"));
         assert_eq!(
             headless_artifact("0.2.0"),
-            format!("comet-0.2.0-{os}-{arch}.tar.gz")
+            format!("zeron-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
     }
@@ -768,12 +766,12 @@ mod tests {
     #[test]
     fn manifest_parses_with_and_without_files() {
         let full: Manifest = serde_json::from_str(
-            r#"{"version":"0.1.1","files":{"comet-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+            r#"{"version":"0.1.1","files":{"zeron-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
         )
         .unwrap();
         assert_eq!(full.version, "0.1.1");
         assert_eq!(
-            full.files["comet-0.1.1-linux-x86_64.tar.gz"]
+            full.files["zeron-0.1.1-linux-x86_64.tar.gz"]
                 .sha256
                 .as_deref(),
             Some("abc")
@@ -789,7 +787,7 @@ mod tests {
         let app_root = tmp.path().join("app");
         for ver in ["0.1.0", "0.1.1"] {
             std::fs::create_dir_all(app_root.join(ver)).unwrap();
-            std::fs::write(app_root.join(ver).join("comet"), ver).unwrap();
+            std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
         }
         apply_headless(&app_root, "0.1.0").unwrap();
         assert_eq!(

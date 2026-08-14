@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::sync::{Arc, Barrier, Mutex};
 
-use comet_engine::{
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use zeron_engine::{
     AuthState, Engine, EngineConfig, EngineCore, EngineProfile, HarnessId, WorkspaceScope,
     default_registry,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 fn config(
     data_dir: &Path,

@@ -1,9 +1,9 @@
 //! Uploads — attachment staging + the content-addressed edge mirror
-//! (feature-inventory §3.7 "Uploads"; port of comet's `uploads.ts`).
+//! (feature-inventory §3.7 "Uploads"; port of zeron's `uploads.ts`).
 //!
 //! The UI streams a file as base64 chunks (~60KB, sized for the relay when the
 //! target device is remote); chunks stage on disk under `{uploads_root}/tmp/
-//! {uploadId}/{seq}.b64` (surviving an engine restart mid-upload, unlike comet's
+//! {uploadId}/{seq}.b64` (surviving an engine restart mid-upload, unlike zeron's
 //! in-memory buffers), and `commit` assembles them into
 //! `{uploads_root}/{id8}-{name}` and returns the absolute path, which the
 //! composer appends to the prompt so the agent can read the file from disk.
@@ -20,7 +20,7 @@
 //! `read_chunk` serves transcript images back in 45KB base64 chunks. Path jail:
 //! only files under the uploads dir or a workspace-known chat cwd are readable
 //! (the RPC layer supplies the cwd roots) — and only supported image types, as
-//! in comet.
+//! in zeron.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl comet_rpc::TokenSource for RecoveringToken {
+    impl zeron_rpc::TokenSource for RecoveringToken {
         async fn token(&self) -> Option<String> {
             self.value.lock().unwrap().clone()
         }

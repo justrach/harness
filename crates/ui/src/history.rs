@@ -7,13 +7,13 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::DateTime;
-use comet_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
-use comet_rpc::methods;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, ListAlignment, ListState,
     PathBuilder, Render, SharedString, Subscription, Task, Window, canvas, container_query, div,
     list, point, prelude::*, px,
 };
+use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
+use zeron_rpc::methods;
 
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -682,7 +682,7 @@ impl GitHistory {
                 history.loading = false;
                 match result.and_then(|value| {
                     serde_json::from_value::<GitHistoryPage>(value)
-                        .map_err(|error| comet_rpc::RpcError::Failed(error.to_string()))
+                        .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))
                 }) {
                     Ok(page) => {
                         let old_commit_count = history.commits.len();

@@ -1,4 +1,4 @@
-//! Blanket dropped-reply settle (`COMET_ACP_QUIET_SETTLE_MS`), tested with
+//! Blanket dropped-reply settle (`ZERON_ACP_QUIET_SETTLE_MS`), tested with
 //! the GROK spec so no adapter-specific evidence (Claude's cost frame,
 //! `noRunningTurn` steering reasons) is in play — this is the path every ACP
 //! agent gets. Own test binary: the env knob is process-global, and every
@@ -11,10 +11,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use comet_harness::{
-    AcpHarness, CancellationToken, Harness, RunControls, SteerMessage,
-};
-use comet_proto::{
+use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_proto::{
     AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
 };
 
@@ -25,7 +23,7 @@ fn init_env() {
     ONCE.call_once(|| {
         // SAFETY: set before any harness runs in this test process; all
         // tests in this binary share the one value.
-        unsafe { std::env::set_var("COMET_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
+        unsafe { std::env::set_var("ZERON_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
     });
 }
 
@@ -86,7 +84,10 @@ async fn run_and_collect(
 ) -> Vec<(std::time::Instant, AgentEvent)> {
     let (controls, _steer, _token) = controls();
     let harness = harness.with_executable(fixture_path());
-    let stream = harness.run(request(prompt), controls).await.expect("run starts");
+    let stream = harness
+        .run(request(prompt), controls)
+        .await
+        .expect("run starts");
     tokio::time::timeout(timeout, async move {
         let mut stream = stream;
         let mut events = Vec::new();
@@ -116,9 +117,17 @@ fn dones(events: &[(std::time::Instant, AgentEvent)]) -> Vec<(DoneStatus, Option
 async fn generic_dropped_reply_settles_off_the_quiet_window() {
     init_env();
     let started = std::time::Instant::now();
-    let events =
-        run_and_collect(AcpHarness::grok(), "scenario:quiet-starve", Duration::from_secs(20)).await;
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)], "{events:?}");
+    let events = run_and_collect(
+        AcpHarness::grok(),
+        "scenario:quiet-starve",
+        Duration::from_secs(20),
+    )
+    .await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
     let done_at = events
         .iter()
         .find(|(_, e)| matches!(e, AgentEvent::Done { .. }))
@@ -146,7 +155,11 @@ async fn open_tool_call_holds_the_quiet_settle_off() {
         Duration::from_secs(20),
     )
     .await;
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)], "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
     // The "finished" text (streamed after the quiet stretch) must precede
     // the single Done — a premature settle would have flipped that order.
     let finished = events
@@ -181,7 +194,11 @@ async fn claude_thinking_silence_never_settles_the_turn() {
         Duration::from_secs(20),
     )
     .await;
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)], "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
     // The "finished" text (streamed after the 4s quiet stretch, ~3x the
     // window) must precede the single Done — a false settle flips the order.
     let finished = events

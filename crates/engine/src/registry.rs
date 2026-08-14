@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use comet_harness::{Harness, HarnessError, mock::MockHarness};
-use comet_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use zeron_harness::{Harness, HarnessError, mock::MockHarness};
+use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,12 +277,12 @@ impl HarnessRegistry {
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus a lazy
-/// `claude-code` slot resolved through `comet_harness` on first use (subprocess
+/// `claude-code` slot resolved through `zeron_harness` on first use (subprocess
 /// discovery only happens when a run/model call actually needs it).
 pub fn default_registry() -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
-    comet_harness::shell_env::prewarm();
+    zeron_harness::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness {
         script: vec![
@@ -294,7 +294,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-1".into(),
-                call: comet_proto::ToolCall::Exec {
+                call: zeron_proto::ToolCall::Exec {
                     command: "cargo test --workspace".into(),
                 },
             },
@@ -306,7 +306,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
-                call: comet_proto::ToolCall::Exec {
+                call: zeron_proto::ToolCall::Exec {
                     command: "git log -5 --oneline --decorate && git merge-base HEAD origin/main"
                         .into(),
                 },
@@ -346,14 +346,14 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::claude().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::claude()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::claude().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::claude()) as Arc<dyn Harness>)),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
     // catalog entry) — "Codex" per the original HARNESS_LABEL, StepBoundary
     // steering via native `turn/steer`, and the unified reasoning ladder from
-    // comet_harness::codex::catalog. CLI discovery only happens when a
+    // zeron_harness::codex::catalog. CLI discovery only happens when a
     // run/model call actually resolves the slot.
     registry.register_lazy(
         HarnessDescriptor {
@@ -373,8 +373,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::codex().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::codex()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::codex().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::codex()) as Arc<dyn Harness>)),
     );
     // Cursor Agent over ACP (`cursor-agent acp`), same lazy pattern: the
     // static descriptor mirrors AcpHarness::cursor() exactly. No steering
@@ -390,8 +390,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::cursor().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::cursor()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::cursor().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::cursor()) as Arc<dyn Harness>)),
     );
     // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
     // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
@@ -411,8 +411,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::grok().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::grok().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
     );
     // Hermes Agent over ACP (`hermes acp`), same lazy pattern: the static
     // descriptor mirrors AcpHarness::hermes() exactly. No steering extension
@@ -428,8 +428,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::hermes().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
     // pi over ACP (community `pi-acp` adapter), same lazy pattern: the static
     // descriptor mirrors AcpHarness::pi() exactly — turn-boundary steering,
@@ -451,8 +451,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| comet_harness::AcpHarness::pi().installed()),
-        Box::new(|| Ok(Arc::new(comet_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::AcpHarness::pi().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
     );
     registry
 }

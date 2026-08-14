@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use comet_proto::Space;
+use zeron_proto::Space;
 
 use crate::repos::Repos;
 use crate::workspace_host::WorkspaceHost;

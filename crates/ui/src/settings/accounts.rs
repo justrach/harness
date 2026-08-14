@@ -2,7 +2,7 @@
 //! (Claude Code, Codex) with account rows — email, plan badge, Active, usage
 //! meters (indigo → amber ≥80% → red ≥95%, reset time), Switch / Forget — plus
 //! the add-account dialogs (paste-code and browser-poll flows) and
-//! account-shaped loading skeletons. Comet retargets devices from the settings
+//! account-shaped loading skeletons. Zeron retargets devices from the settings
 //! sidebar (`targetDeviceId` passthrough kept plumbed, unused single-device).
 //!
 //! The accounts RPC surface is being implemented engine-side in parallel —
@@ -16,11 +16,11 @@ use gpui::{
 };
 use std::time::Duration;
 
-use comet_proto::{
+use zeron_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
     AgentLoginStatus, HarnessId,
 };
-use comet_rpc::methods;
+use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
@@ -96,7 +96,7 @@ pub fn force_usage_for(trigger: LoadTrigger) -> bool {
     }
 }
 
-/// Compact absolute reset moment (comet settings.agents.tsx `formatReset`):
+/// Compact absolute reset moment (zeron settings.agents.tsx `formatReset`):
 /// a local clock time ("3:45 PM") when it lands within ~22h, else a short
 /// weekday ("Mon"); the caller prefixes "resets ". Pure given `now`.
 pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<String> {
@@ -111,7 +111,7 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
 }
 
 /// The provider cards, in display order: (harness, name, CLI command — named
-/// in the empty-state copy, comet settings.agents.tsx `PROVIDERS`).
+/// in the empty-state copy, zeron settings.agents.tsx `PROVIDERS`).
 pub const PROVIDERS: [(HarnessId, &str, &str); 2] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
@@ -155,7 +155,7 @@ enum LoginFlow {
 }
 
 impl LoginFlow {
-    /// Dialog title (comet: "Add Claude account" / "Add Codex account").
+    /// Dialog title (zeron: "Add Claude account" / "Add Codex account").
     fn title(&self) -> &'static str {
         let harness = match self {
             LoginFlow::Starting { harness }
@@ -172,7 +172,7 @@ impl LoginFlow {
 pub struct AccountsPage {
     state: Entity<AppState>,
     /// Which device's logins are shown; `None` = this device (no passthrough).
-    /// Retargeted by the page-header device switcher (comet parity: the
+    /// Retargeted by the page-header device switcher (zeron parity: the
     /// accounts RPCs are relay-forwardable, CLI logins are per-device).
     target_device: Option<String>,
     device_menu: popover::Popup<()>,
@@ -257,7 +257,7 @@ impl AccountsPage {
         value
     }
 
-    /// The page-header device switcher (comet device-switcher.tsx): a quiet
+    /// The page-header device switcher (zeron device-switcher.tsx): a quiet
     /// trigger — platform glyph · name · presence dot · sort glyph — opening a
     /// dropdown of every registered device. Selecting one retargets the page.
     fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -266,7 +266,7 @@ impl AccountsPage {
             let s = self.state.read(cx);
             (s.devices.clone(), s.local_device_id.clone())
         };
-        // Stable row order (registration time, then id) — comet's switcher
+        // Stable row order (registration time, then id) — zeron's switcher
         // sorts the same way so rows never reshuffle on heartbeats.
         devices.sort_by(|a, b| {
             a.created_at
@@ -411,7 +411,11 @@ impl AccountsPage {
                         )
                 }))
                 .into_any_element();
-            trigger = trigger.child(popover::anchored_menu("accounts-device-menu", menu, closing));
+            trigger = trigger.child(popover::anchored_menu(
+                "accounts-device-menu",
+                menu,
+                closing,
+            ));
         }
         trigger.into_any_element()
     }
@@ -493,7 +497,7 @@ impl AccountsPage {
             this.update(cx, |page, cx| {
                 match result.and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
-                        .map_err(|e| comet_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| zeron_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(start) => {
                         cx.open_url(&start.url);
@@ -674,12 +678,12 @@ impl AccountsPage {
 
     // ---- render pieces ----
 
-    /// One usage window (comet settings.agents.tsx `UsageMeter`): label ·
+    /// One usage window (zeron settings.agents.tsx `UsageMeter`): label ·
     /// 5px rounded-full bar (indigo → amber ≥80% → red ≥95%) · "NN% used" ·
     /// quiet reset time.
     fn render_usage_meter(
         &self,
-        window: &comet_proto::AgentUsageWindow,
+        window: &zeron_proto::AgentUsageWindow,
         theme: &Theme,
         now: DateTime<Utc>,
     ) -> AnyElement {
@@ -718,7 +722,7 @@ impl AccountsPage {
                             div()
                                 .h_full()
                                 // A 1.5% floor keeps tiny non-zero usage
-                                // visible (comet `max(used, 1.5)%`).
+                                // visible (zeron `max(used, 1.5)%`).
                                 .w(gpui::relative(fraction.max(0.015)))
                                 .rounded_full()
                                 .bg(fill),
@@ -747,7 +751,7 @@ impl AccountsPage {
             .into_any_element()
     }
 
-    /// One account row (comet settings.agents.tsx `AccountRow`): initial
+    /// One account row (zeron settings.agents.tsx `AccountRow`): initial
     /// avatar, email + usage meters left; badges over the Switch/Forget
     /// actions right-anchored.
     fn render_account_row(
@@ -788,7 +792,7 @@ impl AccountsPage {
                 el.child(widgets::badge(theme, plan))
             });
 
-        // Actions only on INACTIVE accounts (comet `{!account.active && …}`):
+        // Actions only on INACTIVE accounts (zeron `{!account.active && …}`):
         // an icon-only Forget (trash, hover → foreground) then Switch, which
         // reads "Switching…" while the activate round-trips.
         let actions: Option<gpui::Div> = (!account.active).then(|| {
@@ -874,7 +878,7 @@ impl AccountsPage {
                     .child(widgets::row_title(theme, email))
                     .map(|el| {
                         // Meters XOR the quiet fallback line — never both
-                        // (comet: `usage ? meters : "Usage unavailable"…`).
+                        // (zeron: `usage ? meters : "Usage unavailable"…`).
                         if account.usage_windows.is_empty() {
                             el.child(
                                 div()
@@ -926,7 +930,7 @@ impl AccountsPage {
         let url_link =
             |id: &'static str, label: &'static str, url: &str, cx: &mut Context<Self>| {
                 let open_url = url.to_string();
-                // "Reopen the …" text link (comet: `text-[12px]
+                // "Reopen the …" text link (zeron: `text-[12px]
                 // text-muted-foreground/60 hover:underline`).
                 div()
                     .id(id)
@@ -1095,7 +1099,7 @@ impl AccountsPage {
         Some(popover::modal("add-account-dialog", viewport, card))
     }
 
-    /// A ghost account row (comet settings.agents.tsx `SkeletonRow`): avatar,
+    /// A ghost account row (zeron settings.agents.tsx `SkeletonRow`): avatar,
     /// email line, two usage-meter ghosts, a badge — same geometry as the real
     /// row so loaded data lands without a layout jump. `dim` fades row two.
     fn render_skeleton_row(
@@ -1107,7 +1111,7 @@ impl AccountsPage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::motion;
-        let delta = motion::pulse_delta(&motion::COMET_PULSE, cx.entity_id(), cx);
+        let delta = motion::pulse_delta(&motion::ZERON_PULSE, cx.entity_id(), cx);
         let ghost = |w: gpui::Length, h: f32, round_full: bool| {
             div()
                 .w(w)
@@ -1204,7 +1208,7 @@ impl Render for AccountsPage {
                 Some(crate::icons::claude_brand()),
             ),
         };
-        // Brand mark inside a 24px centered box (comet: `grid size-6
+        // Brand mark inside a 24px centered box (zeron: `grid size-6
         // place-items-center [&_svg]:size-4`).
         let provider_mark = |harness: HarnessId, theme: &Theme| {
             let (mark, tint) = provider_icon(harness);
@@ -1221,7 +1225,7 @@ impl Render for AccountsPage {
                 )
         };
 
-        // One section per provider (comet settings.agents.tsx `ProviderSection`):
+        // One section per provider (zeron settings.agents.tsx `ProviderSection`):
         // brand header + Add account, then the account rows card.
         let sections: Vec<AnyElement> = match &self.snapshot {
             Loadable::Idle | Loadable::Loading => PROVIDERS
@@ -1299,7 +1303,7 @@ impl Render for AccountsPage {
                     .into_iter()
                     .map(|(harness, name, cli)| {
                         let accounts = provider_accounts(&snapshot, harness);
-                        // EVERY warning renders its own strip (comet maps them).
+                        // EVERY warning renders its own strip (zeron maps them).
                         let warnings: Vec<String> = snapshot
                             .warnings
                             .iter()
@@ -1393,7 +1397,7 @@ impl Render for AccountsPage {
                             .child(div().flex_1())
                             .child(
                                 // `text-[12.5px]` + leading 16px Refresh icon,
-                                // dimmed while a refresh is in flight (comet
+                                // dimmed while a refresh is in flight (zeron
                                 // `disabled:opacity-50`).
                                 widgets::ghost_action(&theme)
                                     .id("accounts-refresh")
@@ -1415,7 +1419,7 @@ impl Render for AccountsPage {
                     )
                     .child(widgets::page_subtitle(
                         &theme,
-                        "The Claude Code and Codex logins on this device. Comet detects the \
+                        "The Claude Code and Codex logins on this device. Zeron detects the \
                          live session, keeps each account backed up, and can swap between \
                          them.",
                     ))
@@ -1431,7 +1435,7 @@ impl Render for AccountsPage {
                         )
                     })
                     .children(sections)
-                    // Footer note (comet: `mt-6 text-[12px] leading-relaxed
+                    // Footer note (zeron: `mt-6 text-[12px] leading-relaxed
                     // text-muted-foreground/60`).
                     .child(
                         div()
@@ -1472,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_thresholds_match_comet() {
+    fn usage_thresholds_match_zeron() {
         assert_eq!(usage_level(0.0), UsageLevel::Normal);
         assert_eq!(usage_level(0.79), UsageLevel::Normal);
         assert_eq!(usage_level(0.80), UsageLevel::Warn);

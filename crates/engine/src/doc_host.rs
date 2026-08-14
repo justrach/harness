@@ -1,7 +1,7 @@
 //! DocHost — per-chat `SessionDoc` handles: snapshot persistence (debounced), edge room
 //! sync (offline-tolerant), and the HOST-ONLY durable command executor.
 //!
-//! Pragmatic port of comet's `session-docs.ts` + the `main.ts` executor (spec:
+//! Pragmatic port of zeron's `session-docs.ts` + the `main.ts` executor (spec:
 //! feature-inventory §3.3, ARCHITECTURE §2 "command plane"):
 //! - the doc IS the outbox: commands and user entries commit locally and sync whenever a
 //!   room connection exists; the engine is fully functional with sync disabled;
@@ -24,14 +24,14 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use comet_doc::{
+use zeron_doc::{
     COMMAND_DEFAULT_TTL_MS, CommandBasedOn, CommandDisposition, DocError, EvaluationContext,
     MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
     SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
     join_continuation_entries,
 };
-use comet_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
-use comet_sync::{DocsStore, RoomClient};
+use zeron_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
+use zeron_sync::{DocsStore, RoomClient};
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
@@ -41,7 +41,7 @@ use crate::{EngineError, new_id, now_ms};
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 
 /// Warm-doc LRU: how many unwatched, run-less docs stay fully open. Everything
-/// beyond this (and beyond [`comet_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
+/// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
 /// oldest-access-first — reopening from the SQLite snapshot measured within
 /// ~11ms of a warm doc, so the cap trades no perceptible open latency.
 const WARM_DOC_CAP: usize = 12;
@@ -64,14 +64,14 @@ const EVICT_MIN_IDLE_MS: i64 = 30_000;
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
 /// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
 /// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
-/// (which never expire) ride the same seam as a [`comet_rpc::StaticToken`].
+/// (which never expire) ride the same seam as a [`zeron_rpc::StaticToken`].
 #[derive(Clone)]
 pub struct EdgeConfig {
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
     pub url: String,
     /// Fresh-bearer provider (the relay's `TokenSource`), consulted per
     /// connect/request. `None` from the provider = signed out.
-    pub token: Arc<dyn comet_rpc::TokenSource>,
+    pub token: Arc<dyn zeron_rpc::TokenSource>,
     /// This engine's device id, carried on room dials (`&device=`) so the
     /// edge can attribute sockets in logs. Debugging the 2026-08-04 deaf
     /// socket meant reverse-engineering devices from rotating IPv6 privacy
@@ -89,7 +89,7 @@ impl std::fmt::Debug for EdgeConfig {
 }
 
 impl EdgeConfig {
-    pub fn new(url: impl Into<String>, token: Arc<dyn comet_rpc::TokenSource>) -> Self {
+    pub fn new(url: impl Into<String>, token: Arc<dyn zeron_rpc::TokenSource>) -> Self {
         Self {
             url: url.into(),
             token,
@@ -105,7 +105,7 @@ impl EdgeConfig {
 
     /// Fixed bearer — dev mode and tests, where tokens never expire.
     pub fn with_static_token(url: impl Into<String>, token: impl Into<String>) -> Self {
-        Self::new(url, Arc::new(comet_rpc::StaticToken(token.into())))
+        Self::new(url, Arc::new(zeron_rpc::StaticToken(token.into())))
     }
 
     /// The current bearer, refreshed by the provider if stale. `None` = signed out.
@@ -120,7 +120,7 @@ impl EdgeConfig {
     /// A per-dial room URL provider for `path` (e.g. `/session/{chatId}/ws`):
     /// the bearer is re-fetched before every connect, so reconnects after a
     /// token expiry present a fresh `?token=` instead of the boot-time one.
-    pub fn room_url(&self, path: impl Into<String>) -> Arc<dyn comet_sync::UrlProvider> {
+    pub fn room_url(&self, path: impl Into<String>) -> Arc<dyn zeron_sync::UrlProvider> {
         let ws_base = self.url.replacen("http", "ws", 1);
         Arc::new(EdgeRoomUrl {
             base: format!("{}{}", ws_base.trim_end_matches('/'), path.into()),
@@ -132,18 +132,18 @@ impl EdgeConfig {
 
 struct EdgeRoomUrl {
     base: String,
-    token: Arc<dyn comet_rpc::TokenSource>,
+    token: Arc<dyn zeron_rpc::TokenSource>,
     device_id: String,
 }
 
-impl comet_sync::UrlProvider for EdgeRoomUrl {
-    fn url(&self) -> futures::future::BoxFuture<'static, Result<String, comet_sync::SyncError>> {
+impl zeron_sync::UrlProvider for EdgeRoomUrl {
+    fn url(&self) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
         let token = self.token.clone();
         let base = self.base.clone();
         let device = self.device_id.clone();
         Box::pin(async move {
             let token = token.token().await.ok_or_else(|| {
-                comet_sync::SyncError::Auth("no access token (signed out)".into())
+                zeron_sync::SyncError::Auth("no access token (signed out)".into())
             })?;
             let mut url = format!("{base}?token={token}");
             if !device.is_empty() {
@@ -233,7 +233,7 @@ pub struct ChatDocHandle {
     retired: AtomicBool,
     /// chat2 relay client (docs/chat2-sync.md C3) — populated instead of
     /// `room` when the registry names roomGen 2 for this chat.
-    chat2: Mutex<Option<comet_sync::ChatClient>>,
+    chat2: Mutex<Option<zeron_sync::ChatClient>>,
     /// Local commits made before the relay connects (the dial can take up
     /// to a minute; offline, forever): buffered here by the subscription
     /// below and drained into the client on join (review B3 — a user
@@ -320,7 +320,7 @@ impl ChatDocHandle {
 
     /// Recovery sweep: stamp this device's abandoned `streaming` entries `aborted`, appending
     /// `note` as a visible error part so the transcript says WHY the turn
-    /// ended (comet folded "Run interrupted by backend restart" the same
+    /// ended (zeron folded "Run interrupted by backend restart" the same
     /// way). Returns the stamped entries' `(id, created_at)` — recovery uses
     /// them for the resume-freshness check.
     pub fn mark_abandoned_streams(&self, note: &str) -> Result<Vec<(String, i64)>, DocError> {
@@ -514,7 +514,7 @@ impl DocHost {
                     return; // edge-less engine: nothing to migrate onto
                 };
                 let Some(ws) = host.workspace() else { continue };
-                let chats: Vec<comet_proto::Chat> = ws.watch_chats().borrow().clone();
+                let chats: Vec<zeron_proto::Chat> = ws.watch_chats().borrow().clone();
                 let device = host.inner.config.device_id.clone();
                 let now = now_ms();
                 let candidate = chats.into_iter().find(|c| {
@@ -557,7 +557,7 @@ impl DocHost {
     /// the chat2 adopt path. A handle with a LIVE local writer (a running
     /// turn's doc ref) is left alone — the host never flips mid-run, and a
     /// racing writer must never lose its doc out from under it.
-    fn spawn_cutover_watcher(&self, mut chats: watch::Receiver<Vec<comet_proto::Chat>>) {
+    fn spawn_cutover_watcher(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
         let host = self.clone();
         self.spawn_worker(async move {
             loop {
@@ -859,20 +859,22 @@ impl DocHost {
                 // pending buffer the join drains — nothing composed during
                 // (or before) the dial is lost to the room.
                 let weak_push = Arc::downgrade(&handle);
-                let sub = doc.doc().subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
-                    if let Some(handle) = weak_push.upgrade() {
-                        // The buffer push happens WHILE HOLDING the client
-                        // lock (verify pass: releasing it between the None
-                        // check and the push let the join's store+drain
-                        // slip between, orphaning the update forever).
-                        let client_guard = lock(&handle.chat2);
-                        match &*client_guard {
-                            Some(client) => client.enqueue_update(bytes.clone()),
-                            None => lock(&handle.chat2_pending_local).push(bytes.clone()),
+                let sub = doc
+                    .doc()
+                    .subscribe_local_update(Box::new(move |bytes: &Vec<u8>| {
+                        if let Some(handle) = weak_push.upgrade() {
+                            // The buffer push happens WHILE HOLDING the client
+                            // lock (verify pass: releasing it between the None
+                            // check and the push let the join's store+drain
+                            // slip between, orphaning the update forever).
+                            let client_guard = lock(&handle.chat2);
+                            match &*client_guard {
+                                Some(client) => client.enqueue_update(bytes.clone()),
+                                None => lock(&handle.chat2_pending_local).push(bytes.clone()),
+                            }
                         }
-                    }
-                    true
-                }));
+                        true
+                    }));
                 *lock(&handle.chat2_local_sub) = Some(sub);
                 // Re-queue survives the adopt: our own pending commands
                 // become fresh entries in the new lineage (the
@@ -957,7 +959,7 @@ impl DocHost {
             let edge = edge.clone();
             let mut token_changes = edge.token_changes();
             self.spawn_worker(async move {
-                let mut wake = comet_sync::wake::subscribe();
+                let mut wake = zeron_sync::wake::subscribe();
                 let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
                 loop {
                     if weak.upgrade().is_none() {
@@ -1065,7 +1067,7 @@ impl DocHost {
                 chat.clone(),
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
-            let mut wake = comet_sync::wake::subscribe();
+            let mut wake = zeron_sync::wake::subscribe();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
@@ -1073,7 +1075,7 @@ impl DocHost {
                 }
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    comet_sync::ChatClient::connect_via(
+                    zeron_sync::ChatClient::connect_via(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
@@ -1147,7 +1149,7 @@ impl DocHost {
                             let weak = weak.clone();
                             let chat = chat.clone();
                             host.clone().spawn_worker(async move {
-                                use comet_sync::chat_client::ChatEvent;
+                                use zeron_sync::chat_client::ChatEvent;
                                 loop {
                                     match events.recv().await {
                                         Ok(ChatEvent::ServerReset) => {
@@ -1324,7 +1326,7 @@ impl DocHost {
     ) -> Result<(), String> {
         use base64::Engine as _;
         let vv_at_rebuild = doc.doc().oplog_vv().encode();
-        let rebuilt = comet_doc::rebuild::rebuild_thin_doc(&doc).map_err(|e| e.to_string())?;
+        let rebuilt = zeron_doc::rebuild::rebuild_thin_doc(&doc).map_err(|e| e.to_string())?;
         // The seed's own doc ref must be gone before the pinned re-check
         // below: `pinned` reads `Arc::strong_count(&handle.doc) > 1`, and
         // holding this clone made that true unconditionally — every seed
@@ -1393,12 +1395,7 @@ impl DocHost {
         }
         self.inner
             .store
-            .save_snapshot_with_cursor(
-                chat_id,
-                &snapshot,
-                0,
-                crate::chat2_host::CHAT2_DOC_EPOCH,
-            )
+            .save_snapshot_with_cursor(chat_id, &snapshot, 0, crate::chat2_host::CHAT2_DOC_EPOCH)
             .map_err(|e| e.to_string())?;
         // Registry flip LAST — the cutover signal every device dials by.
         let flipped = self
@@ -1453,7 +1450,7 @@ impl DocHost {
             // Let boot settle (registry load, room joins) before sweeping.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let Some(ws) = host.workspace() else { return };
-            let chats: Vec<comet_proto::Chat> = ws.watch_chats().borrow().clone();
+            let chats: Vec<zeron_proto::Chat> = ws.watch_chats().borrow().clone();
             for chat in chats {
                 if chat.device_id != host.inner.config.device_id {
                     continue; // only the host owns its chats' history
@@ -1477,7 +1474,12 @@ impl DocHost {
 
     async fn salvage_chat_transcript(&self, chat_id: &str) -> Result<(), String> {
         let handle = self.open(chat_id).map_err(|e| e.to_string())?;
-        if !handle.doc().read_entries().map_err(|e| e.to_string())?.is_empty() {
+        if !handle
+            .doc()
+            .read_entries()
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
             return Ok(()); // transcript present — nothing lost
         }
         // Fat source 1: the M3 adopt's rollback copy on disk.
@@ -1496,7 +1498,7 @@ impl DocHost {
         // Thin before appending (docs/chat2-sync.md A2): full outputs are
         // parked, exactly like a seed — they survive in the rollback copy
         // saved below and the run journal.
-        let rebuilt = comet_doc::rebuild::rebuild_thin_doc(&fat).map_err(|e| e.to_string())?;
+        let rebuilt = zeron_doc::rebuild::rebuild_thin_doc(&fat).map_err(|e| e.to_string())?;
         let entries = rebuilt.doc.read_entries().map_err(|e| e.to_string())?;
         if entries.is_empty() {
             return Ok(());
@@ -1506,11 +1508,19 @@ impl DocHost {
         }
         // Re-check emptiness at the last instant: a run that started during
         // the room fetch must not get history interleaved under it.
-        if !handle.doc().read_entries().map_err(|e| e.to_string())?.is_empty() {
+        if !handle
+            .doc()
+            .read_entries()
+            .map_err(|e| e.to_string())?
+            .is_empty()
+        {
             return Err("doc gained entries mid-salvage; aborted".into());
         }
         for entry in &entries {
-            handle.doc().push_message(entry).map_err(|e| e.to_string())?;
+            handle
+                .doc()
+                .push_message(entry)
+                .map_err(|e| e.to_string())?;
         }
         tracing::info!(chat = %chat_id, entries = entries.len(),
             "transcript salvaged into chat2 lineage");
@@ -1573,17 +1583,17 @@ impl DocHost {
         };
         let chat_id = handle.chat_id.clone();
         // Tail publish: cheap, every quiesce tick.
-        if let Ok(tail) = comet_doc::materialize_tail(
-            &handle.doc,
-            now_ms(),
-            comet_doc::TAIL_MESSAGE_COUNT,
-        ) && let Ok(body) = serde_json::to_vec(&tail)
+        if let Ok(tail) =
+            zeron_doc::materialize_tail(&handle.doc, now_ms(), zeron_doc::TAIL_MESSAGE_COUNT)
+            && let Ok(body) = serde_json::to_vec(&tail)
         {
             let http = self.inner.http.clone();
             let edge_tail = edge.clone();
             let chat = chat_id.clone();
             self.spawn_worker(async move {
-                let Some(bearer) = edge_tail.bearer().await else { return };
+                let Some(bearer) = edge_tail.bearer().await else {
+                    return;
+                };
                 let url = format!(
                     "{}/chat2/{}/tail",
                     edge_tail.url.trim_end_matches('/'),
@@ -1714,7 +1724,7 @@ impl DocHost {
                         .sum::<usize>(),
                 )
             };
-            if count <= WARM_DOC_CAP && estimate <= comet_doc::DOC_LRU_BYTE_BUDGET {
+            if count <= WARM_DOC_CAP && estimate <= zeron_doc::DOC_LRU_BYTE_BUDGET {
                 return;
             }
             let evicted = {
@@ -1798,12 +1808,12 @@ impl DocHost {
         }
     }
 
-    /// Per-open-chat room introspection for SyncStatus / `comet sync`.
+    /// Per-open-chat room introspection for SyncStatus / `zeron sync`.
     /// `None` room = still dialing (join retry loop) or edge-less.
-    pub fn sync_statuses(&self) -> Vec<(String, Option<comet_sync::RoomStatsSnapshot>)> {
+    pub fn sync_statuses(&self) -> Vec<(String, Option<zeron_sync::RoomStatsSnapshot>)> {
         let handles: Vec<Arc<ChatDocHandle>> =
             lock(&self.inner.handles).values().cloned().collect();
-        let mut rows: Vec<(String, Option<comet_sync::RoomStatsSnapshot>)> = handles
+        let mut rows: Vec<(String, Option<zeron_sync::RoomStatsSnapshot>)> = handles
             .iter()
             .map(|h| {
                 (
@@ -1938,7 +1948,7 @@ impl DocHost {
     /// Fire-and-forget: the doc already carries the summary, so a lost upload
     /// degrades to "full output unavailable" — it must never block or fail
     /// the run. Offline/edge-less engines skip silently.
-    pub fn upload_tool_sidecar(&self, chat_id: &str, payload: comet_doc::SidecarPayload) {
+    pub fn upload_tool_sidecar(&self, chat_id: &str, payload: zeron_doc::SidecarPayload) {
         let Some(edge) = self.inner.config.edge.clone() else {
             return;
         };
@@ -1997,7 +2007,9 @@ impl DocHost {
         let valid = blob_ref.split_once('/').is_some_and(|(chat, part)| {
             !chat.is_empty()
                 && chat.len() <= 128
-                && chat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                && chat
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 && !part.is_empty()
                 && part.len() <= 200
                 && part
@@ -2064,7 +2076,7 @@ impl DocHost {
     pub(crate) fn harness_for_request(
         &self,
         chat_id: &str,
-        request: &comet_proto::RunRequest,
+        request: &zeron_proto::RunRequest,
     ) -> HarnessId {
         request.harness.unwrap_or_else(|| self.harness_for(chat_id))
     }
@@ -2187,7 +2199,7 @@ impl DocHost {
                 if let Some(ws) = self.workspace()
                     && ws.chat_config(chat_id).is_none()
                 {
-                    let config = comet_proto::ChatConfig {
+                    let config = zeron_proto::ChatConfig {
                         harness,
                         model: request.model.clone(),
                         reasoning: request.reasoning,
@@ -2208,10 +2220,10 @@ impl DocHost {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
                     SteerOutcome::NotSteerable => {
                         // No live steerable run: the durable command still delivers —
-                        // run it as the next turn (comet's fallback, executor-side).
+                        // run it as the next turn (zeron's fallback, executor-side).
                         // After an engine restart `last_request` is empty too, so
                         // rebuild the run config from the chat's workspace row
-                        // (comet derived dispatch config from the chat row the
+                        // (zeron derived dispatch config from the chat row the
                         // same way — sessions.ts:601-620); dispatch's engine-owned
                         // resume then reattaches the prior harness conversation.
                         let request = sessions
@@ -2322,7 +2334,7 @@ impl DocHost {
         &self,
         chat_id: &str,
         prompt: &str,
-    ) -> Option<comet_proto::RunRequest> {
+    ) -> Option<zeron_proto::RunRequest> {
         let workspace = self.workspace()?;
         let chat = match workspace.chat(chat_id) {
             Ok(chat) => chat?,
@@ -2332,7 +2344,7 @@ impl DocHost {
             }
         };
         let config = chat.config;
-        Some(comet_proto::RunRequest {
+        Some(zeron_proto::RunRequest {
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
             model: config.as_ref().and_then(|c| c.model.clone()),
@@ -2345,7 +2357,7 @@ impl DocHost {
             sandbox: config
                 .as_ref()
                 .map(|c| c.sandbox)
-                .unwrap_or(comet_proto::SandboxLevel::WorkspaceWrite),
+                .unwrap_or(zeron_proto::SandboxLevel::WorkspaceWrite),
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
