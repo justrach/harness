@@ -51,6 +51,49 @@ pub struct GitHistoryColumns {
     pub sha: bool,
 }
 
+/// Persisted widths for the fixed Git History data columns. The commit column
+/// remains elastic and occupies the space left after these columns and the
+/// topology graph, so resizing its first divider adjusts the adjacent column.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GitHistoryColumnWidths {
+    pub author: f32,
+    pub date: f32,
+    pub sha: f32,
+}
+
+impl GitHistoryColumnWidths {
+    pub const AUTHOR_MIN: f32 = 44.0;
+    pub const AUTHOR_MAX: f32 = 220.0;
+    pub const DATE_MIN: f32 = 68.0;
+    pub const DATE_MAX: f32 = 180.0;
+    pub const SHA_MIN: f32 = 58.0;
+    pub const SHA_MAX: f32 = 140.0;
+
+    pub fn clamped(mut self) -> Self {
+        let defaults = Self::default();
+        self.author = clamp_or(
+            self.author,
+            Self::AUTHOR_MIN,
+            Self::AUTHOR_MAX,
+            defaults.author,
+        );
+        self.date = clamp_or(self.date, Self::DATE_MIN, Self::DATE_MAX, defaults.date);
+        self.sha = clamp_or(self.sha, Self::SHA_MIN, Self::SHA_MAX, defaults.sha);
+        self
+    }
+}
+
+impl Default for GitHistoryColumnWidths {
+    fn default() -> Self {
+        Self {
+            author: 88.0,
+            date: 88.0,
+            sha: 74.0,
+        }
+    }
+}
+
 impl Default for GitHistoryColumns {
     fn default() -> Self {
         Self {
@@ -122,6 +165,8 @@ pub struct UiSettings {
     pub appearance: crate::appearance::AppearanceMode,
     /// Optional columns shown in every Git History pane.
     pub git_history_columns: GitHistoryColumns,
+    /// User-adjusted widths for the resizable Git History columns.
+    pub git_history_column_widths: GitHistoryColumnWidths,
     /// How authors are represented in Git History rows.
     pub git_history_author_display: GitHistoryAuthorDisplay,
 }
@@ -147,6 +192,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
+            git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_author_display: GitHistoryAuthorDisplay::default(),
         }
     }
@@ -339,6 +385,7 @@ impl UiSettings {
             TERMINAL_ABS_MAX_HEIGHT,
             TERMINAL_DEFAULT_HEIGHT,
         );
+        self.git_history_column_widths = self.git_history_column_widths.clamped();
         self
     }
 
@@ -416,6 +463,11 @@ mod tests {
                 date: true,
                 sha: false,
             },
+            git_history_column_widths: GitHistoryColumnWidths {
+                author: 132.0,
+                date: 104.0,
+                sha: 82.0,
+            },
             git_history_author_display: GitHistoryAuthorDisplay::Name,
         };
         settings.save(dir.path()).unwrap();
@@ -451,6 +503,11 @@ mod tests {
             "pre-column files show the complete History table"
         );
         assert_eq!(
+            loaded.git_history_column_widths,
+            GitHistoryColumnWidths::default(),
+            "pre-resize files use the original History column widths"
+        );
+        assert_eq!(
             loaded.git_history_author_display,
             GitHistoryAuthorDisplay::Avatar,
             "pre-author-display files default to avatars"
@@ -476,6 +533,19 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
         assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
+    }
+
+    #[test]
+    fn git_history_column_widths_are_clamped_and_nan_heals() {
+        let widths = GitHistoryColumnWidths {
+            author: 10_000.0,
+            date: f32::NAN,
+            sha: 1.0,
+        }
+        .clamped();
+        assert_eq!(widths.author, GitHistoryColumnWidths::AUTHOR_MAX);
+        assert_eq!(widths.date, GitHistoryColumnWidths::default().date);
+        assert_eq!(widths.sha, GitHistoryColumnWidths::SHA_MIN);
     }
 
     #[test]

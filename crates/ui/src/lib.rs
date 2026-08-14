@@ -146,6 +146,7 @@ pub fn run_app(config: UiConfig) {
         appearance::init(ui_settings.appearance, data_dir.clone(), cx);
         history::init(
             ui_settings.git_history_columns,
+            ui_settings.git_history_column_widths,
             ui_settings.git_history_author_display,
             data_dir,
             cx,

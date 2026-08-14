@@ -1621,6 +1621,8 @@ impl Shell {
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
                 shell.settings.git_history_columns = crate::history::configured_columns(cx);
+                shell.settings.git_history_column_widths =
+                    crate::history::configured_column_widths(cx);
                 shell.settings.git_history_author_display =
                     crate::history::configured_author_display(cx);
                 shell.settings.clone()
