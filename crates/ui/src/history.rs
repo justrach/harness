@@ -1362,6 +1362,7 @@ impl GitHistory {
                         .items_center()
                         .gap(px(HISTORY_REF_GAP))
                         .pr(px(8.0))
+                        .opacity(row_content_opacity)
                         .child(
                             div()
                                 .flex_1()
@@ -1382,7 +1383,6 @@ impl GitHistory {
                 })
                 .flex_1()
                 .min_w(px(HISTORY_COMMIT_SUBJECT_MIN_WIDTH))
-                .opacity(row_content_opacity)
                 .overflow_hidden(),
             )
             .child(
