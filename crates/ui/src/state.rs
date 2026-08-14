@@ -607,9 +607,7 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
-    /// Diff comments staged per composer key. The changes pane writes them,
-    /// the composer reads them for its chip and folds them into the next
-    /// prompt — AppState is the only thing both views already share.
+    /// Written by the changes pane, read by the composer.
     diff_comments: HashMap<String, Vec<DiffComment>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
@@ -660,12 +658,9 @@ impl AppState {
         }
     }
 
-    // ---- diff comments (pure) ----
-
-    /// The key both the changes pane and the composer stage under: the
-    /// selected chat, or `""` on the new-chat canvas — identical to the
-    /// composer's own per-chat attachment/draft key, so a comment written
-    /// before the first send survives the chat being minted.
+    /// The selected chat, or `""` on the new-chat canvas. Identical to the
+    /// composer's own attachment/draft key, so a comment written before the
+    /// first send survives the chat being minted.
     pub fn composer_key(&self) -> String {
         self.selected_chat.clone().unwrap_or_default()
     }
@@ -693,13 +688,10 @@ impl AppState {
         }
     }
 
-    /// Snapshot-and-clear on send (`attachments` does the same): the chip
-    /// empties the instant the prompt carrying the comments goes out.
     pub fn take_diff_comments(&mut self, key: &str) -> Vec<DiffComment> {
         self.diff_comments.remove(key).unwrap_or_default()
     }
 
-    /// Drop a deleted chat's stage — its comments could never be sent again.
     pub fn purge_diff_comments(&mut self, key: &str) {
         self.diff_comments.remove(key);
     }

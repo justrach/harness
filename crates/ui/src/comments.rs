@@ -1,33 +1,27 @@
-//! Diff comments: notes pinned to an exact line of the changes pane, staged in
-//! the composer and folded into the next prompt.
+//! Diff comments: notes pinned to a line of the changes pane, staged on the
+//! composer and folded into the next prompt as plain text.
 //!
-//! The transport is deliberately the same shape as `attachments.rs`: the
-//! comments ride the user message as PLAIN TEXT (see [`with_comments`]). There
-//! is no second data model — nothing to persist, nothing to sync, and the
-//! agent reads `path:line` in the prompt exactly as a human would. The
-//! composer projects the staged set to one chip while it is being composed;
-//! once sent, [`extract_badge`] lifts the same block back out for the
-//! transcript (see `badges.rs`), so the reader sees that one chip again
-//! rather than the bullets the agent reads.
+//! [`with_comments`] appends them; [`extract_badge`] reads the same block back
+//! out for the transcript. There is no second data model.
 
-use std::collections::HashMap;
-
-/// Which column of the diff a comment's line number came from. A comment on a
-/// deleted line can only ever cite the pre-change file, so the side has to
-/// travel with the number — `path:42` alone would send the agent to the wrong
-/// line whenever a hunk shifts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommentSide {
     Old,
     New,
 }
 
-/// One staged comment. `id` is client-minted and only ever used to remove the
-/// row again — it never leaves the process.
+impl CommentSide {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Old => "L",
+            Self::New => "R",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffComment {
     pub id: String,
-    /// Display path of the file, as the patch header spells it.
     pub path: String,
     pub side: CommentSide,
     pub line: u32,
@@ -50,27 +44,23 @@ impl DiffComment {
         }
     }
 
-    /// The anchor a rendered diff row matches itself against.
     pub fn anchor(&self) -> (CommentSide, u32) {
         (self.side, self.line)
     }
 
-    /// `file.rs:42` — how the comment cites its line to the agent, and what
-    /// the card shows in its header.
     pub fn location(&self) -> String {
         format!("{}:{}", self.path, self.line)
     }
 }
 
-/// Body used when the user stages comments and sends with an empty prompt —
-/// mirrors `attachments::ATTACHMENT_ONLY_TEXT`.
 pub const COMMENT_ONLY_TEXT: &str = "Address the review comments below.";
 
-/// How comments ride the prompt: a trailing block of `path:line` bullets.
-///
-/// Multi-line bodies are indented under their bullet so the block stays
-/// unambiguous when the agent re-reads it, and `L`/`R` marks which side of the
-/// diff the number indexes (`R` = the post-change file, the common case).
+pub const COMMENT_BLOCK_HEADER: &str = "Comments on the diff (each cites the file and line it belongs to; L = line number in the original file, R = in the changed file):";
+
+fn side_marker(side: CommentSide) -> String {
+    format!(" ({}): ", side.tag())
+}
+
 pub fn with_comments(text: &str, comments: &[DiffComment]) -> String {
     if comments.is_empty() {
         return text.to_string();
@@ -78,14 +68,12 @@ pub fn with_comments(text: &str, comments: &[DiffComment]) -> String {
     let bullets: Vec<String> = comments
         .iter()
         .map(|comment| {
-            let side = match comment.side {
-                CommentSide::Old => "L",
-                CommentSide::New => "R",
-            };
-            // Continuation lines are indented to the bullet's text column; an
-            // unindented second line would read as a new comment.
             let body = comment.body.trim().replace('\n', "\n  ");
-            format!("- {}:{} ({side}): {body}", comment.path, comment.line)
+            format!(
+                "- {}{}{body}",
+                comment.location(),
+                side_marker(comment.side)
+            )
         })
         .collect();
     let body = if text.is_empty() {
@@ -96,44 +84,63 @@ pub fn with_comments(text: &str, comments: &[DiffComment]) -> String {
     format!("{body}\n\n{COMMENT_BLOCK_HEADER}\n{}", bullets.join("\n"))
 }
 
-/// The line that opens the appended block. Exact, and shared with
-/// [`extract_badge`] — the transcript finds the block by matching this string,
-/// so the two can never drift.
-pub const COMMENT_BLOCK_HEADER: &str = "Comments on the diff (each cites the file and line it belongs to; L = line number in the original file, R = in the changed file):";
-
-/// [`crate::badges::Extractor`] for the comment block: strip the trailing
-/// bullets off a sent message and report them as one pill.
-///
-/// The header is matched at a paragraph break at the very end of the message,
-/// which is the only place [`with_comments`] ever writes it — a prompt that
-/// merely quotes the sentence mid-body is left alone.
+/// [`crate::badges::Extractor`] for the comment block. Matched only as a whole
+/// trailing block, so a prompt quoting the header mid-body is left alone.
 pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)> {
     let marker = format!("\n\n{COMMENT_BLOCK_HEADER}\n");
     let at = text.rfind(&marker)?;
-    let bullets = &text[at + marker.len()..];
-    // The block is bullets and their indented continuation lines, nothing
-    // else — anything else means this is not a block we wrote, and the text
-    // stays untouched rather than being silently truncated.
-    let count = bullets
-        .lines()
-        .filter(|line| line.starts_with("- "))
-        .count();
-    let well_formed = bullets
-        .lines()
-        .all(|line| line.starts_with("- ") || line.starts_with("  "));
-    if count == 0 || !well_formed {
+    let block = &text[at + marker.len()..];
+    if block.is_empty()
+        || !block
+            .lines()
+            .all(|line| line.starts_with("- ") || line.starts_with("  "))
+    {
+        return None;
+    }
+    let details = parse_bullets(block);
+    if details.is_empty() {
         return None;
     }
     Some((
         text[..at].to_string(),
         crate::badges::MessageBadge {
             icon: crate::icons::CHAT_ROUND_LINE,
-            label: chip_label(count).into(),
+            label: chip_label(details.len()).into(),
+            details,
         },
     ))
 }
 
-/// Composer chip label — "1 comment" / "4 comments".
+fn parse_bullets(block: &str) -> Vec<crate::badges::BadgeDetail> {
+    let mut details: Vec<crate::badges::BadgeDetail> = Vec::new();
+    for line in block.lines() {
+        let Some(bullet) = line.strip_prefix("- ") else {
+            if let (Some(indented), Some(last)) = (line.strip_prefix("  "), details.last_mut()) {
+                last.body = format!("{}\n{indented}", last.body).into();
+            }
+            continue;
+        };
+        // Earliest marker wins: a body may contain "(L): " itself, and matching
+        // that would swallow the body into the location.
+        let split = [CommentSide::Old, CommentSide::New]
+            .into_iter()
+            .filter_map(|side| {
+                let marker = side_marker(side);
+                bullet.find(&marker).map(|at| (at, marker.len(), side))
+            })
+            .min_by_key(|(at, _, _)| *at);
+        let Some((at, marker_len, side)) = split else {
+            continue;
+        };
+        details.push(crate::badges::BadgeDetail {
+            location: bullet[..at].into(),
+            tag: Some(side.tag().into()),
+            body: bullet[at + marker_len..].into(),
+        });
+    }
+    details
+}
+
 pub fn chip_label(count: usize) -> String {
     if count == 1 {
         "1 comment".to_string()
@@ -142,34 +149,16 @@ pub fn chip_label(count: usize) -> String {
     }
 }
 
-/// Group a chat's staged comments by file path for rendering — the changes
-/// pane walks one file at a time and needs its comments in line order.
-pub fn by_path(comments: &[DiffComment]) -> HashMap<&str, Vec<&DiffComment>> {
-    let mut map: HashMap<&str, Vec<&DiffComment>> = HashMap::new();
-    for comment in comments {
-        map.entry(comment.path.as_str()).or_default().push(comment);
-    }
-    map
-}
-
 pub const CARD_PAD_V: f32 = 20.0;
 pub const CARD_HEADER_HEIGHT: f32 = 22.0;
 pub const CARD_LINE_HEIGHT: f32 = 18.0;
-pub const CARD_GAP: f32 = 6.0;
-/// Characters a card body fits per line at the pane's usual width. Only used
-/// to guess soft wraps — see [`card_height`].
+pub const DRAFT_CARD_HEIGHT: f32 = 116.0;
+const CARD_GAP: f32 = 6.0;
 const CARD_WRAP_COLUMNS: usize = 64;
-/// Ceiling on rendered body lines. A pasted essay clips inside its own card
-/// rather than pushing the whole file body out of its fold height.
 const CARD_MAX_LINES: usize = 8;
 
-/// Rendered height of a comment card.
-///
-/// Analytic, because the changes pane sizes file bodies by arithmetic to drive
-/// the fold tween (`changes::body_height`) — a measured card would desync it,
-/// and the fold clips to the analytic number. That means soft wraps have to be
-/// *guessed* here (the pure function has no width): each hard line is charged
-/// one row per [`CARD_WRAP_COLUMNS`] characters, and the total is capped.
+/// Wraps are guessed, not measured: the changes pane sizes bodies by arithmetic
+/// to drive the fold tween, and a measured card would desync it.
 pub fn card_body_lines(body: &str) -> usize {
     body.lines()
         .map(|line| line.chars().count().div_ceil(CARD_WRAP_COLUMNS).max(1))
@@ -180,10 +169,6 @@ pub fn card_body_lines(body: &str) -> usize {
 pub fn card_height(body: &str) -> f32 {
     CARD_PAD_V + CARD_HEADER_HEIGHT + card_body_lines(body) as f32 * CARD_LINE_HEIGHT + CARD_GAP
 }
-
-/// The draft card is a fixed two-row affair (input + actions) — its height is
-/// constant so an open draft never fights the fold tween.
-pub const DRAFT_CARD_HEIGHT: f32 = 116.0;
 
 #[cfg(test)]
 mod tests {
@@ -230,23 +215,24 @@ mod tests {
     }
 
     #[test]
-    fn grouping_keeps_per_file_order() {
-        let staged = vec![
-            comment("a.rs", CommentSide::New, 9, "x"),
-            comment("b.rs", CommentSide::New, 1, "y"),
-            comment("a.rs", CommentSide::New, 2, "z"),
-        ];
-        let grouped = by_path(&staged);
-        assert_eq!(grouped["a.rs"].len(), 2);
-        assert_eq!(grouped["a.rs"][0].line, 9);
-        assert_eq!(grouped["a.rs"][1].line, 2);
-        assert_eq!(grouped["b.rs"].len(), 1);
+    fn a_body_quoting_a_side_marker_survives_the_round_trip() {
+        let staged = vec![comment(
+            "a.rs",
+            CommentSide::New,
+            5,
+            "see (L): the other one",
+        )];
+        let (text, badge) = extract_badge(&with_comments("x", &staged)).unwrap();
+        assert_eq!(text, "x");
+        assert_eq!(badge.details.len(), 1);
+        assert_eq!(badge.details[0].location.as_ref(), "a.rs:5");
+        assert_eq!(badge.details[0].tag.as_deref(), Some("R"));
+        assert_eq!(badge.details[0].body.as_ref(), "see (L): the other one");
     }
 
     #[test]
     fn card_height_grows_with_body_lines() {
         assert!(card_height("two\nlines") > card_height("one"));
-        // An empty body still reserves one line — the card is never zero-tall.
         assert_eq!(card_height(""), card_height("one"));
     }
 
@@ -255,7 +241,6 @@ mod tests {
         assert_eq!(card_body_lines("short"), 1);
         assert_eq!(card_body_lines(&"x".repeat(CARD_WRAP_COLUMNS)), 1);
         assert_eq!(card_body_lines(&"x".repeat(CARD_WRAP_COLUMNS + 1)), 2);
-        // Capped, so a pasted essay can't blow out the fold height.
         assert_eq!(card_body_lines(&"line\n".repeat(200)), CARD_MAX_LINES);
     }
 }
