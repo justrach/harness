@@ -2841,11 +2841,14 @@ impl GitHistory {
         div()
             .w(px(width))
             .min_w(px(GitHistoryColumnWidths::AUTHOR_MIN))
+            .h_full()
             .flex_shrink(1.0)
+            .flex()
+            .items_center()
             .opacity(opacity)
             .when(display == GitHistoryAuthorDisplay::Avatar, |author| {
                 let tooltip_name = name.clone();
-                author.flex().items_center().justify_center().child(
+                author.justify_center().child(
                     div()
                         .id(("history-author-avatar", index))
                         .size(px(20.0))
@@ -2890,7 +2893,10 @@ impl GitHistory {
         div()
             .w(px(width))
             .min_w(px(GitHistoryColumnWidths::DATE_MIN))
+            .h_full()
             .flex_shrink(1.0)
+            .flex()
+            .items_center()
             .truncate()
             .pr(px(8.0))
             .text_size(px(10.5))
