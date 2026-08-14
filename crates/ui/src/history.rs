@@ -1057,6 +1057,8 @@ pub struct GitHistory {
     graph_lane_capacity: usize,
     list: ListState,
     hovered_path: Option<usize>,
+    hovered_graph_path: Option<usize>,
+    hovered_row_path: Option<usize>,
     graph_hover_active: bool,
     graph_hover_clear_task: Option<Task<()>>,
     column_drag_anchor: Option<HistoryColumnDragAnchor>,
@@ -1325,6 +1327,8 @@ impl GitHistory {
             graph_lane_capacity: 0,
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
             hovered_path: None,
+            hovered_graph_path: None,
+            hovered_row_path: None,
             graph_hover_active: false,
             graph_hover_clear_task: None,
             column_drag_anchor: None,
@@ -1373,6 +1377,8 @@ impl GitHistory {
             self.graph_lane_capacity = 0;
             self.list.reset(0);
             self.hovered_path = None;
+            self.hovered_graph_path = None;
+            self.hovered_row_path = None;
             self.graph_hover_active = false;
             self.graph_hover_clear_task = None;
             self.avatar_images.clear();
@@ -1406,6 +1412,8 @@ impl GitHistory {
         self.graph_lane_capacity = 0;
         self.list.reset(0);
         self.hovered_path = None;
+        self.hovered_graph_path = None;
+        self.hovered_row_path = None;
         self.graph_hover_active = false;
         self.graph_hover_clear_task = None;
         self.avatar_images.clear();
@@ -1533,6 +1541,8 @@ impl GitHistory {
         self.list
             .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
         self.hovered_path = None;
+        self.hovered_graph_path = None;
+        self.hovered_row_path = None;
         self.graph_hover_active = false;
         self.graph_hover_clear_task = None;
         cx.notify();
@@ -1686,6 +1696,8 @@ impl GitHistory {
             .ok();
         }));
         self.hovered_path = None;
+        self.hovered_graph_path = None;
+        self.hovered_row_path = None;
         self.graph_hover_active = false;
         self.graph_hover_clear_task = None;
         cx.notify();
@@ -1933,7 +1945,7 @@ impl GitHistory {
         })
     }
 
-    fn set_graph_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
+    fn set_history_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
         if let Some(path) = path {
             if self.graph_hover_active && self.hovered_path == Some(path) {
                 return;
@@ -1977,6 +1989,16 @@ impl GitHistory {
             }));
         }
         cx.notify();
+    }
+
+    fn set_graph_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
+        self.hovered_graph_path = path;
+        self.set_history_hover(path.or(self.hovered_row_path), cx);
+    }
+
+    fn set_row_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
+        self.hovered_row_path = path;
+        self.set_history_hover(self.hovered_graph_path.or(path), cx);
     }
 
     fn update_graph_hover(
@@ -3060,6 +3082,7 @@ impl GitHistory {
         let focused_row_wash = graph_focus
             .filter(|_| row_is_focused)
             .map(|focus| crate::theme::ink(0.018 * focus.amount));
+        let row_hover_path = graph_row.node_color_id;
         let graph_lane_count = self.graph_lane_capacity;
         let optional_cells = visible_history_columns(&column_order, columns)
             .into_iter()
@@ -3106,6 +3129,9 @@ impl GitHistory {
             .cursor_pointer()
             .when_some(focused_row_wash, |element, wash| element.bg(wash))
             .hover(|style| style.bg(crate::theme::ink(0.025)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.set_row_hover((*hovered).then_some(row_hover_path), cx);
+            }))
             // A commit row click opens the commit as its own diff tab (the
             // host — the right pane's surface strip — listens; user request).
             .on_click(cx.listener(move |_, _, _, cx| {
