@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use comet_proto::{Chat, ChatConfig, Device, Session, Space};
+use zeron_proto::{Chat, ChatConfig, Device, Session, Space};
 
 use crate::schema::DocError;
 use crate::workspace::{DeletedSpace, WorkspaceState};
@@ -324,7 +324,7 @@ struct PersistedState {
 }
 
 /// The local registry replica. Pure data — no I/O, no async; the transport
-/// (`comet_sync::RegistryClient`) and the engine host drive it under a lock.
+/// (`zeron_sync::RegistryClient`) and the engine host drive it under a lock.
 pub struct RegistryDoc {
     device_id: String,
     /// kind → id → row (server truth).
@@ -1278,7 +1278,7 @@ fn row_to<T: serde::de::DeserializeOwned>(row: &RegistryRow) -> Option<T> {
 }
 
 // SessionStatus needs to serialize to the same strings the loro doc used
-// ("idle"/"working"/…) — comet_proto's serde derives already use camelCase;
+// ("idle"/"working"/…) — zeron_proto's serde derives already use camelCase;
 // the compile-time check lives in the tests below.
 
 #[cfg(test)]

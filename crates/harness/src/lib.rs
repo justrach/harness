@@ -1,4 +1,4 @@
-//! comet-harness — one interface over coding agents, all driven through the
+//! zeron-harness — one interface over coding agents, all driven through the
 //! Agent Client Protocol (and a mock for tests).
 //!
 //! Every production harness is the shared [`AcpHarness`] with a per-agent
@@ -14,7 +14,7 @@ use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
-use comet_proto::{
+use zeron_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -37,7 +37,7 @@ pub struct SteerMessage {
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
-    /// The run sends questions and awaits answers (blocks the agent, mirrors comet).
+    /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
     pub request_input: Box<
         dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
     >,
@@ -150,7 +150,7 @@ pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::p
 /// Rolling tail of a child's stderr, shared between the reader task and the
 /// crash-message composer: an unexpected exit surfaces "<name> exited
 /// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
-/// the proper background-crash message old comet showed (user requirement).
+/// the proper background-crash message old zeron showed (user requirement).
 #[derive(Clone, Default)]
 pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 

@@ -15,7 +15,7 @@ use gpui::{
     Anchor, AnyElement, ElementId, IntoElement, Pixels, Point, SharedString, div, prelude::*, px,
 };
 
-use crate::motion::{self, COMET_PULSE};
+use crate::motion::{self, ZERON_PULSE};
 use crate::theme::{Theme, hairline, ink};
 
 // ---------------------------------------------------------------------------
@@ -293,12 +293,13 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 // Elements
 // ---------------------------------------------------------------------------
 
-/// The floating-menu surface (comet `.glass-surface` + `menuSurface`):
-/// `rounded-xl border border-white/[0.1] p-1` over the frosted glass tint.
-/// gpui has no backdrop blur at the pinned rev, so the glass
-/// (`oklch(0.33 0 0 / 34%)` over blurred dark content) is approximated with
-/// the near-opaque tone it composites to on the dark panels (~#161616), plus
-/// the same hairline + baked-in shadow.
+/// The floating-menu surface (zeron `.glass-surface` + `menuSurface`):
+/// `rounded-xl border border-white/[0.1] p-1` over the frosted glass tint —
+/// the real recipe now that the fork paints backdrop blur: the
+/// [`Theme::glass_overlay`] tint (`oklch(0.33 0 0 / 34%)` on dark) over the
+/// [`crate::frost::MENU_BLUR`] blur from the mount helpers below, plus the
+/// same hairline + baked-in shadow. Opaque platforms keep the near-opaque
+/// tone the reference composites to on the dark panels (~#161616).
 pub fn popover_card(theme: &Theme) -> gpui::Div {
     let card = div()
         .border_1()
@@ -360,7 +361,7 @@ fn exit_progress(since: std::time::Instant) -> f32 {
 /// primitive ignores `element_opacity`, so without this the glass slab would
 /// hold full strength through the fade and pop off at unmount.
 fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
-    let blur = 16.0 * (1.0 - exit.unwrap_or(0.0));
+    let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
     crate::frost::frosted(12.0, blur, content).into_any_element()
 }
 
@@ -373,9 +374,7 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
 /// underneath.
 fn menu_motion(id: SharedString, exit: Option<f32>, inner: gpui::Div) -> AnyElement {
     if let Some(t) = exit {
-        let inner = inner
-            .relative()
-            .child(div().absolute().inset_0().occlude());
+        let inner = inner.relative().child(div().absolute().inset_0().occlude());
         motion::menu_out(SharedString::from(format!("{id}-out")), t, inner).into_any_element()
     } else {
         motion::menu_in(id, inner).into_any_element()
@@ -548,11 +547,7 @@ pub fn menu_at(
             .position(position)
             .anchor(Anchor::TopLeft)
             .snap_to_window_with_margin(px(8.0))
-            .child(menu_motion(
-                id.into(),
-                exit,
-                div().occlude().child(content),
-            )),
+            .child(menu_motion(id.into(), exit, div().occlude().child(content))),
     )
     .priority(1)
     .into_any_element()
@@ -573,13 +568,39 @@ pub(crate) fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
 /// Full-window modal: dim scrim + centered card with the `dialog-in` entrance.
 /// The scrim swallows clicks; the caller wires its own dismiss/confirm.
 /// `viewport` is the window size (an `anchored` layer sizes to its children,
-/// so the scrim needs explicit dimensions).
+/// so the scrim needs explicit dimensions). The frost radius matches
+/// [`dialog_card`]'s 16px rounding.
 pub fn modal(
     id: impl Into<ElementId>,
     viewport: gpui::Size<Pixels>,
     card: AnyElement,
 ) -> AnyElement {
-    let card = crate::frost::frosted(12.0, 16.0, card).into_any_element();
+    modal_with(id, viewport, card, 16.0, 0.6)
+}
+
+/// [`modal`] for glass-tinted cards (the add-space palette): a LIGHTER scrim,
+/// so the frosted card reads like the popovers — the standard 0.6 dim buried
+/// the backdrop hue under the blur and the palette came out a flat grey slab
+/// next to the hue-inheriting menus (user report). `corner_radius` must match
+/// the card's rounding.
+pub fn modal_glass(
+    id: impl Into<ElementId>,
+    viewport: gpui::Size<Pixels>,
+    card: AnyElement,
+    corner_radius: f32,
+) -> AnyElement {
+    modal_with(id, viewport, card, corner_radius, 0.35)
+}
+
+fn modal_with(
+    id: impl Into<ElementId>,
+    viewport: gpui::Size<Pixels>,
+    card: AnyElement,
+    corner_radius: f32,
+    scrim: f32,
+) -> AnyElement {
+    let card =
+        crate::frost::frosted(corner_radius, crate::frost::MENU_BLUR, card).into_any_element();
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -588,7 +609,7 @@ pub fn modal(
                     .occlude()
                     .w(viewport.width)
                     .h(viewport.height)
-                    .bg(scrim_alpha(0.6))
+                    .bg(scrim_alpha(scrim))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -599,7 +620,7 @@ pub fn modal(
     .into_any_element()
 }
 
-/// One menu row (comet `menuItem`): `gap-2.5 rounded-lg px-2 py-1.5
+/// One menu row (zeron `menuItem`): `gap-2.5 rounded-lg px-2 py-1.5
 /// text-[13px]`, active = `bg-white/10 text-foreground`, hover wash
 /// `white/[0.08]` fading over `transition-colors` (floating-styles.ts) via the
 /// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
@@ -642,7 +663,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
 
 /// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
 /// carries the full `bg-white/10` wash, the keyboard cursor the lighter
-/// `bg-white/[0.08]` (comet's `data-[highlighted]` styling) — two selected-
+/// `bg-white/[0.08]` (zeron's `data-[highlighted]` styling) — two selected-
 /// looking rows never appear at once.
 pub fn menu_row_nav(
     theme: &Theme,
@@ -659,7 +680,7 @@ pub fn menu_row_nav(
     }
 }
 
-/// Small uppercase section heading inside a floating menu (comet
+/// Small uppercase section heading inside a floating menu (zeron
 /// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
 /// tracking-[0.1em] text-muted-foreground/60`. gpui has no letter-spacing at
 /// the pinned rev; the tracking is approximated with hair spaces.
@@ -689,7 +710,7 @@ pub fn tracked_upper(label: &str) -> String {
     out
 }
 
-/// Hairline divider between menu sections (comet `MenuSeparator`:
+/// Hairline divider between menu sections (zeron `MenuSeparator`:
 /// `mx-1 my-1 h-px bg-white/[0.07]`).
 pub fn menu_separator() -> gpui::Div {
     // Full-bleed: negative margins cancel the card's p-1 inset so the hairline
@@ -812,7 +833,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-/// The search/text input frame at the top of a picker popover (comet
+/// The search/text input frame at the top of a picker popover (zeron
 /// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
 /// p-1, only a 4px bottom margin).
@@ -827,7 +848,7 @@ pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
         .child(input)
 }
 
-/// A bordered trailing menu section (comet picker action groups /
+/// A bordered trailing menu section (zeron picker action groups /
 /// branch-picker worktree block: `mt-1 flex flex-col gap-0.5 border-t
 /// border-white/[0.06] pt-1` — the hairline runs edge-to-edge of the card's
 /// p-1 inset, unlike [`menu_separator`]'s mx-1).
@@ -843,7 +864,7 @@ pub fn menu_section() -> gpui::Div {
 }
 
 // ---------------------------------------------------------------------------
-// Dialog primitives (comet dialog.tsx / sidebar dialogs.tsx)
+// Dialog primitives (zeron dialog.tsx / sidebar dialogs.tsx)
 // ---------------------------------------------------------------------------
 
 /// The centered dialog card (`dialog-pop`): `w-[360px] rounded-2xl border
@@ -896,7 +917,7 @@ pub fn dialog_field(input: AnyElement) -> gpui::Div {
 }
 
 /// Ghost button (`btnGhost`): quiet text, hover wash fading over
-/// `transition-colors` (comet dialogs.tsx). Caller adds id + click; `fade_key`
+/// `transition-colors` (zeron dialogs.tsx). Caller adds id + click; `fade_key`
 /// as in [`menu_row`].
 pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) -> gpui::Div {
     let fade_key = fade_key.into();
@@ -948,7 +969,7 @@ pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-/// Pulsing skeleton rows shown while a list loads (comet:
+/// Pulsing skeleton rows shown while a list loads (zeron:
 /// `h-7 animate-pulse rounded-md bg-white/[0.04]`).
 pub fn skeleton_rows(
     _id: &'static str,
@@ -958,7 +979,7 @@ pub fn skeleton_rows(
     cx: &mut gpui::App,
 ) -> AnyElement {
     let wash = ink(0.04);
-    let delta = motion::pulse_delta(&COMET_PULSE, view, cx);
+    let delta = motion::pulse_delta(&ZERON_PULSE, view, cx);
     div()
         .flex()
         .flex_col()

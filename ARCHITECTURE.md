@@ -1,13 +1,13 @@
-# comet-native — Architecture
+# zeron — Architecture
 
-A ground-up native rewrite of [comet](../comet) — a multi-device controller for coding agents
+A ground-up native rewrite of [zeron](../zeron) — a multi-device controller for coding agents
 (Claude Code / Codex) — in Rust, with a gpui UI. Fresh app; no backwards compatibility required.
 
 **Pillars (from the goal):**
-- Sync is Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects.
+- Optional sync uses Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects; the same docs persist locally when sync is disabled.
 - Durable Objects stay **TypeScript** (decision + evidence: `docs/research/durable-objects-language.md`).
   Everything device-side is Rust.
-- Feature parity with comet **except token-usage display** (poor fit for CRDTs; excluded).
+- Feature parity with zeron **except token-usage display** (poor fit for CRDTs; excluded).
 - Frontend is **gpui** (pinned Zed rev). Virtualization + markdown techniques ported from
   **mugen + pretext** (`docs/research/mugen-pretext.md`).
 - One binary, **headed or headless**. Smooth transitions/animations matching the original
@@ -17,43 +17,74 @@ A ground-up native rewrite of [comet](../comet) — a multi-device controller fo
 
 ```
 gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══ engine B ─ RPC ─ gpui UI
-                    │            (edge Worker: auth, rooms, R2)          │
-                    └── Loro sync ── SessionRoom DO (per chat) ──────────┘
-                                └── Workspace doc room (per org) ────────┘
+                    │       optional edge Worker: auth, rooms, R2        │
+                    └── optional Loro sync ─ SessionRoom DO (per chat) ──┘
+                                          └─ Workspace registry room ────┘
 ```
 
-- **Engine = backend** (was `@comet/backend`): runs agents, owns auth, terminals, repos/worktrees,
+- **Engine = backend** (was `@zeron/backend`): runs agents, owns auth, terminals, repos/worktrees,
   diff sync, doc hosting. Pure Rust daemon, fully functional headless.
-- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC
-  whether the engine is in-process or a separate daemon. Organized around **spaces** — synced
-  (device, folder) pairs. The sidebar is the data: an attention-sorted Sessions list, filtered
-  by a searchable spaces dropdown ("All spaces" included) that also hosts space management.
-  The horizontal tabs are a **device-local viewport** onto that list (`ui-settings.json
-  openTabs`, cross-space): closing a tab is local-only — archiving is an explicit sidebar
-  action — and a sidebar click (re)opens a session as a tab. The new-session canvas carries a
-  space picker (defaulting to the sidebar filter, else the last selected space); new sessions
-  are minted onto the picked space's device via relay-forwardable RPCs.
-- **Edge (TypeScript, ported from comet `apps/edge`)**: Worker + SessionRoom DO (per chat) +
+- **UI = viewport** (was Electron): gpui app rendering engine state. Talks the same typed RPC whether the engine is in-process or a separate daemon. Organized around **spaces** — (device, folder) pairs, local or synced according to the active profile. The sidebar is the data: an attention-sorted Sessions list, filtered by a searchable spaces dropdown ("All spaces" included) that also hosts space management. The horizontal tabs are a **device-local viewport** onto that list (`ui-settings.json` `openTabs`, cross-space): closing a tab is local-only — archiving is an explicit sidebar action — and a sidebar click (re)opens a session as a tab. The new-session canvas carries a space picker (defaulting to the sidebar filter, else the last selected space); new sessions are minted onto the picked space's device via relay-forwardable RPCs.
+- **Edge (TypeScript, ported from zeron `apps/edge`)**: Worker + SessionRoom DO (per chat) +
   DeviceRoom DO (per device) + R2 attachments + WorkOS JWKS auth. Absorbs the old `apps/server`
   responsibilities (WorkOS code exchange/refresh, orgs) so **Postgres, the Hono server, and
   the WebRTC/signaling stack are all gone**.
 
 ### Headed / headless
-Single binary `comet`:
-- `comet` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
+Single binary `zeron`:
+- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
   otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
   serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
   port**. The embedded engine is not private: any other viewport can attach to the running app
   without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
   window still opens, having lost only the ability to host peers.
-- `comet headless` — engine only; prints sign-in URL on TTY (paste-code flow), serves IPC on
-  localhost + hosts its DeviceRoom for remote control. A VPS runs this; a laptop's UI drives it.
+- `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
+
+### Local-first workspace profiles
+
+Authentication and workspace selection are deliberately separate state machines:
+
+- `AuthState` is live credential state: `SignedOut`, `NeedsOrganization`, or `SignedIn`. It may change after login, refresh, revocation, or logout.
+- `WorkspaceScope` is the immutable storage and transport boundary captured once at engine startup: `Local`, `Synced`, or explicit `Development`.
+
+The engine never re-resolves an open store because `AuthState` changed. This prevents a sign-in, token refresh, or revocation from silently swapping databases or attaching online transports to a runtime that started local-only.
+
+| Startup condition | `WorkspaceScope` | Online transports |
+| --- | --- | --- |
+| WorkOS enabled, no parseable saved `session.json` | `Local` | Disabled |
+| Parseable saved WorkOS session | `Synced` | Enabled when a bearer is available; organization onboarding completes before opening the store when needed |
+| WorkOS disabled without a dev bearer | `Development` | Disabled |
+| Explicit non-empty dev bearer | `Development` | Enabled |
+
+`zeron login` and `zeron logout` operate on `session.json` while the engine is stopped. Login selects `Synced` for the next start; logout selects `Local` for the next start. The UI may update live authentication status, but the active `WorkspaceScope` still changes only after restart.
+
+The resolved profile selects the session snapshots, registry snapshot, run journals, and attachment cache that may contain workspace data:
+
+| Scope | Store and journals | Uploads |
+| --- | --- | --- |
+| `Local` | `{data_dir}/profiles/local/` | `{data_dir}/profiles/local/uploads/` |
+| `Synced` | `{data_dir}/orgs/{org_id}/{user_id}/` | `{data_dir}/orgs/{org_id}/{user_id}/uploads/` |
+| `Development` | `{data_dir}/orgs/{org_id}/{user_id}/` | `{data_dir}/orgs/{org_id}/{user_id}/uploads/` |
+
+The synced and development store roots preserve the historical cloud layout while their attachment caches are account-scoped. Local identity lives in `{data_dir}/local-profile.json`; its UUID is stable across restarts and is not an account or development identity.
+
+Older releases wrote every synced and development attachment to `{data_dir}/uploads/`, and persisted those absolute paths in transcripts. On upgrade, the first synced or development account that opens this legacy cache claims it in `{data_dir}/legacy-uploads-owner.json`. That account may read the cache as a compatibility fallback, but all new staging and commits use its account-scoped uploads root; other accounts cannot read or write the legacy cache.
+
+Device identity and machine resources remain device-scoped under the common data directory: `device-id`, repository registration, managed worktrees, agent credentials/accounts, and UI settings. They are available across profiles, but they do not contain or expose another profile's transcripts or attachments.
+
+#### Privacy boundary and follow-ups
+
+This first local-first change does not upload, import, link, or delete local sessions when a user signs in. Local attachments remain jailed under the local upload root and are not readable through the synced attachment cache. Returning to local-only mode reopens the same local identity and data.
+
+The following product work is intentionally deferred:
+
+1. Explicit session selection and copy between local and synced profiles, including attachment copying, provenance, and conflict behavior.
+2. Browsing both scopes simultaneously or switching the visible scope without restarting the engine.
+3. A supported self-hosted backend contract covering authentication modes, room APIs, authorization, persistence, and blob storage. Current endpoint and bearer overrides remain development/deployment seams, not a promised compatibility surface.
 
 ## 2. Data model — all Loro
 
-Two doc kinds, one room protocol (loro-protocol over WebSocket, the same protocol the TS edge
-already speaks; Rust side uses the official `loro-protocol`/`loro-websocket-client` crates or a
-thin hand-rolled client over `loro` 1.13.x — verify interop early, M1 exit criterion):
+Two persistent doc kinds. When sync is enabled they share one loro-protocol room protocol over WebSocket; local-only profiles persist the same docs without joining rooms:
 
 1. **Session doc** (per chat) — the transcript + durable command queue. Schema is a Rust port of
    `packages/session-doc` (same container names/shapes so the edge's tail materializer keeps
@@ -64,29 +95,15 @@ thin hand-rolled client over `loro` 1.13.x — verify interop early, M1 exit cri
    run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
    `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
 
-2. **Workspace doc** (per org — NEW; replaces comet's residual entity sync) — **spaces**
-   registry (id, deviceId, path, name?, gitDetected, checkoutId — a space is a synced
-   device+folder pair, the app's unit of organization; the owning device's SpacesSync stamps git
-   presence so branch pickers / the diff sidebar gate on a synced bool, no RPC), chats index
-   (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt,
-   lastMessagePreview/At, config), devices registry (id, name, platform, lastSeenAt), session
-   status rows (Working indicator; staleness-checked client-side so a crashed backend never shows
-   eternal "Working"), checkout-diff summary pointers. `lastSeenAt` is the synced LWW seen marker
-   behind the "completed (unseen)" indicator. Lives in its own DO room (same SessionRoom DO
-   class, doc id `ws2/{orgId}` — the `2` is the spaces-overhaul destructive break), with presence
-   via Loro `EphemeralStore` (replaces the 15s heartbeat writes). Writer discipline: each device
-   writes only its own device/session/chat rows and the git stamps of spaces it owns;
-   creates/renames/archives/seen-marks are LWW map sets from any device. `deleteSpace` cascades:
-   the space row and every chat/session row in it tombstone in one commit.
+2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 
-   *Why a workspace doc and not N tiny docs:* the sidebar needs one subscription for the whole
-   list (grouping, resort animations, unseen markers); one doc = one room connection + one mirror.
-   Volume is tiny (index rows, no transcripts), so oplog growth is negligible and daily compaction
-   applies anyway.
+   Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
 
-3. **Mirror layer** (`comet-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
+   *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
+
+3. **Mirror layer** (`zeron-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
    schema, **incremental** application of `doc.subscribe` diffs into cached state (no full
-   re-hydration per change — this is also what fixes comet's known O(transcript) re-projection
+   re-hydration per change — this is also what fixes zeron's known O(transcript) re-projection
    inefficiency, remaining-work item 1a), and a diff-reconcile write path (evaluate `lorosurgeon`
    0.2.x as a dep; our schema is small enough to hand-roll if it doesn't fit). The UI renders
    mirror state directly with per-entry change notifications — the "endgame" the TS
@@ -96,39 +113,39 @@ thin hand-rolled client over `loro` 1.13.x — verify interop early, M1 exit cri
 Send/steer/interrupt/respondInput = durable command entries in the session doc (`QueueCommand`),
 executed by the chat's **host** device (executor gated on chat ownership; mark-processed BEFORE
 execute; steer with no live run dispatches as the next turn). Offline sends queue in the doc.
-This is comet's proven design, kept verbatim.
+This is zeron's proven design, kept verbatim.
 
 ## 3. Cargo workspace
 
 ```
-comet-native/
+zeron/
   Cargo.toml                 # workspace
   crates/
-    proto/        comet-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
+    proto/        zeron-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
                                  # entities, RPC envelopes (serde; ndjson framing);
                                  # `view` = the pure derivations both frontends share
                                  # (sort orders, staleness gating, grouping, boot gate)
-    doc/          comet-doc      # session-doc + workspace-doc schemas, mirror layer,
+    doc/          zeron-doc      # session-doc + workspace-registry schemas, mirror layer,
                                  # parts fold, continuations, command ledger, sidecars
-    sync/         comet-sync     # loro room client (join/VV backfill/fragments/backoff),
+    sync/         zeron-sync     # loro room client (join/VV backfill/fragments/backoff),
                                  # ephemeral presence, DocsStore (SQLite snapshots +
                                  # processed-command ledger)
-    harness/      comet-harness  # Harness trait + claude-code (stream-json subprocess),
+    harness/      zeron-harness  # Harness trait + claude-code (stream-json subprocess),
                                  # codex (app-server JSON-RPC), mock; steering mailbox,
                                  # requestInput, models/reasoning/options catalogs
-    engine/       comet-engine   # sessions engine (pub/sub, run journal, recovery, stall
+    engine/       zeron-engine   # sessions engine (pub/sub, run journal, recovery, stall
                                  # watchdog), doc host + command executor, repos/worktrees,
                                  # checkout-diff sync, terminals (portable-pty), uploads,
                                  # agent accounts (cred swap), auth (WorkOS via edge),
                                  # device-room host/peers, identity
-    rpc/          comet-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
+    rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)
-    ui/           comet-ui       # gpui app: shell, sidebar, conversation, composer,
+    ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
-    comet/                       # the binary (headed default, `headless` subcommand)
-  edge/                          # TypeScript Worker + DOs (ported from comet/apps/edge,
+    zeron/                       # the binary (headed default, `headless` subcommand)
+  edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
                                  # + auth-exchange routes absorbed from apps/server)
   docs/                          # this file + research reports
 ```
@@ -155,7 +172,7 @@ feature spec `docs/research/feature-inventory.md` §1.
   - row height memoization keyed by (row id, content length, width) so a streamed token
     re-measures one row;
   - scroll-anchor absorption for above-viewport height changes.
-- **Markdown** (`comet-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
+- **Markdown** (`zeron-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
   coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
   (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
@@ -174,9 +191,9 @@ feature spec `docs/research/feature-inventory.md` §1.
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
-- **Animation kit** (`comet-ui::motion`): small helpers over gpui `Animation` reproducing the
-  comet catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
-  `comet-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
+- **Animation kit** (`zeron-ui::motion`): small helpers over gpui `Animation` reproducing the
+  zeron catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
+  `zeron-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
   spinner (WorkingIndicator + rotating flavour word), `menu-in`/`dialog-in` scale-fades, 200ms
   ease-out width/height transitions for sidebar/panes, sidebar-resort **slide animation**
   (we own the list, so animate row positions directly — the View Transitions equivalent, 260ms
@@ -186,7 +203,7 @@ feature spec `docs/research/feature-inventory.md` §1.
 
 ## 5. Engine plan
 
-Direct ports of comet behaviors (spec: feature-inventory §3):
+Direct ports of zeron behaviors (spec: feature-inventory §3):
 - **Sessions engine**: per-session broadcast hub; on-disk run journal (resumable `seq` replay,
   crash auto-resume); persistent steerable sessions (steering mailbox at step/turn boundary; idle
   reaper; 10min stall watchdog); recovery stamps `aborted`.
@@ -194,13 +211,13 @@ Direct ports of comet behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Harness** (research pending — `docs/research/harness.md`): trait mirroring comet's
+- **Harness** (research pending — `docs/research/harness.md`): trait mirroring zeron's
   `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
   permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or
   `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
-- **Repos/diffs**: git2 or `git` subprocess (subprocess — matches comet, avoids libgit2 edge
-  cases); worktrees under `~/.comet-native/worktrees`; fs watchers (`notify`) + 2min repair; diff
-  capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace doc summary + DO diff
+- **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
+  cases); worktrees under `~/.zeron/worktrees`; fs watchers (`notify`) + 2min repair; diff
+  capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
   sidecar.
 - **Agent accounts**: credential-slot swap (macOS Keychain via `security-framework`, files
   elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows.
@@ -209,11 +226,10 @@ Direct ports of comet behaviors (spec: feature-inventory §3):
 
 ## 6. Edge plan (TypeScript, `edge/`)
 
-Port `comet/apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
+Port `zeron/apps/edge` nearly verbatim (it is already Loro-native and smoke-tested: session room
 w/ hibernation + two-level compaction + daily alarm backups, device room byte relay + nudges +
 sidecar slots, R2 attachments, JWKS auth). Additions:
-1. Workspace-doc rooms (`ws/{orgId}`) — same DO class, org-membership authz instead of
-   claim-on-first-join.
+1. Private per-user registry rooms (`/registry/{orgId}/ws` → `reg1/{orgId}/{userId}`) with authenticated row sync and ephemeral device presence.
 2. `/auth/*` routes absorbed from `apps/server` (WorkOS API key in Worker secret).
 3. Drop `/seed` migration path and legacy sync anything (fresh app).
 Hibernation hygiene: no idle timers (flush timer only while dirty), auto-response ping/pong —
@@ -224,8 +240,8 @@ per `docs/research/durable-objects-language.md`.
 - **Excluded**: token-usage display (profile heatmap, lifetime stats, per-message token columns,
   `WatchUsage`). Rate-limit meters on agent accounts are *kept* (separate concern; probed from
   CLIs, not CRDT-synced).
-- **Changed**: Postgres entity sync/server → workspace doc + edge; Electron/React/mugen → gpui with
-  ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (comet
+- **Changed**: Postgres entity sync/server → workspace registry + edge; Electron/React/mugen → gpui with
+  ported techniques; Node harness SDKs → subprocess protocols; WebRTC → device-room relay (zeron
   had already made this move); mobile app → out of scope for this repo.
 - **Kept verbatim**: session-doc schema shape + constants, command ledger rules, edge DO design,
   render-parts privacy policy, UX behaviors and animation timings.
@@ -236,15 +252,15 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
 
 - ✅ **M0 Scaffold** — workspace builds; `proto`/`doc` crates with ledger + parts + continuation
   unit tests; gpui hello-window runs.
-- ✅ **M1 Doc + sync core** — `comet-doc` mirror over loro 1.13; room client syncs with the edge
+- ✅ **M1 Doc + sync core** — `zeron-doc` mirror over loro 1.13; room client syncs with the edge
   running under `wrangler dev`; Rust⇄edge⇄Rust convergence test (M1 exit: two Rust peers converge
   through a real SessionRoom DO, tail endpoint serves).
-- ✅ **M2 Engine core** — Claude harness end-to-end headless: `comet headless` + dev auth runs a
+- ✅ **M2 Engine core** — Claude harness end-to-end headless: `zeron headless` + dev auth runs a
   turn, journal + doc writes, recovery test.
 - ✅ **M3 UI core** — shell (sidebar/panes/header), transcript (virtualized, markdown, streaming,
   stick-to-bottom), composer (send/steer/stop, question panel); local chat fully usable headed.
 - ✅ **M4 Multi-device** — device-room host/client virtual sockets, remote device control, workspace
-  doc entity sync, WorkOS auth + org gate, presence. Proven live by `scripts/e2e-smoke.sh`:
+  registry sync, WorkOS auth + org gate, presence. Proven live by `scripts/e2e-smoke.sh`:
   two headless engines against a real edge — B queues a run into the chat doc, the durable
   nudge wakes host A, A executes (mock harness), transcript + session status sync back to B.
 - 🟡 **M5 Full surface** — terminals, diff pane, repo/branch/folder pickers + worktrees,
@@ -261,7 +277,7 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
 1. loro-protocol Rust client ⇄ TS edge interop — verify at M1; fallback is a ~300-line hand-rolled
    client (the frame protocol is small and we control both ends).
 2. `lorosurgeon` fit for the mirror write path vs hand-rolled reconcile.
-3. Cursor harness (comet has it; CLI surface for Rust TBD) — parity item, scheduled after Codex.
+3. Cursor harness (zeron has it; CLI surface for Rust TBD) — parity item, scheduled after Codex.
 4. Text shaping performance for analytic row heights: gpui measures shaped text natively (Rust ⇒
    cheap), so we start with gpui `list()` measurement + memoization rather than porting pretext's
    full analytic kernel; revisit only if cold-open of huge transcripts measures slow.

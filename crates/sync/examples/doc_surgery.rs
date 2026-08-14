@@ -4,9 +4,9 @@
 //!   inspect-workspace <data_dir> <chat_id>
 //!   inspect-chat      <data_dir> <chat_id>
 //!   cut-chat          <data_dir> <chat_id> <from_index>
-use comet_doc::SessionDoc;
-use comet_sync::DocsStore;
 use loro::{LoroDoc, ToJson};
+use zeron_doc::SessionDoc;
+use zeron_sync::DocsStore;
 
 fn load_doc(store: &DocsStore, doc_id: &str) -> LoroDoc {
     let bytes = store

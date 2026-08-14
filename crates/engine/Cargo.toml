@@ -1,17 +1,17 @@
 [package]
-name = "comet-engine"
+name = "zeron-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
-comet-doc.workspace = true
-comet-sync.workspace = true
-comet-harness.workspace = true
-comet-rpc.workspace = true
-comet-update.workspace = true
+zeron-proto.workspace = true
+zeron-doc.workspace = true
+zeron-sync.workspace = true
+zeron-harness.workspace = true
+zeron-rpc.workspace = true
+zeron-update.workspace = true
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -28,6 +28,8 @@ notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
 libc.workspace = true
+gethostname.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
@@ -36,4 +38,4 @@ ignore.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
-comet-sync = { workspace = true, features = ["mock-server"] }
+zeron-sync = { workspace = true, features = ["mock-server"] }

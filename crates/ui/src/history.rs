@@ -7,13 +7,13 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::DateTime;
-use comet_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
-use comet_rpc::methods;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, ListAlignment, ListState,
     PathBuilder, Render, SharedString, Subscription, Task, Window, canvas, container_query, div,
     list, point, prelude::*, px,
 };
+use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
+use zeron_rpc::methods;
 
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -349,6 +349,8 @@ pub struct GitHistory {
 
 pub enum GitHistoryEvent {
     FetchSucceeded,
+    /// A commit row was clicked — the host opens it as its own diff tab.
+    OpenCommit(GitHistoryCommit),
 }
 
 impl EventEmitter<GitHistoryEvent> for GitHistory {}
@@ -682,7 +684,7 @@ impl GitHistory {
                 history.loading = false;
                 match result.and_then(|value| {
                     serde_json::from_value::<GitHistoryPage>(value)
-                        .map_err(|error| comet_rpc::RpcError::Failed(error.to_string()))
+                        .map_err(|error| zeron_rpc::RpcError::Failed(error.to_string()))
                 }) {
                     Ok(page) => {
                         let old_commit_count = history.commits.len();
@@ -1063,6 +1065,7 @@ impl GitHistory {
         };
         let theme = Theme::of(cx).clone();
         let sha = commit.sha.clone();
+        let open_commit = commit.clone();
         let copied = self.copied_sha.as_deref() == Some(sha.as_str());
         let commit_subject = if commit.subject.is_empty() {
             "(no subject)".to_string()
@@ -1083,7 +1086,13 @@ impl GitHistory {
             .border_b_1()
             .border_color(crate::theme::hairline(0.04))
             .text_size(px(11.0))
+            .cursor_pointer()
             .hover(|style| style.bg(crate::theme::ink(0.025)))
+            // A commit row click opens the commit as its own diff tab (the
+            // host — the right pane's surface strip — listens; user request).
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(GitHistoryEvent::OpenCommit(open_commit.clone()));
+            }))
             .child(Self::graph_cell(
                 graph_row,
                 self.graph.max_lane_count,
@@ -1162,7 +1171,11 @@ impl GitHistory {
                     } else {
                         theme.text_muted
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_sha(sha.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // The sha chip must not ALSO open the commit tab.
+                        cx.stop_propagation();
+                        this.copy_sha(sha.clone(), cx)
+                    }))
                     .child(SharedString::from(if copied {
                         "Copied".to_string()
                     } else {

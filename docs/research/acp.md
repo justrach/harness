@@ -6,12 +6,12 @@
   app-server — over the shared `crates/harness/src/jsonrpc.rs` client (promoted
   from `codex/rpc.rs`). Wire types are hand-rolled tolerant serde against raw
   `Value`s (house style, verified against `agent-client-protocol-schema` 1.3.0),
-  NOT the official SDK crates: comet keeps its own child-lifecycle hardening
+  NOT the official SDK crates: zeron keeps its own child-lifecycle hardening
   (StderrTail, SIGTERM→SIGKILL, PATH composition) and shell-script test
   fixtures, and drives raw updates the SDK's `ActiveSession` abstraction hides.
 - First registered agent: **Grok Build** (`grok agent stdio`), xAI's native ACP
   agent (npm `@xai-official/grok`, ACP registry id `grok-build`). Auth: browser
-  OAuth or `XAI_API_KEY`; comet passes env through. `GROK_EXECUTABLE` overrides
+  OAuth or `XAI_API_KEY`; zeron passes env through. `GROK_EXECUTABLE` overrides
   resolution (tests point it at `tests/fixtures/fake-acp.sh`).
 - **claude/codex converted to ACP too** (2026-08-08, wing's call: "keep things
   clean"): `AcpHarness::claude()` via `@agentclientprotocol/claude-agent-acp`
@@ -21,7 +21,7 @@
   catalogs (models, effort clamping, Ultrathink prefix) survive as spec inputs.
   Accepted deltas: Claude steering is now priority-`now` pre-emption (adapter
   semantics) instead of step-boundary stdin; sandbox policy control is
-  adapter-owned; comet-specific settings ride config options where advertised
+  adapter-owned; zeron-specific settings ride config options where advertised
   (mode → bypassPermissions, model via family-alias matching — the claude
   adapter advertises SDK aliases like `opus[1m]`/`sonnet`/`haiku` —
   fastMode/thinking as booleans) and are silently skipped elsewhere
@@ -43,8 +43,8 @@
   `npx -y` fallback; requires the pi CLI itself,
   `@earendil-works/pi-coding-agent`; `PI_ACP_EXECUTABLE` overrides). Models
   ride pi's own provider config (catalog advertises a `default` pass-through
-  entry); thinking ladder minimal→max maps onto comet's levels via the
-  generic `thought_level` preference ladder ("off" has no comet tier).
+  entry); thinking ladder minimal→max maps onto zeron's levels via the
+  generic `thought_level` preference ladder ("off" has no zeron tier).
 - **ACP is the source of truth for model lists** (2026-08-08; preference
   order inverted 2026-08-09): `models()` runs a short-lived probe
   (initialize → `session/new`, the `discover_commands` pattern) and reads
@@ -97,7 +97,7 @@
   session response's advertised `configOptions` (category `model` /
   `thought_level`, matched to advertised value ids, skipped when current,
   never fatal). Grok's effort ladder in the picker is Low/Medium/High →
-  `low`/`medium`/`high`; other comet levels degrade down a preference ladder
+  `low`/`medium`/`high`; other zeron levels degrade down a preference ladder
   (`config_option_sets`).
 - Steering: `_session/steering` extension when
   `initialize._meta.steering.supported` (org adapters); request carries

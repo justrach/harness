@@ -126,13 +126,13 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
             stdin.flush().await
         };
         if let Err(e) = write.await {
-            tracing::debug!(target: "comet_harness::rpc", "stdin write failed (tolerated): {e}");
+            tracing::debug!(target: "zeron_harness::rpc", "stdin write failed (tolerated): {e}");
             return;
         }
     }
 }
 
-/// The id of a response, tolerantly. comet always sends numeric ids, but
+/// The id of a response, tolerantly. zeron always sends numeric ids, but
 /// JSON-RPC lets a server echo them re-encoded — a string `"5"` or float
 /// `5.0` still names request 5. Dropping such a response would strand its
 /// caller forever (the session would spin Working with no per-turn timeout).
@@ -143,9 +143,7 @@ fn response_id(id: &Value) -> Option<i64> {
     if let Some(s) = id.as_str() {
         return s.parse().ok();
     }
-    id.as_f64()
-        .filter(|f| f.fract() == 0.0)
-        .map(|f| f as i64)
+    id.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64)
 }
 
 /// Parse stdout lines: responses resolve the pending map, everything else is
@@ -161,7 +159,7 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(target: "comet_harness::rpc", "non-JSON stdout line (skipped)");
+            tracing::debug!(target: "zeron_harness::rpc", "non-JSON stdout line (skipped)");
             continue;
         };
         let method = msg.get("method").and_then(Value::as_str);

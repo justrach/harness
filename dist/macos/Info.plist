@@ -9,11 +9,11 @@
     <key>CFBundleDisplayName</key>
     <string>Zeron</string>
     <key>CFBundleExecutable</key>
-    <string>comet</string>
+    <string>zeron</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.comet.native</string>
+    <string>sh.zeron.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
