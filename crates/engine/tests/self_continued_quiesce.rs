@@ -6,7 +6,7 @@
 //! settle, so the quiesce watchdog is that turn shape's ONLY settle path.
 //! With the shared 120s window every background notification ended in ~2min
 //! of phantom Working. Self-continued turns now use a much shorter window
-//! (`COMET_SELF_TURN_QUIESCE_MS`); prompt/steer turns keep the normal one.
+//! (`ZERON_SELF_TURN_QUIESCE_MS`); prompt/steer turns keep the normal one.
 //!
 //! This file exists separately from `turn_quiesce.rs` because the env knobs
 //! are process-global: here the NORMAL window is set far beyond the test
@@ -20,9 +20,9 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::{Mutex, mpsc};
 
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode,
 };
@@ -40,8 +40,8 @@ fn init_env() {
         // SAFETY: called before any engine (and thus any reader of the vars)
         // exists in this test process.
         unsafe {
-            std::env::set_var("COMET_TURN_QUIESCE_MS", QUIESCE_MS.to_string());
-            std::env::set_var("COMET_SELF_TURN_QUIESCE_MS", SELF_QUIESCE_MS.to_string());
+            std::env::set_var("ZERON_TURN_QUIESCE_MS", QUIESCE_MS.to_string());
+            std::env::set_var("ZERON_SELF_TURN_QUIESCE_MS", SELF_QUIESCE_MS.to_string());
         }
     });
 }
@@ -226,7 +226,9 @@ async fn self_continued_turn_parks_on_the_short_window() {
 
     // Background wake: self-continued output past the resume gate.
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    rig.feed.send(text("The build is green. Released.")).unwrap();
+    rig.feed
+        .send(text("The build is green. Released."))
+        .unwrap();
     wait_for(
         || status(&rig.core) == Some(SessionStatus::Working),
         "self-continued output resumes Working",

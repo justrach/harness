@@ -12,7 +12,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space};
+use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space, WorkspaceScope};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -139,7 +139,7 @@ pub fn sort_chats(chats: &mut [Chat]) {
 // Boot gate
 // ---------------------------------------------------------------------------
 
-/// The app gate (comet's App.tsx phases). Pure.
+/// The app gate (zeron's App.tsx phases). Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatePhase {
     /// Booting / probing — splash covers this.
@@ -154,17 +154,94 @@ pub enum GatePhase {
     Ready,
 }
 
-/// `auth = None` means "engine doesn't report auth yet" (dev mode) and gates
-/// nothing.
-pub fn gate_phase(connection: &ConnectionStatus, auth: Option<&AuthState>) -> GatePhase {
+/// Missing scope is treated as synced. Current engines always publish
+/// [`WorkspaceScope`] before becoming ready, while old daemons are deliberately
+/// kept behind the account gate instead of being mistaken for local runtimes.
+pub fn gate_phase(
+    connection: &ConnectionStatus,
+    workspace_scope: Option<WorkspaceScope>,
+    auth: Option<&AuthState>,
+) -> GatePhase {
     match connection {
         ConnectionStatus::Connecting => GatePhase::Loading,
         ConnectionStatus::Failed(err) => GatePhase::Failed(err.clone()),
-        ConnectionStatus::Ready => match auth {
-            Some(AuthState::SignedOut) => GatePhase::SignIn,
-            Some(AuthState::NeedsOrganization { .. }) => GatePhase::OrgGate,
-            _ => GatePhase::Ready,
+        ConnectionStatus::Ready => match workspace_scope.unwrap_or(WorkspaceScope::Synced) {
+            WorkspaceScope::Local | WorkspaceScope::Development => GatePhase::Ready,
+            WorkspaceScope::Synced => match auth {
+                Some(AuthState::NeedsOrganization { .. }) => GatePhase::OrgGate,
+                Some(AuthState::SignedIn { .. }) => GatePhase::Ready,
+                Some(AuthState::SignedOut) | None => GatePhase::SignIn,
+            },
         },
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::UserProfile;
+
+    fn user() -> UserProfile {
+        UserProfile {
+            id: "user-1".into(),
+            email: "user@example.com".into(),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn workspace_scope_controls_the_auth_gate() {
+        assert_eq!(
+            gate_phase(
+                &ConnectionStatus::Ready,
+                Some(WorkspaceScope::Local),
+                Some(&AuthState::SignedOut),
+            ),
+            GatePhase::Ready
+        );
+        assert_eq!(
+            gate_phase(
+                &ConnectionStatus::Ready,
+                Some(WorkspaceScope::Synced),
+                Some(&AuthState::SignedOut),
+            ),
+            GatePhase::SignIn
+        );
+        assert_eq!(
+            gate_phase(
+                &ConnectionStatus::Ready,
+                Some(WorkspaceScope::Synced),
+                Some(&AuthState::NeedsOrganization { user: user() }),
+            ),
+            GatePhase::OrgGate
+        );
+    }
+
+    #[test]
+    fn development_and_local_never_use_the_workos_gate() {
+        for scope in [WorkspaceScope::Local, WorkspaceScope::Development] {
+            for auth in [
+                AuthState::SignedOut,
+                AuthState::NeedsOrganization { user: user() },
+                AuthState::SignedIn {
+                    user: user(),
+                    org_id: Some("org-1".into()),
+                },
+            ] {
+                assert_eq!(
+                    gate_phase(&ConnectionStatus::Ready, Some(scope), Some(&auth)),
+                    GatePhase::Ready
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_scope_falls_back_to_a_synced_gate() {
+        assert_eq!(
+            gate_phase(&ConnectionStatus::Ready, None, None),
+            GatePhase::SignIn
+        );
     }
 }
 
@@ -240,7 +317,7 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
 }
 
 /// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix;
-/// port of comet's `formatTimeAgo`.
+/// port of zeron's `formatTimeAgo`.
 pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let s = now.signed_duration_since(then).num_seconds().max(0);
     // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
@@ -270,7 +347,7 @@ pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{}y", d / 365)
 }
 
-/// Session-row sub-line, "project · branch" (comet `chatLocation`): the repo
+/// Session-row sub-line, "project · branch" (zeron `chatLocation`): the repo
 /// checkout identity. Either part may be missing; empty when both are.
 pub fn chat_location(chat: &Chat) -> Option<String> {
     let project = chat
@@ -315,7 +392,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-/// Per-kind chip label + one-line detail. Labels match comet's `describeTool`
+/// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
     let (label, detail) = tool_chip_content_raw(call);
@@ -420,7 +497,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
         segments.push(format!("{failed} failed"));
     }
     let mut summary = segments.join(" · ");
-    // Capitalize the first segment only (comet's style).
+    // Capitalize the first segment only (zeron's style).
     if let Some(first) = summary.get(0..1) {
         let upper = first.to_uppercase();
         summary.replace_range(0..1, &upper);
@@ -432,7 +509,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
 ///
 /// Colors live here rather than in the viewport because the *meaning* of a
 /// dot is part of the protocol, not the presentation — a given status must
-/// read the same on every surface. `comet-ui` has the oklch→sRGB math.
+/// read the same on every surface. `zeron-ui` has the oklch→sRGB math.
 pub mod dot {
     /// Running. Pink, not amber: the harsh yellow read as a warning, and running
     /// is routine (user request).
@@ -473,7 +550,7 @@ pub enum CheckoutPlan {
     CurrentCheckout { branch: Option<String> },
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (the engine mints a `comet/<name>`
+    /// `CreateWorktree` off `base` on send (the engine mints a `zeron/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the space
     /// folder rather than failing.
     NewWorktree { base: Option<String> },

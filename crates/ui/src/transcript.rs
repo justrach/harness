@@ -38,8 +38,8 @@ use gpui::{
     Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
-use comet_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use comet_proto::ToolCall;
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_proto::ToolCall;
 
 use crate::markdown::highlight::{Lang, LineCarry, Token, lang_for_tag, tokenize_line};
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
@@ -63,10 +63,10 @@ pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 pub const GAP_TURN: f32 = 14.0;
 /// Vertical gap between blocks within a turn.
 pub const GAP_BLOCK: f32 = 8.0;
-/// Transcript column max width (comet 46rem).
+/// Transcript column max width (zeron 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
-/// A row is the guide rail + a 30px chip card centered in it (comet
+/// A row is the guide rail + a 30px chip card centered in it (zeron
 /// tool-chip.tsx: `TOOL_CHIP_HEIGHT = 38`, card `h-[30px]`); rows stack with no
 /// gap so the rail reads continuous.
 pub const CHIP_HEIGHT: f32 = 38.0;
@@ -113,14 +113,15 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// A freshly-sent prompt rests this far below the transcript viewport's top.
 /// The titlebar overlays the full-height list, so its height is part of the
 /// inset; the extra 10px matches the first row's breathing room.
-const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
-/// Turn-height allowance baked into the PROVISIONAL reservation (sized before
-/// the sent rows have measured). Deliberately an UNDERSHOOT: too small a pad
-/// parks the prompt a bit below its inset until the refinement lands — still
-/// visible, so its bounds exist and the refinement can land. Too large a pad
-/// overscrolls the prompt off the top, where an unmeasured anchor row can
-/// never refine — the view sticks in blank runway (rig-caught).
-const OWN_SEND_PROMPT_ALLOWANCE_PX: f32 = 160.0;
+pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// Epsilon of extra height under the reservation. The runway ends AT the
+/// app's bottom — this is not scroll room (24px of it read as a janky
+/// overshoot-and-fight zone, user report) — it exists only to keep the held
+/// layout out of gpui's shorter-than-viewport regime, where a bottom-aligned
+/// list reports no item bounds (sizing goes blind) and position becomes a
+/// function of content height instead of the hold. Two pixels of travel is
+/// below perception.
+const OWN_SEND_SCROLL_SLACK_PX: f32 = 2.0;
 /// Per-60fps-frame fraction of the remaining entry glide retained (~90%
 /// covered in ~230ms, ease-out).
 const OWN_SEND_GLIDE_RETAIN: f32 = 0.85;
@@ -169,7 +170,6 @@ impl StickSpring {
     pub fn reset(&mut self) {
         *self = Self::new();
     }
-
 
     /// Residual motion below mugen's settle thresholds (`v < .05 && targetVel
     /// < .05`)?
@@ -260,7 +260,7 @@ pub enum ToolDetail {
     /// (chat2-sync A1). The full diff upgrades this to [`ToolDetail::Diff`]
     /// via the sidecar fetch.
     Stats {
-        stats: Arc<Vec<comet_doc::ToolDiffStat>>,
+        stats: Arc<Vec<zeron_doc::ToolDiffStat>>,
     },
 }
 
@@ -287,8 +287,8 @@ const DETAIL_SEPARATOR: f32 = 1.0;
 /// STATS instead of inline diff text, which win the same way.
 pub fn tool_detail(
     output: Option<&str>,
-    diff: Option<&comet_proto::ToolDiff>,
-    diff_stats: Option<&[comet_doc::ToolDiffStat]>,
+    diff: Option<&zeron_proto::ToolDiff>,
+    diff_stats: Option<&[zeron_doc::ToolDiffStat]>,
 ) -> Option<ToolDetail> {
     if let Some(diff) = diff {
         let mut file = diff_to_file(diff);
@@ -415,10 +415,10 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     })
 }
 
-/// Reduce an inline [`comet_proto::ToolDiff`] to the changes pane's
+/// Reduce an inline [`zeron_proto::ToolDiff`] to the changes pane's
 /// [`crate::changes::FileDiff`]: hunks grouped with 3 context lines, dual
 /// 1-based line numbers, unified-diff hunk headers, and add/del counts.
-pub fn diff_to_file(diff: &comet_proto::ToolDiff) -> crate::changes::FileDiff {
+pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
     use crate::changes::{DiffLine, FileDiff, FileStatus, Hunk, LineKind};
     let old = diff.old_text.as_deref().unwrap_or("");
     let text_diff = similar::TextDiff::from_lines(old, &diff.new_text);
@@ -454,9 +454,7 @@ pub fn diff_to_file(diff: &comet_proto::ToolDiff) -> crate::changes::FileDiff {
                 };
                 let old_no = change.old_index().map(|n| n as u32 + 1);
                 let new_no = change.new_index().map(|n| n as u32 + 1);
-                max_line = max_line
-                    .max(old_no.unwrap_or(0))
-                    .max(new_no.unwrap_or(0));
+                max_line = max_line.max(old_no.unwrap_or(0)).max(new_no.unwrap_or(0));
                 lines.push(DiffLine {
                     kind,
                     old_no,
@@ -559,7 +557,7 @@ pub struct Row {
     pub turn_start: bool,
     pub kind: RowKind,
     /// The owning message entry — hover anywhere on the entry's rows reveals
-    /// its timestamp strip (comet chat-view.tsx `group`/`group-hover`).
+    /// its timestamp strip (zeron chat-view.tsx `group`/`group-hover`).
     pub entry_id: SharedString,
     /// Epoch-ms for the 16px hover-timestamp strip UNDER this row: set on the
     /// LAST row of a completed entry (user rows always; assistant rows only
@@ -874,23 +872,23 @@ pub fn rows_for_entry(
     rows
 }
 
-/// `COMET_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
+/// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
 /// over rolling windows of [`FRAME_STATS_WINDOW`] samples) at `warn` level —
 /// the smoothness measurement knob. Off by default; zero cost when off.
 fn frame_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
-        .get_or_init(|| std::env::var("COMET_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
+        .get_or_init(|| std::env::var("ZERON_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 const FRAME_STATS_WINDOW: usize = 240;
 
-/// `COMET_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
+/// `ZERON_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
 /// A/B knob for the frame-cost measurement above.
 fn render_cache_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DISABLED.get_or_init(|| {
-        std::env::var("COMET_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
+        std::env::var("ZERON_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -1035,19 +1033,19 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 
 /// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
 ///
-/// The rule lives in `comet_proto::view` so the terminal viewport reports the
+/// The rule lives in `zeron_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
-    comet_proto::view::tool_group_summary(&pairs)
+    zeron_proto::view::tool_group_summary(&pairs)
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
-// viewport (`comet_proto::view`): a tool must be named identically on every
+// viewport (`zeron_proto::view`): a tool must be named identically on every
 // surface, and the one-line collapse is needed for the same reason in both (a
 // literal newline breaks gpui's ellipsis logic and would be a cursor move in a
 // cell grid).
-pub use comet_proto::view::{single_line, tool_chip_content};
+pub use zeron_proto::view::{single_line, tool_chip_content};
 
 /// Analytic expanded-chips height — no measurement needed for the fold tween.
 pub fn chips_height(count: usize) -> f32 {
@@ -1089,7 +1087,7 @@ const FULL_OUTPUT_MAX_LINES: usize = 400;
 /// blobs render (near-)uncapped — fetching past the summary was the point.
 fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
     if is_diff {
-        let diff: comet_proto::ToolDiff = serde_json::from_str(text).ok()?;
+        let diff: zeron_proto::ToolDiff = serde_json::from_str(text).ok()?;
         return tool_detail(None, Some(&diff), None);
     }
     let mut lines: Vec<SharedString> = text
@@ -1406,7 +1404,7 @@ pub struct Transcript {
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
-    /// strip (comet chat-view.tsx `group-hover`; the rows report hover
+    /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
@@ -1580,8 +1578,6 @@ impl Transcript {
         }
     }
 
-
-
     pub(crate) fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
@@ -1632,8 +1628,7 @@ impl Transcript {
                         this.spring.reset();
                         this.spring_last_tick = None;
                     } else if !held
-                        && (distance <= AT_BOTTOM_PX
-                            || Self::should_restick(distance, previous))
+                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous))
                     {
                         // Returning to the bottom returns to the RUNWAY: the
                         // glide re-lands the prompt at its inset.
@@ -1643,6 +1638,23 @@ impl Transcript {
                         }
                         this.own_turn_last_tick = None;
                         this.own_turn_kick = true;
+                    } else if held {
+                        // Wheel-down while held: the bottom is a HARD STOP.
+                        // The pad runs one frame behind a streaming commit,
+                        // so the list's own end-clamp can briefly admit
+                        // travel into the transient surplus — re-assert the
+                        // hold in the same effect cycle, before anything
+                        // paints, and the sink never reaches the screen.
+                        // (scroll_to is bounds-free, so this also covers the
+                        // wheel gluing the offset at the end.)
+                        if let Some(ix) = this.own_turn_anchor_ix() {
+                            this.list.scroll_to(ListOffset {
+                                item_ix: ix,
+                                offset_in_item: px(0.0),
+                            });
+                            this.list.scroll_by(px(-Self::own_send_inset(ix)));
+                        }
+                        this.last_scroll_distance = this.distance_from_bottom();
                     }
                     let show = distance > SCROLL_BUTTON_THRESHOLD_PX
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
@@ -1736,6 +1748,18 @@ impl Transcript {
         }
     }
 
+    /// The held prompt's top offset from the viewport top. Row 0 already
+    /// carries the titlebar chrome inside its own box (the first row's
+    /// top gap), so the hold adds nothing — adding the inset on top parked
+    /// a new chat's first prompt a double-chrome ~66px low (user report).
+    fn own_send_inset(anchor_ix: usize) -> f32 {
+        if anchor_ix == 0 {
+            0.0
+        } else {
+            OWN_SEND_TOP_INSET_PX
+        }
+    }
+
     fn own_turn_anchor_ix(&self) -> Option<usize> {
         let anchor = self.own_turn.as_ref()?;
         self.rows
@@ -1747,6 +1771,13 @@ impl Transcript {
     /// all motion is the ordinary bottom pin (see [`OwnTurnAnchor`]).
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
         self.own_turn_kick = false;
+        // Layout moves the bottom too (pad refinement, streaming growth):
+        // refresh the wheel handler's escape baseline every frame so only a
+        // WHEEL's own delta registers as user intent. Without this, the pad
+        // growing at turn-completion between two wheel events read as
+        // "scrolled away" and silently released the hold — the next wheels
+        // then sank unopposed deep into the runway blank (rig-traced).
+        self.last_scroll_distance = self.distance_from_bottom();
         let Some(anchor_ix) = self.own_turn_anchor_ix() else {
             // The optimistic echo may arrive on the next state notification.
             return;
@@ -1762,20 +1793,43 @@ impl Transcript {
             return;
         };
         let base_pad = self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0;
-        let usable = viewport_height - OWN_SEND_TOP_INSET_PX - base_pad;
+        let inset = Self::own_send_inset(anchor_ix);
+        // A glued offset hard-tracks a GROWING end — streamed text visually
+        // pushes everything above it up while the runway blank persists
+        // below (user report; the glued representation also hides every
+        // item's bounds, so the sizing that would consume the runway goes
+        // blind). Dissolve it for HELD and RELEASED views alike. The glued
+        // sentinel resolves NUMERICALLY to the total content height (a
+        // viewport top past the last item), so a small nudge lands in an
+        // absurd overscroll that layout's under-fill normalizer re-glues on
+        // the very next frame — an invisible wedge loop (rig-traced).
+        // Stepping back a FULL viewport from the sentinel is exactly "end
+        // at the screen bottom": the same visual position, concrete.
+        if self.is_glued() {
+            self.list.scroll_by(px(-viewport_height));
+        }
+        // The slack keeps the held layout scrollable (see the constant) —
+        // the reservation deliberately over-fills by this much.
+        let usable = viewport_height - inset - base_pad + OWN_SEND_SCROLL_SLACK_PX;
         let current = self.own_turn.as_ref().map_or(0.0, |a| a.runway);
 
         // A fresh anchor installs a provisional pad BEFORE anything needs
         // bounds: the just-sent rows sit below the fold, unmeasured, and
         // without the pad there is no scroll room to bring them into the
         // measured window (gating the pad on their bounds deadlocked — the
-        // clamped scroll kept them unmeasured forever). Sized for a turn of
-        // [`OWN_SEND_PROMPT_ALLOWANCE_PX`] so the entry glide UNDERSHOOTS
-        // (see the constant), keeping the anchor row on-screen for the
-        // refinement below to finish the job.
+        // clamped scroll kept them unmeasured forever). Sized at FULL
+        // `usable` — a deliberate overshoot by the turn's own height, safe
+        // under the absolute hold (scroll_to pins the prompt regardless) and
+        // REQUIRED for short chats: gpui's bottom-aligned list reports no
+        // item bounds while its content is shorter than the viewport
+        // (rig-traced: a new session's first send sat ~150px below the
+        // inset forever — the old undershot pad left the content short, the
+        // bounds-free scroll_to clamped, and the bounds-gated refinement
+        // could never rescue it). Overshooting guarantees the scroll room;
+        // the surplus sits below the fold until the refinement trues it.
         if current <= 0.0 {
             if let Some(anchor) = self.own_turn.as_mut() {
-                anchor.runway = (usable - OWN_SEND_PROMPT_ALLOWANCE_PX).max(0.0);
+                anchor.runway = usable.max(0.0);
             }
             self.remeasure_last_row();
             cx.notify();
@@ -1794,6 +1848,17 @@ impl Transcript {
                 - current
                 - base_pad;
             let target = own_turn_reservation(usable, turn_height);
+            // FLOOR: never shrink the pad faster than the viewport allows.
+            // The step runs a frame behind content growth, so a wheel that
+            // lands inside that window can sink the view toward the stale
+            // end; snapping the pad straight to `target` then pulls the end
+            // UP THROUGH the viewport (the list clamps instantly — a visible
+            // yank, user report "stutter push back"). Shrinking is capped so
+            // the end never rises above the current view; deferred surplus
+            // burns off as the view moves away from the stop.
+            let dist = self.distance_from_bottom();
+            let floor = current - (dist - OWN_SEND_SCROLL_SLACK_PX).max(0.0);
+            let target = target.max(floor.min(current));
             if target <= 0.5 {
                 // The reply has outgrown the reserved space (or the prompt
                 // alone overfills it): the pad is ~0, so dropping it is
@@ -1832,23 +1897,67 @@ impl Transcript {
             // scroll_to is absolute and bounds-independent, so neither glue
             // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
             // carry the view off the prompt (each broke the spring-held
-            // variants of this — rig-traced).
-            let moved = self
-                .list
-                .bounds_for_item(anchor_ix)
-                .is_none_or(|b| {
-                    (f32::from(b.top())
-                        - (f32::from(viewport.top()) + OWN_SEND_TOP_INSET_PX))
-                        .abs()
-                        > 0.5
-                });
+            // variants of this — rig-traced). ONE-SIDED: only upward drift
+            // (view above the hold) is corrected. The scroll slack under the
+            // reservation is legal resting space — wheel-down sinks into it
+            // and stops hard at the list's own clamp; snapping back up from
+            // there made the bottom bounce/stutter on every scroll event
+            // (user report). Way-below-slack (impossible short of a bug)
+            // still re-asserts.
+            let moved = match self.list.bounds_for_item(anchor_ix) {
+                Some(b) => {
+                    let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
+                    // The legal rest zone below the hold is the epsilon plus
+                    // rounding; anything deeper is a transient-collision sink
+                    // and rubber-bands back.
+                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+                }
+                // Bounds vanish in the glued representation (dissolved
+                // above, so at most for this one frame) and through splice
+                // flicker. Near the stop that is dead-band space — no
+                // assert (asserting on None here was the bottom bounce);
+                // far from it the position is unknowable flicker: re-assert.
+                None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
+            };
             if moved {
-                self.list.scroll_to(ListOffset {
-                    item_ix: anchor_ix,
-                    offset_in_item: px(0.0),
-                });
-                self.list.scroll_by(px(-OWN_SEND_TOP_INSET_PX));
+                // Correct with the entry glide's ease, not a snap: the only
+                // in-band escapes are one-frame commit transients and splice
+                // flicker, and an eased ~200ms return reads as native
+                // rubber-banding where an instant re-assert read as stutter
+                // (user report). Bounds-less flicker still snaps — there is
+                // nothing to ease against.
+                match self.list.bounds_for_item(anchor_ix) {
+                    Some(b) => {
+                        let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
+                        let now = Instant::now();
+                        let frames = match self.own_turn_last_tick {
+                            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
+                                / SPRING_FRAME_MS)
+                                .min(SPRING_MAX_CATCHUP_FRAMES),
+                            None => 1.0,
+                        };
+                        self.own_turn_last_tick = Some(now);
+                        let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
+                        if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
+                            self.list.scroll_by(px(err));
+                            self.own_turn_last_tick = None;
+                        } else {
+                            self.list.scroll_by(px(err * ease));
+                        }
+                        self.own_turn_kick = true;
+                    }
+                    None => {
+                        self.list.scroll_to(ListOffset {
+                            item_ix: anchor_ix,
+                            offset_in_item: px(0.0),
+                        });
+                        self.list.scroll_by(px(-inset));
+                        self.own_turn_last_tick = None;
+                    }
+                }
                 cx.notify();
+            } else {
+                self.own_turn_last_tick = None;
             }
             return;
         }
@@ -1864,11 +1973,19 @@ impl Transcript {
         // bottom distance while it is still below the measured window (the
         // undershot provisional pad guarantees the bottom stops short of the
         // prompt, so this leg can never overshoot it).
-        let err = match self.list.bounds_for_item(anchor_ix) {
-            Some(bounds) => {
-                f32::from(bounds.top()) - (f32::from(viewport.top()) + OWN_SEND_TOP_INSET_PX)
-            }
-            None => self.distance_from_bottom(),
+        // The two error legs mean DIFFERENT things at zero: on the bounds
+        // leg, err 0 is AT the hold (no correction needed); on the bounds-
+        // less leg, err is the distance to the pad's bottom — arrival there
+        // still needs the absolute snap onto the anchor (the short-chat/
+        // glued landing, where bounds never appear). Conflating them once
+        // marked entries "positioned" at the pad bottom without ever
+        // landing (rig-caught: sends parked deep in blank runway).
+        let (err, anchored) = match self.list.bounds_for_item(anchor_ix) {
+            Some(bounds) => (
+                f32::from(bounds.top()) - (f32::from(viewport.top()) + inset),
+                true,
+            ),
+            None => (self.distance_from_bottom(), false),
         };
         let glide_max = GLIDE_MAX_VIEWPORTS * viewport_height;
         let err = if err > glide_max {
@@ -1877,12 +1994,37 @@ impl Transcript {
         } else {
             err
         };
-        if err.abs() <= OWN_SEND_GLIDE_SNAP_PX || motion::reduced_motion(cx) {
-            self.list.scroll_to(ListOffset {
+        let land = |list: &ListState| {
+            list.scroll_to(ListOffset {
                 item_ix: anchor_ix,
                 offset_in_item: px(0.0),
             });
-            self.list.scroll_by(px(-OWN_SEND_TOP_INSET_PX));
+            list.scroll_by(px(-inset));
+        };
+        if motion::reduced_motion(cx) {
+            land(&self.list);
+            if let Some(anchor) = self.own_turn.as_mut() {
+                anchor.positioned = true;
+            }
+            self.own_turn_last_tick = None;
+        } else if anchored
+            && err <= OWN_SEND_GLIDE_SNAP_PX
+            && err >= -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
+        {
+            // At the hold — or resting inside the slack under it (a restick
+            // that fired at the true bottom): land WITHOUT pulling the view
+            // up. Only a still-above position gets the snap.
+            if err > 0.5 {
+                land(&self.list);
+            }
+            if let Some(anchor) = self.own_turn.as_mut() {
+                anchor.positioned = true;
+            }
+            self.own_turn_last_tick = None;
+        } else if !anchored && err <= OWN_SEND_GLIDE_SNAP_PX {
+            // Arrived at the bottom with the anchor still unmeasured: the
+            // absolute, bounds-free snap IS the landing.
+            land(&self.list);
             if let Some(anchor) = self.own_turn.as_mut() {
                 anchor.positioned = true;
             }
@@ -1922,7 +2064,6 @@ impl Transcript {
         }
         self.engage_pin(cx);
     }
-
 
     /// Re-engage the bottom pin with a glide. Long jumps teleport to within
     /// [`GLIDE_MAX_VIEWPORTS`] of the end first (mugen `springToBottom`);
@@ -2222,14 +2363,17 @@ impl Transcript {
             let reply = crate::attachments::call_with_timeout(
                 &engine,
                 cx.background_executor(),
-                comet_rpc::methods::FETCH_TOOL_BLOB,
+                zeron_rpc::methods::FETCH_TOOL_BLOB,
                 serde_json::json!({ "blobRef": ref_key.as_ref() }),
                 Duration::from_secs(20),
             )
             .await;
             let fetched = match reply {
                 Ok(value) => {
-                    let text = value.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                    let text = value
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
                     blob_detail(text, is_diff)
                         .map(|d| BlobFetch::Ready(Arc::new(d)))
                         .unwrap_or(BlobFetch::Failed)
@@ -2276,7 +2420,7 @@ impl Transcript {
     }
 
     /// Devices that may own a user message's attachment files: the chat's host
-    /// device (uploads targeted it) plus this device (comet's
+    /// device (uploads targeted it) plus this device (zeron's
     /// `uniqueIds([attachmentDeviceId, m.device_id])`).
     fn attachment_device_ids(&self, cx: &Context<Self>) -> Vec<String> {
         let state = self.state.read(cx);
@@ -2464,7 +2608,7 @@ impl Transcript {
                     .opacity(
                         0.35 + 0.4
                             * motion::pulse_wave(motion::pulse_delta(
-                                &motion::COMET_PULSE,
+                                &motion::ZERON_PULSE,
                                 cx.entity_id(),
                                 cx,
                             )),
@@ -2715,7 +2859,7 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
         };
 
-        // Hover-revealed timestamp strip (comet chat-view.tsx `Timestamp`):
+        // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
         // a RESERVED 16px lane under the entry's last row — the label only
         // flips opacity, so revealing it never shifts the virtualizer's
         // layout. User entries align end (under the bubble), assistant start.
@@ -2791,7 +2935,7 @@ impl Transcript {
             .justify_center()
             .pt(px(top_gap))
             .pb(px(bottom_pad))
-            // Wide gutters (comet `px-4 @3xl:px-12`) around the 46rem column.
+            // Wide gutters (zeron `px-4 @3xl:px-12`) around the 46rem column.
             .px(px(48.0))
             .child(
                 div()
@@ -2918,8 +3062,7 @@ impl Transcript {
                     let mut best: Option<(u64, &SharedString)> = None;
                     for blob_ref in [&tool.diff_ref, &tool.output_ref].into_iter().flatten() {
                         if matches!(self.blob_details.get(blob_ref), Some(BlobFetch::Ready(_))) {
-                            let order =
-                                self.blob_fetch_order.get(blob_ref).copied().unwrap_or(0);
+                            let order = self.blob_fetch_order.get(blob_ref).copied().unwrap_or(0);
                             if best.is_none_or(|(o, _)| order > o) {
                                 best = Some((order, blob_ref));
                             }
@@ -2999,7 +3142,7 @@ impl Transcript {
         let summary = tool_group_summary(tools);
 
         let toggle_id = row_id.clone();
-        // Header (comet tool-group.tsx): a small chevron tile centered over the
+        // Header (zeron tool-group.tsx): a small chevron tile centered over the
         // chips' guide rail, then the quiet 12px summary.
         let header = div()
             .id(SharedString::from(format!("{row_id}-hdr")))
@@ -3014,7 +3157,7 @@ impl Transcript {
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
-            // chips (destructive tint, comet tool-chip.tsx) and in the
+            // chips (destructive tint, zeron tool-chip.tsx) and in the
             // summary's "· N failed" count.
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
@@ -3084,6 +3227,7 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                let group_key = row_id.clone();
                 let mut card = div()
                     .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
                     .ml(px(12.0))
@@ -3108,6 +3252,23 @@ impl Transcript {
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
                                 entry.toggled_at = Some(Instant::now());
+                                // Arm the GROUP body's height tween too (open
+                                // state untouched): the body's height is
+                                // analytic over the final detail state, so
+                                // without a tween the row snaps to the target
+                                // height while the card is still mid-tween —
+                                // content below teleported on expand and the
+                                // shrinking card clipped on collapse (user
+                                // report). `open_height` was computed with
+                                // the detail still in its pre-click state,
+                                // which is exactly the tween's start; both
+                                // tweens share the click instant and the
+                                // RESIZE curve, so the row tracks the card's
+                                // bottom edge frame-for-frame.
+                                let group = this.folds.entry(group_key.clone()).or_default();
+                                group.from = open_height;
+                                group.epoch += 1;
+                                group.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
                             .child(chip_header(tool, open, theme)),
@@ -3308,7 +3469,7 @@ fn user_bubble_text(
         .into_any_element()
 }
 
-/// The transcript ErrorChip — an exact port of comet chat-view.tsx
+/// The transcript ErrorChip — an exact port of zeron chat-view.tsx
 /// `ErrorChip`: a 34px row (`rounded-[10px] border border-red-400/[0.16]
 /// bg-red-400/[0.05] px-2 text-[12px]`) with a 20px red-washed tile holding a
 /// 12px DangerTriangle (`bg-red-400/[0.12] text-red-300/80`), a medium
@@ -3432,9 +3593,9 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
-/// A small glyph standing in for the tool's icon (comet uses an icon set; a
+/// A small glyph standing in for the tool's icon (zeron uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
-/// The glyph for a tool call (comet tool-chip.tsx `toolIcon`, Solar set).
+/// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
         ToolCall::Exec { .. } => crate::icons::COMMAND,
@@ -3769,7 +3930,7 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use comet_doc::MessagePart;
+    use zeron_doc::MessagePart;
 
     // ---- streaming parse wiring (the transcript side, not the parser) ----
 
@@ -4203,7 +4364,7 @@ mod tests {
     /// the RAW text either way, so projection never perturbs the diff key.
     #[test]
     fn user_rows_project_file_mentions_into_chips() {
-        let raw = "look at [composer.rs](comet-file:crates/ui/src/composer.rs) please";
+        let raw = "look at [composer.rs](zeron-file:crates/ui/src/composer.rs) please";
         let mut entry = assistant("u3", MessageStatus::Complete, vec![]);
         entry.role = MessageRole::User;
         entry.status = None;
@@ -4213,7 +4374,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert!(
-            !text.contains("comet-file:"),
+            !text.contains("zeron-file:"),
             "raw link left visible: {text}"
         );
         assert!(text.contains("composer.rs"));
@@ -4281,12 +4442,13 @@ mod tests {
         let old = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>();
         let mut new = old.clone();
         new[9] = "LINE 10".into();
-        let diff = comet_proto::ToolDiff {
+        let diff = zeron_proto::ToolDiff {
             path: "/w/a.rs".into(),
             old_text: Some(old.join("\n") + "\n"),
             new_text: new.join("\n") + "\n",
         };
-        let Some(ToolDetail::Diff { file, highlight }) = tool_detail(None, Some(&diff), None) else {
+        let Some(ToolDetail::Diff { file, highlight }) = tool_detail(None, Some(&diff), None)
+        else {
             panic!("expected diff detail");
         };
         // One hunk: the change plus 3 context lines each side, real numbers.
@@ -4314,12 +4476,13 @@ mod tests {
         let highlight = highlight.expect("rust highlights");
         assert_eq!(highlight.len(), hunk.lines.len());
         // New files carry Added status (and no old numbers).
-        let created = comet_proto::ToolDiff {
+        let created = zeron_proto::ToolDiff {
             path: "/w/new.txt".into(),
             old_text: None,
             new_text: "only\n".into(),
         };
-        let Some(ToolDetail::Diff { file, highlight }) = tool_detail(None, Some(&created), None) else {
+        let Some(ToolDetail::Diff { file, highlight }) = tool_detail(None, Some(&created), None)
+        else {
             panic!("expected diff detail");
         };
         assert_eq!(file.status, crate::changes::FileStatus::Added);
@@ -4457,11 +4620,11 @@ mod tests {
         );
         let todo = ToolCall::Todo {
             items: vec![
-                comet_proto::TodoItem {
+                zeron_proto::TodoItem {
                     text: "a".into(),
                     done: true,
                 },
-                comet_proto::TodoItem {
+                zeron_proto::TodoItem {
                     text: "b".into(),
                     done: false,
                 },
@@ -4521,21 +4684,21 @@ mod tests {
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Mcp {
             server: "gh".into(),
             tool: "issues".into(),
-            input: Some(serde_json::json!({"repo": "comet"})),
+            input: Some(serde_json::json!({"repo": "zeron"})),
         }) else {
             panic!("expected an output block")
         };
         assert_eq!(lines[0].as_ref(), "gh · issues");
-        assert!(lines.iter().any(|l| l.contains("\"repo\": \"comet\"")));
+        assert!(lines.iter().any(|l| l.contains("\"repo\": \"zeron\"")));
 
         // Todos list one item per line with checkbox state.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
             items: vec![
-                comet_proto::TodoItem {
+                zeron_proto::TodoItem {
                     text: "a".into(),
                     done: true,
                 },
-                comet_proto::TodoItem {
+                zeron_proto::TodoItem {
                     text: "b".into(),
                     done: false,
                 },
@@ -4549,10 +4712,12 @@ mod tests {
         );
 
         // Blank invocation → no block; the chip stays a plain card.
-        assert!(call_block(&ToolCall::Exec {
-            command: "  \n ".into()
-        })
-        .is_none());
+        assert!(
+            call_block(&ToolCall::Exec {
+                command: "  \n ".into()
+            })
+            .is_none()
+        );
     }
 
     #[test]

@@ -32,8 +32,8 @@ use gpui::{
     SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
 
-use comet_proto::{Chat, CheckoutDiff};
-use comet_rpc::methods;
+use zeron_proto::{Chat, CheckoutDiff, GitHistoryCommit};
+use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::history::{GitHistory, GitHistoryCount, GitHistoryEvent, GitHistoryFetchButton};
@@ -444,6 +444,10 @@ pub enum DiffScope {
     LatestTurn,
     /// Repository commit graph. Hosted here until the right pane becomes tabs.
     History,
+    /// One commit's own changes (parent vs commit) — the per-commit tab a
+    /// History row click opens. Never listed in the scope menu
+    /// ([`Self::ALL`]); a commit-pinned pane is born this way and stays.
+    Commit,
 }
 
 impl DiffScope {
@@ -460,6 +464,7 @@ impl DiffScope {
             Self::Branch => "Branch changes",
             Self::LatestTurn => "Latest turn",
             Self::History => "History",
+            Self::Commit => "Commit",
         }
     }
 
@@ -470,6 +475,7 @@ impl DiffScope {
             Self::Branch => "branch",
             Self::LatestTurn => "turn",
             Self::History => "history",
+            Self::Commit => "commit",
         }
     }
 }
@@ -485,6 +491,7 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
         },
         DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
         DiffScope::History => "History".to_string(),
+        DiffScope::Commit => format!("{count} Changed {files} in this commit"),
     }
 }
 
@@ -519,6 +526,7 @@ pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
         },
         DiffScope::LatestTurn => "No changes this turn".to_string(),
         DiffScope::History => "No commits found".to_string(),
+        DiffScope::Commit => "Empty commit".to_string(),
     }
 }
 
@@ -790,8 +798,19 @@ pub struct Changes {
     history_count: Option<Entity<GitHistoryCount>>,
     history_fetch_button: Option<Entity<GitHistoryFetchButton>>,
     history_events: Option<Subscription>,
+    /// Pinned commit for a [`DiffScope::Commit`] pane (sha + subject drive
+    /// the fetch and the surface-tab title).
+    commit: Option<GitHistoryCommit>,
     _observe: Subscription,
 }
+
+/// Events the host (the right pane's surface strip) listens for.
+pub enum ChangesEvent {
+    /// A History row was clicked — open this commit as its own diff tab.
+    OpenCommit(GitHistoryCommit),
+}
+
+impl gpui::EventEmitter<ChangesEvent> for Changes {}
 
 impl Changes {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -829,8 +848,35 @@ impl Changes {
             history_count: None,
             history_fetch_button: None,
             history_events: None,
+            commit: None,
             _observe: observe,
         }
+    }
+
+    /// A pane pinned to one commit's diff (a History row click) — fetches
+    /// `parent vs commit` once and never offers the scope menu.
+    pub fn for_commit(
+        state: Entity<AppState>,
+        commit: GitHistoryCommit,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.scope = DiffScope::Commit;
+        changes.commit = Some(commit);
+        changes
+    }
+
+    /// The surface-tab title (contextual, user request): the pinned commit's
+    /// subject (short sha for subject-less commits), else the scope's label.
+    pub fn tab_title(&self) -> gpui::SharedString {
+        if let Some(commit) = &self.commit {
+            let subject = commit.subject.trim();
+            if !subject.is_empty() {
+                return subject.to_string().into();
+            }
+            return commit.sha.chars().take(7).collect::<String>().into();
+        }
+        gpui::SharedString::from(self.scope.label())
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -951,7 +997,7 @@ impl Changes {
     fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
         match self.scope {
             DiffScope::WorkingTree => self.resolved(cx),
-            DiffScope::Branch | DiffScope::LatestTurn => self.scoped.clone(),
+            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Commit => self.scoped.clone(),
             DiffScope::History => None,
         }
     }
@@ -964,6 +1010,10 @@ impl Changes {
             DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
             DiffScope::LatestTurn => "turn".to_string(),
             DiffScope::History => "history".to_string(),
+            DiffScope::Commit => format!(
+                "commit:{}",
+                self.commit.as_ref().map(|c| c.sha.as_str()).unwrap_or("")
+            ),
         }
     }
 
@@ -1067,14 +1117,22 @@ impl Changes {
             },
             _ => None,
         };
+        let commit_sha = match self.scope {
+            DiffScope::Commit => match &self.commit {
+                Some(commit) => Some(commit.sha.clone()),
+                None => return, // a commit pane without its pin never fetches
+            },
+            _ => None,
+        };
         let target = self.desired_target(cx);
         let context = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             target.as_deref().unwrap_or("local"),
             chat_id,
             cwd,
             self.scope.mode(),
-            base.as_deref().unwrap_or("")
+            base.as_deref().unwrap_or(""),
+            commit_sha.as_deref().unwrap_or("")
         );
         let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
         let key = format!("{context}|{watch_sum}");
@@ -1104,12 +1162,18 @@ impl Changes {
             if let Some(base) = base {
                 params.insert("baseRef".into(), serde_json::Value::String(base));
             }
+            if let Some(sha) = commit_sha {
+                params.insert("commitSha".into(), serde_json::Value::String(sha));
+            }
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
             }
             let result = engine
                 .client()
-                .call(methods::GET_CHECKOUT_DIFF, serde_json::Value::Object(params))
+                .call(
+                    methods::GET_CHECKOUT_DIFF,
+                    serde_json::Value::Object(params),
+                )
                 .await;
             this.update(cx, |changes, cx| {
                 if changes.scoped_inflight.as_deref() != Some(key.as_str()) {
@@ -1118,7 +1182,7 @@ impl Changes {
                 changes.scoped_inflight = None;
                 match result.and_then(|value| {
                     serde_json::from_value::<CheckoutDiff>(value)
-                        .map_err(|e| comet_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| zeron_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(diff) => {
                         changes.scoped = Some(diff);
@@ -1157,6 +1221,10 @@ impl Changes {
         self.history_events = Some(cx.subscribe(
             &history,
             |this: &mut Self, _, event, cx| match event {
+                GitHistoryEvent::OpenCommit(commit) => {
+                    // Bubble to the host — the surface strip opens the tab.
+                    cx.emit(ChangesEvent::OpenCommit(commit.clone()));
+                }
                 GitHistoryEvent::FetchSucceeded => {
                     // Remote refs affect branch choices and every scoped diff
                     // based on a ref. Force fresh reads after the engine has
@@ -1205,6 +1273,13 @@ impl Changes {
         cx.notify();
     }
 
+    /// Everything the pane needs kicked when (re)shown: the watch plus the
+    /// scope-specific loads (branches, scoped/commit capture, history) — the
+    /// shell's hook for freshly-mounted surface tabs.
+    pub fn ensure_content(&mut self, cx: &mut Context<Self>) {
+        self.sync(cx);
+    }
+
     /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
         // The watch follows the selected chat's host device (idempotent when
@@ -1215,7 +1290,9 @@ impl Changes {
                 .update(cx, |history, cx| history.ensure_loaded(cx));
             return;
         }
-        self.ensure_branches(cx);
+        if self.scope != DiffScope::Commit {
+            self.ensure_branches(cx);
+        }
         self.ensure_scoped(cx);
         let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
@@ -1245,9 +1322,7 @@ impl Changes {
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
-                let current = changes
-                    .active_diff(cx)
-                    .map(|d| changes.parse_key(&d));
+                let current = changes.active_diff(cx).map(|d| changes.parse_key(&d));
                 if current.as_deref() != Some(key.as_str()) {
                     return;
                 }
@@ -1616,11 +1691,7 @@ impl Changes {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let fold = self
-                    .folds
-                    .get(&file_diff.path)
-                    .copied()
-                    .unwrap_or_default();
+                let fold = self.folds.get(&file_diff.path).copied().unwrap_or_default();
                 self.render_file_header(file as usize, file_diff, &fold, &theme, cx)
             }
             DiffRow::Notice { file, notice } => files
@@ -1657,19 +1728,12 @@ impl Changes {
                     .unwrap_or(&[]);
                 diff_line_row(line, tokens, &theme, gutter_width(file_diff))
             }
-            DiffRow::BodyPad { .. } => div()
-                .w_full()
-                .h(px(BODY_BOTTOM_PAD))
-                .into_any_element(),
+            DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let fold = self
-                    .folds
-                    .get(&file_diff.path)
-                    .copied()
-                    .unwrap_or_default();
+                let fold = self.folds.get(&file_diff.path).copied().unwrap_or_default();
                 let highlight = self.request_highlight(file_diff, &parsed_key, cx);
                 let (from, to) = (fold.from, fold.to);
                 // Only the revealable slice is built — the tween never pays
@@ -1680,10 +1744,7 @@ impl Changes {
                 if fold.animating() {
                     clipped
                         .with_animation(
-                            SharedString::from(format!(
-                                "fold-{}-{}",
-                                file_diff.path, fold.epoch
-                            )),
+                            SharedString::from(format!("fold-{}-{}", file_diff.path, fold.epoch)),
                             COLLAPSE.animation(),
                             move |el, t| el.h(px(motion::lerp(from, to, t))),
                         )
@@ -1712,7 +1773,7 @@ impl Changes {
         let adds = file.additions;
         let dels = file.deletions;
 
-        // Chevron (comet checkout-diff-sidebar): chevron-right closed,
+        // Chevron (zeron checkout-diff-sidebar): chevron-right closed,
         // chevron-down open; gpui divs have no rotation transform at the
         // pinned rev, so the glyph swap crossfades over the same 200 ms.
         let chevron_icon = if collapsed {
@@ -1846,6 +1907,49 @@ impl Changes {
     /// alongside, shell-owned (they mutate shell state).
     pub fn render_header_controls(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
+        // Commit-pinned pane: the pin never changes, so a fixed identity
+        // chip (mono short sha + subject) replaces the scope dropdown;
+        // fold-all still trails.
+        if let Some(commit) = self.commit.clone() {
+            let short: String = commit.sha.chars().take(7).collect();
+            return div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(22.0))
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .flex()
+                        .items_center()
+                        .bg(crate::theme::ink(0.05))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(short)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from(commit.subject.clone())),
+                )
+                .child(
+                    Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_collapse_all(cx);
+                        })),
+                )
+                .into_any_element();
+        }
         let scope = self.scope;
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_fetch_button =
@@ -1916,12 +2020,13 @@ impl Changes {
                 .gap(px(2.0))
                 .children(history_fetch_button)
                 .child(
-                    Self::header_button("history-refresh", crate::icons::REFRESH, &theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
+                    Self::header_button("history-refresh", crate::icons::REFRESH, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.history_pane(cx)
                                 .update(cx, |history, cx| history.refresh(cx));
-                        })),
+                        }),
+                    ),
                 )
                 .into_any_element()
         } else {
@@ -1960,11 +2065,8 @@ impl Changes {
                 // The 2px row gap every other menu carries — rows straight on
                 // the card abutted, adjacent washes read as one slab (user
                 // report).
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
+                div().flex().flex_col().gap(px(2.0)).children(
+                    DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
                         popover::menu_row(
                             theme,
                             scope == current,
@@ -1975,23 +2077,16 @@ impl Changes {
                             this.set_scope(scope, cx);
                             this.close_scope_menu(cx);
                         }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(SharedString::from(scope.label())),
-                        )
-                    })),
+                        .child(div().flex_1().child(SharedString::from(scope.label())))
+                    }),
+                ),
             )
             .into_any_element()
     }
 
     /// `{branch} → {base ⌄}` — which ref the branch scope compares against
     /// (t3code's ref strip), inlined into the pane header. Branch scope only.
-    fn render_ref_selector(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_ref_selector(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.scope != DiffScope::Branch {
             return None;
         }
@@ -2001,10 +2096,7 @@ impl Changes {
             .selected_chat_row()
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
-        let base = self
-            .base_ref
-            .clone()
-            .unwrap_or_else(|| "…".to_string());
+        let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
         // Even truncation: taffy shrinks flex items ∝ factor × basis, and the
         // default factor of 1 splits the deficit proportionally to content —
         // a long branch stayed near-whole while a short base ("main") read as
@@ -2179,9 +2271,9 @@ impl Changes {
         popover::popover_card(theme)
             .w(px(240.0))
             .track_focus(&focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                this.ref_menu_key(event, cx)
-            }))
+            .on_key_down(
+                cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| this.ref_menu_key(event, cx)),
+            )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_ref_menu(cx)))
             .flex()
             .flex_col()
@@ -2429,7 +2521,7 @@ fn diff_line_row(line: &DiffLine, tokens: &[Token], theme: &Theme, gutter_px: f3
 
 /// The expanded body of one file section: notices, hunk headers, +/-/context
 /// lines with a coloured accent bar, dual line-number gutters, a marker
-/// column, and paint-only syntax runs (comet checkout-diff-sidebar).
+/// column, and paint-only syntax runs (zeron checkout-diff-sidebar).
 /// Shared with the transcript's tool-diff detail blocks — the same component
 /// renders a checkout diff section and an inline ACP tool diff. (The changes
 /// pane itself virtualizes these rows individually; this stacked form serves
@@ -2588,7 +2680,7 @@ impl Render for Changes {
                     .text_color(theme.text_faint)
                     .child(SharedString::from(clean_message(scope, base.as_deref())))
                     .into_any_element(),
-                    DiffPhase::List => {
+                DiffPhase::List => {
                     if self.parsed.is_some() {
                         div()
                             .flex_1()
@@ -2841,10 +2933,7 @@ rename to new_name.rs
         // body_height stays consistent with what actually renders.
         assert_eq!(
             body_height(&file),
-            NOTICE_HEIGHT
-                + 2.0 * HUNK_HEADER_HEIGHT
-                + 6.0 * DIFF_LINE_HEIGHT
-                + BODY_BOTTOM_PAD
+            NOTICE_HEIGHT + 2.0 * HUNK_HEADER_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
 
         // A cap below the first hunk's length drops later hunks entirely.
@@ -2880,11 +2969,14 @@ rename to new_name.rs
         file.max_line = 9999;
         assert!(gutter_width(&file) > GUTTER_WIDTH);
         file.max_line = 27404;
-        assert!(gutter_width(&file) > gutter_width(&{
-            let mut f = file.clone();
-            f.max_line = 9999;
-            f
-        }));
+        assert!(
+            gutter_width(&file)
+                > gutter_width(&{
+                    let mut f = file.clone();
+                    f.max_line = 9999;
+                    f
+                })
+        );
 
         // Truncation refits the gutter to what actually renders: the first
         // 3 lines are ctx(1,1) / del(2,·) / add(·,2) — max line 2.
@@ -2977,7 +3069,7 @@ rename to new_name.rs
         assert_eq!(diff_phase(Some(&full)), DiffPhase::List);
         // Engine may report files without patch text (truncation edge).
         let mut summarized = diff("co", "d", "/w", "");
-        summarized.files.push(comet_proto::DiffFileSummary {
+        summarized.files.push(zeron_proto::DiffFileSummary {
             path: "x".into(),
             old_path: None,
             status: "modified".into(),
@@ -3026,9 +3118,8 @@ rename to new_name.rs
 
     #[test]
     fn base_ref_defaults_to_repo_default_then_main() {
-        let branches = |names: &[&str]| -> Vec<String> {
-            names.iter().map(|n| n.to_string()).collect()
-        };
+        let branches =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
         // Engine order puts the repo default first — take it when it isn't
         // the checked-out branch itself.
         let b = branches(&["main", "feature"]);

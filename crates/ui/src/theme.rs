@@ -1,7 +1,7 @@
 //! The app theme — two concrete appearances, one token set.
 //!
 //! Colors are precomputed from an oklch-derived neutral scale (perceptually even
-//! lightness steps; the same scale comet's Tailwind theme used) into gpui [`Hsla`].
+//! lightness steps; the same scale zeron's Tailwind theme used) into gpui [`Hsla`].
 //! **Numbers drive layout, colors are paint**: layout constants live here as plain
 //! numbers and never depend on which color is painted.
 //!
@@ -316,7 +316,7 @@ impl Theme {
     /// see [`Self::glass_overlay`], where light coverage steps up to keep menu
     /// text legible over an unknown backdrop.
     pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(target_os = "macos") { 0.80 } else { 1.0 };
-    /// Main-panel header height (comet `h-11`) — in-card headers (changes pane).
+    /// Main-panel header height (zeron `h-11`) — in-card headers (changes pane).
     pub const HEADER_HEIGHT: f32 = 44.0;
     /// The unified window titlebar (traffic lights + cluster + tabs). Content
     /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
@@ -324,7 +324,7 @@ impl Theme {
     pub const TITLEBAR_HEIGHT: f32 = 38.0;
     /// Downward shift of titlebar content within the bar.
     pub const TITLEBAR_TOP_PAD: f32 = 2.0;
-    /// Reserved status strip under the content outlet (comet `h-6`) — the
+    /// Reserved status strip under the content outlet (zeron `h-6`) — the
     /// WorkingIndicator row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;
     /// Height of the gradient that fades the transcript into the panel
@@ -399,13 +399,19 @@ impl Theme {
     }
 
     /// The translucent tint floating cards paint over their backdrop blur
-    /// (see [`crate::frost::frosted`]). Dark: 65% — a dark tint dominates the
-    /// blur at low coverage. Light: heavier — a white tint at 65% left menu
-    /// text ghosting over whatever sat behind the popover, so light coverage
+    /// (see [`crate::frost::frosted`]). Dark: the reference zeron
+    /// `.glass-surface` menu tint verbatim — `oklch(0.33 0 0 / 34%)`. The
+    /// previous `surface_overlay` at 65% was tuned back when the tint had to
+    /// *approximate* the composited recipe without a real blur; kept over the
+    /// blur it buried the backdrop's colour and menus read as flat grey slabs
+    /// next to the hue-inheriting chrome (user report). At 34% the blurred
+    /// backdrop carries the card and the mid-grey only lifts it off the
+    /// plane. Light: heavier — a translucent white tint left menu text
+    /// ghosting over whatever sat behind the popover, so light coverage
     /// steps up to keep rows on a known background.
     pub fn glass_overlay(&self) -> Hsla {
         match self.appearance {
-            Appearance::Dark => self.surface_overlay.opacity(0.65),
+            Appearance::Dark => oklch(0.33, 0.0, 0.0).opacity(0.34),
             Appearance::Light => self.surface_overlay.opacity(0.85),
         }
     }
@@ -1006,7 +1012,7 @@ mod tests {
 
     #[test]
     fn neutral_950_is_0a0a0a() {
-        // oklch(0.145 0 0) is Tailwind neutral-950, comet's app background.
+        // oklch(0.145 0 0) is Tailwind neutral-950, zeron's app background.
         let rgb = srgb_u8(oklch_to_srgb(0.145, 0.0, 0.0));
         assert_eq!(rgb, [10, 10, 10]);
     }
@@ -1510,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_numbers_match_comet() {
+    fn layout_numbers_match_zeron() {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);

@@ -1,5 +1,5 @@
 [package]
-name = "comet-proto"
+name = "zeron-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

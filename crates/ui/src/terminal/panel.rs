@@ -23,8 +23,8 @@ use gpui::{
     Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
-use comet_proto::{TerminalEvent, TerminalSession};
-use comet_rpc::methods;
+use zeron_proto::{TerminalEvent, TerminalSession};
+use zeron_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::settings::{TERMINAL_MAX_VH, TERMINAL_MIN_HEIGHT};
@@ -272,6 +272,11 @@ pub struct TerminalPanel {
     chats: HashMap<String, ChatTabs>,
     /// Shell-driven visibility gate: no RPC happens while closed (lazy).
     open: bool,
+    /// Right-pane surface host mode: the SHELL owns the tab strip (surface
+    /// tabs), so the internal bar hides, tabs are only ever created
+    /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
+    /// must not dispatch the bottom drawer's [`ToggleTerminal`].
+    embedded: bool,
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
@@ -290,6 +295,7 @@ impl TerminalPanel {
             focus_handle: cx.focus_handle(),
             chats: HashMap::new(),
             open: false,
+            embedded: false,
             tab_seq: 0,
             drag: None,
             last_selected: None,
@@ -299,18 +305,86 @@ impl TerminalPanel {
         }
     }
 
+    /// A panel in right-pane surface-host mode (see the `embedded` field).
+    pub fn new_embedded(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new(state, cx);
+        panel.embedded = true;
+        panel
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
 
     /// Shell toggle hook. Opening lazily creates the first tab for the
-    /// selected chat; closing keeps every session alive (detach ≠ close).
+    /// selected chat (drawer mode; embedded tabs are explicit); closing
+    /// keeps every session alive (detach ≠ close).
     pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
-        if open {
+        if open && !self.embedded {
             self.ensure_tab(cx);
         }
         cx.notify();
+    }
+
+    /// A tab's display label: the live OSC 0/2 title when the running
+    /// program set one (shells title themselves with the cwd / running
+    /// command — the contextual name, user request), else the fixed
+    /// "Terminal N".
+    fn display_title(tab: &TerminalTab) -> SharedString {
+        match tab.emulator.title().map(str::trim) {
+            Some(title) if !title.is_empty() => title.to_string().into(),
+            _ => tab.title.clone(),
+        }
+    }
+
+    // ---- embedded (right-pane surface) API — the shell's tab strip drives
+    // ---- these; keys are stable across reorders/closes.
+
+    /// `(key, title, exited)` for the selected chat's tabs, in tab order.
+    pub fn tab_summaries(&self, cx: &App) -> Vec<(u64, SharedString, bool)> {
+        let Some(chat) = self.selected_chat(cx) else {
+            return Vec::new();
+        };
+        self.chats
+            .get(&chat)
+            .map(|tabs| {
+                tabs.tabs
+                    .iter()
+                    .map(|t| (t.key, Self::display_title(t), t.exited.is_some()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Open a fresh tab for the selected chat and return its key.
+    pub fn open_tab_for_selected(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+        let chat = self.selected_chat(cx)?;
+        self.open_tab(chat, cx);
+        Some(self.tab_seq)
+    }
+
+    /// Make `key` the rendered tab of the selected chat.
+    pub fn select_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        let Some(ix) = self
+            .chats
+            .get(&chat)
+            .and_then(|tabs| tabs.tabs.iter().position(|t| t.key == key))
+        else {
+            return;
+        };
+        self.select_tab(&chat, ix, cx);
+    }
+
+    /// Close the selected chat's tab `key` (surface-tab ✕).
+    pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        self.close_tab(&chat, key, window, cx);
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -320,10 +394,12 @@ impl TerminalPanel {
             self.last_selected = selected;
             self.drag = None;
         }
-        if self.open {
+        if self.open && !self.embedded {
             // Returning to a chat with tabs restores them; a fresh chat (or an
             // engine that only just finished booting) gets its first tab —
             // ensure_tab is idempotent, so calling on every state change is safe.
+            // Embedded: surface tabs are explicit — a chat switch just shows
+            // that chat's own tabs (or the shell's surface picker).
             self.ensure_tab(cx);
         }
         if switched {
@@ -974,7 +1050,9 @@ impl TerminalPanel {
         self.drag = None;
         // Closing the LAST terminal closes the drawer too — an empty dock is
         // dead space (user request). Same path as the collapse chevron.
-        if now_empty && self.open {
+        // Embedded, the SHELL owns emptiness (it falls back to the surface
+        // picker) — dispatching here would toggle the bottom drawer instead.
+        if now_empty && self.open && !self.embedded {
             window.dispatch_action(Box::new(ToggleTerminal), cx);
         }
         if let (Some(engine), Some(id)) = (engine, tab.terminal_id.clone()) {
@@ -1043,9 +1121,10 @@ impl TerminalPanel {
                     .map(|(ix, tab)| {
                         let selected = ix == active;
                         let key = tab.key;
-                        // Fixed sequential label (comet: "Terminal N") — the
-                        // OSC title never replaces it.
-                        let title = tab.title.clone();
+                        // Contextual label (user request): the OSC title —
+                        // the shell's own cwd/command name — wins over the
+                        // fixed "Terminal N" fallback.
+                        let title = Self::display_title(tab);
                         let exited = tab.exited.is_some();
                         (ix, key, title, selected, exited)
                     })
@@ -1055,7 +1134,7 @@ impl TerminalPanel {
 
         let bar_chat = chat_owned.clone();
         let drop_chat = chat_owned.clone();
-        // Comet terminal-panel.tsx: `flex h-10 items-center border-b
+        // Zeron terminal-panel.tsx: `flex h-10 items-center border-b
         // border-white/[0.07] pl-2 pr-1.5` on the #090909 panel — no separate
         // bar fill.
         div()
@@ -1101,7 +1180,7 @@ impl TerminalPanel {
                         let chat_close2 = chat_owned.clone();
                         let chat_drag = chat_owned.clone();
                         let ghost_title = title.clone();
-                        // Comet tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
+                        // Zeron tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
                         // terminal glyph + label + close; active = white/8 wash.
                         let (text_color, bg, glyph_alpha) = if selected {
                             (theme.text, crate::theme::ink(0.08), 0.8)
@@ -1144,7 +1223,7 @@ impl TerminalPanel {
                             .pl(px(8.0))
                             .pr(px(4.0))
                             .rounded(px(8.0))
-                            // comet terminal-panel.tsx tab: `transition-colors`.
+                            // zeron terminal-panel.tsx tab: `transition-colors`.
                             .bg(motion::hover_blend(
                                 &format!("term-tab-{key}"),
                                 bg,
@@ -1222,7 +1301,7 @@ impl TerminalPanel {
                     .justify_center()
                     .rounded(px(8.0))
                     .cursor_pointer()
-                    // comet terminal-panel.tsx icon buttons: `transition-colors`.
+                    // zeron terminal-panel.tsx icon buttons: `transition-colors`.
                     .bg(motion::hover_blend(
                         "term-new-tab",
                         gpui::transparent_black(),
@@ -1240,7 +1319,7 @@ impl TerminalPanel {
                             .text_color(theme.text_muted.opacity(0.6)),
                     ),
             )
-            // Collapse chevron pinned right (comet "Hide terminal" ⌘J).
+            // Collapse chevron pinned right (zeron "Hide terminal" ⌘J).
             .child(div().flex_1())
             .child(
                 div()
@@ -1282,10 +1361,14 @@ impl Render for TerminalPanel {
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
         }
+        // Embedded, the RIGHT PANE's own surface shows through — a second
+        // fill here stacked another shade on the pane (user report); the
+        // drawer keeps its own tone.
+        let panel_bg: Option<gpui::Hsla> = (!self.embedded).then(|| terminal_panel_bg(&theme));
         let Some(chat) = self.selected_chat(cx) else {
             return div()
                 .size_full()
-                .bg(terminal_panel_bg(&theme))
+                .when_some(panel_bg, |el, bg| el.bg(bg))
                 .font_family(theme.font_sans_fixed.clone())
                 .flex()
                 .items_center()
@@ -1297,6 +1380,10 @@ impl Render for TerminalPanel {
         };
         let focused = self.focus_handle.is_focused(window);
 
+        // Embedded (right-pane surface host): the shell's surface tabs
+        // replace the internal bar.
+        let tab_bar: Option<gpui::AnyElement> =
+            (!self.embedded).then(|| self.render_tab_bar(&chat, cx).into_any_element());
         div()
             .size_full()
             .flex()
@@ -1304,8 +1391,8 @@ impl Render for TerminalPanel {
             // Terminal chrome is fixed Geist; TerminalElement measures and
             // paints its viewport independently with the technical mono role.
             .font_family(theme.font_sans_fixed.clone())
-            .bg(terminal_panel_bg(&theme))
-            .child(self.render_tab_bar(&chat, cx))
+            .when_some(panel_bg, |el, bg| el.bg(bg))
+            .children(tab_bar)
             .child(
                 div()
                     .id("terminal-body")

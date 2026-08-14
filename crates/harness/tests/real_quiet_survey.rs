@@ -2,7 +2,7 @@
 //! turn settle exactly once, at the end, and how close do its silent gaps
 //! come to the 30s blanket quiet-settle window? Run explicitly:
 //!
-//!   SURVEY_RUNS=3 cargo test -p comet-harness --test real_quiet_survey -- --ignored --nocapture
+//!   SURVEY_RUNS=3 cargo test -p zeron-harness --test real_quiet_survey -- --ignored --nocapture
 //!
 //! No env knob is set here — this binary runs the DEFAULTS the app ships:
 //! Claude exempt from the blanket settle, every other adapter on the 30s
@@ -16,8 +16,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use comet_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
-use comet_proto::{
+use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use zeron_proto::{
     AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
 };
 
@@ -221,7 +221,10 @@ async fn real_all_harnesses_quiet_survey() {
             println!(
                 "[{name}] run {i}/{runs}: dones={:?} after_first_done={} finished={} \
                  max_live_gap={:.3}s (window margin {:.1}x) → {}",
-                o.dones.iter().map(|(s, _)| format!("{s:?}")).collect::<Vec<_>>(),
+                o.dones
+                    .iter()
+                    .map(|(s, _)| format!("{s:?}"))
+                    .collect::<Vec<_>>(),
                 o.after_first_done,
                 o.finished,
                 o.max_gap.as_secs_f64(),

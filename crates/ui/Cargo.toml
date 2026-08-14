@@ -1,17 +1,18 @@
 [package]
-name = "comet-ui"
+name = "zeron-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
+zeron-proto.workspace = true
 similar.workspace = true
-comet-doc.workspace = true
-comet-engine.workspace = true
-comet-rpc.workspace = true
-comet-update.workspace = true
+zeron-doc.workspace = true
+zeron-engine.workspace = true
+zeron-harness.workspace = true
+zeron-rpc.workspace = true
+zeron-update.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true

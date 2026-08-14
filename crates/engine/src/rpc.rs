@@ -12,7 +12,9 @@
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
 //!   setChatArchived, deleteChat, renameDevice, markChatSeen)
-//! - `LocalDevice` → `{deviceId}` — this engine's identity (never forwarded)
+//! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
+//!   and data boundary (never forwarded)
+//! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
 //! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
 //!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
 //!   `SelectOrg {organizationId}`
@@ -54,9 +56,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use comet_doc::{MessagePart, SessionCommandPayload};
-use comet_proto::{ChatConfig, HarnessId, ToolCall};
-use comet_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
+use zeron_doc::{MessagePart, SessionCommandPayload};
+use zeron_proto::{ChatConfig, EngineInfo, HarnessId, ToolCall, WorkspaceScope};
+use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
@@ -347,7 +349,7 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
-    /// Full-config replace on the chat row (comet `SetChatConfig`): the
+    /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
     #[serde(rename_all = "camelCase")]
@@ -379,7 +381,8 @@ pub struct EngineRpc {
     agent_accounts: AgentAccounts,
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
-    updater: Option<comet_update::Updater>,
+    updater: Option<zeron_update::Updater>,
+    engine_info: EngineInfo,
 }
 
 impl EngineRpc {
@@ -394,7 +397,12 @@ impl EngineRpc {
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
         agent_accounts: AgentAccounts,
+        workspace_scope: WorkspaceScope,
     ) -> Self {
+        let engine_info = EngineInfo {
+            device_id: doc_host.device_id().to_string(),
+            workspace_scope,
+        };
         Self {
             sessions,
             doc_host,
@@ -408,6 +416,7 @@ impl EngineRpc {
             auth: None,
             links: None,
             updater: None,
+            engine_info,
         }
     }
 
@@ -424,7 +433,7 @@ impl EngineRpc {
     }
 
     /// Attach the release checker (UpdateStatus stream + ApplyUpdate).
-    pub fn with_updater(mut self, updater: comet_update::Updater) -> Self {
+    pub fn with_updater(mut self, updater: zeron_update::Updater) -> Self {
         self.updater = Some(updater);
         self
     }
@@ -435,7 +444,7 @@ impl EngineRpc {
             .ok_or_else(|| RpcError::Failed("auth unavailable".into()))
     }
 
-    fn updater(&self) -> Result<&comet_update::Updater, RpcError> {
+    fn updater(&self) -> Result<&zeron_update::Updater, RpcError> {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
@@ -627,7 +636,13 @@ impl EngineRpc {
                 cwd,
             } => {
                 self.workspace
-                    .create_chat(&chat_id, space_id.as_deref(), device_id.as_deref(), config, cwd)
+                    .create_chat(
+                        &chat_id,
+                        space_id.as_deref(),
+                        device_id.as_deref(),
+                        config,
+                        cwd,
+                    )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
                     self.workspace
@@ -815,15 +830,15 @@ where
     .boxed()
 }
 
-/// The transcript watch as delta frames (`comet_doc::transcript_delta`): a
+/// The transcript watch as delta frames (`zeron_doc::transcript_delta`): a
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
 fn doc_messages_stream(
-    rx: watch::Receiver<Vec<comet_doc::SessionMessageEntry>>,
+    rx: watch::Receiver<Vec<zeron_doc::SessionMessageEntry>>,
 ) -> BoxStream<'static, serde_json::Value> {
-    use comet_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
     futures::stream::unfold(
-        (rx, None::<Vec<comet_doc::SessionMessageEntry>>),
+        (rx, None::<Vec<zeron_doc::SessionMessageEntry>>),
         |(mut rx, mut prev)| async move {
             loop {
                 if prev.is_some() {
@@ -966,6 +981,8 @@ impl RpcService for EngineRpc {
                 .await;
         }
         match method {
+            methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
+            methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
@@ -1027,7 +1044,7 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::SYNC_STATUS => {
-                fn room_json(s: &comet_sync::RoomStatsSnapshot) -> serde_json::Value {
+                fn room_json(s: &zeron_sync::RoomStatsSnapshot) -> serde_json::Value {
                     serde_json::json!({
                         "connected": s.connected,
                         "lastPushedMs": s.last_pushed_ms,
@@ -1107,6 +1124,7 @@ impl RpcService for EngineRpc {
                     mode: String,
                     base_ref: Option<String>,
                     chat_id: Option<String>,
+                    commit_sha: Option<String>,
                 }
                 let p: P = parse_params(params)?;
                 let identity = self
@@ -1124,8 +1142,16 @@ impl RpcService for EngineRpc {
                         let base = crate::diff_sync::merge_base(root, base_ref)
                             .await
                             .map_err(|e| RpcError::Failed(e.to_string()))?;
-                        crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base))
-                            .await
+                        crate::diff_sync::capture_diff_against(&self.repos, root, Some(&base)).await
+                    }
+                    // One commit's own changes (History → per-commit tab):
+                    // parent (or the empty tree) vs the commit itself.
+                    "commit" => {
+                        let sha = p
+                            .commit_sha
+                            .as_deref()
+                            .ok_or_else(|| RpcError::Failed("commitSha required".into()))?;
+                        crate::diff_sync::capture_commit_diff(&self.repos, root, sha).await
                     }
                     "turn" => {
                         let chat_id = p
@@ -1137,13 +1163,12 @@ impl RpcService for EngineRpc {
                             .turn_snapshot(chat_id)
                             .filter(|s| s.root == identity.root)
                             .ok_or_else(|| RpcError::Failed("no turn recorded".into()))?;
-                        crate::diff_sync::capture_turn_diff(&self.repos, root, &snapshot.tree)
-                            .await
+                        crate::diff_sync::capture_turn_diff(&self.repos, root, &snapshot.tree).await
                     }
                     _ => crate::diff_sync::capture_diff(&self.repos, root).await,
                 }
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&comet_proto::CheckoutDiff {
+                RpcReply::value(&zeron_proto::CheckoutDiff {
                     checkout_id: identity.id,
                     device_id: self.doc_host.device_id().to_string(),
                     cwd: identity.root.to_string_lossy().to_string(),
@@ -1487,6 +1512,8 @@ mod tests {
     #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
+        assert!(!forwardable(methods::ENGINE_INFO));
+        assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::FETCH_ALL));

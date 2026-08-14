@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux packaging: build the release binary and produce
-#   target/package/comet-<version>-linux-<arch>.tar.gz
+#   target/package/zeron-<version>-linux-<arch>.tar.gz
 # containing the binary, the .desktop entry, and the icon, plus an install.sh
 # that drops them into ~/.local (XDG) paths.
 #
@@ -15,23 +15,23 @@ PROFILE="${PROFILE:-release}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
-STAGE="$OUT_DIR/comet-$VERSION-linux-$ARCH"
+STAGE="$OUT_DIR/zeron-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p comet
-  BIN="$ROOT/target/release/comet"
+  cargo build --release -p zeron
+  BIN="$ROOT/target/release/zeron"
 else
-  cargo build -p comet
-  BIN="$ROOT/target/debug/comet"
+  cargo build -p zeron
+  BIN="$ROOT/target/debug/zeron"
 fi
 
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
-install -m 755 "$BIN" "$STAGE/comet"
-install -m 644 "$ROOT/dist/comet.desktop" "$STAGE/comet.desktop"
-install -m 644 "$ROOT/dist/comet.png" "$STAGE/comet.png"
+install -m 755 "$BIN" "$STAGE/zeron"
+install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
+install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 
@@ -40,9 +40,9 @@ cat >"$STAGE/install.sh" <<'INSTALL'
 # Install Zeron into ~/.local (no root needed).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-install -Dm755 "$HERE/comet" "$HOME/.local/bin/comet"
-install -Dm644 "$HERE/comet.desktop" "$HOME/.local/share/applications/comet.desktop"
-install -Dm644 "$HERE/comet.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/comet.png"
+install -Dm755 "$HERE/zeron" "$HOME/.local/bin/zeron"
+install -Dm644 "$HERE/zeron.desktop" "$HOME/.local/share/applications/zeron.desktop"
+install -Dm644 "$HERE/zeron.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/zeron.png"
 command -v update-desktop-database >/dev/null 2>&1 \
   && update-desktop-database "$HOME/.local/share/applications" || true
 echo "Installed. Make sure ~/.local/bin is on your PATH."

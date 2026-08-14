@@ -385,7 +385,7 @@ fn helper(mode: AppearanceMode, system: Appearance) -> SharedString {
         AppearanceMode::System => {
             let resolved = if system.is_dark() { "dark" } else { "light" };
             format!(
-                "Following the system appearance — currently {resolved}. Comet switches with \
+                "Following the system appearance — currently {resolved}. Zeron switches with \
                  macOS, including scheduled changes."
             )
             .into()
@@ -601,7 +601,7 @@ impl Render for AppearancePage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "How comet picks between light and dark. This setting stays on this \
+                            "How zeron picks between light and dark. This setting stays on this \
                              device.",
                         )
                         .max_w(px(512.0))

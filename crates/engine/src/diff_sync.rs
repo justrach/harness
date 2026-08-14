@@ -1,5 +1,5 @@
 //! CheckoutDiffSync — checkout-scoped working-tree diff production (feature-inventory
-//! §3.5; port of comet's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
+//! §3.5; port of zeron's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
 //!
 //! Chats do not own working-tree state: a concrete Git checkout does. This service
 //! groups this device's chats by their canonical checkout identity (`chat.cwd` →
@@ -34,8 +34,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
-use comet_proto::{Chat, CheckoutDiff, DiffFileSummary};
+use zeron_proto::{Chat, CheckoutDiff, DiffFileSummary};
 
 use crate::EngineError;
 use crate::doc_host::EdgeConfig;
@@ -124,6 +125,10 @@ struct DiffSyncInner {
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
+    /// The tasks hold `Weak` refs, but an in-flight iteration holds an
+    /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
+    cancel: CancellationToken,
+    supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -155,13 +160,29 @@ impl CheckoutDiffSync {
                 entries: Mutex::new(HashMap::new()),
                 diffs_tx,
                 turn_trees: Mutex::new(HashMap::new()),
+                cancel: CancellationToken::new(),
+                supervisor: Mutex::new(None),
             }),
         };
-        tokio::spawn(diff_sync_task(
+        let task = tokio::spawn(diff_sync_task(
             Arc::downgrade(&sync.inner),
             workspace.watch_chats(),
+            sync.inner.cancel.clone(),
         ));
+        *lock(&sync.inner.supervisor) = Some(task);
         sync
+    }
+
+    /// Stop the sync graph and wait for the supervisor to exit. Per-entry
+    /// tasks observe the same token, so an in-flight `sync_entry` drops its
+    /// sidecar POST instead of finishing it under a replaced runtime.
+    /// Idempotent.
+    pub async fn shutdown(&self) {
+        self.inner.cancel.cancel();
+        let task = lock(&self.inner.supervisor).take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
     }
 
     /// `WatchCheckoutDiffs` source: every tracked checkout's latest diff.
@@ -399,6 +420,7 @@ fn add_entry(inner: &Arc<DiffSyncInner>, identity: CheckoutIdentity, chats: Vec<
         Arc::downgrade(inner),
         Arc::downgrade(&entry),
         kick_rx,
+        inner.cancel.clone(),
     ));
     let _ = kick_tx.send(()); // initial snapshot
 }
@@ -409,6 +431,7 @@ async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
     mut kick_rx: mpsc::UnboundedReceiver<()>,
+    cancel: CancellationToken,
 ) {
     while kick_rx.recv().await.is_some() {
         // Trailing debounce: wait for the burst to settle.
@@ -422,7 +445,12 @@ async fn entry_task(
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
-        sync_entry(&inner, &entry).await;
+        // The upgraded Arc would let a sync outlive shutdown — race the token
+        // so an in-flight sidecar POST is dropped, not completed.
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = sync_entry(&inner, &entry) => {}
+        }
     }
 }
 
@@ -543,13 +571,18 @@ fn publish_watch(inner: &Arc<DiffSyncInner>) {
 }
 
 /// Chat-watch follower + repair tick. Holds only weak handles so dropping the
-/// service tears the loop down.
-async fn diff_sync_task(inner: Weak<DiffSyncInner>, mut chats_rx: watch::Receiver<Vec<Chat>>) {
+/// service tears the loop down; the token ends it eagerly on shutdown.
+async fn diff_sync_task(
+    inner: Weak<DiffSyncInner>,
+    mut chats_rx: watch::Receiver<Vec<Chat>>,
+    cancel: CancellationToken,
+) {
     let mut repair = tokio::time::interval(REPAIR_INTERVAL);
     repair.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     repair.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => break,
             changed = chats_rx.changed() => {
                 if changed.is_err() {
                     break;
@@ -820,7 +853,7 @@ pub async fn capture_diff_against(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Comet diff truncated\n");
+        patch.push_str("\n# Zeron diff truncated\n");
     }
 
     // `?? path` records; rename records (`R  new\0old`) consume their extra field.
@@ -916,15 +949,114 @@ pub async fn capture_diff_against(
     })
 }
 
+/// Snapshot of one COMMIT's changes: first-parent (or the empty tree for a
+/// root commit) diffed against the commit itself — the History pane's
+/// per-commit tab. Commit-to-commit only: no working tree, no untracked
+/// synthesis.
+pub async fn capture_commit_diff(
+    repos: &Repos,
+    root: &Path,
+    sha: &str,
+) -> Result<DiffSnapshot, EngineError> {
+    let parent_spec = format!("{sha}^");
+    let parent = capture_git(root, &["rev-parse", "--verify", &parent_spec], 256)
+        .await
+        .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
+        .unwrap_or_default();
+    let base: String = if parent.is_empty() {
+        EMPTY_TREE_SHA.to_string()
+    } else {
+        parent
+    };
+    let branch = repos
+        .current_branch(root)
+        .await
+        .unwrap_or_else(|_| "HEAD".into());
+    let names = capture_git(
+        root,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            &base,
+            sha,
+            "--",
+        ],
+        2 * 1024 * 1024,
+    )
+    .await?;
+    let nums = capture_git(
+        root,
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--find-renames",
+            &base,
+            sha,
+            "--",
+        ],
+        2 * 1024 * 1024,
+    )
+    .await?;
+    let tracked = capture_git(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "--unified=3",
+            &base,
+            sha,
+            "--",
+        ],
+        MAX_PATCH_BYTES,
+    )
+    .await?;
+    let mut files = parse_name_status(&names.stdout);
+    apply_numstat(&mut files, &nums.stdout);
+    let mut patch = String::from_utf8_lossy(&tracked.stdout).to_string();
+    let truncated = tracked.truncated || names.truncated || nums.truncated;
+    if tracked.truncated {
+        let boundary = patch.rfind('\n').unwrap_or(0);
+        patch.truncate(boundary);
+        patch.push_str("\n# Comet diff truncated\n");
+    }
+    let additions: u32 = files.iter().map(|f| f.additions).sum();
+    let deletions: u32 = files.iter().map(|f| f.deletions).sum();
+    let files_json = serde_json::to_string(&files)
+        .map_err(|e| EngineError::Other(format!("diff files serialize: {e}")))?;
+    let mut hasher = Sha256::new();
+    hasher.update(branch.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(sha.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(patch.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(files_json.as_bytes());
+    hasher.update(if truncated { b"1" } else { b"0" });
+    let checksum = crate::repos::hex(&hasher.finalize());
+    Ok(DiffSnapshot {
+        branch,
+        head_sha: Some(sha.to_string()),
+        patch,
+        files,
+        additions,
+        deletions,
+        truncated,
+        checksum,
+    })
+}
+
 /// `git merge-base <base_ref> HEAD` — the diff base for "Branch changes".
 /// Errors when the ref is unknown or the histories are unrelated.
 pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineError> {
     let capture = capture_git(root, &["merge-base", base_ref, "HEAD"], 256).await?;
     let sha = String::from_utf8_lossy(&capture.stdout).trim().to_string();
     if sha.is_empty() {
-        return Err(EngineError::Other(format!(
-            "no merge base with {base_ref}"
-        )));
+        return Err(EngineError::Other(format!("no merge base with {base_ref}")));
     }
     Ok(sha)
 }
@@ -937,7 +1069,7 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
 /// capture already does.
 pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     let index = std::env::temp_dir().join(format!(
-        "comet-turn-index-{}-{}",
+        "zeron-turn-index-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_micros()
     ));
@@ -1043,7 +1175,7 @@ pub async fn capture_turn_diff(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Comet diff truncated\n");
+        patch.push_str("\n# Zeron diff truncated\n");
     }
 
     let additions: u32 = files.iter().map(|f| f.additions).sum();
