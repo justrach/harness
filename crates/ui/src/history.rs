@@ -984,6 +984,7 @@ pub struct GitHistory {
     loading: bool,
     error: Option<SharedString>,
     graph: GraphLayout,
+    graph_lane_capacity: usize,
     list: ListState,
     hovered_path: Option<usize>,
     graph_hover_active: bool,
@@ -1251,6 +1252,7 @@ impl GitHistory {
             loading: false,
             error: None,
             graph: GraphLayout::default(),
+            graph_lane_capacity: 0,
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
             hovered_path: None,
             graph_hover_active: false,
@@ -1298,6 +1300,7 @@ impl GitHistory {
             self.total_count = None;
             self.head_commit_count = None;
             self.graph = GraphLayout::default();
+            self.graph_lane_capacity = 0;
             self.list.reset(0);
             self.hovered_path = None;
             self.graph_hover_active = false;
@@ -1330,6 +1333,7 @@ impl GitHistory {
         self.head_commit_count = None;
         self.error = None;
         self.graph = GraphLayout::default();
+        self.graph_lane_capacity = 0;
         self.list.reset(0);
         self.hovered_path = None;
         self.graph_hover_active = false;
@@ -1432,7 +1436,19 @@ impl GitHistory {
                 self.collapsed_counts.clear();
             }
         }
+        self.update_graph_layout();
+    }
+
+    fn update_graph_layout(&mut self) {
         self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+        // The commit subject starts immediately after the graph column. Keep
+        // that column at the widest lane count seen for this repository so a
+        // fold cannot move every title sideways when its compact graph settles.
+        let loaded_lane_count = layout_graph(&self.commits, self.head_sha.as_deref()).max_lane_count;
+        self.graph_lane_capacity = self
+            .graph_lane_capacity
+            .max(self.graph.max_lane_count)
+            .max(loaded_lane_count);
     }
 
     fn rebuild_view(&mut self, cx: &mut Context<Self>) {
@@ -1457,7 +1473,7 @@ impl GitHistory {
         };
         self.visible_commits = transition.final_commits;
         self.collapsed_counts = transition.final_collapsed_counts;
-        self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+        self.update_graph_layout();
         let item_count = self.visible_commits.len()
             + usize::from(
                 self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
@@ -1488,7 +1504,7 @@ impl GitHistory {
         if unchanged || crate::motion::reduced_motion(cx) {
             self.visible_commits = final_commits;
             self.collapsed_counts = final_collapsed_counts;
-            self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+            self.update_graph_layout();
             let item_count = self.visible_commits.len()
                 + usize::from(
                     self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
@@ -1502,7 +1518,7 @@ impl GitHistory {
         let (transition_commits, rows) = history_transition_rows(&old_commits, &final_commits);
         self.visible_commits = transition_commits;
         self.collapsed_counts = final_collapsed_counts.clone();
-        self.graph = layout_graph(&self.visible_commits, self.head_sha.as_deref());
+        self.update_graph_layout();
         let item_count = self.visible_commits.len()
             + usize::from(
                 self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
@@ -2901,7 +2917,7 @@ impl GitHistory {
         let focused_row_wash = graph_focus
             .filter(|_| row_is_focused)
             .map(|focus| crate::theme::ink(0.018 * focus.amount));
-        let graph_lane_count = self.graph.max_lane_count;
+        let graph_lane_count = self.graph_lane_capacity;
         let optional_cells = visible_history_columns(&column_order, columns)
             .into_iter()
             .map(|column| match column {
@@ -3035,7 +3051,7 @@ impl Render for GitHistory {
             self.column_drag = None;
         }
         let theme = Theme::of(cx).clone();
-        let graph_column = graph_width(self.graph.max_lane_count);
+        let graph_column = graph_width(self.graph_lane_capacity);
         let graph_focus = self.graph_focus(cx);
         let columns = configured_columns(cx);
         let column_widths = configured_column_widths(cx);
