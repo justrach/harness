@@ -1,12 +1,12 @@
 [package]
-name = "comet-harness"
+name = "zeron-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-comet-proto.workspace = true
+zeron-proto.workspace = true
 base64 = "0.22"
 tokio.workspace = true
 tokio-util.workspace = true

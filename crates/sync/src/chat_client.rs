@@ -270,7 +270,7 @@ struct Shared {
     quota_blocked: bool,
 }
 
-/// `comet sync` surface (plan: cursor / headSeq / floorLag / pendingPushes).
+/// `zeron sync` surface (plan: cursor / headSeq / floorLag / pendingPushes).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatStatsSnapshot {
     pub connected: bool,
@@ -618,8 +618,8 @@ impl Actor {
                     let _ = self.events.send(ChatEvent::Disconnected);
                     if ready.is_some() {
                         if let Some(ready) = ready.take() {
-                            let _ =
-                                ready.send(Err(SyncError::Protocol("chat2 handshake failed".into())));
+                            let _ = ready
+                                .send(Err(SyncError::Protocol("chat2 handshake failed".into())));
                         }
                         return;
                     }

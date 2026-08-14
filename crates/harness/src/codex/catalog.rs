@@ -1,4 +1,4 @@
-//! Model catalog + effort mapping for Codex, ported from comet's
+//! Model catalog + effort mapping for Codex, ported from zeron's
 //! `packages/harness/src/codex.ts`.
 //!
 //! The TS harness discovers models live via the app server's `model/list`
@@ -7,7 +7,7 @@
 //! short-lived `codex app-server` + `model/list` pagination can later be
 //! spliced in (same call t3code's Codex provider makes).
 
-use comet_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
+use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).

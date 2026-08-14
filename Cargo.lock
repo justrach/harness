@@ -1146,188 +1146,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
-name = "comet"
-version = "0.1.61"
-dependencies = [
- "anyhow",
- "clap",
- "comet-engine",
- "comet-rpc",
- "comet-ui",
- "comet-update",
- "libc",
- "mimalloc",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "comet-doc"
-version = "0.1.61"
-dependencies = [
- "chrono",
- "comet-proto",
- "loro",
- "serde",
- "serde_json",
- "similar",
- "thiserror 2.0.19",
- "tracing",
-]
-
-[[package]]
-name = "comet-engine"
-version = "0.1.61"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "comet-doc",
- "comet-harness",
- "comet-proto",
- "comet-rpc",
- "comet-sync",
- "comet-update",
- "futures",
- "ignore",
- "libc",
- "loro",
- "notify",
- "portable-pty",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-harness"
-version = "0.1.61"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "comet-proto",
- "futures",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-proto"
-version = "0.1.61"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "comet-rpc"
-version = "0.1.61"
-dependencies = [
- "anyhow",
- "async-trait",
- "comet-proto",
- "comet-sync",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-sync"
-version = "0.1.61"
-dependencies = [
- "chrono",
- "comet-doc",
- "comet-proto",
- "futures",
- "loro",
- "loro-protocol",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "comet-ui"
-version = "0.1.61"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "comet-doc",
- "comet-engine",
- "comet-harness",
- "comet-proto",
- "comet-rpc",
- "comet-update",
- "futures",
- "gpui",
- "gpui_platform",
- "gpui_tokio",
- "objc",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "tokio",
- "tracing",
- "unicode-segmentation",
- "uuid",
-]
-
-[[package]]
-name = "comet-update"
-version = "0.1.61"
-dependencies = [
- "anyhow",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "compression-codecs"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7162,6 +6980,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -8987,6 +8806,191 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zeron"
+version = "0.1.62"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "mimalloc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zeron-engine",
+ "zeron-rpc",
+ "zeron-ui",
+ "zeron-update",
+]
+
+[[package]]
+name = "zeron-doc"
+version = "0.1.62"
+dependencies = [
+ "chrono",
+ "loro",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror 2.0.19",
+ "tracing",
+ "zeron-proto",
+]
+
+[[package]]
+name = "zeron-engine"
+version = "0.1.62"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "gethostname",
+ "ignore",
+ "libc",
+ "loro",
+ "notify",
+ "portable-pty",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-harness",
+ "zeron-proto",
+ "zeron-rpc",
+ "zeron-sync",
+ "zeron-update",
+]
+
+[[package]]
+name = "zeron-harness"
+version = "0.1.62"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeron-proto",
+]
+
+[[package]]
+name = "zeron-proto"
+version = "0.1.62"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "zeron-rpc"
+version = "0.1.62"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-proto",
+ "zeron-sync",
+]
+
+[[package]]
+name = "zeron-sync"
+version = "0.1.62"
+dependencies = [
+ "chrono",
+ "futures",
+ "loro",
+ "loro-protocol",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-proto",
+]
+
+[[package]]
+name = "zeron-ui"
+version = "0.1.62"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "gpui",
+ "gpui_platform",
+ "gpui_tokio",
+ "objc",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "uuid",
+ "zeron-doc",
+ "zeron-engine",
+ "zeron-harness",
+ "zeron-proto",
+ "zeron-rpc",
+ "zeron-update",
+]
+
+[[package]]
+name = "zeron-update"
+version = "0.1.62"
+dependencies = [
+ "anyhow",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

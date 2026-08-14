@@ -13,11 +13,9 @@
 //! `roomGen: 2` chat with a local `epoch < 2` doc discard-and-adopt (M3);
 //! the epoch check makes re-entry a no-op.
 
-use crate::parts::{
-    diff_stat, summarize_tool_output, MessagePart, SidecarPayload,
-};
-use crate::schema::{DocError, SessionDoc};
 use crate::SessionCommandStatus;
+use crate::parts::{MessagePart, SidecarPayload, diff_stat, summarize_tool_output};
+use crate::schema::{DocError, SessionDoc};
 
 /// Doc lineage epoch written by [`rebuild_thin_doc`]. Pre-migration s2 docs
 /// read back as 0.
@@ -137,7 +135,7 @@ mod tests {
     use super::*;
     use crate::schema::{MessageRole, SessionMessageEntry};
     use crate::{MessageStatus, SessionCommandEntry, SessionCommandPayload};
-    use comet_proto::{ToolCall, ToolDiff};
+    use zeron_proto::{ToolCall, ToolDiff};
 
     /// ~4KB of varied output — repeated text would compress away inside the
     /// Loro snapshot and hide the size win the assertion checks.
@@ -145,7 +143,9 @@ mod tests {
         let mut out = String::new();
         let mut x: u64 = 0x9e37_79b9;
         for i in 0..200 {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             out.push_str(&format!("line {i}: {x:016x} {:08x}\n", x >> 13));
         }
         out
@@ -234,7 +234,14 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                assert_eq!(output.as_deref(), fat_output().lines().next().map(|l| format!("{l}…")).as_deref());
+                assert_eq!(
+                    output.as_deref(),
+                    fat_output()
+                        .lines()
+                        .next()
+                        .map(|l| format!("{l}…"))
+                        .as_deref()
+                );
                 assert_eq!(output_ref.as_deref(), Some("chat-w/m1-tool"));
                 assert_eq!(*output_bytes, Some(fat_output().len() as u64));
                 assert!(diff.is_none());

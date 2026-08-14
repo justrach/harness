@@ -15,10 +15,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use comet_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
-use comet_engine::{EngineCore, HarnessRegistry};
-use comet_harness::{Harness, HarnessError, RunControls};
-use comet_proto::{
+use zeron_doc::{MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry};
+use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
 };
@@ -130,10 +130,10 @@ async fn transcript_survives_open_racing_create_chat() {
         let live_writer_ref = handle.doc_arc();
 
         // The mint lands a beat later, exactly as the composer sends it.
-        let client = comet_rpc::memory_client(core.rpc_service());
+        let client = zeron_rpc::memory_client(core.rpc_service());
         client
             .call(
-                comet_rpc::methods::MUTATE,
+                zeron_rpc::methods::MUTATE,
                 serde_json::json!({
                     "op": "createChat",
                     "chatId": CHAT,
