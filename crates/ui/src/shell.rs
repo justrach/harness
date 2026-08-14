@@ -6265,6 +6265,9 @@ impl Render for Shell {
                 self.viewport_width = viewport;
                 let main_width =
                     (viewport - self.sidebar_target() - self.right_target(cx) - 10.0).max(0.0);
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_available_width(main_width, cx)
+                });
                 // Clearance excludes the terminal dock: the transcript
                 // viewport ends at the dock's top (see the underlay in
                 // `render_main`), so only the chrome above it overlaps.

@@ -3372,6 +3372,16 @@ impl Composer {
         &self.pickers
     }
 
+    /// Feed the stable conversation-column width into responsive composer
+    /// controls. The text input's own width is unsuitable here because it
+    /// changes when the Traits label is replaced by the overflow dots.
+    pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let inner_width = (width.min(768.0) - 2.0 * Theme::SPACE_LG).max(0.0);
+        self.pickers.update(cx, |pickers, cx| {
+            pickers.set_composer_width(inner_width, cx);
+        });
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             let mut input = ComposerInput::new("Do anything…", cx);

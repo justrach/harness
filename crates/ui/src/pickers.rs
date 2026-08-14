@@ -37,6 +37,23 @@ use crate::settings::composer::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
+/// Below this measured composer width, the traits summary yields its space to
+/// the prompt and becomes a compact overflow affordance. The model remains
+/// visible so the active agent is still identifiable at a glance.
+const COMPACT_TRAITS_ENTER_WIDTH: f32 = 400.0;
+const COMPACT_TRAITS_EXIT_WIDTH: f32 = 440.0;
+
+fn compact_traits_for_width(width: f32, currently_compact: bool) -> bool {
+    if width <= 0.0 {
+        return currently_compact;
+    }
+    if currently_compact {
+        width < COMPACT_TRAITS_EXIT_WIDTH
+    } else {
+        width < COMPACT_TRAITS_ENTER_WIDTH
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Catalog invalidation (Settings → Agents toggles)
 // ---------------------------------------------------------------------------
@@ -409,6 +426,9 @@ pub struct Pickers {
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
     focus: FocusHandle,
+    /// Responsive presentation chosen by the composer from its measured
+    /// width. This changes only the Traits trigger; its popover is unchanged.
+    compact_traits: bool,
     /// `ZERON_OPEN_PICKER` boot: keep claiming focus until it sticks, so
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
@@ -558,6 +578,7 @@ impl Pickers {
             search,
             search_reset_muted: false,
             focus: cx.focus_handle(),
+            compact_traits: false,
             boot_focus_pending: boot_open.is_some(),
             load_task: None,
             refs_task: None,
@@ -569,6 +590,18 @@ impl Pickers {
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
         }
+    }
+
+    /// Feed the composer's live measured width into the actions presentation.
+    /// Notify only on a threshold crossing so continuous resize does not cause
+    /// redundant child renders.
+    pub fn set_composer_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let compact = compact_traits_for_width(width, self.compact_traits);
+        if compact == self.compact_traits {
+            return;
+        }
+        self.compact_traits = compact;
+        cx.notify();
     }
 
     /// Persist the sticky defaults (best-effort; picks are rare and tiny).
@@ -2003,6 +2036,7 @@ impl Pickers {
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
+        let compact_traits = kind == PickerKind::Traits && self.compact_traits;
         div()
             .id(id)
             .h(px(32.0))
@@ -2050,7 +2084,15 @@ impl Pickers {
                         .text_color(tint.unwrap_or(theme.text_muted)),
                 )
             })
-            .child(div().min_w_0().truncate().child(label))
+            .when(!compact_traits, |el| {
+                el.child(div().min_w_0().truncate().child(label))
+            })
+            .when(compact_traits, |el| {
+                el.w(px(32.0))
+                    .px_0()
+                    .justify_center()
+                    .child(div().text_size(px(11.0)).child("•••"))
+            })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
             // `tint` overrides the muted tone (the offline warning).
@@ -3607,6 +3649,24 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn traits_trigger_compacts_only_at_narrow_measured_widths() {
+        assert!(!compact_traits_for_width(0.0, false));
+        assert!(compact_traits_for_width(
+            COMPACT_TRAITS_ENTER_WIDTH - 1.0,
+            false
+        ));
+        assert!(!compact_traits_for_width(COMPACT_TRAITS_ENTER_WIDTH, false));
+        // The small gap between entry and exit prevents chatter if the divider
+        // jitters around the boundary, without delaying restoration on a wide
+        // composer.
+        assert!(compact_traits_for_width(
+            COMPACT_TRAITS_EXIT_WIDTH - 1.0,
+            true
+        ));
+        assert!(!compact_traits_for_width(COMPACT_TRAITS_EXIT_WIDTH, true));
+    }
 
     fn bare_model(id: &str, label: &str) -> Model {
         Model {
