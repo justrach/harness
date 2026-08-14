@@ -3325,6 +3325,7 @@ impl Render for GitHistory {
                 .relative()
                 .flex_1()
                 .min_h_0()
+                .overflow_hidden()
                 .child(self.graph_paths(&theme, graph_focus))
                 .child(
                     list(self.list.clone(), cx.processor(Self::render_row))
