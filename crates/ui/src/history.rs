@@ -1613,7 +1613,7 @@ impl GitHistory {
         cx.notify();
     }
 
-    fn animate_view_change(&mut self, cx: &mut Context<Self>) {
+    fn apply_view_change(&mut self, animate_rows: bool, cx: &mut Context<Self>) {
         // A second click during the short tween starts from the previous
         // destination, preventing zero-height transitional rows from leaking
         // into the next merge.
@@ -1636,7 +1636,7 @@ impl GitHistory {
                 .iter()
                 .zip(&final_commits)
                 .all(|(old, new)| old.sha == new.sha);
-        if unchanged || crate::motion::reduced_motion(cx) {
+        if unchanged || !animate_rows || crate::motion::reduced_motion(cx) {
             self.visible_commits = final_commits;
             self.collapsed_counts = final_collapsed_counts;
             self.update_graph_layout();
@@ -1702,7 +1702,7 @@ impl GitHistory {
         }
         self.view_mode = mode;
         self.view_epoch = self.view_epoch.wrapping_add(1);
-        self.animate_view_change(cx);
+        self.apply_view_change(false, cx);
     }
 
     fn toggle_branch_ref(&mut self, reference: GitHistoryRef, cx: &mut Context<Self>) {
@@ -1714,7 +1714,7 @@ impl GitHistory {
         if !self.collapsed_branches.remove(&key) {
             self.collapsed_branches.insert(key);
         }
-        self.animate_view_change(cx);
+        self.apply_view_change(true, cx);
     }
 
     fn load_older(&mut self, cx: &mut Context<Self>) {
