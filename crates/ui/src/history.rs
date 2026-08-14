@@ -883,6 +883,9 @@ impl GitHistory {
         cursor: usize,
         cx: &mut Context<Self>,
     ) {
+        if configured_author_display(cx) != GitHistoryAuthorDisplay::Avatar {
+            return;
+        }
         let mut unique_authors = HashMap::new();
         for commit in &self.commits {
             let email = commit.author_email.trim().to_ascii_lowercase();
@@ -937,6 +940,18 @@ impl GitHistory {
             .ok();
         })
         .detach();
+    }
+
+    fn resolve_loaded_avatars(&mut self, cx: &mut Context<Self>) {
+        if self.commits.is_empty() {
+            return;
+        }
+        let Some((key, cwd, target)) = self.context(cx) else {
+            return;
+        };
+        for cursor in (0..self.commits.len()).step_by(HISTORY_PAGE_SIZE) {
+            self.resolve_avatars(key.clone(), cwd.clone(), target.clone(), cursor, cx);
+        }
     }
 
     fn fetch_page(
@@ -1202,6 +1217,9 @@ impl GitHistory {
         settings.git_history_author_display = display;
         if let Err(error) = settings.save(&data_dir) {
             tracing::warn!(%error, "could not persist Git history author display");
+        }
+        if display == GitHistoryAuthorDisplay::Avatar {
+            self.resolve_loaded_avatars(cx);
         }
         cx.refresh_windows();
         cx.notify();
