@@ -12,8 +12,8 @@ use base64::Engine as _;
 use chrono::DateTime;
 use gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, EventEmitter, Image, ImageFormat,
-    ListAlignment, ListState, ObjectFit, PathBuilder, Render, SharedString, Subscription, Task,
-    Window, canvas, container_query, div, img, list, point, prelude::*, px,
+    ListAlignment, ListOffset, ListState, ObjectFit, PathBuilder, Pixels, Render, SharedString,
+    Subscription, Task, Window, canvas, container_query, div, img, list, point, prelude::*, px,
 };
 use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
 use zeron_rpc::methods;
@@ -100,6 +100,76 @@ struct HistoryViewTransition {
     final_commits: Vec<GitHistoryCommit>,
     final_collapsed_counts: HashMap<String, usize>,
     epoch: usize,
+}
+
+#[derive(Clone)]
+struct HistoryScrollAnchor {
+    sha: String,
+    offset_in_item: Pixels,
+}
+
+fn resolve_history_scroll_anchor(
+    anchor: Option<HistoryScrollAnchor>,
+    old: &[GitHistoryCommit],
+    target: &[GitHistoryCommit],
+) -> Option<HistoryScrollAnchor> {
+    let anchor = anchor?;
+    if target.iter().any(|commit| commit.sha == anchor.sha) {
+        return Some(anchor);
+    }
+    let old_index = old.iter().position(|commit| commit.sha == anchor.sha)?;
+    let target_shas: HashSet<&str> = target.iter().map(|commit| commit.sha.as_str()).collect();
+    let replacement = old
+        .iter()
+        .skip(old_index + 1)
+        .find(|commit| target_shas.contains(commit.sha.as_str()))
+        .or_else(|| {
+            old[..old_index]
+                .iter()
+                .rev()
+                .find(|commit| target_shas.contains(commit.sha.as_str()))
+        })?;
+    Some(HistoryScrollAnchor {
+        sha: replacement.sha.clone(),
+        offset_in_item: px(0.0),
+    })
+}
+
+fn history_list_splice(
+    old: &[GitHistoryCommit],
+    old_has_load_more: bool,
+    target: &[GitHistoryCommit],
+    target_has_load_more: bool,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    const LOAD_MORE_KEY: &str = "\0history-load-more";
+    let mut old_keys: Vec<&str> = old.iter().map(|commit| commit.sha.as_str()).collect();
+    let mut target_keys: Vec<&str> = target.iter().map(|commit| commit.sha.as_str()).collect();
+    if old_has_load_more {
+        old_keys.push(LOAD_MORE_KEY);
+    }
+    if target_has_load_more {
+        target_keys.push(LOAD_MORE_KEY);
+    }
+    let prefix = old_keys
+        .iter()
+        .zip(&target_keys)
+        .take_while(|(old, target)| old == target)
+        .count();
+    let suffix_limit = old_keys.len().min(target_keys.len()).saturating_sub(prefix);
+    let suffix = old_keys
+        .iter()
+        .rev()
+        .zip(target_keys.iter().rev())
+        .take(suffix_limit)
+        .take_while(|(old, target)| old == target)
+        .count();
+    if prefix == old_keys.len() && prefix == target_keys.len() {
+        return None;
+    }
+    Some((
+        prefix..old_keys.len() - suffix,
+        target_keys.len() - prefix - suffix,
+    ))
 }
 
 /// Build a temporary list that preserves every old row while introducing the
@@ -1444,7 +1514,8 @@ impl GitHistory {
         // The commit subject starts immediately after the graph column. Keep
         // that column at the widest lane count seen for this repository so a
         // fold cannot move every title sideways when its compact graph settles.
-        let loaded_lane_count = layout_graph(&self.commits, self.head_sha.as_deref()).max_lane_count;
+        let loaded_lane_count =
+            layout_graph(&self.commits, self.head_sha.as_deref()).max_lane_count;
         self.graph_lane_capacity = self
             .graph_lane_capacity
             .max(self.graph.max_lane_count)
@@ -1467,19 +1538,77 @@ impl GitHistory {
         cx.notify();
     }
 
+    fn current_scroll_anchor(&self) -> Option<HistoryScrollAnchor> {
+        let scroll_top = self.list.logical_scroll_top();
+        let commit = self
+            .visible_commits
+            .get(scroll_top.item_ix)
+            .or_else(|| self.visible_commits.last())?;
+        Some(HistoryScrollAnchor {
+            sha: commit.sha.clone(),
+            offset_in_item: if scroll_top.item_ix < self.visible_commits.len() {
+                scroll_top.offset_in_item
+            } else {
+                px(0.0)
+            },
+        })
+    }
+
+    fn restore_scroll_anchor(&self, anchor: Option<&HistoryScrollAnchor>) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let Some(item_ix) = self
+            .visible_commits
+            .iter()
+            .position(|commit| commit.sha == anchor.sha)
+        else {
+            return;
+        };
+        self.list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: anchor.offset_in_item,
+        });
+    }
+
+    fn reconcile_list_items(
+        &self,
+        old: &[GitHistoryCommit],
+        old_has_load_more: bool,
+        target: &[GitHistoryCommit],
+        target_has_load_more: bool,
+    ) {
+        if let Some((range, count)) =
+            history_list_splice(old, old_has_load_more, target, target_has_load_more)
+        {
+            self.list.splice(range, count);
+        }
+    }
+
     fn settle_view_transition(&mut self, cx: &mut Context<Self>) {
         let Some(transition) = self.view_transition.take() else {
             return;
         };
+        // Resolve at settle time rather than reusing the click-time anchor: if
+        // the user scrolls during the tween, that newer position must win.
+        let final_scroll_anchor = resolve_history_scroll_anchor(
+            self.current_scroll_anchor(),
+            &self.visible_commits,
+            &transition.final_commits,
+        );
+        let old_has_load_more = self.list.item_count() > self.visible_commits.len();
+        let final_has_load_more =
+            self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some();
+        self.reconcile_list_items(
+            &self.visible_commits,
+            old_has_load_more,
+            &transition.final_commits,
+            final_has_load_more,
+        );
         self.visible_commits = transition.final_commits;
         self.collapsed_counts = transition.final_collapsed_counts;
         self.update_graph_layout();
-        let item_count = self.visible_commits.len()
-            + usize::from(
-                self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
-            );
-        self.list
-            .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        self.restore_scroll_anchor(final_scroll_anchor.as_ref());
         self.view_transition_task = None;
         cx.notify();
     }
@@ -1491,10 +1620,16 @@ impl GitHistory {
         if self.view_transition.is_some() {
             self.settle_view_transition(cx);
         }
+        let scroll_anchor = self.current_scroll_anchor();
         let old_commits = self.visible_commits.clone();
+        let old_has_load_more = self.list.item_count() > old_commits.len();
         self.recompute_view();
         let final_commits = std::mem::take(&mut self.visible_commits);
         let final_collapsed_counts = std::mem::take(&mut self.collapsed_counts);
+        let final_scroll_anchor =
+            resolve_history_scroll_anchor(scroll_anchor.clone(), &old_commits, &final_commits);
+        let final_has_load_more =
+            self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some();
 
         let unchanged = old_commits.len() == final_commits.len()
             && old_commits
@@ -1505,26 +1640,28 @@ impl GitHistory {
             self.visible_commits = final_commits;
             self.collapsed_counts = final_collapsed_counts;
             self.update_graph_layout();
-            let item_count = self.visible_commits.len()
-                + usize::from(
-                    self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
-                );
-            self.list
-                .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+            self.reconcile_list_items(
+                &old_commits,
+                old_has_load_more,
+                &self.visible_commits,
+                final_has_load_more,
+            );
+            self.restore_scroll_anchor(final_scroll_anchor.as_ref());
             cx.notify();
             return;
         }
 
         let (transition_commits, rows) = history_transition_rows(&old_commits, &final_commits);
+        self.reconcile_list_items(
+            &old_commits,
+            old_has_load_more,
+            &transition_commits,
+            final_has_load_more,
+        );
         self.visible_commits = transition_commits;
         self.collapsed_counts = final_collapsed_counts.clone();
         self.update_graph_layout();
-        let item_count = self.visible_commits.len()
-            + usize::from(
-                self.view_mode == GitHistoryViewMode::AllCommits && self.next_cursor.is_some(),
-            );
-        self.list
-            .reset_with_uniform_height(item_count, px(HISTORY_ROW_HEIGHT));
+        self.restore_scroll_anchor(scroll_anchor.as_ref());
         let epoch = self.view_epoch;
         self.view_transition = Some(HistoryViewTransition {
             rows,
@@ -3388,6 +3525,41 @@ mod tests {
                 HistoryRowTransition::Stable,
             ]
         );
+    }
+
+    #[test]
+    fn list_splice_preserves_the_unchanged_prefix_around_a_fold() {
+        let old = vec![
+            commit("tip", &["one"]),
+            commit("one", &["two"]),
+            commit("two", &["base"]),
+            commit("base", &[]),
+        ];
+        let target = vec![commit("tip", &["base"]), commit("base", &[])];
+
+        assert_eq!(
+            history_list_splice(&old, true, &target, true),
+            Some((1..3, 0))
+        );
+    }
+
+    #[test]
+    fn removed_scroll_anchor_moves_to_the_next_surviving_commit() {
+        let old = vec![
+            commit("tip", &["one"]),
+            commit("one", &["two"]),
+            commit("two", &["base"]),
+            commit("base", &[]),
+        ];
+        let target = vec![commit("tip", &["base"]), commit("base", &[])];
+        let anchor = HistoryScrollAnchor {
+            sha: "one".into(),
+            offset_in_item: px(12.0),
+        };
+
+        let resolved = resolve_history_scroll_anchor(Some(anchor), &old, &target).unwrap();
+        assert_eq!(resolved.sha, "base");
+        assert_eq!(resolved.offset_in_item, px(0.0));
     }
 
     #[test]
