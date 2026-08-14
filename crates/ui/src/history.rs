@@ -1760,14 +1760,6 @@ impl Render for GitHistory {
                         .border_color(crate::theme::hairline(0.06))
                         .text_size(px(9.5))
                         .text_color(theme.text_faint)
-                        .on_mouse_down(
-                            gpui::MouseButton::Right,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                this.open_column_menu(event.position, cx);
-                            }),
-                        )
                         .child(div().w(px(graph_column)).flex_none())
                         .child(div().flex_1().min_w(px(80.0)).child("Commit"))
                         .when(columns.author, |header| {
