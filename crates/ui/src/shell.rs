@@ -4935,7 +4935,11 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = if theme.is_glass() { bg.opacity(0.4) } else { bg };
+        let panel_bg = if theme.is_glass() {
+            bg.opacity(0.4)
+        } else {
+            bg
+        };
         let panel = div()
             .size_full()
             .flex()
@@ -4956,11 +4960,7 @@ impl Shell {
         self.pane_container(
             self.right_tween,
             target,
-            div()
-                .h_full()
-                .relative()
-                .child(panel)
-                .into_any_element(),
+            div().h_full().relative().child(panel).into_any_element(),
         )
     }
 

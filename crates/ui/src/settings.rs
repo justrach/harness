@@ -308,11 +308,7 @@ impl UiSettings {
         );
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
-        self.right_pane_width = min_or(
-            self.right_pane_width,
-            RIGHT_PANE_MIN,
-            RIGHT_PANE_DEFAULT,
-        );
+        self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
         self.terminal_height = clamp_or(
             self.terminal_height,
             TERMINAL_MIN_HEIGHT,
