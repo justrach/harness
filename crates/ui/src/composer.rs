@@ -393,6 +393,14 @@ fn interrupt_params(chat_id: &str) -> serde_json::Value {
     })
 }
 
+fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
+    key == "escape" && completion_open
+}
+
+fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) -> bool {
+    key == "escape" && (!input_focused || input_empty)
+}
+
 /// Find the unresolved input request the panel should serve, if any: an
 /// unresolved input part on the LAST assistant entry — regardless of the
 /// entry's run status. The question stays answerable until the user actually
@@ -629,7 +637,6 @@ actions!(
         Undo,
         Redo,
         MentionTab,
-        MentionEscape,
     ]
 );
 
@@ -1095,7 +1102,6 @@ pub fn init(cx: &mut App) {
     let mut bindings = vec![
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("tab", MentionTab, ctx),
-        KeyBinding::new("escape", MentionEscape, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
@@ -2139,11 +2145,10 @@ impl ComposerInput {
         }
     }
 
-    fn mention_escape(&mut self, _: &MentionEscape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.mention_open {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if escape_dismisses_completion(&event.keystroke.key, self.mention_open) {
             cx.emit(ComposerInputEvent::MentionDismiss);
-        } else {
-            cx.propagate();
+            cx.stop_propagation();
         }
     }
 
@@ -3124,7 +3129,6 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::mention_tab))
-            .on_action(cx.listener(Self::mention_escape))
             .on_action(cx.listener(Self::select_word_left))
             .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::delete_word_left))
@@ -3138,6 +3142,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -4963,8 +4968,10 @@ impl Composer {
                 self.wizard_advance(cx);
                 cx.stop_propagation();
             }
-        } else if key == "escape" && (!input_focused || input_empty) {
-            self.wizard_back(cx);
+        } else if key == "escape" {
+            if wizard_escape_goes_back(key, input_focused, input_empty) {
+                self.wizard_back(cx);
+            }
             cx.stop_propagation();
         }
     }
@@ -6300,6 +6307,18 @@ mod tests {
         let params = interrupt_params("chat-a");
         assert_eq!(params["chatId"], "chat-a");
         assert_eq!(params["command"]["kind"], "interrupt");
+    }
+
+    #[test]
+    fn escape_consumers_keep_completion_and_wizard_priority() {
+        assert!(escape_dismisses_completion("escape", true));
+        assert!(!escape_dismisses_completion("escape", false));
+        assert!(!escape_dismisses_completion("enter", true));
+
+        assert!(wizard_escape_goes_back("escape", false, false));
+        assert!(wizard_escape_goes_back("escape", true, true));
+        assert!(!wizard_escape_goes_back("escape", true, false));
+        assert!(!wizard_escape_goes_back("enter", false, true));
     }
 
     #[test]

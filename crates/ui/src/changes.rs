@@ -1781,7 +1781,10 @@ impl Changes {
             event.keystroke.modifiers.control,
         );
         match key {
-            popover::MenuKey::Escape => self.close_ref_menu(cx),
+            popover::MenuKey::Escape => {
+                self.close_ref_menu(cx);
+                cx.stop_propagation();
+            }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.ref_menu_rows(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };

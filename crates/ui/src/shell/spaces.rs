@@ -243,6 +243,7 @@ impl Shell {
         match key {
             popover::MenuKey::Escape => {
                 self.close_spaces_menu(cx);
+                cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.spaces_menu_rows(cx).len();
@@ -1290,6 +1291,7 @@ impl Shell {
             popover::MenuKey::Escape => {
                 self.add_space = None;
                 cx.notify();
+                cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.add_space_filtered(cx).len();
@@ -2028,6 +2030,7 @@ impl Shell {
                     if ev.keystroke.key == "escape" {
                         this.rename_space_dialog = None;
                         cx.notify();
+                        cx.stop_propagation();
                     }
                 }))
                 .child(popover::dialog_title(&theme, "Rename project"))

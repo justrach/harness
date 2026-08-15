@@ -553,6 +553,43 @@ impl SyncFlow {
                 | SyncFlow::ImportFailed { .. }
         )
     }
+
+    fn has_visible_overlay(self) -> bool {
+        match self {
+            SyncFlow::Idle
+            | SyncFlow::SwitchOffer { notice_open: false }
+            | SyncFlow::ImportFailed { notice_open: false }
+            | SyncFlow::RestartPending { notice_open: false }
+            | SyncFlow::SignedOutRestartRequired => false,
+            SyncFlow::Enabling
+            | SyncFlow::Canceling
+            | SyncFlow::SwitchOffer { notice_open: true }
+            | SyncFlow::Switching { .. }
+            | SyncFlow::Importing { .. }
+            | SyncFlow::ImportDone { .. }
+            | SyncFlow::ImportFailed { notice_open: true }
+            | SyncFlow::RestartPending { notice_open: true }
+            | SyncFlow::SignOutConfirm
+            | SyncFlow::SigningOut => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellEscapeRoute {
+    OtherKey,
+    Blocked,
+    Fallback,
+}
+
+fn shell_escape_route(key: &str, blocking_overlay: bool) -> ShellEscapeRoute {
+    if key != "escape" {
+        ShellEscapeRoute::OtherKey
+    } else if blocking_overlay {
+        ShellEscapeRoute::Blocked
+    } else {
+        ShellEscapeRoute::Fallback
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4189,6 +4226,27 @@ impl Shell {
 
     /// Floating layers owned by the shell: context menus, edit dialogs, and
     /// the local-to-synced account lifecycle.
+    fn has_blocking_overlay(&self) -> bool {
+        self.chat_menu.get().is_some()
+            || self.rename_dialog.is_some()
+            || self.delete_confirm.is_some()
+            || self.space_menu.get().is_some()
+            || self.rename_space_dialog.is_some()
+            || self.delete_space_confirm.is_some()
+            || self.add_space.is_some()
+            || self.spaces_menu.get().is_some()
+            || self.user_menu.get().is_some()
+            || self.sync_flow.has_visible_overlay()
+    }
+
+    fn on_key_down(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if shell_escape_route(&event.keystroke.key, self.has_blocking_overlay())
+            == ShellEscapeRoute::Blocked
+        {
+            cx.stop_propagation();
+        }
+    }
+
     fn render_overlays(
         &mut self,
         viewport: gpui::Size<Pixels>,
@@ -4268,6 +4326,7 @@ impl Shell {
                     if ev.keystroke.key == "escape" {
                         this.rename_dialog = None;
                         cx.notify();
+                        cx.stop_propagation();
                     }
                 }))
                 .child(popover::dialog_title(&theme, "Rename session"))
@@ -6203,6 +6262,7 @@ impl Render for Shell {
             .text_color(text)
             .font_family(font)
             .text_size(px(14.0))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
@@ -6445,6 +6505,31 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_reaches_fallback_only_without_blocking_chrome() {
+        assert_eq!(
+            shell_escape_route("escape", false),
+            ShellEscapeRoute::Fallback
+        );
+        assert_eq!(
+            shell_escape_route("escape", true),
+            ShellEscapeRoute::Blocked
+        );
+        assert_eq!(
+            shell_escape_route("enter", true),
+            ShellEscapeRoute::OtherKey
+        );
+    }
+
+    #[test]
+    fn only_visible_sync_steps_block_escape() {
+        assert!(!SyncFlow::Idle.has_visible_overlay());
+        assert!(!SyncFlow::SwitchOffer { notice_open: false }.has_visible_overlay());
+        assert!(SyncFlow::SwitchOffer { notice_open: true }.has_visible_overlay());
+        assert!(SyncFlow::Importing { done: 1, total: 3 }.has_visible_overlay());
+        assert!(SyncFlow::SignOutConfirm.has_visible_overlay());
+    }
 
     #[tokio::test]
     async fn remote_shutdown_waits_for_ipc_release() {
