@@ -45,6 +45,10 @@ const HISTORY_GRAPH_TRAILING_PADDING: f32 = 20.0;
 const HISTORY_GRAPH_MIN_COMPACT_WIDTH: f32 = 48.0;
 const HISTORY_GRAPH_MAX_WIDTH_RATIO: f32 = 0.34;
 const HISTORY_GRAPH_RESIZE_STEP: f32 = 2.0;
+const HISTORY_GRAPH_COMPACT_ENTER_SUBJECT_WIDTH: f32 = 160.0;
+const HISTORY_GRAPH_COMPACT_EXIT_SUBJECT_WIDTH: f32 = 184.0;
+const HISTORY_GRAPH_COMPACT_ENTER_LANE_SPACING: f32 = 4.0;
+const HISTORY_GRAPH_COMPACT_EXIT_LANE_SPACING: f32 = 5.0;
 const HISTORY_GRAPH_ROW_OVERLAP: f32 = 0.75;
 const HISTORY_GRAPH_HIT_RADIUS: f32 = 5.5;
 const HISTORY_GRAPH_FOCUSED_STROKE_WIDTH: f32 = 2.25;
@@ -103,6 +107,7 @@ struct GraphGeometry {
     width: f32,
     lane_spacing: f32,
     device_scale: f32,
+    compact: bool,
 }
 
 impl GraphGeometry {
@@ -116,6 +121,7 @@ impl GraphGeometry {
                 + (count - 1) as f32 * HISTORY_LANE_SPACING,
             lane_spacing: HISTORY_LANE_SPACING,
             device_scale: 1.0,
+            compact: false,
         }
     }
 
@@ -133,7 +139,16 @@ impl GraphGeometry {
             width,
             lane_spacing: (width - fixed_width) / (count - 1) as f32,
             device_scale: 1.0,
+            compact: false,
         }
+    }
+
+    fn compact(lane_count: usize) -> Self {
+        let mut geometry = Self::natural(1);
+        geometry.lane_count = lane_count.max(1);
+        geometry.lane_spacing = 0.0;
+        geometry.compact = true;
+        geometry
     }
 
     fn lane_x(self, lane: usize) -> f32 {
@@ -871,11 +886,36 @@ fn responsive_graph_geometry(
     )
 }
 
+fn should_use_compact_graph(
+    target: GraphGeometry,
+    previous: GraphGeometry,
+    container_width: f32,
+    optional_columns_width: f32,
+) -> bool {
+    if target.lane_count <= 1 {
+        return false;
+    }
+    let subject_width = container_width - optional_columns_width - target.width;
+    if previous.compact {
+        subject_width < HISTORY_GRAPH_COMPACT_EXIT_SUBJECT_WIDTH
+            || target.lane_spacing < HISTORY_GRAPH_COMPACT_EXIT_LANE_SPACING
+    } else {
+        subject_width < HISTORY_GRAPH_COMPACT_ENTER_SUBJECT_WIDTH
+            || target.lane_spacing < HISTORY_GRAPH_COMPACT_ENTER_LANE_SPACING
+    }
+}
+
 fn stabilized_graph_geometry(
     target: GraphGeometry,
     previous: GraphGeometry,
     device_scale: f32,
+    compact: bool,
 ) -> GraphGeometry {
+    if compact {
+        let mut compact_geometry = GraphGeometry::compact(target.lane_count);
+        compact_geometry.device_scale = device_scale.max(1.0);
+        return compact_geometry;
+    }
     let natural = GraphGeometry::natural(target.lane_count);
     let target_is_natural = (target.width - natural.width).abs() < f32::EPSILON;
     let snapped_width = if target_is_natural {
@@ -992,6 +1032,10 @@ fn hovered_graph_path(
     let node_y = HISTORY_ROW_HEIGHT / 2.0;
     let node_distance = ((point_x - node_x).powi(2) + (point_y - node_y).powi(2)).sqrt();
     if node_distance <= HISTORY_GRAPH_HIT_RADIUS + HISTORY_NODE_RADIUS {
+        return Some(row.node_color_id);
+    }
+
+    if geometry.compact && (point_x - geometry.lane_x(0)).abs() <= HISTORY_GRAPH_HIT_RADIUS {
         return Some(row.node_color_id);
     }
 
@@ -3228,6 +3272,70 @@ impl GitHistory {
                     focus
                 };
                 let pass_count = if focus.is_some() { 2 } else { 1 };
+                if geometry.compact {
+                    let rail_x = geometry.lane_x(0);
+                    for pass in 0..pass_count {
+                        let selected_pass = focus.is_some() && pass == 1;
+                        for (color_index, color) in palette.iter().enumerate() {
+                            let stroke_width = focus
+                                .filter(|_| selected_pass)
+                                .map(|focus| {
+                                    HISTORY_STROKE_WIDTH
+                                        + (HISTORY_GRAPH_FOCUSED_STROKE_WIDTH
+                                            - HISTORY_STROKE_WIDTH)
+                                            * focus.amount
+                                })
+                                .unwrap_or(HISTORY_STROKE_WIDTH);
+                            let mut builder = PathBuilder::stroke(px(stroke_width));
+                            let mut has_segments = false;
+                            for (index, row) in rows.iter().enumerate() {
+                                if row.node_color_id % palette.len() != color_index
+                                    || focus.is_some_and(|focus| {
+                                        (row.node_color_id == focus.color_id) != selected_pass
+                                    })
+                                {
+                                    continue;
+                                }
+                                let Some(row_bounds) = list.bounds_for_item(index) else {
+                                    continue;
+                                };
+                                if row_bounds.bottom() < viewport_bounds.top()
+                                    || row_bounds.top() > viewport_bounds.bottom()
+                                {
+                                    continue;
+                                }
+                                let row_height = f32::from(row_bounds.size.height);
+                                if row_height <= 0.5 {
+                                    continue;
+                                }
+                                let start = point(
+                                    row_bounds.origin.x + px(rail_x),
+                                    row_bounds.origin.y + px(row_height / 2.0),
+                                );
+                                let end_y = list
+                                    .bounds_for_item(index + 1)
+                                    .map(|next| {
+                                        next.origin.y + px(f32::from(next.size.height) / 2.0)
+                                    })
+                                    .unwrap_or_else(|| row_bounds.bottom());
+                                builder.move_to(start);
+                                builder.line_to(point(row_bounds.origin.x + px(rail_x), end_y));
+                                has_segments = true;
+                            }
+                            if has_segments && let Ok(path) = builder.build() {
+                                let mut paint_color = *color;
+                                if let Some(focus) = focus
+                                    && !selected_pass
+                                {
+                                    paint_color.a *= 1.0
+                                        - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+                                }
+                                window.paint_path(path, paint_color);
+                            }
+                        }
+                    }
+                    return;
+                }
                 for pass in 0..pass_count {
                     let selected_pass = focus.is_some() && pass == 1;
                     for (color_index, color) in palette.iter().enumerate() {
@@ -4176,8 +4284,14 @@ impl Render for GitHistory {
                         optional_columns_width,
                     );
                     let previous = graph_geometry.get();
+                    let compact = should_use_compact_graph(
+                        target,
+                        previous,
+                        f32::from(size.width),
+                        optional_columns_width,
+                    );
                     let geometry =
-                        stabilized_graph_geometry(target, previous, window.scale_factor());
+                        stabilized_graph_geometry(target, previous, window.scale_factor(), compact);
                     if geometry != previous {
                         graph_hover_suppressed.set(true);
                     }
@@ -4573,6 +4687,46 @@ mod tests {
     }
 
     #[test]
+    fn narrow_commit_space_switches_to_a_compact_rail_with_hysteresis() {
+        let target = responsive_graph_geometry(10, 500.0, 240.0);
+        assert!(should_use_compact_graph(
+            target,
+            GraphGeometry::natural(10),
+            500.0,
+            240.0,
+        ));
+
+        let compact = GraphGeometry::compact(10);
+        let still_narrow = responsive_graph_geometry(10, 550.0, 240.0);
+        assert!(should_use_compact_graph(
+            still_narrow,
+            compact,
+            550.0,
+            240.0,
+        ));
+
+        let wide_again = responsive_graph_geometry(10, 570.0, 240.0);
+        assert!(!should_use_compact_graph(wide_again, compact, 570.0, 240.0,));
+    }
+
+    #[test]
+    fn compact_graph_keeps_each_rows_color_as_its_hover_identity() {
+        let geometry = GraphGeometry::compact(20);
+        let row = GraphRow {
+            sha: "compact".into(),
+            node_lane: 14,
+            node_color_id: 9,
+            segments: Vec::new(),
+            is_head: false,
+        };
+        assert_eq!(geometry.lane_x(0), geometry.lane_x(14));
+        assert_eq!(
+            hovered_graph_path(&row, geometry.lane_x(0), 2.0, geometry),
+            Some(9)
+        );
+    }
+
+    #[test]
     fn compressed_graph_hit_testing_uses_the_fitted_lane_positions() {
         let geometry = GraphGeometry::fitted(20, 80.0);
         let row = GraphRow {
@@ -4597,12 +4751,12 @@ mod tests {
     fn responsive_graph_geometry_ignores_sub_step_resize_jitter() {
         let previous = GraphGeometry::fitted(20, 80.0);
         let target = GraphGeometry::fitted(20, 81.9);
-        let stable = stabilized_graph_geometry(target, previous, 2.0);
+        let stable = stabilized_graph_geometry(target, previous, 2.0, false);
         assert_eq!(stable.width, previous.width);
         assert_eq!(stable.lane_spacing, previous.lane_spacing);
         assert_eq!(stable.device_scale, 2.0);
 
-        let next = stabilized_graph_geometry(GraphGeometry::fitted(20, 82.1), stable, 2.0);
+        let next = stabilized_graph_geometry(GraphGeometry::fitted(20, 82.1), stable, 2.0, false);
         assert_eq!(next.width, 82.0);
         assert_ne!(next.lane_spacing, stable.lane_spacing);
     }
@@ -4613,6 +4767,7 @@ mod tests {
             GraphGeometry::fitted(20, 82.0),
             GraphGeometry::natural(1),
             2.0,
+            false,
         );
         for lane in 0..20 {
             assert!((geometry.lane_x(lane) * 2.0).fract().abs() < f32::EPSILON);
