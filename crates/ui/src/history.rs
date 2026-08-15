@@ -110,6 +110,13 @@ struct GraphGeometry {
     compact: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GraphGeometryMorph {
+    from: GraphGeometry,
+    to: GraphGeometry,
+    epoch: usize,
+}
+
 impl GraphGeometry {
     fn natural(lane_count: usize) -> Self {
         let count = lane_count.max(1);
@@ -154,6 +161,29 @@ impl GraphGeometry {
     fn lane_x(self, lane: usize) -> f32 {
         let x = HISTORY_GRAPH_SIDE_PADDING + HISTORY_NODE_RADIUS + lane as f32 * self.lane_spacing;
         (x * self.device_scale).round() / self.device_scale
+    }
+}
+
+fn interpolate_graph_geometry(
+    from: GraphGeometry,
+    to: GraphGeometry,
+    progress: f32,
+) -> GraphGeometry {
+    let progress = progress.clamp(0.0, 1.0);
+    let lerp = |start: f32, end: f32| start + (end - start) * progress;
+    GraphGeometry {
+        lane_count: to.lane_count,
+        width: lerp(from.width, to.width),
+        lane_spacing: lerp(from.lane_spacing, to.lane_spacing),
+        device_scale: to.device_scale,
+        // Keep the full topology while lanes converge; the compact rail takes
+        // over only once all paths already share its x coordinate. Expanding
+        // does the inverse from the rail's first frame.
+        compact: if from.compact {
+            progress <= 0.001
+        } else {
+            to.compact && progress >= 0.999
+        },
     }
 }
 
@@ -1261,6 +1291,10 @@ pub struct GitHistory {
     /// Updated by the surface-level container query before rows paint. The
     /// same geometry drives canvas paths, nodes, headers, and hit testing.
     graph_geometry: Rc<Cell<GraphGeometry>>,
+    /// The settled responsive target. This stays separate from the animated
+    /// geometry so resize hysteresis never reads an in-between lane layout.
+    graph_target_geometry: Rc<Cell<GraphGeometry>>,
+    graph_geometry_morph: Rc<Cell<Option<GraphGeometryMorph>>>,
     graph_hover_suppressed: Rc<Cell<bool>>,
     list: ListState,
     hovered_path: Option<usize>,
@@ -1893,6 +1927,8 @@ impl GitHistory {
             graph: GraphLayout::default(),
             graph_lane_capacity: 0,
             graph_geometry: Rc::new(Cell::new(GraphGeometry::natural(1))),
+            graph_target_geometry: Rc::new(Cell::new(GraphGeometry::natural(1))),
+            graph_geometry_morph: Rc::new(Cell::new(None)),
             graph_hover_suppressed: Rc::new(Cell::new(false)),
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
             hovered_path: None,
@@ -4149,6 +4185,8 @@ impl Render for GitHistory {
             (position, menu, closing)
         });
         let graph_geometry = self.graph_geometry.clone();
+        let graph_target_geometry = self.graph_target_geometry.clone();
+        let graph_geometry_morph = self.graph_geometry_morph.clone();
         let graph_hover_suppressed = self.graph_hover_suppressed.clone();
         let graph_lane_capacity = self.graph_lane_capacity;
         let show_header = !self.visible_commits.is_empty();
@@ -4277,25 +4315,87 @@ impl Render for GitHistory {
                 },
             )
             .child(
-                container_query(move |size, window, _| {
-                    let target = responsive_graph_geometry(
+                container_query(move |size, window, cx| {
+                    let responsive_target = responsive_graph_geometry(
                         graph_lane_capacity,
                         f32::from(size.width),
                         optional_columns_width,
                     );
-                    let previous = graph_geometry.get();
+                    let previous_target = graph_target_geometry.get();
                     let compact = should_use_compact_graph(
-                        target,
-                        previous,
+                        responsive_target,
+                        previous_target,
                         f32::from(size.width),
                         optional_columns_width,
                     );
-                    let geometry =
-                        stabilized_graph_geometry(target, previous, window.scale_factor(), compact);
-                    if geometry != previous {
-                        graph_hover_suppressed.set(true);
-                    }
-                    graph_geometry.set(geometry);
+                    let target = stabilized_graph_geometry(
+                        responsive_target,
+                        previous_target,
+                        window.scale_factor(),
+                        compact,
+                    );
+                    let active_morph = graph_geometry_morph.get().filter(|morph| {
+                        if graph_geometry.get() == morph.to {
+                            graph_geometry_morph.set(None);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    let morph = match active_morph {
+                        Some(active) if active.to.compact == target.compact => Some(active),
+                        _ if target.compact != previous_target.compact && !cx.reduce_motion() => {
+                            let epoch = graph_geometry_morph
+                                .get()
+                                .map_or(0, |morph| morph.epoch.wrapping_add(1));
+                            let morph = GraphGeometryMorph {
+                                from: graph_geometry.get(),
+                                to: target,
+                                epoch,
+                            };
+                            graph_target_geometry.set(target);
+                            graph_geometry_morph.set(Some(morph));
+                            graph_hover_suppressed.set(true);
+                            Some(morph)
+                        }
+                        _ => {
+                            if graph_geometry.get() != target {
+                                graph_hover_suppressed.set(true);
+                            }
+                            graph_target_geometry.set(target);
+                            graph_geometry_morph.set(None);
+                            graph_geometry.set(target);
+                            None
+                        }
+                    };
+                    let graph_spacer: AnyElement = match morph {
+                        Some(morph) => {
+                            let graph_geometry = graph_geometry.clone();
+                            div()
+                                .id("history-graph-morph-spacer")
+                                .w(px(morph.from.width))
+                                .flex_none()
+                                .with_animation(
+                                    SharedString::from(format!(
+                                        "history-graph-morph-{}",
+                                        morph.epoch
+                                    )),
+                                    crate::motion::COLLAPSE.animation(),
+                                    move |element, progress| {
+                                        let geometry = interpolate_graph_geometry(
+                                            morph.from, morph.to, progress,
+                                        );
+                                        graph_geometry.set(geometry);
+                                        element.w(px(geometry.width))
+                                    },
+                                )
+                                .into_any_element()
+                        }
+                        None => div()
+                            .w(px(graph_geometry.get().width))
+                            .flex_none()
+                            .into_any_element(),
+                    };
                     div()
                         .size_full()
                         .flex()
@@ -4314,7 +4414,7 @@ impl Render for GitHistory {
                                     .border_color(crate::theme::hairline(0.06))
                                     .text_size(px(9.5))
                                     .text_color(header_theme.text_faint)
-                                    .child(div().w(px(geometry.width)).flex_none())
+                                    .child(graph_spacer)
                                     .child(div().flex_1().min_w(px(80.0)).child("Commit"))
                                     .child(optional_headers)
                                     .child(column_button),
@@ -4724,6 +4824,34 @@ mod tests {
             hovered_graph_path(&row, geometry.lane_x(0), 2.0, geometry),
             Some(9)
         );
+    }
+
+    #[test]
+    fn graph_geometry_morph_converges_lanes_before_entering_the_compact_rail() {
+        let full = GraphGeometry::natural(8);
+        let compact = GraphGeometry::compact(8);
+        let halfway = interpolate_graph_geometry(full, compact, 0.5);
+        assert!(!halfway.compact);
+        assert!(halfway.width < full.width);
+        assert!(halfway.width > compact.width);
+        assert!(halfway.lane_spacing < full.lane_spacing);
+        assert!(halfway.lane_spacing > compact.lane_spacing);
+
+        let settled = interpolate_graph_geometry(full, compact, 1.0);
+        assert!(settled.compact);
+        assert_eq!(settled.width, compact.width);
+        assert_eq!(settled.lane_spacing, 0.0);
+    }
+
+    #[test]
+    fn graph_geometry_morph_expands_the_rail_from_its_compact_start() {
+        let compact = GraphGeometry::compact(8);
+        let full = GraphGeometry::natural(8);
+        assert!(interpolate_graph_geometry(compact, full, 0.0).compact);
+        let halfway = interpolate_graph_geometry(compact, full, 0.5);
+        assert!(!halfway.compact);
+        assert!(halfway.lane_spacing > 0.0);
+        assert!(halfway.lane_spacing < full.lane_spacing);
     }
 
     #[test]
