@@ -2277,6 +2277,7 @@ impl Changes {
             .child(
                 div()
                     .text_size(px(12.0))
+                    .line_height(px(14.0))
                     .text_color(theme.text)
                     .child(SharedString::from(scope.label())),
             )
@@ -2333,7 +2334,15 @@ impl Changes {
             .gap(px(6.0))
             .child(trigger)
             .when_some(history_count, |element, count| {
-                element.child(div().flex_1().min_w_0().h_full().child(count))
+                element.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .child(count),
+                )
             })
             .children(self.render_ref_selector(&theme, cx))
             .when(scope != DiffScope::History, |element| {

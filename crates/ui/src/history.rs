@@ -1276,6 +1276,7 @@ impl Render for GitHistoryCount {
                         .flex_none()
                         .whitespace_nowrap()
                         .text_size(px(11.0))
+                        .line_height(px(14.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(format!(
                             "{count} commit{}",
@@ -1290,6 +1291,7 @@ impl Render for GitHistoryCount {
                         .truncate()
                         .font_family(theme.font_mono.clone())
                         .text_size(px(11.5))
+                        .line_height(px(14.0))
                         .text_color(theme.text_dim)
                         .child(SharedString::from(branch)),
                 )
