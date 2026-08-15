@@ -33,8 +33,8 @@ use zeron_proto::{
     ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
 };
 use zeron_rpc::{
-    DeviceFrameHeader, LinkCache, LinkCacheConfig, StaticToken, decode_device_frame,
-    encode_device_frame, methods,
+    DeviceFrameHeader, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, RpcError, RpcReply,
+    RpcService, StaticToken, decode_device_frame, encode_device_frame, methods,
 };
 
 // ---------------------------------------------------------------------------
@@ -196,6 +196,24 @@ struct StaticChangeRequestLookup {
     source: CheckoutSourceContext,
     summary: ChangeRequestSummary,
     resolves: AtomicUsize,
+}
+
+/// Models a host from before the checkout change-request watch existed.
+struct LegacyChangeRequestService {
+    list_harnesses_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl RpcService for LegacyChangeRequestService {
+    async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        match method {
+            methods::LIST_HARNESSES => {
+                self.list_harnesses_calls.fetch_add(1, Ordering::AcqRel);
+                RpcReply::value(&serde_json::json!([]))
+            }
+            other => Err(RpcError::UnknownMethod(other.into())),
+        }
+    }
 }
 
 #[async_trait]
@@ -461,6 +479,76 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
 
     core_a.shutdown().await;
     core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let legacy = Arc::new(LegacyChangeRequestService {
+        list_harnesses_calls: AtomicUsize::new(0),
+    });
+    let _legacy_host = HostRelay::spawn(
+        HostRelayConfig::new(
+            &relay_url,
+            "legacy-device",
+            Arc::new(StaticToken("test-user".into())),
+        ),
+        legacy.clone(),
+        Arc::new(|_| {}),
+    );
+
+    let core = assemble(&dirs.path().join("new"), "new-device");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    // The host can take a moment to attach to the room. Once attached, an old
+    // host rejects only the capability added by this version.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match client
+            .subscribe_checked(
+                methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+                serde_json::json!({
+                    "cwd": "/legacy-checkout",
+                    "targetDeviceId": "legacy-device",
+                }),
+            )
+            .await
+        {
+            Err(RpcError::UnknownMethod(method)) => {
+                assert_eq!(method, methods::WATCH_CHECKOUT_CHANGE_REQUEST);
+                break;
+            }
+            Ok(_) => panic!("legacy host must reject the change-request watch"),
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "legacy host never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    let harnesses = client
+        .call(
+            methods::LIST_HARNESSES,
+            serde_json::json!({ "targetDeviceId": "legacy-device" }),
+        )
+        .await
+        .expect("a capability rejection must not sever the shared link");
+    assert_eq!(harnesses, serde_json::json!([]));
+    assert_eq!(
+        legacy.list_harnesses_calls.load(Ordering::Acquire),
+        2,
+        "one readiness probe and one forwarded call prove the existing link was reused"
+    );
+
+    core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

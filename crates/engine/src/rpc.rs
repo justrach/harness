@@ -670,7 +670,9 @@ impl EngineRpc {
                 let rx = match client.subscribe_checked(method, params).await {
                     Ok(rx) => rx,
                     Err(err) => {
-                        links.invalidate(target);
+                        if should_invalidate_link(&err) {
+                            links.invalidate(target);
+                        }
                         return Err(err);
                     }
                 };
@@ -682,7 +684,9 @@ impl EngineRpc {
             let rx = match client.subscribe(method, params).await {
                 Ok(rx) => rx,
                 Err(err) => {
-                    links.invalidate(target);
+                    if should_invalidate_link(&err) {
+                        links.invalidate(target);
+                    }
                     return Err(err);
                 }
             };
@@ -697,7 +701,7 @@ impl EngineRpc {
         match client.call(method, params).await {
             Ok(value) => Ok(RpcReply::Value(value)),
             Err(err) => {
-                if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
+                if should_invalidate_link(&err) {
                     links.invalidate(target);
                 }
                 Err(err)
@@ -825,6 +829,12 @@ impl EngineRpc {
             }
         }
     }
+}
+
+/// An RPC rejection is scoped to the requested capability. Only a broken
+/// transport means the shared device link itself cannot carry other calls.
+fn should_invalidate_link(error: &RpcError) -> bool {
+    matches!(error, RpcError::Closed | RpcError::Transport(_))
 }
 
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
