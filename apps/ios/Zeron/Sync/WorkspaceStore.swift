@@ -22,6 +22,7 @@ final class WorkspaceStore {
     private(set) var chats: [Chat] = []
     private(set) var sessions: [String: SessionRow] = [:]
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
+    private(set) var changeRequestSnapshots: [ChangeRequestWatchKey: CheckoutChangeRequestStatus] = [:]
     private(set) var connected = false
 
     /// Presence entries older than this are expired (mirrors the Rust
@@ -76,8 +77,10 @@ final class WorkspaceStore {
     /// Foreground hook: revive the room after a suspension (see
     /// RegistryClient.kick).
     func kickRoom() {
-        guard let client else { return }
-        Task { await client.kick() }
+        if let client {
+            Task { await client.kick() }
+        }
+        restartChangeRequestStreams(resetUnsupported: true)
     }
 
     func stop() {
@@ -86,6 +89,12 @@ final class WorkspaceStore {
             Task { await client.stop() }
         }
         client = nil
+        stopChangeRequestStreams()
+        let relays = Array(relayClients.values)
+        relayClients.removeAll()
+        for relay in relays {
+            Task { await relay.close() }
+        }
         connected = false
     }
 
@@ -110,7 +119,11 @@ final class WorkspaceStore {
             project()
             saver?.poke()
         case .connected:
+            let reconnected = !connected
             connected = true
+            if reconnected {
+                restartChangeRequestStreams(resetUnsupported: true)
+            }
         case .rows(let seq, let rows):
             doc.applyRows(seq: seq, rows: rows)
             project()
@@ -211,6 +224,7 @@ final class WorkspaceStore {
                                       updatedAt: f["updatedAt"]?.int64Value ?? 0)
         }
         sessions = rows
+        reconcileChangeRequestStreams()
     }
 
     // MARK: Derived views
@@ -245,6 +259,10 @@ final class WorkspaceStore {
         chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
     }
 
+    func changeRequest(for chat: Chat) -> ChangeRequestSummary? {
+        resolvedChangeRequest(for: chat, spaces: spaces, snapshots: changeRequestSnapshots)
+    }
+
     /// Aggregate most-urgent member status for a space's leading dot.
     func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
         let members = chats(in: spaceId).map { indicator(for: $0) }
@@ -254,12 +272,90 @@ final class WorkspaceStore {
     // MARK: Device relay (folder browsing / direct host RPCs)
 
     @ObservationIgnored private var relayClients: [String: DeviceRelayClient] = [:]
+    @ObservationIgnored private var changeRequestTasks: [ChangeRequestWatchKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var unsupportedChangeRequestDevices: Set<String> = []
 
     private func relay(for deviceId: String) -> DeviceRelayClient {
         if let existing = relayClients[deviceId] { return existing }
         let client = DeviceRelayClient(deviceId: deviceId, config: config)
         relayClients[deviceId] = client
         return client
+    }
+
+    private func reconcileChangeRequestStreams() {
+        let targets = desiredChangeRequestTargets(
+            chats: chats,
+            spaces: spaces,
+            unsupportedDevices: unsupportedChangeRequestDevices
+        )
+
+        for target in Array(changeRequestTasks.keys) where !targets.contains(target) {
+            changeRequestTasks.removeValue(forKey: target)?.cancel()
+        }
+        changeRequestSnapshots = changeRequestSnapshots.filter { targets.contains($0.key) }
+
+        for target in targets where changeRequestTasks[target] == nil {
+            let client = relay(for: target.deviceId)
+            changeRequestTasks[target] = Task { [weak self] in
+                guard let self else { return }
+                await self.watchChangeRequest(target, through: client)
+            }
+        }
+    }
+
+    private func watchChangeRequest(
+        _ target: ChangeRequestWatchKey,
+        through client: DeviceRelayClient
+    ) async {
+        var retryNanoseconds: UInt64 = 500_000_000
+        while !Task.isCancelled {
+            do {
+                let stream: AsyncThrowingStream<CheckoutChangeRequestStatus, Error> = try await client.stream(
+                    method: "WatchCheckoutChangeRequest",
+                    params: ["cwd": target.cwd]
+                )
+                for try await snapshot in stream {
+                    guard !Task.isCancelled else { return }
+                    // Never expose a misrouted frame under another host/path.
+                    guard snapshot.deviceId == target.deviceId,
+                          snapshot.cwd == target.cwd else { continue }
+                    changeRequestSnapshots[target] = snapshot
+                    retryNanoseconds = 500_000_000
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                if isUnknownChangeRequestMethod(error) {
+                    markChangeRequestsUnsupported(on: target.deviceId)
+                    return
+                }
+            }
+
+            // Preserve the latest successful snapshot through transport gaps.
+            try? await Task.sleep(nanoseconds: retryNanoseconds)
+            retryNanoseconds = min(retryNanoseconds * 2, 5_000_000_000)
+        }
+    }
+
+    private func markChangeRequestsUnsupported(on deviceId: String) {
+        unsupportedChangeRequestDevices.insert(deviceId)
+        for target in Array(changeRequestTasks.keys) where target.deviceId == deviceId {
+            changeRequestTasks.removeValue(forKey: target)?.cancel()
+        }
+        changeRequestSnapshots = changeRequestSnapshots.filter { $0.key.deviceId != deviceId }
+    }
+
+    private func restartChangeRequestStreams(resetUnsupported: Bool) {
+        for task in changeRequestTasks.values { task.cancel() }
+        changeRequestTasks.removeAll()
+        if resetUnsupported { unsupportedChangeRequestDevices.removeAll() }
+        reconcileChangeRequestStreams()
+    }
+
+    private func stopChangeRequestStreams() {
+        for task in changeRequestTasks.values { task.cancel() }
+        changeRequestTasks.removeAll()
+        unsupportedChangeRequestDevices.removeAll()
+        changeRequestSnapshots.removeAll()
     }
 
     /// The last relay failure, for surfacing in UI/diagnostics.
