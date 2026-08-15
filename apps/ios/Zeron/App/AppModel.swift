@@ -510,13 +510,35 @@ final class AppModel {
     private func kickAllRooms() {
         workspace?.kickRoom()
         // Deliver any roomGen flips that landed while the store had no open
-        // view, then kick every room.
+        // view, then kick every room — registry first and instantly, chat
+        // rooms trickled one per 200ms in attention order. Post-suspend and
+        // path-recovery kicks redial dead sockets; a simultaneous N-socket
+        // redial competed with the registry (the sidebar the user is
+        // actually looking at) on thin links.
         if let workspace {
             for chat in workspace.chats {
                 sessionStores[chat.id]?.updateRoomGen(chat.roomGen)
             }
         }
-        sessionStores.values.forEach { $0.kickRoom() }
+        var delay: UInt64 = 0
+        var kicked = Set<String>()
+        for chat in overviewChats {
+            guard let store = sessionStores[chat.id] else { continue }
+            kicked.insert(chat.id)
+            scheduleKick(store, afterNs: delay)
+            delay += 200_000_000
+        }
+        for (id, store) in sessionStores where !kicked.contains(id) {
+            scheduleKick(store, afterNs: delay)
+            delay += 200_000_000
+        }
+    }
+
+    private func scheduleKick(_ store: SessionStore, afterNs delay: UInt64) {
+        Task { @MainActor in
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            store.kickRoom()
+        }
     }
 
     /// Kick rooms the moment the network path recovers or hops interfaces
@@ -563,6 +585,8 @@ final class AppModel {
             // views re-derive `chat` from the registry on every change, so
             // this accessor is the flip's delivery path.
             existing.updateRoomGen(chat.roomGen)
+            // An open view wants live sync NOW — any preload dial-hold ends.
+            existing.releaseDial()
             return existing
         }
         let store = SessionStore(chatId: chat.id, config: config)
@@ -578,11 +602,27 @@ final class AppModel {
     }
 
     /// Warm every non-archived session: stores hydrate from disk instantly
-    /// and keep their rooms syncing, so opening a session never shows a
-    /// loading state.
+    /// so opening a session never shows a loading state. The room DIALS are
+    /// held and released one per 300ms in attention order — N simultaneous
+    /// TLS handshakes at launch competed with the registry dial for a thin
+    /// uplink (and, pre-single-flight, raced N token refreshes), which was
+    /// the cold-open "connecting…" stall. Opening a session releases its
+    /// hold immediately (sessionStore(for:) above).
     func preloadSessions() {
-        for chat in overviewChats {
-            _ = sessionStore(for: chat)
+        guard demo == nil, let config else { return }
+        var stagger: UInt64 = 0
+        for chat in overviewChats where sessionStores[chat.id] == nil {
+            let store = SessionStore(chatId: chat.id, config: config)
+            store.hostDeviceId = chat.deviceId
+            sessionStores[chat.id] = store
+            store.start(holdDial: true)
+            store.updateRoomGen(chat.roomGen)
+            let delay = stagger
+            Task { @MainActor in
+                if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+                store.releaseDial()
+            }
+            stagger += 300_000_000
         }
     }
 }
