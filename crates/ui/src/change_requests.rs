@@ -6,7 +6,162 @@
 
 use std::collections::{HashMap, HashSet};
 
+use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
 use zeron_proto::{ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space};
+
+use crate::theme::Theme;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeRequestBadgeTone {
+    Open,
+    Merged,
+    Closed,
+}
+
+impl ChangeRequestBadgeTone {
+    pub fn color(self, theme: &Theme) -> gpui::Hsla {
+        match self {
+            Self::Open => theme.success,
+            Self::Merged => theme.code_text,
+            Self::Closed => theme.danger,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChangeRequestBadgeModel {
+    pub number: SharedString,
+    pub state_label: &'static str,
+    pub title: SharedString,
+    pub tone: ChangeRequestBadgeTone,
+}
+
+impl ChangeRequestBadgeModel {
+    pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
+        use zeron_proto::ChangeRequestState;
+
+        let (state_label, tone) = match summary.state {
+            ChangeRequestState::Open => ("Open", ChangeRequestBadgeTone::Open),
+            ChangeRequestState::Merged => ("Merged", ChangeRequestBadgeTone::Merged),
+            ChangeRequestState::Closed => ("Closed", ChangeRequestBadgeTone::Closed),
+        };
+        Self {
+            number: format!("#{}", summary.number).into(),
+            state_label,
+            title: summary.title.replace(['\r', '\n'], " ").into(),
+            tone,
+        }
+    }
+}
+
+pub(crate) struct ChangeRequestTooltip {
+    model: ChangeRequestBadgeModel,
+}
+
+impl ChangeRequestTooltip {
+    pub fn new(summary: &ChangeRequestSummary) -> Self {
+        Self {
+            model: ChangeRequestBadgeModel::from_summary(summary),
+        }
+    }
+}
+
+impl Render for ChangeRequestTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .max_w(px(320.0))
+            .px(px(9.0))
+            .py(px(7.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(self.model.tone.color(theme))
+                    .child(SharedString::from(format!(
+                        "PR {} · {}",
+                        self.model.number, self.model.state_label
+                    ))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .child(self.model.title.clone()),
+            )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeRequestBadgeSurface {
+    Sidebar,
+    Composer,
+}
+
+pub(crate) fn pull_request_badge(
+    id: SharedString,
+    summary: ChangeRequestSummary,
+    surface: ChangeRequestBadgeSurface,
+    theme: &Theme,
+) -> AnyElement {
+    let model = ChangeRequestBadgeModel::from_summary(&summary);
+    let color = model.tone.color(theme);
+    let url = summary.url.clone();
+    let tooltip_summary = summary;
+    let composer = surface == ChangeRequestBadgeSurface::Composer;
+
+    div()
+        .id(id)
+        .h(px(if composer { 20.0 } else { 16.0 }))
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(if composer { 5.0 } else { 0.0 }))
+        .px(px(if composer { 7.0 } else { 4.0 }))
+        .rounded(px(if composer { 6.0 } else { 4.0 }))
+        .bg(color.opacity(0.08))
+        .text_size(px(if composer { 11.0 } else { 10.0 }))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(color.opacity(0.85))
+        .cursor_pointer()
+        .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.open_url(&url);
+        })
+        .tooltip(move |_, cx| {
+            cx.new(|_| ChangeRequestTooltip::new(&tooltip_summary))
+                .into()
+        })
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .when(composer, |element| {
+            element.child(
+                crate::icons::icon(crate::icons::PULL_REQUEST)
+                    .size(px(11.0))
+                    .flex_none()
+                    .text_color(color.opacity(0.85)),
+            )
+        })
+        // Monospace digits give the badge a stable tabular width as PR numbers change.
+        .child(
+            div()
+                .font_family(theme.font_mono.clone())
+                .child(model.number),
+        )
+        .into_any_element()
+}
 
 /// One host-side checkout watch. Multiple chats can share this target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -317,5 +472,38 @@ mod tests {
                 "targetDeviceId": "host"
             })
         );
+    }
+
+    #[test]
+    fn badge_models_cover_open_merged_and_closed() {
+        let cases = [
+            (
+                ChangeRequestState::Open,
+                "Open",
+                ChangeRequestBadgeTone::Open,
+            ),
+            (
+                ChangeRequestState::Merged,
+                "Merged",
+                ChangeRequestBadgeTone::Merged,
+            ),
+            (
+                ChangeRequestState::Closed,
+                "Closed",
+                ChangeRequestBadgeTone::Closed,
+            ),
+        ];
+        for (state, label, tone) in cases {
+            let mut summary = snapshot("local", "/repo", "checkout")
+                .change_request
+                .unwrap();
+            summary.state = state;
+            summary.title = "First line\nSecond line".into();
+            let model = ChangeRequestBadgeModel::from_summary(&summary);
+            assert_eq!(model.number, "#90");
+            assert_eq!(model.state_label, label);
+            assert_eq!(model.tone, tone);
+            assert_eq!(model.title, "First line Second line");
+        }
     }
 }
