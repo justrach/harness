@@ -15,6 +15,7 @@
 pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
+pub mod change_requests;
 pub mod changes;
 pub mod composer;
 pub mod edge_fade;

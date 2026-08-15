@@ -30,9 +30,14 @@ use serde::de::DeserializeOwned;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
-    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
+    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+
+use crate::change_requests::{
+    ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
+};
 
 // ---------------------------------------------------------------------------
 // Engine handle
@@ -402,9 +407,8 @@ impl EngineHandle {
                             Ok(_) => DeferredEngineState::Ready,
                             // EngineReady was added after EngineInfo. An older daemon
                             // that does not expose the barrier is already assembled.
-                            Err(RpcError::Failed(message))
-                                if message
-                                    == format!("unknown method: {}", methods::ENGINE_READY) =>
+                            Err(RpcError::UnknownMethod(method))
+                                if method == methods::ENGINE_READY =>
                             {
                                 DeferredEngineState::Ready
                             }
@@ -470,9 +474,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
         .await
     {
         Ok(info) => Ok(info),
-        Err(RpcError::Failed(message))
-            if message == format!("unknown method: {}", methods::ENGINE_INFO) =>
-        {
+        Err(RpcError::UnknownMethod(method)) if method == methods::ENGINE_INFO => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct LocalDevice {
@@ -617,6 +619,8 @@ pub struct AppState {
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
+    change_requests: ChangeRequestClientState,
+    change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
 }
 
 impl Default for AppState {
@@ -648,6 +652,8 @@ impl AppState {
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
+            change_requests: ChangeRequestClientState::default(),
+            change_request_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
@@ -1033,6 +1039,12 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
+    pub fn change_request_for_chat(&self, chat: &Chat) -> Option<&ChangeRequestSummary> {
+        self.change_requests
+            .change_request_for_chat(chat, &self.spaces)
+    }
+
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
@@ -1048,6 +1060,8 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        self.change_request_tasks.clear();
+        self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
         self.workspace_scope = None;
         self.auth = None;
@@ -1153,6 +1167,7 @@ impl AppState {
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
+        self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
         // data profile they reached before they are allowed to render Ready.
         self.connection = ConnectionStatus::Ready;
@@ -1161,6 +1176,34 @@ impl AppState {
             self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
         }
         cx.notify();
+    }
+
+    fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.engine.clone() else {
+            self.change_request_tasks.clear();
+            return;
+        };
+        let targets = desired_watch_targets(&self.chats, &self.spaces, |device| {
+            !self.change_requests.is_supported(device)
+        });
+
+        self.change_request_tasks
+            .retain(|target, _| targets.contains(target));
+        self.change_requests.retain_targets(&targets);
+
+        let local_device_id = self.local_device_id.clone();
+        for target in targets {
+            if self.change_request_tasks.contains_key(&target) {
+                continue;
+            }
+            let task = spawn_change_request_watch(
+                cx,
+                handle.clone(),
+                target.clone(),
+                local_device_id.clone(),
+            );
+            self.change_request_tasks.insert(target, task);
+        }
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
@@ -1329,6 +1372,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 };
                 let alive = this.update(cx, |state, cx| {
                     state.apply_chats(parsed);
+                    state.reconcile_change_request_watches(cx);
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -1336,6 +1380,90 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 }
             }
             tracing::debug!("chats stream ended; resubscribing");
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+fn spawn_change_request_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    target: ChangeRequestWatchKey,
+    local_device_id: Option<String>,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        loop {
+            let params = watch_params(&target, local_device_id.as_deref());
+
+            let mut subscription = match handle
+                .client()
+                .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, params)
+                .await
+            {
+                Ok(subscription) => subscription,
+                Err(RpcError::UnknownMethod(_)) => {
+                    tracing::debug!(
+                        device = %target.device_id,
+                        "checkout change requests unsupported on device"
+                    );
+                    this.update(cx, |state, cx| {
+                        state
+                            .change_requests
+                            .mark_unsupported(target.device_id.clone());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        device = %target.device_id,
+                        cwd = %target.cwd,
+                        error = %err,
+                        "checkout change request watch unavailable; retrying"
+                    );
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue;
+                }
+            };
+
+            while let Some(value) = subscription.recv().await {
+                let snapshot: CheckoutChangeRequestStatus = match serde_json::from_value(value) {
+                    Ok(snapshot) => snapshot,
+                    Err(err) => {
+                        tracing::warn!(
+                            device = %target.device_id,
+                            cwd = %target.cwd,
+                            error = %err,
+                            "dropping malformed checkout change request frame"
+                        );
+                        continue;
+                    }
+                };
+                if this
+                    .update(cx, |state, cx| {
+                        state.change_requests.store(target.clone(), snapshot);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            // Preserve the latest successful snapshot during a transport gap.
+            tracing::debug!(
+                device = %target.device_id,
+                cwd = %target.cwd,
+                "checkout change request stream ended; resubscribing"
+            );
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
@@ -1383,6 +1511,9 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     apply(state, parsed);
+                    if method == methods::WATCH_SPACES {
+                        state.reconcile_change_request_watches(cx);
+                    }
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -2016,8 +2147,7 @@ mod tests {
                 .client()
                 .call(methods::STOP_ENGINE, serde_json::json!({}))
                 .await,
-            Err(RpcError::Failed(message))
-                if message == format!("unknown method: {}", methods::STOP_ENGINE)
+            Err(RpcError::UnknownMethod(method)) if method == methods::STOP_ENGINE
         ));
     }
 
