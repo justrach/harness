@@ -49,6 +49,14 @@ const HISTORY_REF_BADGE_MAX_WIDTH: f32 = 112.0;
 const HISTORY_REF_GAP: f32 = 5.0;
 const HISTORY_SEARCH_WIDTH: f32 = 196.0;
 const HISTORY_SEARCH_DEBOUNCE: Duration = Duration::from_millis(70);
+const HISTORY_SEARCH_IDLE_DISMISS: Duration = Duration::from_millis(1_500);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitHistorySearchMode {
+    Collapsed,
+    Expanded,
+    Collapsing,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SegmentShape {
@@ -1147,6 +1155,11 @@ pub struct GitHistoryViewButton {
 pub struct GitHistorySearchControl {
     history: Entity<GitHistory>,
     input: Entity<ComposerInput>,
+    mode: GitHistorySearchMode,
+    idle_dismiss_epoch: usize,
+    transition_epoch: usize,
+    idle_dismiss_task: Option<Task<()>>,
+    transition_task: Option<Task<()>>,
     blur_subscription: Option<Subscription>,
     _observe: Subscription,
     _input_events: Subscription,
@@ -1167,24 +1180,102 @@ impl GitHistorySearchControl {
         let input_events = cx.subscribe(&input, |this: &mut Self, input, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 let query = input.read(cx).text().to_string();
+                let query_is_empty = query.is_empty();
                 this.history
                     .update(cx, |history, cx| history.set_search_query(query, cx));
+                if query_is_empty {
+                    this.schedule_idle_dismiss(cx);
+                } else {
+                    this.cancel_idle_dismiss();
+                }
             }
         });
         Self {
             history,
             input,
+            mode: GitHistorySearchMode::Collapsed,
+            idle_dismiss_epoch: 0,
+            transition_epoch: 0,
+            idle_dismiss_task: None,
+            transition_task: None,
             blur_subscription: None,
             _observe: observe,
             _input_events: input_events,
         }
     }
 
-    fn clear(&mut self, cx: &mut Context<Self>) {
-        if self.input.read(cx).text().is_empty() {
+    fn cancel_idle_dismiss(&mut self) {
+        self.idle_dismiss_epoch = self.idle_dismiss_epoch.wrapping_add(1);
+        self.idle_dismiss_task = None;
+    }
+
+    fn schedule_idle_dismiss(&mut self, cx: &mut Context<Self>) {
+        self.cancel_idle_dismiss();
+        if self.mode != GitHistorySearchMode::Expanded || !self.input.read(cx).text().is_empty() {
             return;
         }
-        self.input.update(cx, |input, cx| input.set_text("", cx));
+        let epoch = self.idle_dismiss_epoch;
+        self.idle_dismiss_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(HISTORY_SEARCH_IDLE_DISMISS)
+                .await;
+            this.update(cx, |control, cx| {
+                if control.idle_dismiss_epoch == epoch
+                    && control.mode == GitHistorySearchMode::Expanded
+                    && control.input.read(cx).text().is_empty()
+                {
+                    control.begin_collapse(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn begin_collapse(&mut self, cx: &mut Context<Self>) {
+        if self.mode != GitHistorySearchMode::Expanded || !self.input.read(cx).text().is_empty() {
+            return;
+        }
+        self.cancel_idle_dismiss();
+        self.mode = GitHistorySearchMode::Collapsing;
+        self.transition_epoch = self.transition_epoch.wrapping_add(1);
+        let epoch = self.transition_epoch;
+        let duration = crate::motion::RESIZE
+            .total()
+            .mul_f32(crate::motion::speed_scale());
+        self.transition_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            this.update(cx, |control, cx| {
+                if control.transition_epoch == epoch
+                    && control.mode == GitHistorySearchMode::Collapsing
+                {
+                    // Unmounting the input is intentional: GPUI otherwise keeps
+                    // its focused caret alive after this compact control is idle.
+                    control.mode = GitHistorySearchMode::Collapsed;
+                    control.transition_task = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn expand(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_idle_dismiss();
+        self.transition_epoch = self.transition_epoch.wrapping_add(1);
+        self.transition_task = None;
+        self.mode = GitHistorySearchMode::Expanded;
+        let focus = self.input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.schedule_idle_dismiss(cx);
+        cx.notify();
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        if !self.input.read(cx).text().is_empty() {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.schedule_idle_dismiss(cx);
         cx.notify();
     }
 }
@@ -1340,16 +1431,58 @@ impl Render for GitHistoryViewButton {
 
 impl Render for GitHistorySearchControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx).clone();
+        if self.mode == GitHistorySearchMode::Collapsed {
+            let control = cx.entity().downgrade();
+            return div()
+                .id("history-search-trigger")
+                .size(px(24.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .bg(crate::motion::hover_blend(
+                    "history-search-trigger",
+                    crate::theme::wash(0.0),
+                    crate::theme::wash(0.14),
+                ))
+                .on_hover(crate::motion::hover_listener("history-search-trigger"))
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                    window.prevent_default()
+                })
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    control
+                        .update(cx, |control, cx| control.expand(window, cx))
+                        .ok();
+                })
+                .child(
+                    crate::icons::icon(crate::icons::MAGNIFER)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
+                .tooltip(|_, cx| {
+                    cx.new(|_| HistoryRefTooltip {
+                        descriptions: vec!["Search commits".into()],
+                    })
+                    .into()
+                })
+                .tooltip_show_delay(Duration::from_millis(350))
+                .into_any_element();
+        }
         if self.blur_subscription.is_none() {
             let focus = self.input.read(cx).focus_handle(cx);
             self.blur_subscription = Some(cx.on_blur(&focus, window, |control, _, cx| {
                 control.clear(cx);
             }));
         }
-        let theme = Theme::of(cx).clone();
         let control = cx.entity().downgrade();
         let escape_control = cx.entity().downgrade();
         let search_loading = self.history.read(cx).search_loading;
+        let closing = self.mode == GitHistorySearchMode::Collapsing;
+        let transition_epoch = self.transition_epoch;
         let status_icon = if search_loading {
             crate::loaders::mini_gradient_spinner("history-search-spinner", 1.5, cx.entity_id(), cx)
                 .into_any_element()
@@ -1430,6 +1563,19 @@ impl Render for GitHistorySearchControl {
                             .size(px(9.0))
                             .text_color(theme.text_faint),
                     ),
+            )
+            .with_animation(
+                SharedString::from(format!(
+                    "history-search-morph-{transition_epoch}-{}",
+                    if closing { "out" } else { "in" }
+                )),
+                crate::motion::RESIZE.animation(),
+                move |element, progress| {
+                    let amount = if closing { 1.0 - progress } else { progress };
+                    element
+                        .w(px(24.0 + (HISTORY_SEARCH_WIDTH - 24.0) * amount))
+                        .opacity(0.45 + 0.55 * amount)
+                },
             )
             .into_any_element()
     }
