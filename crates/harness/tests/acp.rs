@@ -283,6 +283,7 @@ async fn claude_and_codex_specs_drive_the_same_wire() {
             "cursor",
             AcpHarness::cursor().with_executable(fixture_path()),
         ),
+        ("devin", AcpHarness::devin().with_executable(fixture_path())),
     ] {
         let (controls, _steer, _token) = controls();
         let events = run_to_end(&h, request("scenario:happy"), controls).await;
@@ -927,6 +928,18 @@ fn cursor_descriptor_surface_matches_registry_expectations() {
 }
 
 #[test]
+fn devin_descriptor_surface_matches_registry_expectations() {
+    let devin = AcpHarness::devin();
+    assert_eq!(devin.id(), HarnessId::Devin);
+    assert_eq!(devin.display_name(), "Devin");
+    assert!(devin.supports_steering());
+    assert_eq!(devin.steering_mode(), SteeringMode::TurnBoundary);
+    // Devin bakes effort into the advertised model ids, so there is no
+    // separate ladder for the Reasoning dropdown to drive.
+    assert!(devin.reasoning_levels().is_empty());
+}
+
+#[test]
 fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     let hermes = AcpHarness::hermes();
     assert_eq!(hermes.id(), HarnessId::Hermes);
@@ -1311,6 +1324,7 @@ async fn real_all_harnesses_settle_with_a_mid_turn_steer() {
         ("claude", AcpHarness::claude()),
         ("codex", AcpHarness::codex()),
         ("cursor", AcpHarness::cursor()),
+        ("devin", AcpHarness::devin()),
         ("grok", AcpHarness::grok()),
         ("pi", AcpHarness::pi()),
     ];

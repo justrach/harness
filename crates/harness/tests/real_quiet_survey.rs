@@ -202,6 +202,7 @@ async fn real_all_harnesses_quiet_survey() {
         ("claude", AcpHarness::claude),
         ("codex", AcpHarness::codex),
         ("cursor", AcpHarness::cursor),
+        ("devin", AcpHarness::devin),
         ("grok", AcpHarness::grok),
         ("hermes", AcpHarness::hermes),
         ("pi", AcpHarness::pi),

@@ -3,8 +3,8 @@
 //! implementation covers every ACP agent; [`AcpHarness::grok`] configures it
 //! for xAI's Grok Build (`grok agent stdio`), the first registered agent —
 //! [`AcpHarness::hermes`] (Nous Research, `hermes acp`), [`AcpHarness::pi`]
-//! (pi.dev via `pi-acp`) and [`AcpHarness::cursor`] (`cursor-agent acp`)
-//! followed.
+//! (pi.dev via `pi-acp`), [`AcpHarness::cursor`] (`cursor-agent acp`) and
+//! [`AcpHarness::devin`] (Cognition, `devin acp`) followed.
 //!
 //! - `initialize` (protocolVersion 1, fs/terminal capabilities declined) →
 //!   `session/new`, or `session/load` with a fresh-session fallback when
@@ -364,6 +364,66 @@ fn cursor_spec() -> AcpAgentSpec {
     }
 }
 
+fn devin_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        // The install script's launcher symlink (→ ~/.local/share/devin/cli).
+        dirs.push(home.join(".local").join("bin").join("devin"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/devin"));
+    dirs.push(PathBuf::from("/usr/local/bin/devin"));
+    dirs
+}
+
+fn devin_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Devin,
+        display_name: "Devin",
+        executable: "devin",
+        env_override: "DEVIN_EXECUTABLE",
+        args: &["acp"],
+        // Native ACP server — no adapter package in between.
+        npx_package: None,
+        extra_paths: devin_install_paths,
+        cli_executable: "devin",
+        cli_extra_paths: devin_install_paths,
+        install_hint: "devin (searched PATH, the login shell's PATH, ~/.local/bin, \
+             /opt/homebrew/bin, and /usr/local/bin; install with \
+             `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
+             `brew install --cask devin-cli`, then `devin login`; set \
+             DEVIN_EXECUTABLE to override)",
+        // Fallback only: `session/new` advertises the account's models and
+        // the wire always wins. Keep this list to well-known public ids.
+        models: || {
+            vec![
+                Model {
+                    id: "claude-5-fable-high".into(),
+                    label: "Claude Fable 5 High".into(),
+                    description: Some("Devin's default coding model".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "adaptive".into(),
+                    label: "Adaptive".into(),
+                    description: Some("Devin picks the model per request".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+            ]
+        },
+        // No `_session/steering` extension: steers deliver at turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // No `thought_level` config option — Devin bakes effort into the
+        // advertised model ids (`claude-5-fable-high`), so there is no
+        // separate ladder for the Reasoning dropdown to drive.
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+    }
+}
+
 fn hermes_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -522,6 +582,11 @@ impl AcpHarness {
     /// Cursor Agent (`cursor-agent acp`) — Cursor's native ACP server.
     pub fn cursor() -> Self {
         Self::with_spec(cursor_spec())
+    }
+
+    /// Devin (`devin acp`) — Cognition's native ACP server.
+    pub fn devin() -> Self {
+        Self::with_spec(devin_spec())
     }
 
     /// Grok Build (`grok agent stdio`) — xAI's native ACP agent.
@@ -1284,9 +1349,9 @@ fn config_option_sets(
             // bypassPermissions / codex approvalPolicy never): pick the
             // no-prompts mode when the agent offers one. claude-agent-acp
             // calls it `bypassPermissions`, codex-acp `agent-full-access`
-            // (approvalPolicy "never" + danger-full-access sandbox).
-            // Cursor instead exposes agent/plan/ask — those arrive as a
-            // Traits "Mode" option and win when the run selected one.
+            // (approvalPolicy "never" + danger-full-access sandbox), devin
+            // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
+            // as a Traits "Mode" option and win when the run selected one.
             ("select", Some("mode")) => model_options
                 .get("mode")
                 .and_then(Value::as_str)
@@ -1296,6 +1361,7 @@ fn config_option_sets(
                     [
                         "bypassPermissions",
                         "bypass_permissions",
+                        "bypass",
                         "yolo",
                         "agent-full-access",
                         "danger-full-access",
