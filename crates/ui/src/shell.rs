@@ -606,6 +606,10 @@ fn resolve_shell_escape(
     }
 }
 
+fn any_escape_blocker(shell_overlay: bool, right_plus: bool, changes_overlay: bool) -> bool {
+    shell_overlay || right_plus || changes_overlay
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccountMenuAction {
     EnableSync,
@@ -4238,10 +4242,30 @@ impl Shell {
         Some(popover::modal("sync-lifecycle-dialog", viewport, card))
     }
 
-    /// Floating layers owned by the shell: context menus, edit dialogs, and
-    /// the local-to-synced account lifecycle.
-    fn has_blocking_overlay(&self) -> bool {
-        self.chat_menu.get().is_some()
+    fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
+        if !self.right_pane_open(cx) {
+            return None;
+        }
+        let RightSurface::Diff(id) = self.resolved_right_active(cx) else {
+            return None;
+        };
+        self.diffs.get(&id).cloned()
+    }
+
+    /// Close a contextual surface that does not own focus before Escape can
+    /// fall through to the active-agent interrupt.
+    fn consume_contextual_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.right_plus.is_open() {
+            self.close_right_plus(cx);
+            return true;
+        }
+        self.active_changes(cx)
+            .is_some_and(|changes| changes.update(cx, |changes, cx| changes.consume_escape(cx)))
+    }
+
+    /// Floating layers owned by the shell or the active right-pane surface.
+    fn has_blocking_overlay(&self, cx: &App) -> bool {
+        let shell_overlay = self.chat_menu.get().is_some()
             || self.rename_dialog.is_some()
             || self.delete_confirm.is_some()
             || self.space_menu.get().is_some()
@@ -4250,10 +4274,23 @@ impl Shell {
             || self.add_space.is_some()
             || self.spaces_menu.get().is_some()
             || self.user_menu.get().is_some()
-            || self.sync_flow.has_visible_overlay()
+            || self.sync_flow.has_visible_overlay();
+        let changes_overlay = self
+            .active_changes(cx)
+            .is_some_and(|changes| changes.read(cx).has_blocking_overlay());
+        any_escape_blocker(
+            shell_overlay,
+            self.right_plus.get().is_some(),
+            changes_overlay,
+        )
     }
 
     fn on_key_down(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" && self.consume_contextual_escape(cx) {
+            cx.stop_propagation();
+            return;
+        }
+
         let selected_chat = self.state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
@@ -4265,7 +4302,7 @@ impl Shell {
 
         match resolve_shell_escape(
             &event.keystroke.key,
-            self.has_blocking_overlay(),
+            self.has_blocking_overlay(cx),
             self.route,
             selected_chat.as_deref(),
             indicator,
@@ -6615,6 +6652,14 @@ mod tests {
         assert!(SyncFlow::SwitchOffer { notice_open: true }.has_visible_overlay());
         assert!(SyncFlow::Importing { done: 1, total: 3 }.has_visible_overlay());
         assert!(SyncFlow::SignOutConfirm.has_visible_overlay());
+    }
+
+    #[test]
+    fn shell_right_plus_and_changes_overlays_each_block_escape() {
+        assert!(!any_escape_blocker(false, false, false));
+        assert!(any_escape_blocker(true, false, false));
+        assert!(any_escape_blocker(false, true, false));
+        assert!(any_escape_blocker(false, false, true));
     }
 
     #[tokio::test]

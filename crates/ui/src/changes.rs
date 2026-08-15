@@ -1724,6 +1724,25 @@ impl Changes {
         }
     }
 
+    /// Consume an Escape that reached the shell because a menu retained the
+    /// previous focus instead of owning the key path itself.
+    pub(crate) fn consume_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.ref_menu.is_open() {
+            self.close_ref_menu(cx);
+            return true;
+        }
+        if self.scope_menu.is_open() {
+            self.close_scope_menu(cx);
+            return true;
+        }
+        false
+    }
+
+    /// A closing popup remains blocking until its exit animation unmounts.
+    pub(crate) fn has_blocking_overlay(&self) -> bool {
+        self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
+    }
+
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
