@@ -456,11 +456,19 @@ impl GitCheckoutInspector {
         if remote_name.is_none()
             && let Some(remotes) = self.git_optional(&checkout_root, &["remote"]).await
         {
-            let mut remotes = remotes.lines();
-            let only = remotes.next().filter(|remote| !remote.is_empty());
-            if remotes.next().is_none() {
-                remote_name = only.map(str::to_owned);
-            }
+            let remotes: Vec<_> = remotes
+                .lines()
+                .filter(|remote| !remote.is_empty())
+                .collect();
+            // `origin` is Git's conventional default destination when no
+            // branch/upstream or push-default configuration is present. It is
+            // still the useful PR source for a local branch in a fork +
+            // upstream checkout.
+            remote_name = remotes
+                .iter()
+                .find(|remote| **remote == "origin")
+                .map(|remote| (*remote).to_owned())
+                .or_else(|| (remotes.len() == 1).then(|| remotes[0].to_owned()));
         }
 
         let remote_url = if let Some(remote) = remote_name.as_deref() {
@@ -995,6 +1003,50 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(pull_request.number, 90);
         assert_eq!(pull_request.state, ChangeRequestState::Open);
         assert_eq!(pull_request.head_ref, "feature/status");
+    }
+
+    #[tokio::test]
+    async fn git_inspector_uses_origin_without_upstream_in_a_multi_remote_checkout() {
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        run_git(&checkout, &["init", "-q", "-b", "main"]);
+        run_git(&checkout, &["checkout", "-q", "-b", "feature/no-upstream"]);
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:contributor/zeron.git",
+            ],
+        );
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/acme/zeron.git",
+            ],
+        );
+
+        let source = ChangeRequestResolver::new()
+            .inspect_checkout(&checkout)
+            .await
+            .expect("inspect checkout without branch upstream");
+
+        assert_eq!(source.branch.upstream_ref, None);
+        assert_eq!(source.branch.remote_name.as_deref(), Some("origin"));
+        assert_eq!(
+            source.branch.remote_url.as_deref(),
+            Some("git@github.com:contributor/zeron.git")
+        );
+        assert_eq!(source.branch.owner.as_deref(), Some("contributor"));
+        assert_eq!(
+            source.branch.head_selectors,
+            ["contributor:feature/no-upstream", "feature/no-upstream"]
+        );
     }
 
     #[tokio::test]
