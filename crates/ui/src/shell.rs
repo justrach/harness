@@ -586,6 +586,7 @@ enum ShellEscapeOutcome {
 fn resolve_shell_escape(
     key: &str,
     blocking_overlay: bool,
+    escape_stops_active_agent: bool,
     route: Route,
     selected_chat: Option<&str>,
     indicator: Indicator,
@@ -595,7 +596,7 @@ fn resolve_shell_escape(
         ShellEscapeOutcome::OtherKey
     } else if blocking_overlay {
         ShellEscapeOutcome::Blocked
-    } else if !matches!(route, Route::Chat) || interrupting {
+    } else if !escape_stops_active_agent || !matches!(route, Route::Chat) || interrupting {
         ShellEscapeOutcome::Ignored
     } else if matches!(indicator, Indicator::Working | Indicator::AwaitingInput) {
         selected_chat
@@ -1955,14 +1956,22 @@ impl Shell {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
-                    let page = cx.new(|cx| ShortcutsPage::new(state, keymap, cx));
-                    // Persist + re-apply the keymap whenever the page changes it.
+                    let escape_stops_active_agent = self.settings.escape_stops_active_agent;
+                    let page = cx
+                        .new(|cx| ShortcutsPage::new(state, keymap, escape_stops_active_agent, cx));
+                    // Persist shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
-                            let ShortcutsEvent::Changed(keymap) = event;
-                            this.settings.keymap = keymap.clone();
-                            apply_keymap(cx, keymap);
+                            match event {
+                                ShortcutsEvent::KeymapChanged(keymap) => {
+                                    this.settings.keymap = keymap.clone();
+                                    apply_keymap(cx, keymap);
+                                }
+                                ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
+                                    this.settings.escape_stops_active_agent = *enabled;
+                                }
+                            }
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -4317,10 +4326,12 @@ impl Shell {
         let interrupting = selected_chat
             .as_deref()
             .is_some_and(|chat_id| self.composer.read(cx).is_interrupting(chat_id));
+        let escape_stops_active_agent = self.settings.escape_stops_active_agent;
 
         match resolve_shell_escape(
             &event.keystroke.key,
             false,
+            escape_stops_active_agent,
             self.route,
             selected_chat.as_deref(),
             indicator,
@@ -6602,6 +6613,7 @@ mod tests {
             resolve_shell_escape(
                 "escape",
                 false,
+                true,
                 Route::Chat,
                 Some("chat-a"),
                 Indicator::Working,
@@ -6613,6 +6625,7 @@ mod tests {
             resolve_shell_escape(
                 "escape",
                 false,
+                true,
                 Route::Chat,
                 Some("chat-b"),
                 Indicator::AwaitingInput,
@@ -6627,6 +6640,7 @@ mod tests {
         assert_eq!(
             resolve_shell_escape(
                 "escape",
+                true,
                 true,
                 Route::Chat,
                 Some("chat-a"),
@@ -6647,7 +6661,15 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                resolve_shell_escape("escape", false, route, selected, indicator, interrupting,),
+                resolve_shell_escape(
+                    "escape",
+                    false,
+                    true,
+                    route,
+                    selected,
+                    indicator,
+                    interrupting,
+                ),
                 ShellEscapeOutcome::Ignored
             );
         }
@@ -6655,12 +6677,29 @@ mod tests {
             resolve_shell_escape(
                 "enter",
                 true,
+                true,
                 Route::Chat,
                 Some("chat-a"),
                 Indicator::Working,
                 false,
             ),
             ShellEscapeOutcome::OtherKey
+        );
+    }
+
+    #[test]
+    fn escape_interrupt_is_opt_in() {
+        assert_eq!(
+            resolve_shell_escape(
+                "escape",
+                false,
+                false,
+                Route::Chat,
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+            ShellEscapeOutcome::Ignored
         );
     }
 
