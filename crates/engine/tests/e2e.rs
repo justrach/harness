@@ -186,8 +186,12 @@ where
 }
 
 fn entries(core: &EngineCore) -> Vec<SessionMessageEntry> {
+    entries_for(core, CHAT)
+}
+
+fn entries_for(core: &EngineCore, chat_id: &str) -> Vec<SessionMessageEntry> {
     core.doc_host
-        .open(CHAT)
+        .open(chat_id)
         .expect("open chat")
         .doc()
         .read_entries()
@@ -443,6 +447,71 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         core.sessions.session_status(CHAT).map(|s| s.status),
         Some(SessionStatus::Idle)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupt_is_scoped_to_the_target_chat() {
+    const CHAT_A: &str = "chat-interrupt-a";
+    const CHAT_B: &str = "chat-interrupt-b";
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![AgentEvent::TextDelta {
+                text: "still working".into(),
+            }],
+            step_delay: Duration::from_millis(5),
+            hang_until_interrupt: true,
+        }),
+    );
+
+    for (chat_id, command_id, message_id) in [
+        (CHAT_A, "cmd-run-a", "message-a"),
+        (CHAT_B, "cmd-run-b", "message-b"),
+    ] {
+        let handle = core.doc_host.open(chat_id).unwrap();
+        queue_as_viewer(
+            handle.doc(),
+            command_id,
+            SessionCommandPayload::Run {
+                request: run_request("hang"),
+                message_id: message_id.into(),
+            },
+        );
+    }
+
+    wait_for(
+        || {
+            [CHAT_A, CHAT_B].into_iter().all(|chat_id| {
+                core.sessions.session_status(chat_id).map(|s| s.status)
+                    == Some(SessionStatus::Working)
+                    && entries_for(&core, chat_id)
+                        .iter()
+                        .any(|entry| entry.status == Some(MessageStatus::Streaming))
+            })
+        },
+        "both chats to be streaming",
+    )
+    .await;
+
+    assert!(core.sessions.interrupt(CHAT_A).await.unwrap());
+    assert_eq!(
+        core.sessions.session_status(CHAT_A).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
+    assert_eq!(
+        core.sessions.session_status(CHAT_B).map(|s| s.status),
+        Some(SessionStatus::Working),
+        "interrupting chat A must leave chat B running"
+    );
+    assert!(
+        entries_for(&core, CHAT_B)
+            .iter()
+            .any(|entry| entry.status == Some(MessageStatus::Streaming))
+    );
+
+    assert!(core.sessions.interrupt(CHAT_B).await.unwrap());
 }
 
 #[tokio::test]
