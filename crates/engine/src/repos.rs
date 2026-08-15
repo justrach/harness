@@ -577,6 +577,93 @@ impl Repos {
         })
     }
 
+    /// Fuzzy subject / SHA search across the complete public history. Results
+    /// stay in `--topo-order`; fuzzy score decides inclusion, never row order,
+    /// so the client can keep rendering a meaningful commit graph.
+    pub async fn search_history(
+        &self,
+        repo_path: &Path,
+        query: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<GitHistoryPage, EngineError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(GitHistoryPage {
+                commits: Vec::new(),
+                branch_tips: Vec::new(),
+                head_sha: None,
+                next_cursor: None,
+                total_count: Some(0),
+                head_commit_count: None,
+            });
+        }
+        let limit = limit.clamp(1, GIT_HISTORY_MAX_LIMIT);
+        let head_sha = self
+            .git(&["rev-parse", "--verify", "HEAD^{commit}"], Some(repo_path))
+            .await
+            .ok()
+            .filter(|sha| !sha.is_empty());
+        let refs_out = self
+            .git(
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)%00",
+                    "refs/heads",
+                    "refs/remotes",
+                    "refs/tags",
+                ],
+                Some(repo_path),
+            )
+            .await?;
+        let refs_by_sha = parse_history_refs(&refs_out);
+        if head_sha.is_none() && refs_by_sha.is_empty() {
+            return Ok(GitHistoryPage {
+                commits: Vec::new(),
+                branch_tips: Vec::new(),
+                head_sha: None,
+                next_cursor: None,
+                total_count: Some(0),
+                head_commit_count: None,
+            });
+        }
+
+        let mut log_args = vec![
+            "log",
+            "--topo-order",
+            "--no-color",
+            "--no-decorate",
+            "--no-show-signature",
+            "--no-patch",
+            "--format=%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00",
+        ];
+        if head_sha.is_some() {
+            log_args.push("HEAD");
+        }
+        log_args.extend(["--branches", "--remotes", "--tags"]);
+        let log = self.git(&log_args, Some(repo_path)).await?;
+        let all_commits = parse_history_log(&log, &refs_by_sha);
+        let visible: HashSet<String> = all_commits
+            .iter()
+            .filter(|commit| git_history_matches(query, commit))
+            .map(|commit| commit.sha.clone())
+            .collect();
+        let matches = compact_history_commits(&all_commits, &visible);
+        let total_count = matches.len();
+        let start = cursor.min(total_count);
+        let end = start.saturating_add(limit).min(total_count);
+        let commits = matches[start..end].to_vec();
+
+        Ok(GitHistoryPage {
+            commits,
+            branch_tips: Vec::new(),
+            head_sha,
+            next_cursor: (end < total_count).then_some(end),
+            total_count: Some(total_count),
+            head_commit_count: None,
+        })
+    }
+
     /// Best-effort GitHub profile images for the authors in one history page.
     /// Git itself only stores names and emails, so this resolves the hosting
     /// metadata separately and caches it by both commit and normalized email.
@@ -1161,6 +1248,66 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<usize> {
             }
             Some(total.saturating_add(score))
         })
+}
+
+fn git_history_matches(query: &str, commit: &GitHistoryCommit) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let normalized = query.to_ascii_lowercase();
+    commit.sha.to_ascii_lowercase().starts_with(&normalized)
+        || fuzzy_score(query, &format!("{} {}", commit.sha, commit.subject)).is_some()
+}
+
+/// Contract hidden commits to their nearest visible ancestors. Search results
+/// remain sparse without leaving graph lanes aimed at rows that are absent.
+fn compact_history_commits(
+    commits: &[GitHistoryCommit],
+    visible: &HashSet<String>,
+) -> Vec<GitHistoryCommit> {
+    let by_sha: HashMap<_, _> = commits
+        .iter()
+        .map(|commit| (commit.sha.as_str(), commit))
+        .collect();
+    fn nearest_visible_parents(
+        sha: &str,
+        visible: &HashSet<String>,
+        by_sha: &HashMap<&str, &GitHistoryCommit>,
+        visiting: &mut HashSet<String>,
+    ) -> Vec<String> {
+        if visible.contains(sha) || !by_sha.contains_key(sha) {
+            return vec![sha.to_string()];
+        }
+        if !visiting.insert(sha.to_string()) {
+            return Vec::new();
+        }
+        let parents = by_sha[sha]
+            .parent_shas
+            .iter()
+            .flat_map(|parent| nearest_visible_parents(parent, visible, by_sha, visiting))
+            .collect();
+        visiting.remove(sha);
+        parents
+    }
+
+    commits
+        .iter()
+        .filter(|commit| visible.contains(&commit.sha))
+        .cloned()
+        .map(|mut commit| {
+            let mut seen = HashSet::new();
+            commit.parent_shas = commit
+                .parent_shas
+                .iter()
+                .flat_map(|parent| {
+                    nearest_visible_parents(parent, visible, &by_sha, &mut HashSet::new())
+                })
+                .filter(|parent| seen.insert(parent.clone()))
+                .collect();
+            commit
+        })
+        .collect()
 }
 
 type RankedFileMatch = (Option<usize>, usize, String, bool);

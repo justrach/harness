@@ -295,6 +295,43 @@ async fn git_history_is_topological_paged_and_carries_public_refs() {
 }
 
 #[tokio::test]
+async fn git_history_search_is_fuzzy_complete_and_accepts_sha_prefixes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("history-search-repo");
+    init_repo(&repo_dir).await;
+    for (name, subject) in [
+        ("one.txt", "prepare history search"),
+        ("two.txt", "unrelated middle commit"),
+        ("three.txt", "polish searchable graph"),
+    ] {
+        std::fs::write(repo_dir.join(name), subject).expect("history search fixture");
+        git(&repo_dir, &["add", "."]).await;
+        git(&repo_dir, &["commit", "-m", subject]).await;
+    }
+
+    let repos = test_repos(&tmp.path().join("data"));
+    let first_page = repos
+        .history(&repo_dir, 0, 1)
+        .await
+        .expect("first history page");
+    assert_eq!(first_page.commits[0].subject, "polish searchable graph");
+    let fuzzy = repos
+        .search_history(&repo_dir, "prpr hstry", 0, 20)
+        .await
+        .expect("fuzzy history search");
+    assert_eq!(fuzzy.total_count, Some(1));
+    assert_eq!(fuzzy.commits[0].subject, "prepare history search");
+
+    let sha = fuzzy.commits[0].sha.clone();
+    let by_sha = repos
+        .search_history(&repo_dir, &sha[..8], 0, 20)
+        .await
+        .expect("sha history search");
+    assert_eq!(by_sha.commits.len(), 1);
+    assert_eq!(by_sha.commits[0].sha, sha);
+}
+
+#[tokio::test]
 async fn fetch_all_updates_only_remote_tracking_refs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("fetch-repo");

@@ -92,6 +92,8 @@ pub mod methods {
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
     pub const LIST_GIT_HISTORY: &str = "ListGitHistory";
+    /// Fuzzy commit-subject / SHA search over the complete public history.
+    pub const SEARCH_GIT_HISTORY: &str = "SearchGitHistory";
     /// Resolve hosted profile images for a page of Git commit authors.
     pub const RESOLVE_GIT_AVATARS: &str = "ResolveGitAvatars";
     /// Update remote-tracking refs without changing HEAD, the index, or files.

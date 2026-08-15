@@ -781,6 +781,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_BRANCHES
             | methods::LIST_REFS
             | methods::LIST_GIT_HISTORY
+            | methods::SEARCH_GIT_HISTORY
             | methods::RESOLVE_GIT_AVATARS
             | methods::FETCH_ALL
             | methods::SWITCH_REF
@@ -1474,6 +1475,28 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&history)
             }
+            methods::SEARCH_GIT_HISTORY => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    cwd: String,
+                    query: String,
+                    #[serde(default)]
+                    cursor: usize,
+                    #[serde(default = "default_git_history_search_limit")]
+                    limit: usize,
+                }
+                fn default_git_history_search_limit() -> usize {
+                    crate::repos::GIT_HISTORY_DEFAULT_LIMIT
+                }
+                let p: P = parse_params(params)?;
+                let history = self
+                    .repos
+                    .search_history(std::path::Path::new(&p.cwd), &p.query, p.cursor, p.limit)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&history)
+            }
             methods::RESOLVE_GIT_AVATARS => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -1772,6 +1795,7 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
+        assert!(forwardable(methods::SEARCH_GIT_HISTORY));
         assert!(forwardable(methods::FETCH_ALL));
         assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
     }
