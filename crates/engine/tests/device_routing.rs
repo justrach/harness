@@ -399,7 +399,6 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
         .await
         .expect("local change request subscribe");
     let local_frame = local.recv().await.expect("local initial frame");
-    drop(local);
 
     let _host = core_b.start_host_relay(&relay_url);
     let core_a = assemble(&dirs.path().join("a"), "device-a");

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -193,7 +193,7 @@ impl CheckoutChangeRequests {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            entries
+            let entry = entries
                 .entry(key.clone())
                 .or_insert_with(|| {
                     Arc::new(CacheEntry {
@@ -206,10 +206,18 @@ impl CheckoutChangeRequests {
                         demand: AtomicUsize::new(0),
                     })
                 })
-                .clone()
+                .clone();
+            // Keep the demand transition under the entries lock. The final
+            // lease drop uses that same lock before evicting, so a new watcher
+            // cannot resurrect an entry after it was removed from the map.
+            entry.demand.fetch_add(1, Ordering::AcqRel);
+            entry
         };
-        entry.demand.fetch_add(1, Ordering::AcqRel);
-        DemandLease { key, entry }
+        DemandLease {
+            key,
+            entry,
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 
     async fn refresh(
@@ -277,11 +285,24 @@ impl CheckoutChangeRequests {
 struct DemandLease {
     key: ChangeRequestCacheKey,
     entry: Arc<CacheEntry>,
+    inner: Weak<Inner>,
 }
 
 impl Drop for DemandLease {
     fn drop(&mut self) {
-        self.entry.demand.fetch_sub(1, Ordering::AcqRel);
+        if self.entry.demand.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut entries = inner.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let is_cached_entry = entries
+            .get(&self.key)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry));
+        if is_cached_entry && self.entry.demand.load(Ordering::Acquire) == 0 {
+            entries.remove(&self.key);
+        }
     }
 }
 
@@ -631,7 +652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_last_subscriber_stops_refresh_work() {
+    async fn dropping_last_subscriber_evicts_cache_and_stops_refresh_work() {
         let lookup = FakeLookup::new(
             source("feature/status"),
             [Ok(Some(pull_request(90))), Ok(Some(pull_request(91)))],
@@ -644,9 +665,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(lookup.resolve_count(), 1);
-        let entries = service.inner.entries.lock().unwrap();
-        let entry = entries.values().next().unwrap();
-        assert_eq!(entry.demand.load(Ordering::Acquire), 0);
+        assert!(service.inner.entries.lock().unwrap().is_empty());
+
+        // A later observer gets a fresh entry rather than reviving the
+        // abandoned snapshot retained by an inactive checkout.
+        let mut renewed = service.watch_checkout(PathBuf::from("/checkout"), identity());
+        let renewed_status = renewed.next().await.unwrap();
+        assert_eq!(renewed_status.change_request.unwrap().number, 91);
+        assert_eq!(lookup.resolve_count(), 2);
     }
 
     #[tokio::test]
