@@ -3428,8 +3428,8 @@ impl Shell {
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // A release outside the pinned drop target ends GPUI's drag without
-        // calling its drop handler. Heal the ephemeral slide state here.
+        // A release outside the sidebar ends GPUI's drag without calling the
+        // sidebar drop handler. Heal the ephemeral slide state here.
         if self.pinned_session_drag.is_some()
             && (!cx.has_active_drag() || !self.pinned_session_drag_is_valid(cx))
         {
@@ -3670,6 +3670,15 @@ impl Shell {
                                         f32::from(event.bounds.bottom()),
                                         cx,
                                     );
+                                },
+                            ))
+                            // The divider is a hard boundary, not an unpin
+                            // target. Releasing over regular sessions commits
+                            // the nearest valid pinned slot so the row never
+                            // snaps back after appearing to cross the divider.
+                            .on_drop::<PinnedSessionDrag>(cx.listener(
+                                |this, payload: &PinnedSessionDrag, _, cx| {
+                                    this.commit_pinned_session_drag(payload, cx);
                                 },
                             ))
                             .px(px(Theme::SPACE_SM))

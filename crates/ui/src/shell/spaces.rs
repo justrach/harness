@@ -83,6 +83,17 @@ pub(super) fn pinned_session_drop_index(rel_y: f32, count: usize) -> Option<usiz
         .then(|| ((rel_y / super::SIDEBAR_SESSION_SLOT).floor() as usize).min(count - 1))
 }
 
+/// Keep a sidebar-wide drag physically bounded to the pinned section. The
+/// strict drop helper above still identifies whether the pointer is actually
+/// inside the section; this helper supplies the nearest valid pinned slot
+/// while the pointer is over regular sessions.
+pub(super) fn pinned_session_clamped_index(rel_y: f32, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(((rel_y.max(0.0) / super::SIDEBAR_SESSION_SLOT).floor() as usize).min(count - 1))
+}
+
 fn pinned_session_is_draggable(count: usize) -> bool {
     count > 1
 }
@@ -114,8 +125,8 @@ pub(super) fn pinned_drag_scroll_delta(
 mod pinned_session_tests {
     use super::{
         pinned_drag_scroll_delta, pinned_drag_scroll_step, pinned_drag_snapshot_is_valid,
-        pinned_session_drop_index, pinned_session_is_draggable, project_pinned_first,
-        reorder_visible_pins, retain_known_pins,
+        pinned_session_clamped_index, pinned_session_drop_index, pinned_session_is_draggable,
+        project_pinned_first, reorder_visible_pins, retain_known_pins,
     };
     use std::collections::HashSet;
 
@@ -177,6 +188,17 @@ mod pinned_session_tests {
         );
         assert_eq!(pinned_session_drop_index(500.0, 3), None);
         assert_eq!(pinned_session_drop_index(0.0, 0), None);
+    }
+
+    #[test]
+    fn sidebar_wide_pin_drag_clamps_to_the_nearest_pinned_slot() {
+        assert_eq!(pinned_session_clamped_index(-50.0, 3), Some(0));
+        assert_eq!(
+            pinned_session_clamped_index(super::super::SIDEBAR_SESSION_SLOT, 3),
+            Some(1)
+        );
+        assert_eq!(pinned_session_clamped_index(500.0, 3), Some(2));
+        assert_eq!(pinned_session_clamped_index(0.0, 0), None);
     }
 
     #[test]
@@ -442,7 +464,9 @@ impl Shell {
     ) {
         let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
         let rel_y = pointer_y - viewport_top + scroll_top - super::SIDEBAR_LIST_PAD_TOP;
-        let Some(over) = pinned_session_drop_index(rel_y, payload.visible_ids.len()) else {
+        let inside_pinned_section =
+            pinned_session_drop_index(rel_y, payload.visible_ids.len()).is_some();
+        let Some(over) = pinned_session_clamped_index(rel_y, payload.visible_ids.len()) else {
             if let Some(drag) = self.pinned_session_drag.as_mut() {
                 drag.pointer_y = None;
                 drag.autoscroll_active = false;
@@ -451,6 +475,13 @@ impl Shell {
         };
 
         self.update_pinned_session_drag(&payload, over, cx);
+        if !inside_pinned_section {
+            if let Some(drag) = self.pinned_session_drag.as_mut() {
+                drag.pointer_y = None;
+                drag.autoscroll_active = false;
+            }
+            return;
+        }
         let delta = pinned_drag_scroll_delta(pointer_y, viewport_top, viewport_bottom);
         let Some(drag) = self.pinned_session_drag.as_mut() else {
             return;
