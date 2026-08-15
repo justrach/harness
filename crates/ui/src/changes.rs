@@ -889,6 +889,57 @@ pub fn flatten_rows(
     (rows, ranges)
 }
 
+/// The file header that should remain visible for a logical list position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StickyFileHeader {
+    pub file_ix: usize,
+    pub header_row: usize,
+    pub next_header_row: Option<usize>,
+}
+
+/// Resolve a sticky file header from the current flattened row ranges.
+///
+/// This remains independent of the rendered list so folds and diff resets
+/// cannot leave a second, stale active-file state behind.
+pub fn sticky_file_header(
+    row_ranges: &[std::ops::Range<usize>],
+    item_ix: usize,
+    offset_in_item: f32,
+) -> Option<StickyFileHeader> {
+    let file_ix = row_ranges
+        .partition_point(|range| range.start <= item_ix)
+        .checked_sub(1)?;
+    let range = row_ranges.get(file_ix)?;
+
+    // A reset can briefly leave ListState pointing past the replacement
+    // model. Treat that frame as having no sticky header.
+    if !range.contains(&item_ix) || (item_ix == range.start && offset_in_item <= 0.0) {
+        return None;
+    }
+
+    Some(StickyFileHeader {
+        file_ix,
+        header_row: range.start,
+        next_header_row: row_ranges.get(file_ix + 1).map(|range| range.start),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileHeaderPresentation {
+    Row,
+    Sticky,
+}
+
+impl FileHeaderPresentation {
+    fn element_id(self, file_ix: usize) -> SharedString {
+        let prefix = match self {
+            Self::Row => "file-hdr",
+            Self::Sticky => "sticky-file-hdr",
+        };
+        SharedString::from(format!("{prefix}-{file_ix}"))
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct FileFold {
     collapsed: bool,
@@ -1963,7 +2014,14 @@ impl Changes {
                     return gpui::Empty.into_any_element();
                 };
                 let fold = self.folds.get(&file_diff.path).copied().unwrap_or_default();
-                self.render_file_header(file as usize, file_diff, &fold, &theme, cx)
+                self.render_file_header(
+                    file as usize,
+                    file_diff,
+                    &fold,
+                    FileHeaderPresentation::Row,
+                    &theme,
+                    cx,
+                )
             }
             DiffRow::Notice { file, notice } => files
                 .get(file as usize)
@@ -2035,6 +2093,7 @@ impl Changes {
         ix: usize,
         file: &FileDiff,
         fold: &FileFold,
+        presentation: FileHeaderPresentation,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2073,12 +2132,13 @@ impl Changes {
         // section separator (the per-file wrapper it used to hang on is
         // gone — rows are flat now).
         div()
-            .id(SharedString::from(format!("file-hdr-{ix}")))
+            .id(presentation.element_id(ix))
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
-            .when(ix > 0, |el| {
-                el.border_t_1().border_color(crate::theme::hairline(0.04))
-            })
+            .when(
+                presentation == FileHeaderPresentation::Row && ix > 0,
+                |el| el.border_t_1().border_color(crate::theme::hairline(0.04)),
+            )
             .flex_none()
             .flex()
             .flex_row()
@@ -3196,6 +3256,52 @@ rename to new_name.rs
         // Notices lead the body: the added file carries "New file".
         let added_rows = &rows[ranges[1].clone()];
         assert_eq!(added_rows[1], DiffRow::Notice { file: 1, notice: 0 });
+    }
+
+    #[test]
+    fn sticky_header_tracks_the_logical_top_row() {
+        let ranges = vec![0..4, 4..5, 5..10];
+
+        assert_eq!(sticky_file_header(&[], 0, 0.0), None);
+        assert_eq!(sticky_file_header(&ranges, 0, 0.0), None);
+        assert_eq!(
+            sticky_file_header(&ranges, 0, 0.5),
+            Some(StickyFileHeader {
+                file_ix: 0,
+                header_row: 0,
+                next_header_row: Some(4),
+            })
+        );
+        assert_eq!(
+            sticky_file_header(&ranges, 2, 0.0),
+            Some(StickyFileHeader {
+                file_ix: 0,
+                header_row: 0,
+                next_header_row: Some(4),
+            })
+        );
+
+        // Landing exactly on a new header hands ownership to that file; its
+        // real row remains visible until it starts crossing the viewport.
+        assert_eq!(sticky_file_header(&ranges, 4, 0.0), None);
+        assert_eq!(
+            sticky_file_header(&ranges, 4, 1.0),
+            Some(StickyFileHeader {
+                file_ix: 1,
+                header_row: 4,
+                next_header_row: Some(5),
+            })
+        );
+        assert_eq!(sticky_file_header(&ranges, 5, 0.0), None);
+        assert_eq!(
+            sticky_file_header(&ranges, 8, 0.0),
+            Some(StickyFileHeader {
+                file_ix: 2,
+                header_row: 5,
+                next_header_row: None,
+            })
+        );
+        assert_eq!(sticky_file_header(&ranges, 10, 0.0), None);
     }
 
     #[test]
