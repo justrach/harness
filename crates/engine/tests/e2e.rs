@@ -135,6 +135,77 @@ impl Harness for ScriptedHarness {
     }
 }
 
+/// Two-run harness for interrupt isolation. Run B stays parked until the test
+/// releases it, then records whether its own token was cancelled before it
+/// completes. This makes a cross-chat cancellation observable even if B has
+/// not yet had a chance to publish `Done` when A's interrupt returns.
+struct InterruptIsolationHarness {
+    release_b: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Harness for InterruptIsolationHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Interrupt isolation"
+    }
+    fn supports_steering(&self) -> bool {
+        true
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::StepBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(8);
+        let release_b = self.release_b.clone();
+        let token = controls.interrupt.clone();
+        tokio::spawn(async move {
+            if tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("{} started", request.prompt),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            if request.prompt == "run-b" {
+                release_b.notified().await;
+                if token.is_cancelled() {
+                    let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+                } else {
+                    let _ = tx
+                        .send(Ok(AgentEvent::TextDelta {
+                            text: "; completed independently".into(),
+                        }))
+                        .await;
+                    let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+                }
+            } else {
+                token.cancelled().await;
+                let _ = tx.send(Ok(done(DoneStatus::Interrupted))).await;
+            }
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
 fn registry_with(harness: Arc<dyn Harness>) -> Arc<HarnessRegistry> {
     let registry = HarnessRegistry::new();
     registry.register(harness);
@@ -455,27 +526,24 @@ async fn interrupt_is_scoped_to_the_target_chat() {
     const CHAT_B: &str = "chat-interrupt-b";
 
     let dir = tempfile::tempdir().unwrap();
+    let release_b = Arc::new(tokio::sync::Notify::new());
     let core = assemble(
         dir.path(),
-        Arc::new(ScriptedHarness {
-            script: vec![AgentEvent::TextDelta {
-                text: "still working".into(),
-            }],
-            step_delay: Duration::from_millis(5),
-            hang_until_interrupt: true,
+        Arc::new(InterruptIsolationHarness {
+            release_b: release_b.clone(),
         }),
     );
 
-    for (chat_id, command_id, message_id) in [
-        (CHAT_A, "cmd-run-a", "message-a"),
-        (CHAT_B, "cmd-run-b", "message-b"),
+    for (chat_id, command_id, message_id, prompt) in [
+        (CHAT_A, "cmd-run-a", "message-a", "run-a"),
+        (CHAT_B, "cmd-run-b", "message-b", "run-b"),
     ] {
         let handle = core.doc_host.open(chat_id).unwrap();
         queue_as_viewer(
             handle.doc(),
             command_id,
             SessionCommandPayload::Run {
-                request: run_request("hang"),
+                request: run_request(prompt),
                 message_id: message_id.into(),
             },
         );
@@ -500,6 +568,19 @@ async fn interrupt_is_scoped_to_the_target_chat() {
         core.sessions.session_status(CHAT_A).map(|s| s.status),
         Some(SessionStatus::Idle)
     );
+    assert!(
+        entries_for(&core, CHAT_A)
+            .iter()
+            .any(|entry| entry.status == Some(MessageStatus::Aborted))
+    );
+    assert!(
+        !core.sessions.interrupt(CHAT_A).await.unwrap(),
+        "a settled chat must report that there is no live run to interrupt"
+    );
+
+    // B has not observed any completion signal yet. Release it through its
+    // independent test control; it checks its own token before completing, so
+    // a cancellation leaked from A cannot hide behind an early status read.
     assert_eq!(
         core.sessions.session_status(CHAT_B).map(|s| s.status),
         Some(SessionStatus::Working),
@@ -510,8 +591,22 @@ async fn interrupt_is_scoped_to_the_target_chat() {
             .iter()
             .any(|entry| entry.status == Some(MessageStatus::Streaming))
     );
+    release_b.notify_one();
 
-    assert!(core.sessions.interrupt(CHAT_B).await.unwrap());
+    wait_for(
+        || core.sessions.session_status(CHAT_B).map(|s| s.status) == Some(SessionStatus::Idle),
+        "chat B to complete independently",
+    )
+    .await;
+
+    let assistant_b = entries_for(&core, CHAT_B)
+        .into_iter()
+        .find(|entry| entry.role == MessageRole::Assistant)
+        .expect("chat B assistant entry");
+    assert_eq!(assistant_b.status, Some(MessageStatus::Complete));
+    assert!(assistant_b.parts.iter().any(|part| {
+        matches!(part, MessagePart::Text { text, .. } if text.contains("completed independently"))
+    }));
 }
 
 #[tokio::test]
