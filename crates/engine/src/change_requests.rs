@@ -571,6 +571,39 @@ mod tests {
         assert_eq!(lookup.resolve_count(), 2);
     }
 
+    #[tokio::test]
+    async fn authentication_and_rate_limit_keep_the_last_success() {
+        let source = source("feature/status");
+        let lookup = FakeLookup::new(
+            source.clone(),
+            [
+                Ok(Some(pull_request(90))),
+                Err(ChangeRequestError::Authentication),
+                Err(ChangeRequestError::RateLimited),
+            ],
+        );
+        let timing = Timing {
+            with_change_request_ttl: Duration::from_millis(1),
+            without_change_request_ttl: Duration::from_millis(1),
+            failure_initial_backoff: Duration::from_millis(1),
+            failure_max_backoff: Duration::from_millis(1),
+            context_poll_interval: Duration::from_millis(1),
+        };
+        let service = service(lookup.clone(), timing);
+        let key = cache_key("checkout-1", &source);
+        let _lease = service.acquire(key.clone());
+
+        let (first, _) = service.refresh(&key, &source).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let (after_auth, _) = service.refresh(&key, &source).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let (after_rate_limit, _) = service.refresh(&key, &source).await;
+
+        assert_eq!(after_auth, first);
+        assert_eq!(after_rate_limit, first);
+        assert_eq!(lookup.resolve_count(), 3);
+    }
+
     #[test]
     fn failure_backoff_grows_and_caps() {
         let initial = Duration::from_secs(20);

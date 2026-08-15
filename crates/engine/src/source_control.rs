@@ -764,6 +764,7 @@ async fn read_capped(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     use super::*;
@@ -799,6 +800,33 @@ mod tests {
                 .pop_front()
                 .expect("missing fake process response")
         }
+    }
+
+    struct ExecutableGhRunner {
+        executable: PathBuf,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for ExecutableGhRunner {
+        async fn run(&self, mut request: ProcessRequest) -> Result<ProcessOutput, ProcessRunError> {
+            if request.program == "gh" {
+                request.program = self.executable.to_string_lossy().into_owned();
+            }
+            SystemProcessRunner.run(request).await
+        }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git fixture command starts");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn command_success(stdout: impl Into<Vec<u8>>) -> Result<ProcessOutput, ProcessRunError> {
@@ -904,6 +932,66 @@ mod tests {
         assert_eq!(requests[0].env, [("GH_PROMPT_DISABLED".into(), "1".into())]);
         assert_eq!(requests[0].timeout, GITHUB_TIMEOUT);
         assert_eq!(requests[0].output_limit, GITHUB_OUTPUT_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn real_git_checkout_resolves_through_host_fake_gh() {
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        run_git(&checkout, &["init", "-q", "-b", "main"]);
+        run_git(&checkout, &["checkout", "-q", "-b", "feature/status"]);
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/zeron.git",
+            ],
+        );
+
+        let fake_gh = temp.path().join("gh");
+        std::fs::write(
+            &fake_gh,
+            r##"#!/bin/sh
+if [ "$GH_PROMPT_DISABLED" != "1" ]; then
+  echo "interactive auth was not disabled" >&2
+  exit 2
+fi
+printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/zeron/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]'
+"##,
+        )
+        .expect("write fake gh");
+        let mut permissions = std::fs::metadata(&fake_gh)
+            .expect("fake gh metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, permissions).expect("make fake gh executable");
+
+        let runner: Arc<dyn ProcessRunner> = Arc::new(ExecutableGhRunner {
+            executable: fake_gh,
+        });
+        let resolver = ChangeRequestResolver {
+            inspector: GitCheckoutInspector::new(runner.clone()),
+            github: GitHubCli::with_runner(runner),
+        };
+
+        let resolution = resolver
+            .resolve_github(&checkout)
+            .await
+            .expect("host resolves fake GitHub pull request");
+
+        assert_eq!(
+            std::fs::canonicalize(&resolution.source.checkout_root).expect("resolved root"),
+            std::fs::canonicalize(&checkout).expect("fixture root")
+        );
+        assert_eq!(resolution.source.branch.local_branch, "feature/status");
+        assert_eq!(resolution.source.branch.owner.as_deref(), Some("acme"));
+        let pull_request = resolution.change_request.expect("pull request");
+        assert_eq!(pull_request.number, 90);
+        assert_eq!(pull_request.state, ChangeRequestState::Open);
+        assert_eq!(pull_request.head_ref, "feature/status");
     }
 
     #[tokio::test]

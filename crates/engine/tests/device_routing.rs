@@ -8,6 +8,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -194,6 +195,7 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
 struct StaticChangeRequestLookup {
     source: CheckoutSourceContext,
     summary: ChangeRequestSummary,
+    resolves: AtomicUsize,
 }
 
 #[async_trait]
@@ -209,6 +211,7 @@ impl CheckoutChangeRequestLookup for StaticChangeRequestLookup {
         &self,
         _source: &CheckoutSourceContext,
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+        self.resolves.fetch_add(1, Ordering::AcqRel);
         Ok(Some(self.summary.clone()))
     }
 }
@@ -244,7 +247,93 @@ fn change_request_lookup(root: &std::path::Path) -> Arc<StaticChangeRequestLooku
             base_ref: "main".into(),
             head_ref: "feature/status".into(),
         },
+        resolves: AtomicUsize::new(0),
     })
+}
+
+/// Exercise the device-room wire format used by the native iOS relay client,
+/// without routing through another desktop engine first.
+async fn simulated_ios_change_request(
+    relay_url: &str,
+    conn_id: &str,
+    cwd: &std::path::Path,
+) -> serde_json::Value {
+    let ws_url = relay_url.replacen("http://", "ws://", 1);
+    let url = format!("{ws_url}/device/device-b/ws?role=client&connId={conn_id}&token=ios-token");
+    let (mut socket, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("iOS relay client connects");
+    let request = serde_json::json!({
+        "id": 7,
+        "method": methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+        "params": { "cwd": cwd },
+    });
+    let header = DeviceFrameHeader::new("rpc", "rpc");
+    let frame = encode_device_frame(&header, request.to_string().as_bytes()).expect("encode RPC");
+    socket
+        .send(WsMessage::Binary(frame))
+        .await
+        .expect("send iOS subscription");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("iOS item before timeout")
+            .expect("iOS relay remains connected")
+            .expect("valid iOS relay frame");
+        let WsMessage::Binary(bytes) = message else {
+            continue;
+        };
+        let (header, payload) = decode_device_frame(&bytes).expect("decode iOS relay frame");
+        assert_eq!(header.k, "rpc");
+        let response: serde_json::Value =
+            serde_json::from_slice(&payload).expect("decode RPC response");
+        assert_eq!(response["id"], 7);
+        if let Some(error) = response["err"].as_str() {
+            panic!("iOS subscription failed: {error}");
+        }
+        if let Some(item) = response.get("item") {
+            return item.clone();
+        }
+    }
+}
+
+fn assert_public_change_request_payload(item: &serde_json::Value) {
+    let mut keys: Vec<_> = item
+        .as_object()
+        .expect("status object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "branch",
+            "changeRequest",
+            "checkoutId",
+            "cwd",
+            "deviceId",
+            "updatedAt",
+        ]
+    );
+    let mut summary_keys: Vec<_> = item["changeRequest"]
+        .as_object()
+        .expect("change request object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    summary_keys.sort_unstable();
+    assert_eq!(
+        summary_keys,
+        [
+            "baseRef", "headRef", "number", "provider", "state", "title", "url"
+        ]
+    );
+    let payload = item.to_string();
+    assert!(!payload.contains("ios-token"));
+    assert!(!payload.to_ascii_lowercase().contains("stderr"));
 }
 
 // ---------------------------------------------------------------------------
@@ -269,11 +358,9 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
             true,
         )
         .expect("checkout space");
-    core_b.change_requests = CheckoutChangeRequests::new(
-        core_b.repos.clone(),
-        "device-b",
-        change_request_lookup(&checkout),
-    );
+    let lookup = change_request_lookup(&checkout);
+    core_b.change_requests =
+        CheckoutChangeRequests::new(core_b.repos.clone(), "device-b", lookup.clone());
     let local_client = zeron_rpc::memory_client(core_b.rpc_service());
     let rejected = match local_client
         .subscribe_checked(
@@ -299,7 +386,7 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
     let _host = core_b.start_host_relay(&relay_url);
     let core_a = assemble(&dirs.path().join("a"), "device-a");
     let mut link_config =
-        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core_a.set_links(LinkCache::new(link_config));
     let client = zeron_rpc::memory_client(core_a.rpc_service());
@@ -331,6 +418,38 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
         .expect("remote frame before timeout")
         .expect("remote initial frame");
     assert_eq!(remote_frame, local_frame);
+
+    // A second desktop subscription and native mobile clients all consume B's
+    // host cache. Neither A nor iOS performs its own GitHub lookup.
+    let mut second_desktop = client
+        .subscribe_checked(
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            serde_json::json!({
+                "cwd": checkout,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("second desktop subscription");
+    let second_desktop_frame = second_desktop
+        .recv()
+        .await
+        .expect("second desktop initial frame");
+    assert_eq!(second_desktop_frame, local_frame);
+
+    let ios_frame = simulated_ios_change_request(&relay_url, "ios-1", &checkout).await;
+    assert_eq!(ios_frame, local_frame);
+    assert_public_change_request_payload(&ios_frame);
+
+    // Reconnecting creates a new relay peer and receives a fresh initial
+    // snapshot from the still-warm host cache.
+    let reconnected_ios_frame = simulated_ios_change_request(&relay_url, "ios-2", &checkout).await;
+    assert_eq!(reconnected_ios_frame, local_frame);
+    assert_eq!(
+        lookup.resolves.load(Ordering::Acquire),
+        1,
+        "all device-boundary subscribers must share one host resolution"
+    );
 
     core_a.disconnect_edge();
     assert!(
