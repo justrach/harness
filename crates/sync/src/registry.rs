@@ -27,7 +27,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use zeron_doc::{PendingBatch, RegistryDoc, RegistryRow, StateOutcome};
 
-use crate::room::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
+use crate::types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
 
 /// Text `"ping"` keepalive interval (answered by the DO auto-response pair
 /// without waking it — transport liveness only).
@@ -294,7 +294,7 @@ impl RegistryClient {
     /// Connect with a per-dial URL provider (fresh `?token=` every attempt).
     /// Resolves once the initial hello/state handshake lands; a first-attempt
     /// failure is returned as `Err` (callers own the initial-join retry, same
-    /// contract as `RoomClient`). After that the client reconnects itself.
+    /// contract as `ChatClient`). After that the client reconnects itself.
     pub async fn connect_via(
         provider: Arc<dyn UrlProvider>,
         doc: Arc<Mutex<RegistryDoc>>,
