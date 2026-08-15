@@ -3,8 +3,10 @@
 // dataset so the UI can be exercised without an edge deployment.
 
 import Foundation
+import Network
 import Observation
 import SwiftUI
+import os
 
 @MainActor
 @Observable
@@ -20,6 +22,8 @@ final class AppModel {
     var demo: DemoDataset?
     private var sessionStores: [String: SessionStore] = [:]
     private var config: AppConfig?
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var lastPathKey: String?
 
     // Persisted connection settings.
     @ObservationIgnored @AppStorage("edgeURL") var edgeURLString = "https://edge.zeron.sh"
@@ -157,6 +161,7 @@ final class AppModel {
             scheduledToggle("-unarchive-after", archived: false)
             return
         }
+        startPathMonitor()
         guard let url = URL(string: edgeURLString), !storedUserId.isEmpty, !storedOrgId.isEmpty else {
             return
         }
@@ -499,6 +504,10 @@ final class AppModel {
     /// views reconnected on open, freezing sidebar rows and Working
     /// indicators against perfectly live transcripts (2026-08-04).
     func foregrounded() {
+        kickAllRooms()
+    }
+
+    private func kickAllRooms() {
         workspace?.kickRoom()
         // Deliver any roomGen flips that landed while the store had no open
         // view, then kick every room.
@@ -508,6 +517,36 @@ final class AppModel {
             }
         }
         sessionStores.values.forEach { $0.kickRoom() }
+    }
+
+    /// Kick rooms the moment the network path recovers or hops interfaces
+    /// (wifi drop-and-return while foregrounded, wifi→cellular handover).
+    /// Without this the clients sleep out their full reconnect backoff — up
+    /// to 30s of dead sidebar on exactly the flaky networks (airplane wifi)
+    /// where the OS knows recovery happened the instant it did. Kicks are
+    /// idempotent: fresh backoff + immediate redial or a deadline-checked
+    /// probe on a session that looks alive.
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            // Interface set is part of the key: a satisfied→satisfied hop
+            // (wifi→cellular) silently kills established sockets too.
+            let key = path.status == .satisfied
+                ? "up:" + path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+                : "down"
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let previous = self.lastPathKey
+                self.lastPathKey = key
+                // First callback reports the initial state — nothing to revive.
+                guard let previous, previous != key, path.status == .satisfied else { return }
+                roomLog.info("network path recovered (\(key, privacy: .public)); kicking rooms")
+                self.kickAllRooms()
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "zeron.path-monitor"))
+        pathMonitor = monitor
     }
 
     /// Diagnostics access (live e2e probe).
