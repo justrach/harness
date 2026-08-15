@@ -3,8 +3,10 @@
 //! The pane is hosted by the current Changes surface for now, but owns its
 //! data and rendering so it can move intact into the future right-panel tabs.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +42,9 @@ const HISTORY_STROKE_WIDTH: f32 = 1.5;
 const HISTORY_GRAPH_SATURATION: f32 = 0.72;
 const HISTORY_GRAPH_SIDE_PADDING: f32 = 5.0;
 const HISTORY_GRAPH_TRAILING_PADDING: f32 = 20.0;
+const HISTORY_GRAPH_MIN_COMPACT_WIDTH: f32 = 48.0;
+const HISTORY_GRAPH_MAX_WIDTH_RATIO: f32 = 0.34;
+const HISTORY_GRAPH_RESIZE_STEP: f32 = 2.0;
 const HISTORY_GRAPH_ROW_OVERLAP: f32 = 0.75;
 const HISTORY_GRAPH_HIT_RADIUS: f32 = 5.5;
 const HISTORY_GRAPH_FOCUSED_STROKE_WIDTH: f32 = 2.25;
@@ -90,6 +95,51 @@ struct GraphRow {
 struct GraphLayout {
     rows: Vec<GraphRow>,
     max_lane_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GraphGeometry {
+    lane_count: usize,
+    width: f32,
+    lane_spacing: f32,
+    device_scale: f32,
+}
+
+impl GraphGeometry {
+    fn natural(lane_count: usize) -> Self {
+        let count = lane_count.max(1);
+        Self {
+            lane_count: count,
+            width: HISTORY_GRAPH_SIDE_PADDING
+                + HISTORY_GRAPH_TRAILING_PADDING
+                + HISTORY_NODE_RADIUS * 2.0
+                + (count - 1) as f32 * HISTORY_LANE_SPACING,
+            lane_spacing: HISTORY_LANE_SPACING,
+            device_scale: 1.0,
+        }
+    }
+
+    fn fitted(lane_count: usize, width: f32) -> Self {
+        let count = lane_count.max(1);
+        let natural = Self::natural(count);
+        if count == 1 || width >= natural.width {
+            return natural;
+        }
+        let fixed_width =
+            HISTORY_GRAPH_SIDE_PADDING + HISTORY_GRAPH_TRAILING_PADDING + HISTORY_NODE_RADIUS * 2.0;
+        let width = width.clamp(fixed_width, natural.width);
+        Self {
+            lane_count: count,
+            width,
+            lane_spacing: (width - fixed_width) / (count - 1) as f32,
+            device_scale: 1.0,
+        }
+    }
+
+    fn lane_x(self, lane: usize) -> f32 {
+        let x = HISTORY_GRAPH_SIDE_PADDING + HISTORY_NODE_RADIUS + lane as f32 * self.lane_spacing;
+        (x * self.device_scale).round() / self.device_scale
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -797,16 +847,57 @@ fn history_search_matches(commit: &GitHistoryCommit, query: &str) -> bool {
     })
 }
 
-fn lane_x(lane: usize) -> f32 {
-    HISTORY_GRAPH_SIDE_PADDING + HISTORY_NODE_RADIUS + lane as f32 * HISTORY_LANE_SPACING
+fn responsive_graph_geometry(
+    lane_count: usize,
+    container_width: f32,
+    optional_columns_width: f32,
+) -> GraphGeometry {
+    let natural = GraphGeometry::natural(lane_count);
+    if natural.width <= HISTORY_GRAPH_MIN_COMPACT_WIDTH {
+        return natural;
+    }
+
+    // Commit subjects remain the primary content. Give the graph at most a
+    // third of the surface, and never consume the subject's minimum width or
+    // the configured metadata columns when the pane becomes narrow.
+    let content_budget =
+        (container_width - optional_columns_width - HISTORY_COMMIT_SUBJECT_MIN_WIDTH)
+            .max(HISTORY_GRAPH_MIN_COMPACT_WIDTH);
+    let share_budget =
+        (container_width * HISTORY_GRAPH_MAX_WIDTH_RATIO).max(HISTORY_GRAPH_MIN_COMPACT_WIDTH);
+    GraphGeometry::fitted(
+        lane_count,
+        natural.width.min(content_budget.min(share_budget)),
+    )
 }
 
-fn graph_width(lane_count: usize) -> f32 {
-    let count = lane_count.max(1);
-    HISTORY_GRAPH_SIDE_PADDING
-        + HISTORY_GRAPH_TRAILING_PADDING
-        + HISTORY_NODE_RADIUS * 2.0
-        + (count - 1) as f32 * HISTORY_LANE_SPACING
+fn stabilized_graph_geometry(
+    target: GraphGeometry,
+    previous: GraphGeometry,
+    device_scale: f32,
+) -> GraphGeometry {
+    let natural = GraphGeometry::natural(target.lane_count);
+    let target_is_natural = (target.width - natural.width).abs() < f32::EPSILON;
+    let snapped_width = if target_is_natural {
+        natural.width
+    } else {
+        (target.width / HISTORY_GRAPH_RESIZE_STEP).floor() * HISTORY_GRAPH_RESIZE_STEP
+    };
+    let mut next = GraphGeometry::fitted(target.lane_count, snapped_width);
+    next.device_scale = device_scale.max(1.0);
+
+    if !target_is_natural
+        && previous.lane_count == next.lane_count
+        && (previous.width - next.width).abs() < HISTORY_GRAPH_RESIZE_STEP
+    {
+        // Small width oscillations are common while dragging a GPUI split.
+        // Keep the last geometry until a complete step has accumulated.
+        let mut stable = previous;
+        stable.device_scale = next.device_scale;
+        stable
+    } else {
+        next
+    }
 }
 
 fn cubic_coordinate(start: f32, control_1: f32, control_2: f32, end: f32, t: f32) -> f32 {
@@ -839,10 +930,15 @@ fn point_to_segment_distance(
     ((point_x - closest_x).powi(2) + (point_y - closest_y).powi(2)).sqrt()
 }
 
-fn segment_distance(segment: &GraphSegment, point_x: f32, point_y: f32) -> f32 {
+fn segment_distance(
+    segment: &GraphSegment,
+    point_x: f32,
+    point_y: f32,
+    geometry: GraphGeometry,
+) -> f32 {
     let middle = HISTORY_ROW_HEIGHT / 2.0;
-    let from_x = lane_x(segment.from_lane);
-    let to_x = lane_x(segment.to_lane);
+    let from_x = geometry.lane_x(segment.from_lane);
+    let to_x = geometry.lane_x(segment.to_lane);
     let (start_y, end_y, control_1_y, control_2_y) = match segment.shape {
         SegmentShape::Incoming => (
             -HISTORY_GRAPH_ROW_OVERLAP,
@@ -886,8 +982,13 @@ fn segment_distance(segment: &GraphSegment, point_x: f32, point_y: f32) -> f32 {
     closest
 }
 
-fn hovered_graph_path(row: &GraphRow, point_x: f32, point_y: f32) -> Option<usize> {
-    let node_x = lane_x(row.node_lane);
+fn hovered_graph_path(
+    row: &GraphRow,
+    point_x: f32,
+    point_y: f32,
+    geometry: GraphGeometry,
+) -> Option<usize> {
+    let node_x = geometry.lane_x(row.node_lane);
     let node_y = HISTORY_ROW_HEIGHT / 2.0;
     let node_distance = ((point_x - node_x).powi(2) + (point_y - node_y).powi(2)).sqrt();
     if node_distance <= HISTORY_GRAPH_HIT_RADIUS + HISTORY_NODE_RADIUS {
@@ -899,7 +1000,7 @@ fn hovered_graph_path(row: &GraphRow, point_x: f32, point_y: f32) -> Option<usiz
         .map(|segment| {
             (
                 segment.color_id,
-                segment_distance(segment, point_x, point_y),
+                segment_distance(segment, point_x, point_y, geometry),
             )
         })
         .filter(|(_, distance)| *distance <= HISTORY_GRAPH_HIT_RADIUS)
@@ -1113,6 +1214,10 @@ pub struct GitHistory {
     error: Option<SharedString>,
     graph: GraphLayout,
     graph_lane_capacity: usize,
+    /// Updated by the surface-level container query before rows paint. The
+    /// same geometry drives canvas paths, nodes, headers, and hit testing.
+    graph_geometry: Rc<Cell<GraphGeometry>>,
+    graph_hover_suppressed: Rc<Cell<bool>>,
     list: ListState,
     hovered_path: Option<usize>,
     hovered_graph_path: Option<usize>,
@@ -1743,6 +1848,8 @@ impl GitHistory {
             error: None,
             graph: GraphLayout::default(),
             graph_lane_capacity: 0,
+            graph_geometry: Rc::new(Cell::new(GraphGeometry::natural(1))),
+            graph_hover_suppressed: Rc::new(Cell::new(false)),
             list: ListState::new(0, ListAlignment::Top, px(HISTORY_ROW_HEIGHT * 5.0)),
             hovered_path: None,
             hovered_graph_path: None,
@@ -2546,6 +2653,9 @@ impl GitHistory {
     }
 
     fn graph_focus(&self, cx: &Context<Self>) -> Option<GraphFocus> {
+        if self.graph_hover_suppressed.get() {
+            return None;
+        }
         self.hovered_path.map(|color_id| GraphFocus {
             color_id,
             amount: crate::motion::hover_t(&Self::graph_hover_key(cx)),
@@ -2604,6 +2714,9 @@ impl GitHistory {
     }
 
     fn set_row_hover(&mut self, path: Option<usize>, cx: &mut Context<Self>) {
+        if path.is_some() && self.graph_hover_suppressed.replace(false) {
+            cx.notify();
+        }
         self.hovered_row_path = path;
         self.set_history_hover(self.hovered_graph_path.or(path), cx);
     }
@@ -2614,6 +2727,9 @@ impl GitHistory {
         position: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if self.graph_hover_suppressed.replace(false) {
+            cx.notify();
+        }
         let Some(bounds) = self.list.bounds_for_item(row_index) else {
             self.set_graph_hover(None, cx);
             return;
@@ -2624,7 +2740,10 @@ impl GitHistory {
         };
         let local_x = f32::from(position.x - bounds.left());
         let local_y = f32::from(position.y - bounds.top());
-        self.set_graph_hover(hovered_graph_path(row, local_x, local_y), cx);
+        self.set_graph_hover(
+            hovered_graph_path(row, local_x, local_y, self.graph_geometry.get()),
+            cx,
+        );
     }
 
     fn toggle_column(&mut self, column: GitHistoryColumn, cx: &mut Context<Self>) {
@@ -3097,9 +3216,17 @@ impl GitHistory {
         ];
         let rows = self.graph.rows.clone();
         let list = self.list.clone();
+        let graph_geometry = self.graph_geometry.clone();
+        let graph_hover_suppressed = self.graph_hover_suppressed.clone();
         canvas(
             |_, _, _| (),
             move |viewport_bounds, _, window, _| {
+                let geometry = graph_geometry.get();
+                let focus = if graph_hover_suppressed.get() {
+                    None
+                } else {
+                    focus
+                };
                 let pass_count = if focus.is_some() { 2 } else { 1 };
                 for pass in 0..pass_count {
                     let selected_pass = focus.is_some() && pass == 1;
@@ -3138,8 +3265,8 @@ impl GitHistory {
                                     })
                             }) {
                                 has_segments = true;
-                                let from_x = lane_x(segment.from_lane);
-                                let to_x = lane_x(segment.to_lane);
+                                let from_x = geometry.lane_x(segment.from_lane);
+                                let to_x = geometry.lane_x(segment.to_lane);
                                 let origin = row_bounds.origin;
                                 match segment.shape {
                                     SegmentShape::Incoming => {
@@ -3225,12 +3352,12 @@ impl GitHistory {
         &mut self,
         row_index: usize,
         row: GraphRow,
-        lane_count: usize,
         focus: Option<GraphFocus>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let width = graph_width(lane_count);
+        let geometry = self.graph_geometry.get();
+        let width = geometry.width;
         let palette = [
             graph_color(theme.accent),
             graph_color(theme.busy),
@@ -3251,7 +3378,7 @@ impl GitHistory {
                 .filter(|_| selected)
                 .map(|focus| focus.amount * 0.75)
                 .unwrap_or_default();
-        let node_x = lane_x(row.node_lane);
+        let node_x = geometry.lane_x(row.node_lane);
         let fold_reference = (self.view_mode == GitHistoryViewMode::AllCommits)
             .then(|| {
                 self.visible_commits.get(row_index).and_then(|commit| {
@@ -3700,7 +3827,6 @@ impl GitHistory {
             .filter(|_| row_is_focused)
             .map(|focus| crate::theme::ink(0.018 * focus.amount));
         let row_hover_path = graph_row.node_color_id;
-        let graph_lane_count = self.graph_lane_capacity;
         let optional_cells = visible_history_columns(&column_order, columns)
             .into_iter()
             .map(|column| match column {
@@ -3754,7 +3880,7 @@ impl GitHistory {
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(GitHistoryEvent::OpenCommit(open_commit.clone()));
             }))
-            .child(self.graph_cell(index, graph_row, graph_lane_count, graph_focus, &theme, cx))
+            .child(self.graph_cell(index, graph_row, graph_focus, &theme, cx))
             .child(
                 container_query(move |size, _, _| {
                     let refs_width = ref_area_width(f32::from(size.width));
@@ -3837,12 +3963,16 @@ impl Render for GitHistory {
             self.column_drag = None;
         }
         let theme = Theme::of(cx).clone();
-        let graph_column = graph_width(self.graph_lane_capacity);
         let graph_focus = self.graph_focus(cx);
         let columns = configured_columns(cx);
         let column_widths = configured_column_widths(cx);
         let column_order = configured_column_order(cx);
         let visible_columns = visible_history_columns(&column_order, columns);
+        let optional_columns_width = visible_columns
+            .iter()
+            .copied()
+            .map(|column| history_optional_width(column, column_widths))
+            .sum::<f32>();
         let mut previous = HistoryDataColumn::Commit;
         let mut header_cells = Vec::with_capacity(visible_columns.len());
         for (index, column) in visible_columns.iter().copied().enumerate() {
@@ -3870,6 +4000,34 @@ impl Render for GitHistory {
                 },
             ))
             .children(header_cells);
+        let column_button = div()
+            .id("history-columns-button")
+            .absolute()
+            .right(px(3.0))
+            .top(px(2.0))
+            .size(px(20.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .opacity(0.0)
+            .group_hover("history-column-header", |style| style.opacity(1.0))
+            .when(self.column_menu.is_open(), |button| button.opacity(1.0))
+            .hover(|style| style.bg(crate::theme::ink(0.08)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_column_menu(event.position, cx);
+                }),
+            )
+            .child(
+                crate::icons::icon(crate::icons::CHECKLIST)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            );
         let column_menu_position = self.column_menu.get().copied();
         let column_menu = column_menu_position.map(|position| {
             let closing = self.column_menu.closing_since();
@@ -3882,6 +4040,11 @@ impl Render for GitHistory {
             let menu = self.render_author_menu(&theme, cx);
             (position, menu, closing)
         });
+        let graph_geometry = self.graph_geometry.clone();
+        let graph_hover_suppressed = self.graph_hover_suppressed.clone();
+        let graph_lane_capacity = self.graph_lane_capacity;
+        let show_header = !self.visible_commits.is_empty();
+        let header_theme = theme.clone();
 
         let body: AnyElement = if self.target_key.is_none() {
             div()
@@ -4005,58 +4168,50 @@ impl Render for GitHistory {
                     )
                 },
             )
-            .when(!self.visible_commits.is_empty(), |element| {
-                element.child(
+            .child(
+                container_query(move |size, window, _| {
+                    let target = responsive_graph_geometry(
+                        graph_lane_capacity,
+                        f32::from(size.width),
+                        optional_columns_width,
+                    );
+                    let previous = graph_geometry.get();
+                    let geometry =
+                        stabilized_graph_geometry(target, previous, window.scale_factor());
+                    if geometry != previous {
+                        graph_hover_suppressed.set(true);
+                    }
+                    graph_geometry.set(geometry);
                     div()
-                        .id("history-column-header")
-                        .group("history-column-header")
-                        .relative()
-                        .h(px(24.0))
-                        .flex_none()
+                        .size_full()
                         .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(crate::theme::hairline(0.06))
-                        .text_size(px(9.5))
-                        .text_color(theme.text_faint)
-                        .child(div().w(px(graph_column)).flex_none())
-                        .child(div().flex_1().min_w(px(80.0)).child("Commit"))
-                        .child(optional_headers)
-                        .child(
-                            div()
-                                .id("history-columns-button")
-                                .absolute()
-                                .right(px(3.0))
-                                .top(px(2.0))
-                                .size(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.0))
-                                .cursor_pointer()
-                                .opacity(0.0)
-                                .group_hover("history-column-header", |style| style.opacity(1.0))
-                                .when(self.column_menu.is_open(), |button| button.opacity(1.0))
-                                .hover(|style| style.bg(crate::theme::ink(0.08)))
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(
-                                        |this, event: &gpui::MouseDownEvent, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                            this.open_column_menu(event.position, cx);
-                                        },
-                                    ),
-                                )
-                                .child(
-                                    crate::icons::icon(crate::icons::CHECKLIST)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                )
-            })
-            .child(body)
+                        .flex_col()
+                        .when(show_header, |element| {
+                            element.child(
+                                div()
+                                    .id("history-column-header")
+                                    .group("history-column-header")
+                                    .relative()
+                                    .h(px(24.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .border_b_1()
+                                    .border_color(crate::theme::hairline(0.06))
+                                    .text_size(px(9.5))
+                                    .text_color(header_theme.text_faint)
+                                    .child(div().w(px(geometry.width)).flex_none())
+                                    .child(div().flex_1().min_w(px(80.0)).child("Commit"))
+                                    .child(optional_headers)
+                                    .child(column_button),
+                            )
+                        })
+                        .child(body)
+                })
+                .w_full()
+                .flex_1()
+                .min_h_0(),
+            )
             .when_some(column_menu, |element, (position, menu, closing)| {
                 element.child(popover::menu_at(
                     "history-columns-menu",
@@ -4325,6 +4480,7 @@ mod tests {
 
     #[test]
     fn graph_hover_detects_vertical_and_curved_paths() {
+        let geometry = GraphGeometry::natural(2);
         let vertical = GraphRow {
             sha: "vertical".into(),
             node_lane: 0,
@@ -4337,7 +4493,10 @@ mod tests {
             }],
             is_head: false,
         };
-        assert_eq!(hovered_graph_path(&vertical, lane_x(1), 5.0), Some(7));
+        assert_eq!(
+            hovered_graph_path(&vertical, geometry.lane_x(1), 5.0, geometry),
+            Some(7)
+        );
 
         let curved_segment = GraphSegment {
             from_lane: 0,
@@ -4346,7 +4505,13 @@ mod tests {
             shape: SegmentShape::Outgoing,
         };
         let middle = HISTORY_ROW_HEIGHT / 2.0;
-        let curve_x = cubic_coordinate(lane_x(0), lane_x(0), lane_x(1), lane_x(1), 0.5);
+        let curve_x = cubic_coordinate(
+            geometry.lane_x(0),
+            geometry.lane_x(0),
+            geometry.lane_x(1),
+            geometry.lane_x(1),
+            0.5,
+        );
         let curve_y = cubic_coordinate(
             middle,
             middle * 1.45,
@@ -4361,11 +4526,15 @@ mod tests {
             segments: vec![curved_segment],
             is_head: false,
         };
-        assert_eq!(hovered_graph_path(&curved, curve_x, curve_y), Some(9));
+        assert_eq!(
+            hovered_graph_path(&curved, curve_x, curve_y, geometry),
+            Some(9)
+        );
     }
 
     #[test]
     fn graph_hover_prefers_the_node_and_ignores_empty_space() {
+        let geometry = GraphGeometry::natural(4);
         let row = GraphRow {
             sha: "node".into(),
             node_lane: 1,
@@ -4379,10 +4548,75 @@ mod tests {
             is_head: false,
         };
         assert_eq!(
-            hovered_graph_path(&row, lane_x(1), HISTORY_ROW_HEIGHT / 2.0),
+            hovered_graph_path(&row, geometry.lane_x(1), HISTORY_ROW_HEIGHT / 2.0, geometry,),
             Some(11)
         );
-        assert_eq!(hovered_graph_path(&row, graph_width(4) - 1.0, 2.0), None);
+        assert_eq!(
+            hovered_graph_path(&row, geometry.width - 1.0, 2.0, geometry),
+            None
+        );
+    }
+
+    #[test]
+    fn responsive_graph_keeps_natural_spacing_when_it_fits() {
+        let geometry = responsive_graph_geometry(8, 900.0, 240.0);
+        assert_eq!(geometry, GraphGeometry::natural(8));
+    }
+
+    #[test]
+    fn responsive_graph_compresses_lanes_to_preserve_commit_space() {
+        let geometry = responsive_graph_geometry(20, 400.0, 240.0);
+        assert_eq!(geometry.width, 80.0);
+        assert!(geometry.lane_spacing < HISTORY_LANE_SPACING);
+        assert_eq!(geometry.lane_x(0), GraphGeometry::natural(20).lane_x(0));
+        assert!(geometry.lane_x(19) < GraphGeometry::natural(20).lane_x(19));
+    }
+
+    #[test]
+    fn compressed_graph_hit_testing_uses_the_fitted_lane_positions() {
+        let geometry = GraphGeometry::fitted(20, 80.0);
+        let row = GraphRow {
+            sha: "compact".into(),
+            node_lane: 19,
+            node_color_id: 7,
+            segments: Vec::new(),
+            is_head: false,
+        };
+        assert_eq!(
+            hovered_graph_path(
+                &row,
+                geometry.lane_x(19),
+                HISTORY_ROW_HEIGHT / 2.0,
+                geometry,
+            ),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn responsive_graph_geometry_ignores_sub_step_resize_jitter() {
+        let previous = GraphGeometry::fitted(20, 80.0);
+        let target = GraphGeometry::fitted(20, 81.9);
+        let stable = stabilized_graph_geometry(target, previous, 2.0);
+        assert_eq!(stable.width, previous.width);
+        assert_eq!(stable.lane_spacing, previous.lane_spacing);
+        assert_eq!(stable.device_scale, 2.0);
+
+        let next = stabilized_graph_geometry(GraphGeometry::fitted(20, 82.1), stable, 2.0);
+        assert_eq!(next.width, 82.0);
+        assert_ne!(next.lane_spacing, stable.lane_spacing);
+    }
+
+    #[test]
+    fn responsive_graph_lanes_snap_to_device_pixels() {
+        let geometry = stabilized_graph_geometry(
+            GraphGeometry::fitted(20, 82.0),
+            GraphGeometry::natural(1),
+            2.0,
+        );
+        for lane in 0..20 {
+            assert!((geometry.lane_x(lane) * 2.0).fract().abs() < f32::EPSILON);
+        }
     }
 
     #[test]
