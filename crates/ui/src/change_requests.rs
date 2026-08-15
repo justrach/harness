@@ -69,7 +69,7 @@ impl ChangeRequestTooltip {
 impl Render for ChangeRequestTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
+        let card = div()
             .max_w(px(320.0))
             .px(px(9.0))
             .py(px(7.0))
@@ -79,7 +79,11 @@ impl Render for ChangeRequestTooltip {
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
+            .bg(if theme.is_glass() {
+                theme.glass_overlay()
+            } else {
+                theme.surface_raised
+            })
             .shadow_md()
             .child(
                 div()
@@ -99,7 +103,8 @@ impl Render for ChangeRequestTooltip {
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
                     .child(self.model.title.clone()),
-            )
+            );
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
     }
 }
 
