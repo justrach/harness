@@ -398,6 +398,22 @@ fn normalized_upstream(upstream: &str) -> &str {
     upstream.strip_prefix("refs/remotes/").unwrap_or(upstream)
 }
 
+/// Extract `main` from `git ls-remote --symref <remote> HEAD` output.
+///
+/// A local `refs/remotes/<remote>/HEAD` is merely a fetch-time cache and is
+/// absent in freshly configured or manually created checkouts. The remote's
+/// advertised symbolic HEAD is authoritative without changing local refs.
+fn default_branch_from_ls_remote(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (reference, name) = line.split_once('\t')?;
+        (name == "HEAD")
+            .then(|| reference.strip_prefix("ref: refs/heads/"))
+            .flatten()
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
@@ -496,12 +512,23 @@ impl GitCheckoutInspector {
         );
         let default_branch = if let Some(remote) = branch.remote_name.as_deref() {
             let remote_head = format!("refs/remotes/{remote}/HEAD");
-            self.git_optional(
-                &checkout_root,
-                &["symbolic-ref", "--quiet", "--short", &remote_head],
-            )
-            .await
-            .and_then(|reference| branch_from_upstream(&reference, Some(remote)).map(str::to_owned))
+            let local_default_branch = self
+                .git_optional(
+                    &checkout_root,
+                    &["symbolic-ref", "--quiet", "--short", &remote_head],
+                )
+                .await
+                .and_then(|reference| {
+                    branch_from_upstream(&reference, Some(remote)).map(str::to_owned)
+                });
+            if local_default_branch.is_some() {
+                local_default_branch
+            } else {
+                self.git_optional(&checkout_root, &["ls-remote", "--symref", remote, "HEAD"])
+                    .await
+                    .as_deref()
+                    .and_then(default_branch_from_ls_remote)
+            }
         } else {
             None
         };
@@ -1047,6 +1074,76 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             source.branch.head_selectors,
             ["contributor:feature/no-upstream", "feature/no-upstream"]
         );
+    }
+
+    #[tokio::test]
+    async fn git_inspector_reads_default_branch_from_remote_when_local_head_is_absent() {
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let remote = temp.path().join("origin.git");
+        let checkout = temp.path().join("checkout");
+        let init_remote = std::process::Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("remote path"),
+            ])
+            .output()
+            .expect("create bare remote");
+        assert!(
+            init_remote.status.success(),
+            "create bare remote failed: {}",
+            String::from_utf8_lossy(&init_remote.stderr)
+        );
+        let remote_head = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
+            .output()
+            .expect("set bare remote head");
+        assert!(
+            remote_head.status.success(),
+            "set bare remote head failed: {}",
+            String::from_utf8_lossy(&remote_head.stderr)
+        );
+
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        run_git(&checkout, &["init", "-q", "-b", "main"]);
+        run_git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        run_git(
+            &checkout,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ],
+        );
+        run_git(&checkout, &["push", "-q", "origin", "main"]);
+
+        let source = ChangeRequestResolver::new()
+            .inspect_checkout(&checkout)
+            .await
+            .expect("inspect checkout with an unfetched remote HEAD");
+
+        assert_eq!(source.branch.remote_name.as_deref(), Some("origin"));
+        assert_eq!(source.default_branch.as_deref(), Some("main"));
     }
 
     #[tokio::test]
