@@ -65,6 +65,10 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// Device-local pinned sessions in their visual order. This preference is
+    /// presentation-only and never enters the synchronized workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sidebar_pinned_session_ids: Vec<String>,
     /// Legacy: per-space tab order, from when tabs were the selected space's
     /// non-archived sessions. Kept for file compatibility; no longer read.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -105,6 +109,7 @@ impl Default for UiSettings {
             last_space_id: None,
             open_tabs: None,
             space_filter: None,
+            sidebar_pinned_session_ids: Vec::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
@@ -370,6 +375,7 @@ mod tests {
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            sidebar_pinned_session_ids: vec!["chat-2".to_string(), "chat-1".to_string()],
             tab_order: std::collections::HashMap::from([(
                 "space-1".to_string(),
                 vec!["b".to_string(), "a".to_string()],
@@ -406,6 +412,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
         assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(loaded.sidebar_pinned_session_ids.is_empty());
         assert!(!loaded.sound_enabled, "other keys still parse");
         assert!(
             loaded.notifications_enabled,
