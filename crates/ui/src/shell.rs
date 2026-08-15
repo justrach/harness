@@ -205,6 +205,12 @@ fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
     (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
 }
 
+/// Width used by right-pane takeover. Unlike manual resizing, takeover is
+/// intentionally allowed to consume the conversation column completely.
+fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
+    (viewport - sidebar).max(0.0)
+}
+
 /// One right-pane surface tab (t3code RightPanelSurface, narrowed to our two
 /// kinds): a git-diff page (each tab its own [`Changes`] viewer — multiple
 /// diff panels, user request) or one embedded terminal keyed by its
@@ -1384,15 +1390,16 @@ impl Shell {
         if !self.right_pane_open(cx) {
             0.0
         } else {
-            // Preserve a usable conversation column while giving everything
-            // else physically available to the right pane. Rides the sidebar
+            // Manual sizing preserves a usable conversation column. Takeover
+            // intentionally consumes it completely. Both ride the sidebar
             // tween so toggling it remains seamless.
             let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-            let available = right_pane_max_width(self.viewport_width, sidebar_now);
             if self.right_pane_expanded {
-                available
+                right_pane_takeover_width(self.viewport_width, sidebar_now)
             } else {
-                self.settings.right_pane_width.min(available)
+                self.settings
+                    .right_pane_width
+                    .min(right_pane_max_width(self.viewport_width, sidebar_now))
             }
         }
     }
@@ -6486,6 +6493,12 @@ mod tests {
         // when the whole window is unusually narrow.
         assert_eq!(right_pane_max_width(800.0, 256.0), 244.0);
         assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
+    }
+
+    #[test]
+    fn right_pane_takeover_consumes_the_chat_column() {
+        assert_eq!(right_pane_takeover_width(1200.0, 256.0), 944.0);
+        assert_eq!(1200.0 - 256.0 - 944.0, 0.0);
     }
 
     #[tokio::test]
