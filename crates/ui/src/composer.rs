@@ -4808,7 +4808,7 @@ impl Composer {
         self.interrupt_chat(chat_id, cx);
     }
 
-    fn interrupt_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn interrupt_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -4829,6 +4829,10 @@ impl Composer {
             }
         });
         self.interrupt_tasks.insert(chat_id, task);
+    }
+
+    pub(crate) fn is_interrupting(&self, chat_id: &str) -> bool {
+        self.interrupting.contains(chat_id)
     }
 
     // ---- wizard glue ----

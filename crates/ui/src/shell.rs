@@ -575,20 +575,34 @@ impl SyncFlow {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellEscapeRoute {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellEscapeOutcome {
     OtherKey,
     Blocked,
-    Fallback,
+    InterruptChat(String),
+    Ignored,
 }
 
-fn shell_escape_route(key: &str, blocking_overlay: bool) -> ShellEscapeRoute {
+fn resolve_shell_escape(
+    key: &str,
+    blocking_overlay: bool,
+    route: Route,
+    selected_chat: Option<&str>,
+    indicator: Indicator,
+    interrupting: bool,
+) -> ShellEscapeOutcome {
     if key != "escape" {
-        ShellEscapeRoute::OtherKey
+        ShellEscapeOutcome::OtherKey
     } else if blocking_overlay {
-        ShellEscapeRoute::Blocked
+        ShellEscapeOutcome::Blocked
+    } else if !matches!(route, Route::Chat) || interrupting {
+        ShellEscapeOutcome::Ignored
+    } else if matches!(indicator, Indicator::Working | Indicator::AwaitingInput) {
+        selected_chat
+            .map(|chat_id| ShellEscapeOutcome::InterruptChat(chat_id.to_owned()))
+            .unwrap_or(ShellEscapeOutcome::Ignored)
     } else {
-        ShellEscapeRoute::Fallback
+        ShellEscapeOutcome::Ignored
     }
 }
 
@@ -4240,10 +4254,30 @@ impl Shell {
     }
 
     fn on_key_down(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if shell_escape_route(&event.keystroke.key, self.has_blocking_overlay())
-            == ShellEscapeRoute::Blocked
-        {
-            cx.stop_propagation();
+        let selected_chat = self.state.read(cx).selected_chat.clone();
+        let indicator = selected_chat
+            .as_deref()
+            .map(|chat_id| self.state.read(cx).indicator_for(chat_id, Utc::now()))
+            .unwrap_or(Indicator::None);
+        let interrupting = selected_chat
+            .as_deref()
+            .is_some_and(|chat_id| self.composer.read(cx).is_interrupting(chat_id));
+
+        match resolve_shell_escape(
+            &event.keystroke.key,
+            self.has_blocking_overlay(),
+            self.route,
+            selected_chat.as_deref(),
+            indicator,
+            interrupting,
+        ) {
+            ShellEscapeOutcome::Blocked => cx.stop_propagation(),
+            ShellEscapeOutcome::InterruptChat(chat_id) => {
+                cx.stop_propagation();
+                self.composer
+                    .update(cx, |composer, cx| composer.interrupt_chat(chat_id, cx));
+            }
+            ShellEscapeOutcome::OtherKey | ShellEscapeOutcome::Ignored => {}
         }
     }
 
@@ -6507,18 +6541,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_reaches_fallback_only_without_blocking_chrome() {
+    fn escape_interrupts_only_the_active_live_chat() {
         assert_eq!(
-            shell_escape_route("escape", false),
-            ShellEscapeRoute::Fallback
+            resolve_shell_escape(
+                "escape",
+                false,
+                Route::Chat,
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+            ShellEscapeOutcome::InterruptChat("chat-a".to_owned())
         );
         assert_eq!(
-            shell_escape_route("escape", true),
-            ShellEscapeRoute::Blocked
+            resolve_shell_escape(
+                "escape",
+                false,
+                Route::Chat,
+                Some("chat-b"),
+                Indicator::AwaitingInput,
+                false,
+            ),
+            ShellEscapeOutcome::InterruptChat("chat-b".to_owned())
         );
+    }
+
+    #[test]
+    fn escape_ignores_non_live_or_ineligible_views() {
         assert_eq!(
-            shell_escape_route("enter", true),
-            ShellEscapeRoute::OtherKey
+            resolve_shell_escape(
+                "escape",
+                true,
+                Route::Chat,
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+            ShellEscapeOutcome::Blocked
+        );
+        for (route, selected, indicator, interrupting) in [
+            (Route::Chat, Some("chat-a"), Indicator::None, false),
+            (Route::Chat, None, Indicator::Working, false),
+            (Route::Chat, Some("chat-a"), Indicator::Working, true),
+            (
+                Route::Settings(SettingsSection::Devices),
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                resolve_shell_escape("escape", false, route, selected, indicator, interrupting,),
+                ShellEscapeOutcome::Ignored
+            );
+        }
+        assert_eq!(
+            resolve_shell_escape(
+                "enter",
+                true,
+                Route::Chat,
+                Some("chat-a"),
+                Indicator::Working,
+                false,
+            ),
+            ShellEscapeOutcome::OtherKey
         );
     }
 
