@@ -1071,6 +1071,23 @@ impl RpcService for EngineRpc {
                         "rejected": s.rejected,
                     })
                 }
+                fn chat2_json(s: &zeron_sync::ChatStatsSnapshot) -> serde_json::Value {
+                    serde_json::json!({
+                        "connected": s.connected,
+                        "cursor": s.cursor,
+                        "headSeq": s.head_seq,
+                        "seqFloor": s.seq_floor,
+                        "checkpointSeq": s.checkpoint_seq,
+                        "checkpointSize": s.checkpoint_size,
+                        "rowCount": s.row_count,
+                        "rowBytes": s.row_bytes,
+                        "pendingPushes": s.pending_pushes,
+                        "rejoins": s.rejoins,
+                        "disconnects": s.disconnects,
+                        "rejected": s.rejected,
+                        "serverResets": s.server_resets,
+                    })
+                }
                 let workspace = self.workspace.sync_status();
                 let chats: Vec<serde_json::Value> = self
                     .doc_host
@@ -1079,7 +1096,7 @@ impl RpcService for EngineRpc {
                     .map(|(chat_id, room)| {
                         serde_json::json!({
                             "chatId": chat_id,
-                            "room": room.as_ref().map(room_json),
+                            "room": room.as_ref().map(chat2_json),
                         })
                     })
                     .collect();

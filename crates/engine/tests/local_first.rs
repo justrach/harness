@@ -349,6 +349,15 @@ async fn revoked_captured_session_stays_on_its_synced_cache() {
         .await
         .unwrap();
 
+    // Revocation is detected by the background session probe — assembly no
+    // longer blocks on the network round trip — so the SignedOut transition
+    // lands shortly after assembly, not during it.
+    for _ in 0..200 {
+        if auth.state() == AuthState::SignedOut {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     assert_eq!(auth.state(), AuthState::SignedOut);
     assert!(auth.loaded_workos_session());
     assert_eq!(runtime.workspace_scope(), WorkspaceScope::Synced);
