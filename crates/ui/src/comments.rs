@@ -22,7 +22,12 @@ impl CommentSide {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffComment {
     pub id: String,
+    /// The diff's own path — post-rename when the file moved. This is the
+    /// grouping key the changes pane looks cards up by, NOT necessarily the
+    /// path the citation names (see [`DiffComment::cite_path`]).
     pub path: String,
+    /// Pre-rename path, when the file moved. `None` otherwise.
+    pub old_path: Option<String>,
     pub side: CommentSide,
     pub line: u32,
     pub body: String,
@@ -38,18 +43,36 @@ impl DiffComment {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             path: path.into(),
+            old_path: None,
             side,
             line,
             body: body.into(),
         }
     }
 
+    /// Tag the comment with the file's pre-rename path so an `Old`-side line
+    /// cites where that line actually lives.
+    pub fn renamed_from(mut self, old_path: Option<impl Into<String>>) -> Self {
+        self.old_path = old_path.map(Into::into);
+        self
+    }
+
     pub fn anchor(&self) -> (CommentSide, u32) {
         (self.side, self.line)
     }
 
+    /// The path the line number is valid in. An `Old`-side line only exists in
+    /// the pre-rename file, so citing `path` there points the agent at a line
+    /// of a file that never held it.
+    pub fn cite_path(&self) -> &str {
+        match self.side {
+            CommentSide::Old => self.old_path.as_deref().unwrap_or(&self.path),
+            CommentSide::New => &self.path,
+        }
+    }
+
     pub fn location(&self) -> String {
-        format!("{}:{}", self.path, self.line)
+        format!("{}:{}", self.cite_path(), self.line)
     }
 }
 
@@ -228,6 +251,31 @@ mod tests {
         assert_eq!(badge.details[0].location.as_ref(), "a.rs:5");
         assert_eq!(badge.details[0].tag.as_deref(), Some("R"));
         assert_eq!(badge.details[0].body.as_ref(), "see (L): the other one");
+    }
+
+    #[test]
+    fn a_renamed_file_cites_the_side_the_line_lives_in() {
+        let old = comment("new_name.rs", CommentSide::Old, 7, "why dropped?")
+            .renamed_from(Some("old_name.rs"));
+        let new =
+            comment("new_name.rs", CommentSide::New, 12, "nit").renamed_from(Some("old_name.rs"));
+        // The grouping key stays the diff's own path either way.
+        assert_eq!(old.path, "new_name.rs");
+        assert_eq!(new.path, "new_name.rs");
+        let out = with_comments("x", &[old, new]);
+        assert!(out.contains("- old_name.rs:7 (L): why dropped?"));
+        assert!(out.contains("- new_name.rs:12 (R): nit"));
+    }
+
+    #[test]
+    fn an_unrenamed_file_cites_its_only_path_on_both_sides() {
+        let staged = vec![
+            comment("a.rs", CommentSide::Old, 3, "gone"),
+            comment("a.rs", CommentSide::New, 4, "here"),
+        ];
+        let out = with_comments("x", &staged);
+        assert!(out.contains("- a.rs:3 (L): gone"));
+        assert!(out.contains("- a.rs:4 (R): here"));
     }
 
     #[test]

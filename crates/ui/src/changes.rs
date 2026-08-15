@@ -1052,7 +1052,14 @@ struct HoverRow {
 }
 
 struct CommentDraft {
+    /// Composer the note will stage onto, captured when the card opened. A
+    /// draft belongs to the checkout it was written over, so it must not
+    /// follow the user onto whatever chat is selected by commit time.
+    key: String,
     path: String,
+    /// The file's pre-rename path, when it moved — carried onto the comment so
+    /// an `Old`-side citation names the file that line lives in.
+    old_path: Option<String>,
     side: CommentSide,
     line: u32,
     input: Entity<ComposerInput>,
@@ -1597,6 +1604,7 @@ impl Changes {
 
     /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.discard_stale_draft(cx);
         // The watch follows the selected chat's host device (idempotent when
         // the target is unchanged); a boot-deferred attempt retries here too.
         self.ensure_watch(cx);
@@ -1906,6 +1914,29 @@ impl Changes {
             .collect()
     }
 
+    /// The parsed diff's pre-rename path for `path`, when the file moved.
+    fn old_path_of(&self, path: &str) -> Option<String> {
+        self.parsed
+            .as_ref()?
+            .files
+            .iter()
+            .find(|file| file.path == path)?
+            .old_path
+            .clone()
+    }
+
+    /// A draft belongs to the checkout it was opened over. Chat navigation
+    /// swaps both the diff under it and the composer it would stage onto, so
+    /// the half-written note is dropped rather than following the user across.
+    fn discard_stale_draft(&mut self, cx: &mut Context<Self>) {
+        let key = self.state.read(cx).composer_key();
+        if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
+            self.draft = None;
+            self.sync_comment_rows(cx);
+            cx.notify();
+        }
+    }
+
     fn draft_anchor(&self) -> Option<(String, CommentSide, u32)> {
         self.draft
             .as_ref()
@@ -2011,8 +2042,12 @@ impl Changes {
             _ => {}
         });
         let handle = input.read(cx).focus_handle(cx);
+        let key = self.state.read(cx).composer_key();
+        let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
+            key,
             path,
+            old_path,
             side,
             line,
             input,
@@ -2039,9 +2074,12 @@ impl Changes {
             cx.notify();
             return;
         }
-        let comment = DiffComment::new(draft.path, draft.side, draft.line, body);
+        let comment =
+            DiffComment::new(draft.path, draft.side, draft.line, body).renamed_from(draft.old_path);
+        // `draft.key`, not the live one: the note stages onto the composer it
+        // was written against even if the selection moved under it.
+        let key = draft.key;
         self.state.update(cx, |state, cx| {
-            let key = state.composer_key();
             state.add_diff_comment(&key, comment);
             cx.notify();
         });
@@ -2394,8 +2432,10 @@ impl Changes {
                     .as_ref()
                     .filter(|draft| draft.path == file_diff.path)
                 {
+                    // Header cites the same path the staged card and the
+                    // prompt bullet will.
                     Some(draft) => render_comment_draft(
-                        &draft.path,
+                        draft_cite_path(draft),
                         draft.line,
                         draft.input.clone(),
                         &theme,
@@ -3333,6 +3373,14 @@ fn render_comment_card(comment: &DiffComment, theme: &Theme, cx: &Context<Change
 
 fn comment_accent_bar(color: gpui::Hsla) -> gpui::Div {
     div().w(px(ACCENT_BAR_WIDTH)).h_full().flex_none().bg(color)
+}
+
+/// Mirrors [`DiffComment::cite_path`] for the not-yet-staged note.
+fn draft_cite_path(draft: &CommentDraft) -> &str {
+    match draft.side {
+        CommentSide::Old => draft.old_path.as_deref().unwrap_or(&draft.path),
+        CommentSide::New => &draft.path,
+    }
 }
 
 /// Fixed height, so an open draft never fights the fold tween.
