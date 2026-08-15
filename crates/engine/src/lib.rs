@@ -50,7 +50,10 @@ pub use repos::{CheckoutIdentity, Repos, worktree_branch_from_title};
 pub use rpc::EngineRpc;
 pub use run_journal::{JournalError, RunJournal};
 pub use sessions::{JournaledEvent, SessionsEngine, SteerOutcome};
-pub use source_control::{BranchHeadContext, GitRemote, parse_git_remote};
+pub use source_control::{
+    BranchHeadContext, ChangeRequestError, ChangeRequestProvider, ChangeRequestResolution,
+    ChangeRequestResolver, CheckoutSourceContext, GitHubCli, GitRemote, parse_git_remote,
+};
 pub use spaces::SpacesSync;
 pub use terminals::Terminals;
 pub use titles::TitleGenerator;
