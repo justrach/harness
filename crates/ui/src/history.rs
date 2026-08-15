@@ -1479,7 +1479,6 @@ impl Render for GitHistorySearchControl {
             }));
         }
         let control = cx.entity().downgrade();
-        let escape_control = cx.entity().downgrade();
         let search_loading = self.history.read(cx).search_loading;
         let closing = self.mode == GitHistorySearchMode::Collapsing;
         let transition_epoch = self.transition_epoch;
@@ -1508,14 +1507,6 @@ impl Render for GitHistorySearchControl {
             .border_1()
             .border_color(theme.border.opacity(0.8))
             .bg(theme.surface_raised.opacity(0.86))
-            .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    escape_control
-                        .update(cx, |control, cx| control.clear(cx))
-                        .ok();
-                }
-            })
             .child(
                 div()
                     .size(px(14.0))
