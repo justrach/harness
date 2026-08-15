@@ -43,6 +43,7 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
     SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    sidebar_pin_profile_key,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -424,6 +425,7 @@ struct PinnedSessionDrag {
     chat_id: String,
     visible_ids: std::sync::Arc<Vec<String>>,
     filter: Option<String>,
+    profile_key: String,
 }
 
 /// Live destination for a pinned-session drag. The real row remains clipped
@@ -436,6 +438,7 @@ struct PinnedSessionDragState {
     prev_over: usize,
     epoch: usize,
     filter: Option<String>,
+    profile_key: String,
     pointer_y: Option<f32>,
     viewport_top: f32,
     viewport_bottom: f32,
@@ -1315,20 +1318,30 @@ impl Shell {
             self.settings.space_filter = None;
             self.schedule_save(cx);
         }
-        // Pins are device-local presentation state. Keep archived ids so an
-        // unarchived session returns to its pinned slot; prune only after the
-        // synchronized chat list confirms a hard deletion.
-        if state.read(cx).chats_synced && !self.settings.sidebar_pinned_session_ids.is_empty() {
-            let known_chat_ids = state
+        // Pins belong to one device-local workspace profile. Never judge a
+        // profile before both its identity and first complete chat frame have
+        // landed; another profile's absent chats are not deletions.
+        let profile_key = self.active_sidebar_pin_profile_key(cx);
+        let known_chat_ids = state.read(cx).chats_synced.then(|| {
+            state
                 .read(cx)
                 .chats
                 .iter()
                 .map(|chat| chat.id.clone())
-                .collect();
-            if spaces::retain_known_pins(
-                &mut self.settings.sidebar_pinned_session_ids,
-                &known_chat_ids,
-            ) {
+                .collect()
+        });
+        if let (Some(profile_key), Some(known_chat_ids)) = (profile_key, known_chat_ids) {
+            let changed = self
+                .settings
+                .sidebar_pinned_session_ids_by_profile
+                .get_mut(&profile_key)
+                .is_some_and(|pins| spaces::retain_known_pins(pins, &known_chat_ids));
+            if changed {
+                if self.settings.sidebar_pins(&profile_key).is_empty() {
+                    self.settings
+                        .sidebar_pinned_session_ids_by_profile
+                        .remove(&profile_key);
+                }
                 self.schedule_save(cx);
             }
         }
@@ -2083,29 +2096,52 @@ impl Shell {
         self.set_chat_archived(chat_id, true, cx);
     }
 
+    fn active_sidebar_pin_profile_key(&self, cx: &App) -> Option<String> {
+        let state = self.state.read(cx);
+        sidebar_pin_profile_key(
+            state.workspace_scope,
+            state.auth.as_ref(),
+            self.boot.org_id.as_deref(),
+        )
+    }
+
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
         self.close_chat_menu(cx);
         self.cancel_pinned_session_drag(cx);
-        let changed = if pinned {
-            if self
-                .settings
-                .sidebar_pinned_session_ids
-                .iter()
-                .any(|id| id == &chat_id)
-            {
-                false
+        let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
+            return;
+        };
+        if !self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id)
+        {
+            return;
+        }
+        let (changed, empty) = {
+            let pinned_ids = self.settings.sidebar_pins_mut(profile_key.clone());
+            let changed = if pinned {
+                if pinned_ids.iter().any(|id| id == &chat_id) {
+                    false
+                } else {
+                    pinned_ids.push(chat_id);
+                    true
+                }
             } else {
-                self.settings.sidebar_pinned_session_ids.push(chat_id);
-                true
-            }
-        } else {
-            let before = self.settings.sidebar_pinned_session_ids.len();
-            self.settings
-                .sidebar_pinned_session_ids
-                .retain(|id| id != &chat_id);
-            self.settings.sidebar_pinned_session_ids.len() != before
+                let before = pinned_ids.len();
+                pinned_ids.retain(|id| id != &chat_id);
+                pinned_ids.len() != before
+            };
+            (changed, pinned_ids.is_empty())
         };
         if changed {
+            if empty {
+                self.settings
+                    .sidebar_pinned_session_ids_by_profile
+                    .remove(&profile_key);
+            }
             self.schedule_save(cx);
         }
         cx.notify();
@@ -4461,10 +4497,8 @@ impl Shell {
         if let Some((chat_id, position)) = self.chat_menu.get().cloned() {
             let chat_menu_closing = self.chat_menu.closing_since();
             let is_pinned = self
-                .settings
-                .sidebar_pinned_session_ids
-                .iter()
-                .any(|id| id == &chat_id);
+                .active_sidebar_pin_profile_key(cx)
+                .is_some_and(|key| self.settings.sidebar_pins(&key).contains(&chat_id));
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();

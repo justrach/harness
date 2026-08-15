@@ -179,6 +179,25 @@ mod pinned_session_tests {
     }
 
     #[test]
+    fn pin_cleanup_for_one_profile_leaves_other_profiles_untouched() {
+        let mut settings = crate::settings::UiSettings::default();
+        settings
+            .sidebar_pins_mut("local".to_string())
+            .extend(ids(&["local-active", "local-deleted"]));
+        settings
+            .sidebar_pins_mut("synced:org-1:user-1".to_string())
+            .push("synced-pin".to_string());
+
+        let known = HashSet::from(["local-active".to_string()]);
+        assert!(retain_known_pins(
+            settings.sidebar_pins_mut("local".to_string()),
+            &known,
+        ));
+        assert_eq!(settings.sidebar_pins("local"), ["local-active"]);
+        assert_eq!(settings.sidebar_pins("synced:org-1:user-1"), ["synced-pin"]);
+    }
+
+    #[test]
     fn pinned_drop_index_quantizes_clamps_and_rejects_outside() {
         assert_eq!(pinned_session_drop_index(-1.0, 3), None);
         assert_eq!(pinned_session_drop_index(0.0, 3), Some(0));
@@ -404,6 +423,10 @@ impl Shell {
         over: usize,
         cx: &mut Context<Self>,
     ) {
+        if self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&payload.profile_key) {
+            self.cancel_pinned_session_drag(cx);
+            return;
+        }
         let Some(from) = payload
             .visible_ids
             .iter()
@@ -420,6 +443,7 @@ impl Shell {
             Some(drag)
                 if drag.chat_id == payload.chat_id
                     && drag.filter == payload.filter
+                    && drag.profile_key == payload.profile_key
                     && drag.visible_ids.as_ref() == payload.visible_ids.as_ref()
                     && drag.over != over =>
             {
@@ -431,6 +455,7 @@ impl Shell {
             Some(drag)
                 if drag.chat_id == payload.chat_id
                     && drag.filter == payload.filter
+                    && drag.profile_key == payload.profile_key
                     && drag.visible_ids.as_ref() == payload.visible_ids.as_ref() => {}
             _ => {
                 self.pinned_session_drag_generation =
@@ -443,6 +468,7 @@ impl Shell {
                     prev_over: from,
                     epoch: 0,
                     filter: payload.filter.clone(),
+                    profile_key: payload.profile_key.clone(),
                     pointer_y: None,
                     viewport_top: 0.0,
                     viewport_bottom: 0.0,
@@ -579,12 +605,14 @@ impl Shell {
         let Some(drag) = self.pinned_session_drag.as_ref() else {
             return true;
         };
-        if drag.filter != self.settings.space_filter {
+        if drag.filter != self.settings.space_filter
+            || self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&drag.profile_key)
+        {
             return false;
         }
         let pinned: HashSet<&str> = self
             .settings
-            .sidebar_pinned_session_ids
+            .sidebar_pins(&drag.profile_key)
             .iter()
             .map(String::as_str)
             .collect();
@@ -626,6 +654,7 @@ impl Shell {
         self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
         if drag.chat_id != payload.chat_id
             || drag.filter != payload.filter
+            || drag.profile_key != payload.profile_key
             || drag.visible_ids.as_ref() != payload.visible_ids.as_ref()
         {
             cx.notify();
@@ -636,14 +665,12 @@ impl Shell {
             return;
         };
         let to = drag.over.min(drag.visible_ids.len().saturating_sub(1));
-        let next = reorder_visible_pins(
-            &self.settings.sidebar_pinned_session_ids,
-            drag.visible_ids.as_ref(),
-            from,
-            to,
-        );
-        if next != self.settings.sidebar_pinned_session_ids {
-            self.settings.sidebar_pinned_session_ids = next;
+        let saved_pins = self.settings.sidebar_pins(&drag.profile_key);
+        let next = reorder_visible_pins(saved_pins, drag.visible_ids.as_ref(), from, to);
+        if next != saved_pins {
+            self.settings
+                .sidebar_pinned_session_ids_by_profile
+                .insert(drag.profile_key, next);
             self.sidebar_prev_order.clear();
             self.sidebar_resort.clear();
             self.sidebar_new_keys.clear();
@@ -1081,10 +1108,17 @@ impl Shell {
     ) -> SidebarSessionRows {
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
+        let profile_key = self.active_sidebar_pin_profile_key(cx);
+        let saved_pins = profile_key
+            .as_deref()
+            .map(|key| self.settings.sidebar_pins(key).to_vec())
+            .unwrap_or_default();
         let frozen_pinned = self
             .pinned_session_drag
             .as_ref()
-            .filter(|drag| drag.filter == filter)
+            .filter(|drag| {
+                drag.filter == filter && profile_key.as_deref() == Some(&drag.profile_key)
+            })
             .map(|drag| drag.visible_ids.clone());
         let rows: Vec<(ChatIndicator, zeron_proto::Chat, String, Option<String>)> = {
             let state = self.state.read(cx);
@@ -1122,9 +1156,7 @@ impl Shell {
         };
         let pinned_order = frozen_pinned
             .as_ref()
-            .map_or(self.settings.sidebar_pinned_session_ids.as_slice(), |ids| {
-                ids.as_slice()
-            });
+            .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let recency_ids: Vec<String> = rows.iter().map(|(_, chat, _, _)| chat.id.clone()).collect();
         let ordered_ids = project_pinned_first(&recency_ids, pinned_order);
         let rank: std::collections::HashMap<&str, usize> = ordered_ids
@@ -1149,42 +1181,45 @@ impl Shell {
                 .collect::<Vec<_>>(),
         );
         let selected = self.state.read(cx).selected_chat.clone();
-        let rows =
-            rows.into_iter()
-                .enumerate()
-                .map(|(ix, (status, chat, folder, branch))| {
-                    let time_ago: SharedString =
-                        format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
-                            .into();
-                    let is_selected = selected.as_deref() == Some(chat.id.as_str());
-                    let height = super::CHAT_ROW_HEIGHT;
-                    let harness = chat.config.as_ref().map(|c| c.harness);
-                    let drag = (ix < pinned_count && pinned_session_is_draggable(pinned_count))
-                        .then(|| PinnedSessionDrag {
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (status, chat, folder, branch))| {
+                let time_ago: SharedString =
+                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
+                let is_selected = selected.as_deref() == Some(chat.id.as_str());
+                let height = super::CHAT_ROW_HEIGHT;
+                let harness = chat.config.as_ref().map(|c| c.harness);
+                let drag = (ix < pinned_count && pinned_session_is_draggable(pinned_count))
+                    .then(|| {
+                        profile_key.as_ref().map(|profile_key| PinnedSessionDrag {
                             chat_id: chat.id.clone(),
                             visible_ids: visible_pinned_ids.clone(),
                             filter: filter.clone(),
-                        });
-                    let element = self.render_chat_row(
-                        chat.id.clone(),
-                        transcript::single_line(
-                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                        )
-                        .into(),
-                        time_ago,
-                        folder.into(),
-                        branch.map(SharedString::from),
-                        harness,
-                        status,
-                        is_selected,
-                        false,
-                        drag,
-                        theme,
-                        cx,
-                    );
-                    (format!("c:{}", chat.id), height, element)
-                })
-                .collect();
+                            profile_key: profile_key.clone(),
+                        })
+                    })
+                    .flatten();
+                let element = self.render_chat_row(
+                    chat.id.clone(),
+                    transcript::single_line(
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
+                    )
+                    .into(),
+                    time_ago,
+                    folder.into(),
+                    branch.map(SharedString::from),
+                    harness,
+                    status,
+                    is_selected,
+                    false,
+                    drag,
+                    theme,
+                    cx,
+                );
+                (format!("c:{}", chat.id), height, element)
+            })
+            .collect();
         SidebarSessionRows { rows, pinned_count }
     }
 
