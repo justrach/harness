@@ -305,7 +305,7 @@ impl Connector for WsConnector {
             // this fetch and the handshake below can hang; the actor bounds
             // the whole dial with CONNECT_TIMEOUT.
             let url = provider.url().await?;
-            let (ws, _) = tokio_tungstenite::connect_async(&url)
+            let ws = crate::dial::connect_ws(&url)
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
@@ -613,6 +613,10 @@ impl RoomActor {
         // and cancels any pending backoff, so the room is redialing within a
         // second of the lid opening instead of waiting out a silence lease.
         let mut wake = crate::wake::subscribe();
+        // Sibling-dial successes cut backoff waits short the same way — but
+        // never tear down a live session, so this one stays out of
+        // `run_session` on purpose.
+        let mut online = crate::wake::subscribe_online();
         loop {
             if *self.shutdown.borrow() {
                 return;
@@ -679,10 +683,14 @@ impl RoomActor {
             // duplicated every offline commit's bytes in memory.
             let sleep = tokio::time::sleep(backoff);
             tokio::pin!(sleep);
+            // Only successes that happen DURING this wait matter — stale
+            // events (e.g. our own last dial) must not turn into a hot loop.
+            while online.try_recv().is_ok() {}
             let woke = loop {
                 tokio::select! {
                     _ = &mut sleep => break false,
                     _ = wake.recv() => break true,
+                    _ = online.recv() => break true,
                     _ = self.shutdown.changed() => return,
                     Some(_) = self.local_rx.recv() => {}
                     Some(_) = self.eph_rx.recv() => {}
