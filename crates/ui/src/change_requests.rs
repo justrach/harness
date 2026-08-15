@@ -178,17 +178,39 @@ pub(crate) struct ChangeRequestWatchKey {
 #[derive(Debug, Default)]
 pub(crate) struct ChangeRequestClientState {
     snapshots: HashMap<ChangeRequestWatchKey, CheckoutChangeRequestStatus>,
-    unsupported_devices: HashSet<String>,
+    /// The engine version that rejected this versioned capability. A device
+    /// update publishes its running version, so a host upgrade invalidates this
+    /// negative cache without polling older hosts.
+    unsupported_devices: HashMap<String, Option<String>>,
 }
 
 impl ChangeRequestClientState {
     pub fn is_supported(&self, device_id: &str) -> bool {
-        !self.unsupported_devices.contains(device_id)
+        !self.unsupported_devices.contains_key(device_id)
     }
 
-    pub fn mark_unsupported(&mut self, device_id: String) {
-        self.unsupported_devices.insert(device_id.clone());
+    pub fn mark_unsupported(&mut self, device_id: String, engine_version: Option<String>) {
+        self.unsupported_devices
+            .insert(device_id.clone(), engine_version);
         self.snapshots.retain(|key, _| key.device_id != device_id);
+    }
+
+    /// Forget a version-skew rejection after the host advertises a different
+    /// engine version. `UnknownMethod` describes one running engine, not the
+    /// device permanently.
+    pub fn clear_unsupported_on_version_change(
+        &mut self,
+        device_id: &str,
+        engine_version: Option<&str>,
+    ) -> bool {
+        let Some(unsupported_version) = self.unsupported_devices.get(device_id) else {
+            return false;
+        };
+        if unsupported_version.as_deref() == engine_version {
+            return false;
+        }
+        self.unsupported_devices.remove(device_id);
+        true
     }
 
     pub fn store(&mut self, key: ChangeRequestWatchKey, snapshot: CheckoutChangeRequestStatus) {
@@ -433,11 +455,27 @@ mod tests {
             },
             snapshot("old-engine", "/repo", "checkout"),
         );
-        state.mark_unsupported("old-engine".into());
+        state.mark_unsupported("old-engine".into(), Some("0.2.2".into()));
 
         assert!(state.change_request_for_chat(&chat, &[]).is_none());
         assert!(
             desired_watch_targets(&[chat], &[], |device| !state.is_supported(device)).is_empty()
+        );
+    }
+
+    #[test]
+    fn host_upgrade_reenables_a_previously_unsupported_device() {
+        let chat = chat("chat", "host", Some("/repo"), Some("checkout"));
+        let mut state = ChangeRequestClientState::default();
+        state.mark_unsupported("host".into(), Some("0.2.2".into()));
+
+        assert!(!state.is_supported("host"));
+        assert!(!state.clear_unsupported_on_version_change("host", Some("0.2.2")));
+        assert!(state.clear_unsupported_on_version_change("host", Some("0.2.3")));
+        assert!(state.is_supported("host"));
+        assert_eq!(
+            desired_watch_targets(&[chat], &[], |device| !state.is_supported(device)).len(),
+            1
         );
     }
 

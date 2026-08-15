@@ -723,6 +723,10 @@ impl AppState {
         {
             device.name = "Local".to_string();
         }
+        for device in &devices {
+            self.change_requests
+                .clear_unsupported_on_version_change(&device.id, device.version.as_deref());
+        }
         self.devices = devices;
     }
 
@@ -1411,9 +1415,14 @@ fn spawn_change_request_watch(
                         "checkout change requests unsupported on device"
                     );
                     this.update(cx, |state, cx| {
+                        let engine_version = state
+                            .devices
+                            .iter()
+                            .find(|device| device.id == target.device_id)
+                            .and_then(|device| device.version.clone());
                         state
                             .change_requests
-                            .mark_unsupported(target.device_id.clone());
+                            .mark_unsupported(target.device_id.clone(), engine_version);
                         cx.notify();
                     })
                     .ok();
@@ -1511,7 +1520,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     apply(state, parsed);
-                    if method == methods::WATCH_SPACES {
+                    if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
                     }
                     cx.notify();
@@ -2245,6 +2254,23 @@ mod tests {
 
         state.apply_devices(vec![device("local", "José's MacBook Pro")]);
         assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
+    }
+
+    #[test]
+    fn device_version_change_reenables_change_request_capability() {
+        let mut state = AppState::new();
+        state
+            .change_requests
+            .mark_unsupported("remote".into(), Some("0.2.2".into()));
+        let mut old = device("remote", "Remote");
+        old.version = Some("0.2.2".into());
+        state.apply_devices(vec![old]);
+        assert!(!state.change_requests.is_supported("remote"));
+
+        let mut upgraded = device("remote", "Remote");
+        upgraded.version = Some("0.2.3".into());
+        state.apply_devices(vec![upgraded]);
+        assert!(state.change_requests.is_supported("remote"));
     }
 
     #[test]
