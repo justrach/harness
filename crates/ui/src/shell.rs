@@ -197,9 +197,8 @@ pub enum Route {
     Settings(SettingsSection),
 }
 
-/// One right-pane surface tab (t3code RightPanelSurface, narrowed to our two
-/// kinds): a git-diff page (each tab its own [`Changes`] viewer — multiple
-/// diff panels, user request) or one embedded terminal keyed by its
+/// One right-pane surface tab (t3code RightPanelSurface): a Diff or History
+/// page (each backed by its own [`Changes`] viewer) or one embedded terminal keyed by its
 /// [`TerminalPanel`] tab key. `Picker` is the empty state ("Open a surface").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum RightSurface {
@@ -772,7 +771,7 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
-    /// The surface-tab strip's `+` menu (Terminal / Git diff rows).
+    /// The surface-tab strip's `+` menu (Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
@@ -1530,12 +1529,19 @@ impl Shell {
         cx.notify();
     }
 
-    /// The picker's Git card / the `+` menu's Diff row: every click opens a
+    /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
     /// FRESH diff tab with its own scope/base selection (multiple diff
     /// panels, user request).
     fn add_diff_surface(&mut self, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
         self.register_diff_surface(changes, cx);
+    }
+
+    /// The dedicated History surface. Keeping it as its own tab preserves its
+    /// graph/search state while Diff tabs retain their ordinary scope picker.
+    fn add_history_surface(&mut self, cx: &mut Context<Self>) {
+        let history = cx.new(|cx| Changes::for_history(self.state.clone(), cx));
+        self.register_diff_surface(history, cx);
     }
 
     /// A History row click: the commit opens as its own pinned diff tab
@@ -5056,13 +5062,20 @@ impl Shell {
                                     }),
                                 ),
                             )
-                            // Git only where there IS git — the pane itself
-                            // no longer gates on it (terminals work anywhere).
+                            // Git surfaces only where there IS git — the pane
+                            // itself no longer gates on it (terminals work anywhere).
                             .when(self.space_git_detected(cx), |el| {
                                 el.child(
-                                    row("surface-card-git", icons::GIT_BRANCH, "Git").on_click(
+                                    row("surface-card-diffs", icons::GIT_BRANCH, "Diffs").on_click(
                                         cx.listener(|this, _, _, cx| {
                                             this.add_diff_surface(cx);
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    row("surface-card-history", icons::LIST, "History").on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.add_history_surface(cx);
                                         }),
                                     ),
                                 )
@@ -5238,8 +5251,18 @@ impl Shell {
         for (ix, (surface, title)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let icon_path = match surface {
-                RightSurface::Diff(_) => icons::GIT_BRANCH,
-                _ => icons::TERMINAL,
+                RightSurface::Diff(id) => self
+                    .diffs
+                    .get(&id)
+                    .map(|changes| {
+                        if changes.read(cx).is_history() {
+                            icons::LIST
+                        } else {
+                            icons::GIT_BRANCH
+                        }
+                    })
+                    .unwrap_or(icons::GIT_BRANCH),
+                RightSurface::Terminal(_) | RightSurface::Picker => icons::TERMINAL,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
             // (same slot, no width jump) — the ✕ only shows while the tab is
@@ -5381,7 +5404,7 @@ impl Shell {
             };
             strip = strip.child(wrapped);
         }
-        // The `+` — a small menu offering the two surfaces (t3 "Add panel
+        // The `+` — a small menu offering the available surfaces (t3 "Add panel
         // surface"); mirrors the picker cards.
         let plus_open = self.right_plus.get().is_some();
         let plus_fade = "right-surface-add-fade";
@@ -5458,10 +5481,21 @@ impl Shell {
                                         .size(px(13.0))
                                         .text_color(theme.text_muted),
                                 )
-                                // "Git", not "Git diff" — the surface hosts
-                                // history and per-commit views too (user
-                                // request; matches the picker card).
-                                .child(SharedString::from("Git")),
+                                .child(SharedString::from("Diffs")),
+                        )
+                        .child(
+                            popover::menu_row(&theme, false, "right-plus-history")
+                                .id("right-plus-history-row")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.add_history_surface(cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::LIST)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("History")),
                         ),
                 )
                 .into_any_element();

@@ -507,7 +507,9 @@ pub enum DiffScope {
     Branch,
     /// Changes since the current chat's last turn started.
     LatestTurn,
-    /// Repository commit graph. Hosted here until the right pane becomes tabs.
+    /// Repository commit graph. History owns this scope in its own right-pane
+    /// surface tab; it remains a `Changes` variant so commit rows can open
+    /// their corresponding diff tabs through the existing event path.
     History,
     /// One commit's own changes (parent vs commit) — the per-commit tab a
     /// History row click opens. Never listed in the scope menu
@@ -516,12 +518,9 @@ pub enum DiffScope {
 }
 
 impl DiffScope {
-    pub const ALL: [DiffScope; 4] = [
-        Self::WorkingTree,
-        Self::Branch,
-        Self::LatestTurn,
-        Self::History,
-    ];
+    /// Scopes available from a Diff tab. History is selected from the surface
+    /// picker instead, so it can keep its own tab and toolbar state.
+    pub const ALL: [DiffScope; 3] = [Self::WorkingTree, Self::Branch, Self::LatestTurn];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -1069,6 +1068,18 @@ impl Changes {
         changes.scope = DiffScope::Commit;
         changes.commit = Some(commit);
         changes
+    }
+
+    /// A dedicated History surface. It shares the commit-opening event path
+    /// with diffs, but is never offered as an item in a Diff tab's scope menu.
+    pub fn for_history(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.scope = DiffScope::History;
+        changes
+    }
+
+    pub fn is_history(&self) -> bool {
+        self.scope == DiffScope::History
     }
 
     /// The surface-tab title (contextual, user request): the pinned commit's
@@ -2258,7 +2269,7 @@ impl Changes {
             (scope == DiffScope::History).then(|| self.history_fetch_button(cx));
         let history_view_button =
             (scope == DiffScope::History).then(|| self.history_view_button(cx));
-        let trigger = div()
+        let scope_trigger = div()
             .id("changes-scope-trigger")
             .h(px(24.0))
             .px(px(8.0))
@@ -2304,17 +2315,35 @@ impl Changes {
                     .size(px(12.0))
                     .text_color(theme.text_muted.opacity(0.7)),
             );
-        let trigger = if self.scope_menu.get().is_some() {
+        let trigger = if scope == DiffScope::History {
+            // History is its own surface: show its identity rather than a
+            // scope picker that could turn this tab back into a Diff tab.
+            div()
+                .id("history-surface-title")
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .text_size(px(12.0))
+                .line_height(px(14.0))
+                .text_color(theme.text)
+                .child("History")
+                .into_any_element()
+        } else if self.scope_menu.get().is_some() {
             let closing = self.scope_menu.closing_since();
             let menu = self.render_scope_menu(&theme, cx);
-            trigger.relative().child(popover::anchored_menu_below_gap(
-                "changes-scope-menu",
-                menu,
-                closing,
-                10.0,
-            ))
+            scope_trigger
+                .relative()
+                .child(popover::anchored_menu_below_gap(
+                    "changes-scope-menu",
+                    menu,
+                    closing,
+                    10.0,
+                ))
+                .into_any_element()
         } else {
-            trigger
+            scope_trigger.into_any_element()
         };
 
         let trailing: AnyElement = if scope == DiffScope::History {
@@ -3491,6 +3520,19 @@ rename to new_name.rs
         assert_eq!(DiffScope::Branch.mode(), "branch");
         assert_eq!(DiffScope::LatestTurn.mode(), "turn");
         assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
+    }
+
+    #[test]
+    fn diff_scope_menu_keeps_history_as_a_separate_surface() {
+        assert_eq!(
+            DiffScope::ALL,
+            [
+                DiffScope::WorkingTree,
+                DiffScope::Branch,
+                DiffScope::LatestTurn,
+            ]
+        );
+        assert!(!DiffScope::ALL.contains(&DiffScope::History));
     }
 
     #[test]
