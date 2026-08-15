@@ -22,11 +22,14 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 
 use zeron_doc::SessionCommandPayload;
-use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_engine::{
+    BranchHeadContext, ChangeRequestError, CheckoutChangeRequestLookup, CheckoutChangeRequests,
+    CheckoutSourceContext, EngineCore, HarnessRegistry,
+};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode,
+    AgentEvent, ChangeRequestState, ChangeRequestSummary, DoneStatus, HarnessId, Model,
+    ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
 };
 use zeron_rpc::{
     DeviceFrameHeader, LinkCache, LinkCacheConfig, StaticToken, decode_device_frame,
@@ -188,9 +191,158 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
 }
 
+struct StaticChangeRequestLookup {
+    source: CheckoutSourceContext,
+    summary: ChangeRequestSummary,
+}
+
+#[async_trait]
+impl CheckoutChangeRequestLookup for StaticChangeRequestLookup {
+    async fn inspect_checkout(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<CheckoutSourceContext, ChangeRequestError> {
+        Ok(self.source.clone())
+    }
+
+    async fn resolve_github_source(
+        &self,
+        _source: &CheckoutSourceContext,
+    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+        Ok(Some(self.summary.clone()))
+    }
+}
+
+fn init_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).expect("create git fixture");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(path)
+        .status()
+        .expect("spawn git init");
+    assert!(status.success(), "git init failed");
+}
+
+fn change_request_lookup(root: &std::path::Path) -> Arc<StaticChangeRequestLookup> {
+    Arc::new(StaticChangeRequestLookup {
+        source: CheckoutSourceContext {
+            checkout_root: root.to_owned(),
+            branch: BranchHeadContext::resolve(
+                "feature/status",
+                Some("origin/feature/status"),
+                Some("origin"),
+                Some("https://github.com/acme/zeron.git"),
+            ),
+            default_branch: Some("main".into()),
+        },
+        summary: ChangeRequestSummary {
+            provider: "github".into(),
+            number: 90,
+            title: "Stream checkout pull request".into(),
+            url: "https://github.com/acme/zeron/pull/90".into(),
+            state: ChangeRequestState::Open,
+            base_ref: "main".into(),
+            head_ref: "feature/status".into(),
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkout_change_request_stream_matches_locally_and_through_device_routing() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let checkout = dirs.path().join("checkout");
+    init_git_repo(&checkout);
+
+    let mut core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b
+        .workspace
+        .create_space(
+            "space-pr",
+            "device-b",
+            &checkout.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("checkout space");
+    core_b.change_requests = CheckoutChangeRequests::new(
+        core_b.repos.clone(),
+        "device-b",
+        change_request_lookup(&checkout),
+    );
+    let local_client = zeron_rpc::memory_client(core_b.rpc_service());
+    let rejected = match local_client
+        .subscribe_checked(
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            serde_json::json!({ "cwd": dirs.path().join("not-registered") }),
+        )
+        .await
+    {
+        Ok(_) => panic!("unregistered cwd must be rejected"),
+        Err(error) => error,
+    };
+    assert!(rejected.to_string().contains("not a known checkout"));
+    let mut local = local_client
+        .subscribe_checked(
+            methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+            serde_json::json!({ "cwd": checkout }),
+        )
+        .await
+        .expect("local change request subscribe");
+    let local_frame = local.recv().await.expect("local initial frame");
+    drop(local);
+
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut remote = loop {
+        match client
+            .subscribe_checked(
+                methods::WATCH_CHECKOUT_CHANGE_REQUEST,
+                serde_json::json!({
+                    "cwd": checkout,
+                    "targetDeviceId": "device-b",
+                }),
+            )
+            .await
+        {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let remote_frame = tokio::time::timeout(Duration::from_secs(5), remote.recv())
+        .await
+        .expect("remote frame before timeout")
+        .expect("remote initial frame");
+    assert_eq!(remote_frame, local_frame);
+
+    core_a.disconnect_edge();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), remote.recv())
+            .await
+            .expect("remote stream closes after link")
+            .is_none()
+    );
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn target_device_id_routes_over_the_relay() {

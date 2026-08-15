@@ -92,6 +92,20 @@ pub trait ChangeRequestProvider: Send + Sync {
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
 }
 
+/// Checkout inspection plus provider resolution, injectable for cache/service tests.
+#[async_trait]
+pub trait CheckoutChangeRequestLookup: Send + Sync {
+    async fn inspect_checkout(
+        &self,
+        cwd: &Path,
+    ) -> Result<CheckoutSourceContext, ChangeRequestError>;
+
+    async fn resolve_github_source(
+        &self,
+        source: &CheckoutSourceContext,
+    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
+}
+
 /// Host-side resolver. All subprocesses run on the device that owns `cwd`.
 #[derive(Clone)]
 pub struct ChangeRequestResolver {
@@ -146,6 +160,23 @@ impl ChangeRequestResolver {
 impl Default for ChangeRequestResolver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait]
+impl CheckoutChangeRequestLookup for ChangeRequestResolver {
+    async fn inspect_checkout(
+        &self,
+        cwd: &Path,
+    ) -> Result<CheckoutSourceContext, ChangeRequestError> {
+        ChangeRequestResolver::inspect_checkout(self, cwd).await
+    }
+
+    async fn resolve_github_source(
+        &self,
+        source: &CheckoutSourceContext,
+    ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
+        ChangeRequestResolver::resolve_github_source(self, source).await
     }
 }
 
