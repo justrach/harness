@@ -731,6 +731,10 @@ impl Engine {
             core.set_updater(updater);
         }
         tracing::info!(device_id = %core.device_id, "engine core assembled");
+        // Managed ACP adapters install in the background at boot (agents
+        // whose CLI is present but whose adapter isn't yet), so a first chat
+        // never waits on — or dies inside — an npm run.
+        zeron_harness::acp::prewarm_managed_adapters();
 
         let host_relay = edge.as_ref().map(|edge| {
             let links = zeron_rpc::LinkCache::new(zeron_rpc::LinkCacheConfig::new(
