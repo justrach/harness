@@ -295,6 +295,36 @@ async fn git_history_is_topological_paged_and_carries_public_refs() {
 }
 
 #[tokio::test]
+async fn git_history_reports_ahead_and_behind_against_integration_branch() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("history-comparison-repo");
+    init_repo(&repo_dir).await;
+
+    git(&repo_dir, &["checkout", "-b", "feature"]).await;
+    std::fs::write(repo_dir.join("feature.txt"), "feature\n").expect("feature file");
+    git(&repo_dir, &["add", "."]).await;
+    git(&repo_dir, &["commit", "-m", "feature commit"]).await;
+
+    git(&repo_dir, &["checkout", "main"]).await;
+    std::fs::write(repo_dir.join("main.txt"), "main\n").expect("main file");
+    git(&repo_dir, &["add", "."]).await;
+    git(&repo_dir, &["commit", "-m", "upstream main commit"]).await;
+    git(
+        &repo_dir,
+        &["update-ref", "refs/remotes/upstream/main", "HEAD"],
+    )
+    .await;
+    git(&repo_dir, &["checkout", "feature"]).await;
+
+    let repos = test_repos(&tmp.path().join("data"));
+    let page = repos.history(&repo_dir, 0, 20).await.expect("history page");
+    let comparison = page.comparison.expect("integration comparison");
+    assert_eq!(comparison.base, "upstream/main");
+    assert_eq!(comparison.ahead, 1);
+    assert_eq!(comparison.behind, 1);
+}
+
+#[tokio::test]
 async fn git_history_search_is_fuzzy_complete_and_accepts_sha_prefixes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("history-search-repo");

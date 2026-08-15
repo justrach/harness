@@ -19,8 +19,8 @@ use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
-    FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit, GitHistoryPage, GitHistoryRef,
-    GitHistoryRefKind, Repo, RepoRef, Worktree,
+    FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit, GitHistoryComparison,
+    GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo, RepoRef, Worktree,
 };
 
 use crate::EngineError;
@@ -496,6 +496,7 @@ impl Repos {
                 next_cursor: None,
                 total_count: Some(0),
                 head_commit_count: Some(0),
+                comparison: None,
             });
         }
 
@@ -566,6 +567,11 @@ impl Repos {
         } else {
             None
         };
+        let comparison = if cursor == 0 && head_sha.is_some() {
+            self.history_comparison(repo_path).await
+        } else {
+            None
+        };
 
         Ok(GitHistoryPage {
             next_cursor: has_next.then_some(cursor + commits.len()),
@@ -574,7 +580,106 @@ impl Repos {
             head_sha,
             total_count,
             head_commit_count,
+            comparison,
         })
+    }
+
+    /// Compare the checked-out branch with the best locally available
+    /// integration ref. This deliberately never talks to the network: `Fetch
+    /// all` refreshes remote-tracking refs, then the next History load sees
+    /// those new counts.
+    async fn history_comparison(&self, repo_path: &Path) -> Option<GitHistoryComparison> {
+        // Detached checkouts do not have a branch relationship to present.
+        self.git(
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            Some(repo_path),
+        )
+        .await
+        .ok()?;
+
+        // An integration remote is more useful than the branch's push/tracking
+        // ref: a feature usually tracks origin/feature, whereas the status the
+        // user needs in History is its relationship to upstream/main.
+        let mut candidates = Vec::new();
+        for remote in ["upstream", "origin"] {
+            let remote_head = format!("refs/remotes/{remote}/HEAD");
+            if let Ok(base) = self
+                .git(
+                    &["symbolic-ref", "--quiet", "--short", &remote_head],
+                    Some(repo_path),
+                )
+                .await
+                && !base.is_empty()
+            {
+                candidates.push(base);
+            }
+        }
+        // A remote HEAD is not guaranteed to have been configured locally.
+        // Conventional default names keep the result useful in that case.
+        candidates.extend([
+            "upstream/main".to_string(),
+            "origin/main".to_string(),
+            "upstream/master".to_string(),
+            "origin/master".to_string(),
+        ]);
+        // Fall back to the configured tracking ref only after integration
+        // defaults. This still gives sensible data in a single-remote repo.
+        if let Ok(base) = self
+            .git(
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+                Some(repo_path),
+            )
+            .await
+            && !base.is_empty()
+        {
+            candidates.push(base);
+        }
+
+        let mut seen = HashSet::new();
+        for base in candidates
+            .into_iter()
+            .filter(|base| seen.insert(base.clone()))
+        {
+            let commit_ref = format!("{base}^{{commit}}");
+            if self
+                .git(
+                    &["rev-parse", "--verify", "--quiet", &commit_ref],
+                    Some(repo_path),
+                )
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let range = format!("HEAD...{base}");
+            let Ok(counts) = self
+                .git(
+                    &["rev-list", "--left-right", "--count", &range],
+                    Some(repo_path),
+                )
+                .await
+            else {
+                continue;
+            };
+            let mut counts = counts.split_whitespace();
+            let (Some(ahead), Some(behind)) = (counts.next(), counts.next()) else {
+                continue;
+            };
+            let (Ok(ahead), Ok(behind)) = (ahead.parse(), behind.parse()) else {
+                continue;
+            };
+            return Some(GitHistoryComparison {
+                base,
+                ahead,
+                behind,
+            });
+        }
+        None
     }
 
     /// Fuzzy subject / SHA search across the complete public history. Results
@@ -596,6 +701,7 @@ impl Repos {
                 next_cursor: None,
                 total_count: Some(0),
                 head_commit_count: None,
+                comparison: None,
             });
         }
         let limit = limit.clamp(1, GIT_HISTORY_MAX_LIMIT);
@@ -625,6 +731,7 @@ impl Repos {
                 next_cursor: None,
                 total_count: Some(0),
                 head_commit_count: None,
+                comparison: None,
             });
         }
 
@@ -661,6 +768,7 @@ impl Repos {
             next_cursor: (end < total_count).then_some(end),
             total_count: Some(total_count),
             head_commit_count: None,
+            comparison: None,
         })
     }
 

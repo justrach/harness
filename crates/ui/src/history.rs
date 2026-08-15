@@ -16,7 +16,9 @@ use gpui::{
     SharedString, Subscription, Task, Window, canvas, container_query, div, img, list, point,
     prelude::*, px,
 };
-use zeron_proto::{GitHistoryCommit, GitHistoryPage, GitHistoryRef, GitHistoryRefKind};
+use zeron_proto::{
+    GitHistoryCommit, GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind,
+};
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -50,6 +52,9 @@ const HISTORY_REF_GAP: f32 = 5.0;
 const HISTORY_SEARCH_WIDTH: f32 = 196.0;
 const HISTORY_SEARCH_DEBOUNCE: Duration = Duration::from_millis(70);
 const HISTORY_SEARCH_IDLE_DISMISS: Duration = Duration::from_millis(1_500);
+/// The header's comparison pill is supplemental metadata. Hide it before it
+/// can crowd the fixed History controls on a narrow pane.
+const HISTORY_COMPARISON_MIN_WIDTH: f32 = 260.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GitHistorySearchMode {
@@ -1094,6 +1099,7 @@ pub struct GitHistory {
     next_cursor: Option<usize>,
     total_count: Option<usize>,
     head_commit_count: Option<usize>,
+    comparison: Option<GitHistoryComparison>,
     search_query: String,
     search_results: Option<Vec<GitHistoryCommit>>,
     search_next_cursor: Option<usize>,
@@ -1584,42 +1590,118 @@ impl GitHistoryCount {
 
 impl Render for GitHistoryCount {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
+        let theme = Theme::of(cx).clone();
         let history = self.history.read(cx);
         let count = history.commit_count();
         let branch = history.current_branch(cx);
+        let comparison = history
+            .comparison
+            .clone()
+            .filter(|comparison| comparison.ahead > 0 || comparison.behind > 0);
         div()
             .h_full()
             .min_w_0()
+            .flex_1()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .when_some(count, |element, count| {
-                element.child(
+            .overflow_hidden()
+            .child(
+                container_query(move |size, _, _| {
+                    let comparison_fits = f32::from(size.width) >= HISTORY_COMPARISON_MIN_WIDTH;
                     div()
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_size(px(11.0))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "{count} commit{}",
-                            if count == 1 { "" } else { "s" }
-                        ))),
-                )
-            })
-            .when_some(branch, |element, branch| {
-                element.child(
-                    div()
+                        .size_full()
                         .min_w_0()
-                        .truncate()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.5))
-                        .line_height(px(14.0))
-                        .text_color(theme.text_dim)
-                        .child(SharedString::from(branch)),
-                )
-            })
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .when_some(count, |element, count| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!(
+                                        "{count} commit{}",
+                                        if count == 1 { "" } else { "s" }
+                                    ))),
+                            )
+                        })
+                        .when_some(branch.clone(), |element, branch| {
+                            element.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(11.5))
+                                    .line_height(px(14.0))
+                                    .text_color(theme.text_dim)
+                                    .child(SharedString::from(branch)),
+                            )
+                        })
+                        .when_some(
+                            comparison_fits.then(|| comparison.clone()).flatten(),
+                            |element, comparison| {
+                                let base = comparison.base.clone();
+                                let ahead = comparison.ahead;
+                                let behind = comparison.behind;
+                                element.child(
+                                    div()
+                                        .id("history-comparison")
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .when(ahead > 0, |comparison| {
+                                            comparison.child(
+                                                div()
+                                                    .whitespace_nowrap()
+                                                    .text_size(px(10.5))
+                                                    .line_height(px(13.0))
+                                                    .text_color(theme.accent.opacity(0.88))
+                                                    .child(SharedString::from(format!(
+                                                        "{ahead} ahead"
+                                                    ))),
+                                            )
+                                        })
+                                        .when(ahead > 0 && behind > 0, |comparison| {
+                                            comparison.child(
+                                                div()
+                                                    .text_size(px(10.0))
+                                                    .text_color(theme.text_faint)
+                                                    .child("·"),
+                                            )
+                                        })
+                                        .when(behind > 0, |comparison| {
+                                            comparison.child(
+                                                div()
+                                                    .whitespace_nowrap()
+                                                    .text_size(px(10.5))
+                                                    .line_height(px(13.0))
+                                                    .text_color(theme.warning.opacity(0.82))
+                                                    .child(SharedString::from(format!(
+                                                        "{behind} behind"
+                                                    ))),
+                                            )
+                                        })
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| HistoryRefTooltip {
+                                                descriptions: vec![
+                                                    format!(
+                                                        "Compared with {base}: {ahead} ahead, {behind} behind"
+                                                    )
+                                                    .into(),
+                                                ],
+                                            })
+                                            .into()
+                                        }),
+                                )
+                            },
+                        )
+                })
+                .size_full(),
+            )
     }
 }
 
@@ -1647,6 +1729,7 @@ impl GitHistory {
             next_cursor: None,
             total_count: None,
             head_commit_count: None,
+            comparison: None,
             search_query: String::new(),
             search_results: None,
             search_next_cursor: None,
@@ -1708,6 +1791,7 @@ impl GitHistory {
             self.collapsed_counts.clear();
             self.total_count = None;
             self.head_commit_count = None;
+            self.comparison = None;
             self.search_query.clear();
             self.search_results = None;
             self.search_next_cursor = None;
@@ -1751,6 +1835,7 @@ impl GitHistory {
         self.next_cursor = None;
         self.total_count = None;
         self.head_commit_count = None;
+        self.comparison = None;
         self.search_query.clear();
         self.search_results = None;
         self.search_next_cursor = None;
@@ -2386,6 +2471,7 @@ impl GitHistory {
                             history.branch_tips = page.branch_tips;
                             history.total_count = page.total_count;
                             history.head_commit_count = page.head_commit_count;
+                            history.comparison = page.comparison;
                         } else {
                             let mut seen: HashSet<String> = history
                                 .commits

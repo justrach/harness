@@ -247,6 +247,21 @@ pub struct GitHistoryCommit {
     pub refs: Vec<GitHistoryRef>,
 }
 
+/// Divergence between the checked-out branch and the repository's integration
+/// branch. Counts are computed only from locally available refs; callers must
+/// fetch explicitly when they want newer remote state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryComparison {
+    /// The local remote-tracking ref used as the comparison base, e.g.
+    /// `upstream/main`.
+    pub base: String,
+    /// Commits reachable from HEAD but not from [`Self::base`].
+    pub ahead: usize,
+    /// Commits reachable from [`Self::base`] but not from HEAD.
+    pub behind: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHistoryPage {
@@ -262,6 +277,9 @@ pub struct GitHistoryPage {
     /// Number of commits reachable from the active checkout's HEAD.
     #[serde(default)]
     pub head_commit_count: Option<usize>,
+    /// Current branch divergence from the preferred integration branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<GitHistoryComparison>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
