@@ -126,7 +126,7 @@ impl Shell {
     /// Close the space-filter dropdown through the exit animation (no-op when
     /// it isn't open). Every close path funnels here so the menu always
     /// animates out instead of vanishing.
-    fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
         if self.spaces_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
             cx.notify();

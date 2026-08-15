@@ -1724,9 +1724,9 @@ impl Changes {
         }
     }
 
-    /// Consume an Escape that reached the shell because a menu retained the
-    /// previous focus instead of owning the key path itself.
-    pub(crate) fn consume_escape(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Handle Escape before focused descendants such as a terminal receive it.
+    /// A popup in its exit animation remains a blocker until it unmounts.
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
         if self.ref_menu.is_open() {
             self.close_ref_menu(cx);
             return true;
@@ -1735,11 +1735,6 @@ impl Changes {
             self.close_scope_menu(cx);
             return true;
         }
-        false
-    }
-
-    /// A closing popup remains blocking until its exit animation unmounts.
-    pub(crate) fn has_blocking_overlay(&self) -> bool {
         self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
     }
 
