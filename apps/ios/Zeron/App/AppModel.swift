@@ -523,12 +523,15 @@ final class AppModel {
         var delay: UInt64 = 0
         var kicked = Set<String>()
         for chat in overviewChats {
-            guard let store = sessionStores[chat.id] else { continue }
+            // Dial-held stores stay held: a kick force-dials, and sweeping 46
+            // of them on every foreground/path flap is the stampede the warm
+            // cap exists to prevent. Held chats reconnect on open.
+            guard let store = sessionStores[chat.id], !store.isDialHeld else { continue }
             kicked.insert(chat.id)
             scheduleKick(store, afterNs: delay)
             delay += 200_000_000
         }
-        for (id, store) in sessionStores where !kicked.contains(id) {
+        for (id, store) in sessionStores where !kicked.contains(id) && !store.isDialHeld {
             scheduleKick(store, afterNs: delay)
             delay += 200_000_000
         }
@@ -608,15 +611,27 @@ final class AppModel {
     /// uplink (and, pre-single-flight, raced N token refreshes), which was
     /// the cold-open "connecting…" stall. Opening a session releases its
     /// hold immediately (sessionStore(for:) above).
+    /// Sessions that keep a live socket without an open view. Everything else
+    /// hydrates from disk but dials on demand: 46 background joins (TLS +
+    /// hello + state each) drowned a 450kbps link for tens of seconds at
+    /// every cold open and network kick, for transcripts nobody was reading —
+    /// sidebar status (Working, presence, titles) rides the registry room, so
+    /// an undialed chat's row stays live regardless, and opening it releases
+    /// its dial instantly.
+    static let warmDialCap = 8
+
     func preloadSessions() {
         guard demo == nil, let config else { return }
         var stagger: UInt64 = 0
+        var released = 0
         for chat in overviewChats where sessionStores[chat.id] == nil {
             let store = SessionStore(chatId: chat.id, config: config)
             store.hostDeviceId = chat.deviceId
             sessionStores[chat.id] = store
             store.start(holdDial: true)
             store.updateRoomGen(chat.roomGen)
+            guard released < Self.warmDialCap else { continue }
+            released += 1
             let delay = stagger
             Task { @MainActor in
                 if delay > 0 { try? await Task.sleep(nanoseconds: delay) }

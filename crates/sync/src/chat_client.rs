@@ -753,48 +753,22 @@ impl Actor {
         let plan = plan_catch_up(cursor, &state, contained);
         let after = match plan {
             CatchUpPlan::RowsOnly { after } => after,
-            CatchUpPlan::CheckpointThenRows { after } => {
-                tracing::info!(
-                    checkpoint_seq = state.checkpoint_seq,
-                    checkpoint_size = state.checkpoint_size,
-                    "chat2: fetching checkpoint"
-                );
-                // Deadline + shutdown-interruptible: a hung fetch (half-open
-                // TCP, stalled link) must neither pin the actor forever nor
-                // block `shutdown()`. The fetch is Range-resumable, so the
-                // redial retries from wherever the bytes stopped.
-                let fetch = self.fetcher.fetch();
-                let fetched = tokio::select! {
-                    fetched = tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetch) => fetched,
-                    _ = self.shutdown.changed() => return SessionEnd::Stop,
-                };
-                let bytes = match fetched {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(err)) => {
-                        tracing::warn!(error = %err, "chat2: checkpoint fetch failed");
-                        return SessionEnd::Reconnect;
-                    }
-                    Err(_) => {
-                        tracing::warn!("chat2: checkpoint fetch timed out; redialing");
-                        return SessionEnd::Reconnect;
-                    }
-                };
-                if let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq) {
-                    tracing::warn!(error = %err, "chat2: checkpoint import failed");
-                    return SessionEnd::Reconnect;
-                }
-                let mut shared = lock(&self.shared);
-                shared.cursor = shared.cursor.max(state.checkpoint_seq);
-                drop(shared);
-                let _ = self.events.send(ChatEvent::Applied);
-                after
-            }
+            CatchUpPlan::CheckpointThenRows { after } => after,
         };
         // Clamp the persisted cursor into the room's honest range (server
         // reset detection happened in plan_catch_up via after==0).
         if after < cursor {
             lock(&self.shared).cursor = after;
         }
+        // Rows request goes out BEFORE any checkpoint fetch: the row backfill
+        // streams over the socket while the checkpoint downloads over HTTP in
+        // parallel, instead of serializing download → request → backfill. On
+        // a thin link the checkpoint download IS the join time, and every
+        // byte of it used to push the row stream (and "ready") back by that
+        // much. Rows received mid-fetch are buffered and applied after the
+        // checkpoint imports — row seqs are all > checkpointSeq, so ordering
+        // is preserved, and the persisted cursor can't advance past state it
+        // doesn't contain because nothing applies until the import lands.
         let rows_req = wire::encode(
             frame_type::ROWS_REQ,
             &wire::RowsReqHeader {
@@ -808,42 +782,118 @@ impl Actor {
         if pipe.tx.send(rows_req).await.is_err() {
             return SessionEnd::Reconnect;
         }
-        let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
-            loop {
-                let bytes = pipe.rx.recv().await?;
-                let Some(frame) = wire::decode(&bytes) else {
-                    return None;
-                };
-                match frame.kind {
-                    frame_type::ROWS_DONE => {
-                        let done: wire::RowsDoneHeader =
-                            serde_json::from_value(frame.header).ok()?;
-                        return Some(done.head_seq);
-                    }
-                    _ => {
-                        if !self.handle_frame(frame) {
-                            return None;
+        // Pending pushes ALSO go before catch-up completes: the server's
+        // batchId dedupe makes replays no-ops and rows are CRDT-commutative,
+        // so a message written on a dead network flushes ~2 RTTs after the
+        // socket lands instead of waiting out a whole checkpoint download +
+        // backfill ("typing works even when load doesn't").
+        if !self.push_pending(&mut pipe).await {
+            return SessionEnd::Reconnect;
+        }
+        let mut buffered: Vec<wire::WireFrame> = Vec::new();
+        if let CatchUpPlan::CheckpointThenRows { .. } = plan {
+            tracing::info!(
+                checkpoint_seq = state.checkpoint_seq,
+                checkpoint_size = state.checkpoint_size,
+                "chat2: fetching checkpoint (rows streaming in parallel)"
+            );
+            // Deadline + shutdown-interruptible: a hung fetch (half-open
+            // TCP, stalled link) must neither pin the actor forever nor
+            // block `shutdown()`. The fetch is Range-resumable, so the
+            // redial retries from wherever the bytes stopped. The socket is
+            // drained (into the buffer) for the whole fetch so backpressure
+            // can't stall the server's row stream.
+            let fetch = self.fetcher.fetch();
+            tokio::pin!(fetch);
+            let deadline = tokio::time::sleep(CHECKPOINT_FETCH_DEADLINE);
+            tokio::pin!(deadline);
+            let bytes = loop {
+                tokio::select! {
+                    fetched = &mut fetch => match fetched {
+                        Ok(bytes) => break bytes,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "chat2: checkpoint fetch failed");
+                            return SessionEnd::Reconnect;
                         }
+                    },
+                    _ = &mut deadline => {
+                        tracing::warn!("chat2: checkpoint fetch timed out; redialing");
+                        return SessionEnd::Reconnect;
+                    }
+                    _ = self.shutdown.changed() => return SessionEnd::Stop,
+                    inbound = pipe.rx.recv() => match inbound {
+                        Some(raw) => match wire::decode(&raw) {
+                            Some(frame) => buffered.push(frame),
+                            None => {
+                                tracing::warn!("chat2: unparseable frame during checkpoint fetch");
+                                return SessionEnd::Reconnect;
+                            }
+                        },
+                        None => return SessionEnd::Reconnect,
                     }
                 }
+            };
+            if let Err(err) = self.sink.apply_checkpoint(&bytes, state.checkpoint_seq) {
+                tracing::warn!(error = %err, "chat2: checkpoint import failed");
+                return SessionEnd::Reconnect;
             }
-        })
-        .await;
-        let Ok(Some(head_seq)) = backfill else {
-            tracing::warn!("chat2: backfill did not complete");
-            return SessionEnd::Reconnect;
+            let mut shared = lock(&self.shared);
+            shared.cursor = shared.cursor.max(state.checkpoint_seq);
+            drop(shared);
+            let _ = self.events.send(ChatEvent::Applied);
+        }
+        // Frames buffered during the fetch replay first, then the live socket
+        // finishes the backfill — one pass, same ROWS_DONE terminator either
+        // way.
+        let mut head_seq: Option<u64> = None;
+        for frame in buffered.drain(..) {
+            if head_seq.is_none() && frame.kind == frame_type::ROWS_DONE {
+                let Ok(done) = serde_json::from_value::<wire::RowsDoneHeader>(frame.header) else {
+                    return SessionEnd::Reconnect;
+                };
+                head_seq = Some(done.head_seq);
+                continue; // frames after ROWS_DONE are steady-state; keep them
+            }
+            if !self.handle_frame(frame) {
+                return SessionEnd::Reconnect;
+            }
+        }
+        let head_seq = match head_seq {
+            Some(seq) => seq,
+            None => {
+                let backfill = tokio::time::timeout(BACKFILL_DEADLINE, async {
+                    loop {
+                        let bytes = pipe.rx.recv().await?;
+                        let Some(frame) = wire::decode(&bytes) else {
+                            return None;
+                        };
+                        match frame.kind {
+                            frame_type::ROWS_DONE => {
+                                let done: wire::RowsDoneHeader =
+                                    serde_json::from_value(frame.header).ok()?;
+                                return Some(done.head_seq);
+                            }
+                            _ => {
+                                if !self.handle_frame(frame) {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+                let Ok(Some(seq)) = backfill else {
+                    tracing::warn!("chat2: backfill did not complete");
+                    return SessionEnd::Reconnect;
+                };
+                seq
+            }
         };
         self.resumed = true;
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));
         }
         let _ = self.events.send(ChatEvent::CaughtUp { head_seq });
-
-        // Anything pending (offline writes, reconnect re-pushes) goes now —
-        // the server's batchId dedupe makes replays exact no-ops.
-        if !self.push_pending(&mut pipe).await {
-            return SessionEnd::Reconnect;
-        }
 
         // ── steady state ────────────────────────────────────────────────────
         let mut last_frame = tokio::time::Instant::now();

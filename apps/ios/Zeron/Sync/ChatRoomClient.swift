@@ -82,6 +82,12 @@ actor ChatRoomClient {
     private var livenessTask: Task<Void, Never>?
     private var quotaTask: Task<Void, Never>?
     private var pending: [PendingPush] = []
+    /// State frame received on the CURRENT socket — pushes are legal from
+    /// here (the server accepts them any time post-hello; batchId dedupe).
+    private var stateReceived = false
+    /// Non-nil while a checkpoint downloads in parallel with the row
+    /// backfill: row/rowsDone frames land here and replay after the import.
+    private var checkpointBuffer: [ChatWireFrame]?
     private var joined = false
     private var closed = false
     private var generation = 0
@@ -143,7 +149,7 @@ actor ChatRoomClient {
             return
         }
         pending.append(PendingPush(batchId: UUID().uuidString.lowercased(), bytes: update))
-        if joined {
+        if stateReceived {
             Task { await self.pushPending() }
         }
     }
@@ -187,6 +193,8 @@ actor ChatRoomClient {
         generation += 1
         let gen = generation
         joined = false
+        stateReceived = false
+        checkpointBuffer = nil
         helloSentAt = nil
         backfillStartedAt = nil
         probeSentAt = nil
@@ -350,25 +358,16 @@ actor ChatRoomClient {
         case ChatFrameType.state:
             await handleState(frame, gen: gen)
 
-        case ChatFrameType.row:
-            guard let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
-            // Own-device rows can still arrive (first-backfill redownload, a
-            // racing second socket) — Loro re-import is a no-op; the cursor
-            // advance is what matters.
-            await delegate.applyRow(frame.payload, seq)
-
-        case ChatFrameType.rowsDone:
-            guard backfillStartedAt != nil else { return }
-            backfillStartedAt = nil
-            let wasResumed = resumed
-            resumed = true
-            joined = true
-            backoffMs = ChatRoomClient.backoffBaseMs
-            roomLog.info("chat2 \(self.chatId, privacy: .public): joined (converged, resumed=\(wasResumed))")
-            await delegate.event(.connected)
-            // Anything pending (offline writes, reconnect re-pushes) goes
-            // now — the server's batchId dedupe makes replays exact no-ops.
-            await pushPending()
+        case ChatFrameType.row, ChatFrameType.rowsDone:
+            // Rows landing while a checkpoint downloads in parallel wait for
+            // the import (their seqs are all past the checkpoint; applying
+            // them first would advance the cursor past state the doc doesn't
+            // hold if the fetch then dies).
+            if checkpointBuffer != nil {
+                checkpointBuffer?.append(frame)
+                return
+            }
+            await applyRowFrame(frame)
 
         case ChatFrameType.ack:
             guard let batchId = frame.header["batchId"] as? String,
@@ -419,28 +418,83 @@ actor ChatRoomClient {
             contained = await delegate.containsFrontier(frame.payload)
         }
         let plan = chatPlanCatchUp(cursor: cursor, state: state, frontierContained: contained)
+        stateReceived = true
         let after: UInt64
         switch plan {
         case .rowsOnly(let a):
             after = a
         case .checkpointThenRows(let a):
-            roomLog.info("chat2 \(self.chatId, privacy: .public): fetching checkpoint (seq=\(state.checkpointSeq), \(state.checkpointSize)B)")
-            guard let bytes = await fetchCheckpoint(), gen == generation, !closed else {
-                if gen == generation, !closed {
-                    roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint fetch failed; redialing")
-                    await onSocketError(gen: gen)
-                }
-                return
-            }
-            guard await delegate.applyCheckpoint(bytes, state.checkpointSeq) else {
-                roomLog.error("chat2 \(self.chatId, privacy: .public): checkpoint import failed; redialing")
-                await onSocketError(gen: gen)
-                return
-            }
+            // Fetch in PARALLEL with the row backfill: the rows request goes
+            // out below immediately, rows landing mid-download buffer (see
+            // handleInbound), and the import + replay happen when the bytes
+            // arrive. On a thin link the checkpoint download IS the join
+            // time; serializing download → rows pushed "joined" back by the
+            // whole blob.
+            roomLog.info("chat2 \(self.chatId, privacy: .public): fetching checkpoint (seq=\(state.checkpointSeq), \(state.checkpointSize)B, rows in parallel)")
+            checkpointBuffer = []
+            let seq = state.checkpointSeq
+            Task { await self.completeCheckpointFetch(gen: gen, seq: seq) }
             after = a
         }
         await send(ChatWire.encode(ChatFrameType.rowsReq,
                                    header: ["after": after, "excludeOwn": resumed]))
+        // Pending pushes go before catch-up completes: batchId dedupe makes
+        // replays no-ops and rows are CRDT-commutative, so a message written
+        // offline flushes ~2 RTTs after the socket lands instead of waiting
+        // out the whole checkpoint + backfill.
+        await pushPending()
+    }
+
+    /// Second half of the parallel checkpoint fetch: import the blob, then
+    /// replay the rows that buffered while it downloaded.
+    private func completeCheckpointFetch(gen: Int, seq: UInt64) async {
+        let bytes = await fetchCheckpoint()
+        guard gen == generation, !closed else { return }
+        guard let bytes else {
+            roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint fetch failed; redialing")
+            checkpointBuffer = nil
+            await onSocketError(gen: gen)
+            return
+        }
+        guard await delegate.applyCheckpoint(bytes, seq), gen == generation, !closed else {
+            if gen == generation, !closed {
+                roomLog.error("chat2 \(self.chatId, privacy: .public): checkpoint import failed; redialing")
+                checkpointBuffer = nil
+                await onSocketError(gen: gen)
+            }
+            return
+        }
+        while let frame = checkpointBuffer?.first {
+            checkpointBuffer?.removeFirst()
+            await applyRowFrame(frame)
+            guard gen == generation, !closed else { return }
+        }
+        checkpointBuffer = nil
+    }
+
+    /// One backfill/broadcast frame: a row, or the ROWS_DONE terminator.
+    /// Factored out so frames buffered during a parallel checkpoint fetch
+    /// replay through exactly the live path.
+    private func applyRowFrame(_ frame: ChatWireFrame) async {
+        if frame.kind == ChatFrameType.row {
+            guard let seq = (frame.header["seq"] as? NSNumber)?.uint64Value else { return }
+            // Own-device rows can still arrive (first-backfill redownload, a
+            // racing second socket) — Loro re-import is a no-op; the cursor
+            // advance is what matters.
+            await delegate.applyRow(frame.payload, seq)
+            return
+        }
+        guard backfillStartedAt != nil else { return }
+        backfillStartedAt = nil
+        let wasResumed = resumed
+        resumed = true
+        joined = true
+        backoffMs = ChatRoomClient.backoffBaseMs
+        roomLog.info("chat2 \(self.chatId, privacy: .public): joined (converged, resumed=\(wasResumed))")
+        await delegate.event(.connected)
+        // Anything not yet in flight goes now — the server's batchId dedupe
+        // makes replays exact no-ops.
+        await pushPending()
     }
 
     private func handleErrorFrame(_ header: [String: Any], gen: Int) async {
@@ -481,7 +535,7 @@ actor ChatRoomClient {
     // MARK: Outbound
 
     private func pushPending() async {
-        guard joined else { return }
+        guard stateReceived else { return }
         for ix in pending.indices where !pending[ix].inFlight {
             pending[ix].inFlight = true
             let push = pending[ix]

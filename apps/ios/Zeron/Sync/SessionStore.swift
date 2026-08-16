@@ -148,6 +148,10 @@ final class SessionStore {
         connectIfReady()
     }
 
+    /// Still holding the preload dial (never connected) — the kick sweep
+    /// skips these so a foreground/path flap can't stampede held sockets.
+    var isDialHeld: Bool { holdDial }
+
     /// End a preload dial-hold: an open view (or the stagger timer) wants
     /// live sync now.
     func releaseDial() {
