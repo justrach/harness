@@ -3296,6 +3296,11 @@ impl GitHistory {
         ];
         let rows = self.graph.rows.clone();
         let list = self.list.clone();
+        // Branch tips are independent overview entries: their parents are
+        // intentionally removed in `recompute_view`. Do not restore a false
+        // relationship between adjacent tips just because the graph has
+        // collapsed into its narrow rail.
+        let show_compact_rail = self.view_mode == GitHistoryViewMode::AllCommits;
         let graph_geometry = self.graph_geometry.clone();
         let graph_hover_suppressed = self.graph_hover_suppressed.clone();
         canvas(
@@ -3308,7 +3313,7 @@ impl GitHistory {
                     focus
                 };
                 let pass_count = if focus.is_some() { 2 } else { 1 };
-                if geometry.compact {
+                if geometry.compact && show_compact_rail {
                     let rail_x = geometry.lane_x(0);
                     for pass in 0..pass_count {
                         let selected_pass = focus.is_some() && pass == 1;
