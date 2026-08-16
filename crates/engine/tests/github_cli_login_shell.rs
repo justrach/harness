@@ -32,6 +32,16 @@ fn run_git(cwd: &Path, args: &[&str]) {
 #[tokio::test]
 async fn github_cli_on_login_shell_path_only_resolves_pull_request() {
     let dir = tempfile::tempdir().unwrap();
+    let direct_bin = dir.path().join("direct-bin");
+    std::fs::create_dir(&direct_bin).unwrap();
+    let git_executable = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .expect("git available for checkout inspection");
+    std::os::unix::fs::symlink(&git_executable, direct_bin.join("git")).unwrap();
+
     let shell_bin = dir.path().join("shell-bin");
     std::fs::create_dir(&shell_bin).unwrap();
     write_executable(
@@ -72,13 +82,15 @@ printf '%s\n' '[{"number":90,"title":"Login shell pull request","url":"https://g
         ],
     );
 
-    // A GUI/service-launch environment: `gh` is unavailable directly, but
-    // the user's shell makes it available through its login PATH.
+    // A GUI/service-launch environment: only the git shim is available
+    // directly, while the user's shell makes `gh` available through its
+    // login PATH. Keeping the direct PATH isolated makes this deterministic
+    // even on systems that install the real GitHub CLI in /usr/bin.
     // SAFETY: single-test binary — nothing else reads env concurrently.
     unsafe {
         std::env::set_var("SHELL", &fake_shell);
         std::env::set_var("HOME", dir.path());
-        std::env::set_var("PATH", "/usr/bin:/bin");
+        std::env::set_var("PATH", &direct_bin);
         std::env::remove_var("ZERON_NO_LOGIN_SHELL");
     }
 
