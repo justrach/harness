@@ -592,3 +592,85 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
         ]
     );
 }
+
+#[tokio::test]
+async fn prompt_complete_extension_settles_a_hung_prompt_response() {
+    // The grok field hang: `_x.ai/session/prompt_complete` fires (echoing
+    // the minted _meta.promptId) but the session/prompt RPC never answers.
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:prompt-complete-hang"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let done = matches!(ev, AgentEvent::Done { .. });
+            events.push(ev);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("notification settled the turn despite the hung RPC");
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "pong".into()
+    }));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn stale_prompt_complete_never_settles_a_newer_turn() {
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:prompt-complete-stale"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let done = matches!(ev, AgentEvent::Done { .. });
+            events.push(ev);
+            if done {
+                break;
+            }
+        }
+        events
+    })
+    .await
+    .expect("real response settled the turn");
+    // Exactly one Done, AFTER the real content — the stale/foreign
+    // completions (emitted before the 1s pause) must not have settled first,
+    // and must not have marked the turn Interrupted.
+    let text = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "real answer"))
+        .expect("real content precedes the settle");
+    let done = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Done { .. }))
+        .expect("done");
+    assert!(text < done, "{events:?}");
+    assert!(matches!(
+        &events[done],
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    ));
+    // Grok-style `_meta` usage on the response is captured.
+    assert!(events.contains(&AgentEvent::Usage {
+        input_tokens: 9,
+        output_tokens: 4
+    }));
+}

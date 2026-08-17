@@ -91,9 +91,21 @@ struct AcpAgentSpec {
     /// first value the agent actually advertises wins.
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
     /// Levels appended to a DISCOVERED model's non-empty ladder: modes the
-    /// wire can't advertise because they aren't `thought_level` values
-    /// (Claude's Ultrathink rides prompts via `prompt_transform`).
+    /// wire can't advertise because they aren't `thought_level` values.
     ladder_extras: &'static [ReasoningLevel],
+    /// The agent emits `_x.ai/session/prompt_complete` (Grok): treat it as
+    /// the AUTHORITATIVE turn end — grok's `session/prompt` RPC can hang
+    /// silently after the turn really finished (field reports: total silent
+    /// non-response on some machines). The prompt response stays as the
+    /// fallback; whichever lands first settles the turn, exactly once.
+    prompt_complete_extension: bool,
+    /// Bound on prompt-send → FIRST sign of life on the wire. `None`
+    /// disables. Grok's healthy runs acknowledge a prompt within
+    /// milliseconds (queue bookkeeping precedes any model work), so total
+    /// silence past this window is a wedged agent (a stale shared leader,
+    /// a dead update check) — surface a visible error chip instead of
+    /// indefinite Working.
+    prompt_stall: Option<Duration>,
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
@@ -186,8 +198,15 @@ fn grok_spec() -> AcpAgentSpec {
         display_name: "Grok",
         executable: "grok",
         env_override: "GROK_EXECUTABLE",
-        args: &["agent", "stdio"],
-        npm_package: Some("@xai-official/grok@1.0.0"),
+        // Flag placement verified against grok 1.0.4: `--no-auto-update` is
+        // TOP-LEVEL (before the subcommand) and kills the launch-time update
+        // check (a silent multi-second network stall); `--no-leader` lives on
+        // the `agent` subcommand and starts a fresh agent even when
+        // `[cli] use_leader` is set — leader mode ATTACHES `agent stdio` to a
+        // shared process via ~/.grok/leader.sock, so a wedged/stale leader
+        // (the user's TUI) reads as total silent non-response in zeron.
+        args: &["--no-auto-update", "agent", "--no-leader", "stdio"],
+        npm_package: Some("@xai-official/grok@1.0.4"),
         extra_paths: grok_install_paths,
         cli_executable: "grok",
         cli_extra_paths: grok_install_paths,
@@ -221,6 +240,10 @@ fn grok_spec() -> AcpAgentSpec {
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
+        // Verified live (1.0.4): the notification fires with the echoed
+        // `_meta.promptId`, just ahead of the RPC response.
+        prompt_complete_extension: true,
+        prompt_stall: Some(Duration::from_secs(30)),
     }
 }
 
@@ -283,6 +306,8 @@ fn hermes_spec() -> AcpAgentSpec {
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
     }
 }
 
@@ -336,6 +361,8 @@ fn pi_spec() -> AcpAgentSpec {
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
     }
 }
 
@@ -1035,6 +1062,8 @@ impl Harness for AcpHarness {
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
             effort_values: self.spec.effort_values,
+            prompt_complete_extension: self.spec.prompt_complete_extension,
+            prompt_stall: self.spec.prompt_stall,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
@@ -1061,6 +1090,8 @@ struct Session {
     request: RunRequest,
     harness: HarnessId,
     agent_name: &'static str,
+    prompt_complete_extension: bool,
+    prompt_stall: Option<Duration>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
     interrupt_grace: Duration,
@@ -1316,7 +1347,10 @@ fn session_update_events(params: &Value, session_id: &str) -> Vec<AgentEvent> {
 /// Per-turn token usage from a settled `session/prompt` response, when the
 /// adapter attaches it (tolerant of both field spellings; absent → nothing).
 fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> {
-    let usage = res.as_ref().ok()?.get("usage")?;
+    let resp = res.as_ref().ok()?;
+    // Grok settles usage on the response `_meta` (inputTokens/outputTokens —
+    // verified live, 1.0.4); adapters used a first-class `usage` object.
+    let usage = resp.get("usage").or_else(|| resp.get("_meta"))?;
     let count = |keys: &[&str]| {
         keys.iter()
             .find_map(|k| usage.get(*k))
@@ -1354,21 +1388,24 @@ fn stop_outcome(
 }
 
 /// One turn: `session/prompt` whose response (the `stopReason`) ends it.
+/// `prompt_id` (agents with the prompt-complete extension) rides `_meta` so
+/// the `_x.ai/session/prompt_complete` notification can be matched exactly —
+/// grok echoes it back (verified live, 1.0.4).
 fn prompt_turn(
     client: RpcClient,
     session_id: String,
     text: String,
+    prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
-        client
-            .request(
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": text }],
-                }),
-            )
-            .await
+        let mut params = json!({
+            "sessionId": session_id,
+            "prompt": [{ "type": "text", "text": text }],
+        });
+        if let Some(id) = prompt_id {
+            params["_meta"] = json!({ "promptId": id, "requestId": id });
+        }
+        client.request("session/prompt", params).await
     })
 }
 
@@ -1604,6 +1641,8 @@ async fn run_session(session: Session) {
         request,
         harness,
         agent_name,
+        prompt_complete_extension,
+        prompt_stall,
         prompt_transform,
         effort_values,
         interrupt_grace,
@@ -1808,11 +1847,35 @@ async fn run_session(session: Session) {
     }
 
     // ---- main loop --------------------------------------------------------
-    let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some(prompt_turn(
-        client.clone(),
-        session_id.clone(),
-        prompt_transform(request.reasoning, &request.prompt),
-    ));
+    // Prompt-completion settlement state (the prompt-complete extension):
+    // one prompt is outstanding at a time, identified by `current_prompt_id`;
+    // settled ids are remembered so a STALE `prompt_complete` (a late replay
+    // of an already-settled prompt) can never settle a newer turn.
+    let mut prompt_seq: u64 = 0;
+    let mut current_prompt_id: Option<String> = None;
+    let mut completed_prompts: VecDeque<String> = VecDeque::new();
+    // `ZERON_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
+    let prompt_stall: Option<Duration> = match std::env::var("ZERON_ACP_PROMPT_STALL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => prompt_stall,
+    };
+    let mut prompt_stall_deadline: Option<tokio::time::Instant> =
+        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
+        prompt_seq += 1;
+        current_prompt_id =
+            prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+        prompt_turn(
+            client.clone(),
+            session_id.clone(),
+            prompt_transform(request.reasoning, &request.prompt),
+            current_prompt_id.clone(),
+        )
+    });
     // Steers waiting for the turn boundary (agents without the extension, or
     // extension steers that lost the turn-end race).
     let mut queued_steers: VecDeque<String> = VecDeque::new();
@@ -1895,6 +1958,13 @@ async fn run_session(session: Session) {
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
                 starve_deadline = None;
+                prompt_stall_deadline = None;
+                if let Some(id) = current_prompt_id.take() {
+                    completed_prompts.push_back(id);
+                    while completed_prompts.len() > 32 {
+                        completed_prompts.pop_front();
+                    }
+                }
                 // Settle an in-flight `_session/steering` call BEFORE closing
                 // the turn: its response rides the same stdout as the prompt
                 // response, so by now it is (nearly always) already parsed —
@@ -2046,7 +2116,17 @@ async fn run_session(session: Session) {
                     steered_this_turn = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                    prompt_seq += 1;
+                    current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(),
+                        session_id.clone(),
+                        text,
+                        current_prompt_id.clone(),
+                    ));
                 } else if !steering_open {
                     break 'main;
                 }
@@ -2055,6 +2135,50 @@ async fn run_session(session: Session) {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                     last_update_at = tokio::time::Instant::now();
+                    // Any wire traffic is a sign of life: the prompt-stall
+                    // watchdog only guards TOTAL silence after a prompt.
+                    prompt_stall_deadline = None;
+                    // `_x.ai/session/prompt_complete` — the AUTHORITATIVE
+                    // turn end for agents advertising it (grok): the
+                    // `session/prompt` RPC can hang after the turn really
+                    // finished. Settle through the SAME response arm by
+                    // swapping the in-flight future for the synthesized
+                    // response; the abandoned RPC future drains in the
+                    // background and its late result is discarded. Guards:
+                    // session match, an outstanding prompt, and an exact
+                    // prompt-id match (a stale replay of an already-settled
+                    // prompt must never settle a newer turn; grok echoes the
+                    // `_meta.promptId` we mint — verified live, 1.0.4).
+                    if prompt_complete_extension
+                        && method == "_x.ai/session/prompt_complete"
+                        && !interrupted
+                        && turn.is_some()
+                        && params.get("sessionId").and_then(Value::as_str)
+                            == Some(session_id.as_str())
+                    {
+                        let pid = params
+                            .get("promptId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let stale = pid.as_deref().is_some_and(|p| {
+                            completed_prompts.iter().any(|c| c == p)
+                        }) || (pid.is_some() && pid != current_prompt_id);
+                        if !stale {
+                            let stop = params
+                                .get("stopReason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("end_turn")
+                                .to_owned();
+                            if let Some(old) = turn.take() {
+                                tokio::spawn(async move {
+                                    let _ = old.await;
+                                });
+                            }
+                            turn = Some(Box::pin(async move {
+                                Ok(json!({ "stopReason": stop }))
+                            }));
+                        }
+                    }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events = if method == "session/update" {
@@ -2070,6 +2194,7 @@ async fn run_session(session: Session) {
                     }
                 }
                 Some(Incoming::Request { id, method, params }) => {
+                    prompt_stall_deadline = None;
                     for ev in handle_server_request_live(
                         &client,
                         id,
@@ -2265,7 +2390,17 @@ async fn run_session(session: Session) {
                     steered_this_turn = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                    prompt_seq += 1;
+                    current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(),
+                        session_id.clone(),
+                        text,
+                        current_prompt_id.clone(),
+                    ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
                     if turn.is_some() && !interrupted {
@@ -2306,7 +2441,17 @@ async fn run_session(session: Session) {
                     steered_this_turn = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                    prompt_seq += 1;
+                    current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(),
+                        session_id.clone(),
+                        text,
+                        current_prompt_id.clone(),
+                    ));
                 } else if turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
                     break 'main;
@@ -2400,7 +2545,17 @@ async fn run_session(session: Session) {
                     steered_this_turn = false;
                     open_tools.clear();
                     last_update_at = tokio::time::Instant::now();
-                    turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                    prompt_seq += 1;
+                    current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(),
+                        session_id.clone(),
+                        text,
+                        current_prompt_id.clone(),
+                    ));
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
                     // and nothing left to run — the session is over.
@@ -2463,7 +2618,17 @@ async fn run_session(session: Session) {
                         steered_this_turn = false;
                         open_tools.clear();
                         last_update_at = tokio::time::Instant::now();
-                        turn = Some(prompt_turn(client.clone(), session_id.clone(), text));
+                        prompt_seq += 1;
+                    current_prompt_id =
+                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                    prompt_stall_deadline =
+                        prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(),
+                        session_id.clone(),
+                        text,
+                        current_prompt_id.clone(),
+                    ));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
                         // extension: start the call, resolved by its own
@@ -2508,6 +2673,42 @@ async fn run_session(session: Session) {
                     // bookkeeping below still guarantees Done { Interrupted }.
                     break 'main;
                 }
+            },
+
+            // Prompt-stall watchdog: a prompt was sent and NOTHING has come
+            // back on the wire at all — no queue bookkeeping, no updates, no
+            // requests. Healthy grok acknowledges within milliseconds; total
+            // silence past the bound is a wedged agent (stale shared leader,
+            // launch-time update check). Surface a visible error instead of
+            // indefinite Working.
+            _ = tokio::time::sleep_until(
+                prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
+            ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
+                prompt_stall_deadline = None;
+                let _ = send(
+                    &event_tx,
+                    AgentEvent::Error {
+                        message: format!(
+                            "{agent_name} did not respond to the prompt at all                              (no wire activity for {}s). The agent process is                              likely wedged — a stale shared leader process or a                              hung startup check; zeron launches it with                              --no-leader and --no-auto-update to avoid both.",
+                            prompt_stall.map(|d| d.as_secs()).unwrap_or(0)
+                        ),
+                    },
+                )
+                .await;
+                done_current = true;
+                let _ = send(
+                    &event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(format!(
+                            "{agent_name} is unresponsive — the run was closed."
+                        )),
+                        session_id: Some(session_id.clone()),
+                    },
+                )
+                .await;
+                break 'main;
             },
 
             _ = event_tx.closed() => break 'main,

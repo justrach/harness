@@ -94,18 +94,32 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
-*scenario:autonomous-end*)
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"on it"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  # Background-task wake: a self-continued cycle streams real output with no
-  # prompt in flight, then announces its end with the turn-ended extension.
-  # The sleep orders it AFTER the prompt response settles (responses resolve
-  # through a different channel than notifications and can race).
+*scenario:prompt-complete-hang*)
+  # The grok field hang: the turn really finishes — prompt_complete fires
+  # with the echoed _meta.promptId — but the session/prompt RPC is NEVER
+  # answered. The harness must settle off the notification.
+  reqpid=$(printf '%s' "$promptline" | sed 's/.*"promptId":"\([^"]*\)".*/\1/')
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"pong"}}'
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"$reqpid\",\"stopReason\":\"end_turn\",\"agentResult\":null}}"
+  # Hang the response forever (the wedge under test).
+  exec sleep 60
+  ;;
+
+*scenario:prompt-complete-stale*)
+  # A STALE completion (wrong prompt id — a replay of an already-settled
+  # prompt) must not settle the live turn; the real response follows.
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"stale-p0\",\"stopReason\":\"cancelled\",\"agentResult\":null}}"
+  # A completion for ANOTHER session is equally inert.
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"other\",\"promptId\":\"zeron-p1\",\"stopReason\":\"cancelled\",\"agentResult\":null}}"
   sleep 1
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"background finished"}}'
-  emit "{\"method\":\"_session/turn_ended\",\"params\":{\"sessionId\":\"$SID\",\"stopReason\":\"end_turn\"}}"
-  # Another session's marker must map to nothing.
-  emit "{\"method\":\"_session/turn_ended\",\"params\":{\"sessionId\":\"other\",\"stopReason\":\"end_turn\"}}"
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"real answer"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\",\"_meta\":{\"inputTokens\":9,\"outputTokens\":4}}}"
+  ;;
+
+*scenario:prompt-stall*)
+  # TOTAL silence after the prompt — the leader-wedge signature. Nothing is
+  # ever emitted; the harness's prompt-stall watchdog must error the run.
+  exec sleep 60
   ;;
 
 *scenario:happy*)
