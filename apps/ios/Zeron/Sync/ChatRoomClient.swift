@@ -166,10 +166,16 @@ actor ChatRoomClient {
         // Push first, so a message typed on dead wifi leaves the device on
         // this cycle rather than the next.
         for push in pending {
-            guard var request = await pushRequest(push.batchId) else { break }
+            guard var request = await pushRequest(push.batchId) else {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): http push skipped — no URL (token unavailable)")
+                break
+            }
             request.httpBody = push.bytes
             guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else { break }
+                  let http = response as? HTTPURLResponse else {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): http push transport error; will retry")
+                break
+            }
             if http.statusCode == 200,
                let ack = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let seq = (ack["seq"] as? NSNumber)?.uint64Value {
@@ -187,13 +193,24 @@ actor ChatRoomClient {
                 roomLog.error("chat2 \(self.chatId, privacy: .public): http push rejected (\(code, privacy: .public)); retiring batch")
                 pending.removeAll { $0.batchId == push.batchId }
             } else {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): http push http=\(http.statusCode); will retry")
                 break  // quota/transient/middlebox: retry next cycle
             }
         }
         let after = await delegate.cursor()
-        guard let request = await rowsRequest(after) else { return }
-        guard let (body, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        guard let request = await rowsRequest(after) else {
+            roomLog.warning("chat2 \(self.chatId, privacy: .public): http pull skipped — no URL (token unavailable)")
+            return
+        }
+        let fetched = try? await URLSession.shared.data(for: request)
+        guard let (body, response) = fetched, let http = response as? HTTPURLResponse else {
+            roomLog.warning("chat2 \(self.chatId, privacy: .public): http pull transport error; will retry")
+            return
+        }
+        guard http.statusCode == 200 else {
+            roomLog.warning("chat2 \(self.chatId, privacy: .public): http pull http=\(http.statusCode); will retry")
+            return
+        }
         // u32-LE length-prefixed frames: state first, then rows, rowsDone.
         var frames: [ChatWireFrame] = []
         var off = 0
@@ -209,7 +226,10 @@ actor ChatRoomClient {
             off += len
         }
         guard let stateFrame = frames.first, stateFrame.kind == ChatFrameType.state,
-              let state = ChatStateHeader(stateFrame.header) else { return }
+              let state = ChatStateHeader(stateFrame.header) else {
+            roomLog.error("chat2 \(self.chatId, privacy: .public): http pull body malformed (\(body.count)B, \(frames.count) frames)")
+            return
+        }
         var contained = state.checkpointSize == 0
         if !contained {
             contained = await delegate.containsFrontier(stateFrame.payload)
@@ -226,7 +246,11 @@ actor ChatRoomClient {
             guard !fetchInFlight else { return }  // socket's fetch owns it
             fetchInFlight = true
             await completeCheckpointFetch(seq: state.checkpointSeq)
-            guard !closed, await delegate.containsFrontier(stateFrame.payload) else { return }
+            guard !closed else { return }
+            guard await delegate.containsFrontier(stateFrame.payload) else {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): http pull — frontier still missing after checkpoint; will retry")
+                return
+            }
         }
         guard !closed else { return }
         for frame in frames.dropFirst()

@@ -96,9 +96,19 @@ final class WorkspaceStore {
     /// The WS hello's delta answer over plain HTTPS, applied through the
     /// exact state path the socket uses.
     private func pullDelta() async {
-        guard let request = await config.registryRowsRequest(since: doc.helloCursor) else { return }
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        guard let request = await config.registryRowsRequest(since: doc.helloCursor) else {
+            roomLog.warning("registry: http pull skipped — no URL (token unavailable)")
+            return
+        }
+        let fetched = try? await URLSession.shared.data(for: request)
+        guard let (data, response) = fetched, let http = response as? HTTPURLResponse else {
+            roomLog.warning("registry: http pull transport error; will retry")
+            return
+        }
+        guard http.statusCode == 200 else {
+            roomLog.warning("registry: http pull http=\(http.statusCode); will retry")
+            return
+        }
         struct PullBody: Decodable {
             var seq: UInt64
             var full: Bool
@@ -133,9 +143,11 @@ final class WorkspaceStore {
                   let body = try? JSONEncoder().encode(PushBody(batch: pending.batch,
                                                                 ops: pending.ops)) else { break }
             request.httpBody = body
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
+            let result = try? await URLSession.shared.data(for: request)
+            let status = (result?.1 as? HTTPURLResponse)?.statusCode
+            guard let (data, _) = result, status == 200,
                   let ack = try? JSONDecoder().decode(AckBody.self, from: data) else {
+                roomLog.warning("registry: http push failed (http=\(status ?? -1)); will retry")
                 // takePushable marked these in flight; nothing clears that
                 // until the next socket disconnect — un-mark so the next
                 // cycle (HTTP or WS) retries them.

@@ -822,7 +822,7 @@ impl Actor {
                         }
                     }
                     Err(err) => {
-                        tracing::debug!(error = %err, "registry: http push failed; will retry");
+                        tracing::warn!(error = %err, "registry: http push failed; will retry");
                         push_failed = true;
                         break;
                     }
@@ -867,7 +867,7 @@ impl Actor {
                     }
                 }
                 Err(err) => {
-                    tracing::debug!(error = %err, "registry: http pull failed; will retry");
+                    tracing::warn!(error = %err, "registry: http pull failed; will retry");
                 }
             }
             busy.store(false, Relaxed);

@@ -1124,7 +1124,7 @@ impl Actor {
                         }
                     }
                     Err(err) => {
-                        tracing::debug!(error = %err, "chat2: http push failed; will retry");
+                        tracing::warn!(error = %err, "chat2: http push failed; will retry");
                         break;
                     }
                 }
@@ -1133,7 +1133,7 @@ impl Actor {
             let body = match transport.fetch_rows(cursor).await {
                 Ok(body) => body,
                 Err(err) => {
-                    tracing::debug!(error = %err, "chat2: http pull failed; will retry");
+                    tracing::warn!(error = %err, "chat2: http pull failed; will retry");
                     busy.store(false, Relaxed);
                     return;
                 }
