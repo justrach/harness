@@ -498,6 +498,8 @@ pub enum RowKind {
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
+        /// Context the prompt folded in as text, lifted back out by `badges`.
+        badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -663,9 +665,12 @@ pub fn rows_for_entry(
         // File mentions render as chips here too, not just in the composer.
         // The projection is pure over the text, so the raw-length row version
         // below stays a valid cache/diff key.
-        let (text, mentions) = match crate::composer::sent_mention_display(&parsed.text) {
+        // Lifted before the mention projection, so a comment body's own
+        // Markdown never lands in the bubble.
+        let (body, badges) = crate::badges::split(&parsed.text);
+        let (text, mentions) = match crate::composer::sent_mention_display(&body) {
             Some((display, spans)) => (display, spans),
-            None => (parsed.text, Vec::new()),
+            None => (body, Vec::new()),
         };
         return vec![Row {
             id: entry.id.clone().into(),
@@ -675,6 +680,7 @@ pub fn rows_for_entry(
                 text: text.into(),
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
+                badges: Arc::new(badges),
                 pending,
             },
             entry_id,
@@ -2744,9 +2750,11 @@ impl Transcript {
                 text,
                 mentions,
                 attachments,
+                badges,
                 pending,
             } => {
                 let attachments = attachments.clone();
+                let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
@@ -2756,6 +2764,26 @@ impl Transcript {
                 let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
+                }
+                if !badges.is_empty() {
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .justify_end()
+                            .items_center()
+                            .gap(px(6.0))
+                            .pb(px(6.0))
+                            .children(badges.iter().enumerate().map(|(bix, badge)| {
+                                crate::badges::render(
+                                    SharedString::from(format!("{}#badge{bix}", row.id)),
+                                    badge,
+                                    &theme,
+                                )
+                            })),
+                    );
                 }
                 if !text.is_empty() {
                     // `min_w_0` is load-bearing: gpui text answers min/max-content
@@ -3699,6 +3727,8 @@ fn detail_body(
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     match detail {
+        // No comment layer: an inline tool diff is a record of what the
+        // agent already did, not a review surface.
         ToolDetail::Diff { file, .. } => body
             .child(crate::changes::render_file_body_with_syntax(
                 file,
