@@ -88,10 +88,24 @@ pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f3
 /// back/forward: three 24px buttons, 2px gaps).
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + 2.0 * 2.0;
 
+/// Width of a row of `count` Linux caption buttons, drawn at the cluster's
+/// own 24px-button / 2px-gap rhythm.
+pub fn caption_buttons_width(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    count as f32 * 24.0 + (count as f32 - 1.0) * 2.0
+}
+
 /// Where the cluster's first button starts, from the window's left edge.
-pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
+/// `linux_left_captions` is the number of caption buttons zeron draws at the
+/// top-left on Linux (GNOME `close:…` layouts) — the app cluster follows them
+/// at the shared 2px rhythm.
+pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captions: usize) -> f32 {
     if is_macos {
         titlebar_cluster_start(fullscreen)
+    } else if linux_left_captions > 0 {
+        10.0 + caption_buttons_width(linux_left_captions) + 2.0
     } else {
         10.0
     }
@@ -99,8 +113,14 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
 
 /// Left clearance a full-bleed header (collapsed sidebar) needs so its content
 /// starts past the overlay cluster, given the header's own `container_pad`.
-pub fn cluster_clearance(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
-    (cluster_buttons_start(is_macos, fullscreen) + CLUSTER_BUTTONS_WIDTH + 8.0 - container_pad)
+pub fn cluster_clearance(
+    is_macos: bool,
+    fullscreen: bool,
+    linux_left_captions: usize,
+    container_pad: f32,
+) -> f32 {
+    (cluster_buttons_start(is_macos, fullscreen, linux_left_captions) + CLUSTER_BUTTONS_WIDTH + 8.0
+        - container_pad)
         .max(0.0)
 }
 
@@ -894,6 +914,15 @@ pub struct Shell {
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
+    /// The caption buttons zeron itself draws on Linux under client-side
+    /// decorations, per side, already filtered to what the compositor
+    /// supports — `None` off Linux or under server decorations (where the WM
+    /// draws real buttons). Re-resolved every frame at the top of `render`.
+    linux_captions: Option<gpui::WindowButtonLayout>,
+    /// Re-renders when the desktop's button layout changes (GNOME
+    /// `button-layout` gsetting). Registered on first paint — [`Shell::new`]
+    /// has no window.
+    button_layout_sub: Option<Subscription>,
     /// Clears the height tween once it completes (so a closed panel unmounts).
     terminal_tween_task: Option<Task<()>>,
     /// Height-drag anchor: (pointer y, height) at mouse-down on the handle.
@@ -1082,6 +1111,8 @@ impl Shell {
             fullscreen: None,
             titlebar_tween: None,
             titlebar_should_move: false,
+            linux_captions: None,
+            button_layout_sub: None,
             terminal_tween_task: None,
             terminal_drag_anchor: None,
             reduced_motion: false,
@@ -2020,7 +2051,7 @@ impl Shell {
             self.state.update(cx, |s, cx| s.select_chat(None, cx));
         }
         self.composer
-            .update(cx, |composer, _| composer.purge_chat(&chat_id));
+            .update(cx, |composer, cx| composer.purge_chat(&chat_id, cx));
         self.mutate(
             serde_json::json!({ "op": "deleteChat", "chatId": chat_id }),
             cx,
@@ -2647,7 +2678,7 @@ impl Shell {
         let is_macos = cfg!(target_os = "macos");
         let cluster = self.eval_tween(
             self.titlebar_tween,
-            cluster_buttons_start(is_macos, fullscreen),
+            cluster_buttons_start(is_macos, fullscreen, self.linux_left_caption_count()),
         );
         cluster + CLUSTER_BUTTONS_WIDTH + 10.0
     }
@@ -2665,10 +2696,7 @@ impl Shell {
                     .items_center()
                     .pt(px(Theme::TITLEBAR_TOP_PAD))
                     .pl(px(self.title_bar_content_start()))
-                    .pr(px(titlebar_right_padding(
-                        cfg!(target_os = "windows"),
-                        Theme::SPACE_LG,
-                    )));
+                    .pr(px(self.titlebar_right_pad(Theme::SPACE_LG)));
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("settings-header-titlebar", bar, cx)
                     .into_any_element()
@@ -2759,6 +2787,15 @@ impl Shell {
             .gap(px(2.0))
             .px(px(10.0))
             .children(self.titlebar_spacer(12.0))
+            // Left-side Linux captions (GNOME `close:…` layouts): the
+            // root-level caption overlay owns the buttons; the cluster row
+            // just starts past them, at the shared 2px rhythm.
+            .children((self.linux_left_caption_count() > 0).then(|| {
+                div()
+                    .flex_none()
+                    .h_full()
+                    .w(px(caption_buttons_width(self.linux_left_caption_count())))
+            }))
             .child(window_control_button(
                 "toggle-sidebar",
                 icons::SIDEBAR_MINIMALISTIC_LEFT,
@@ -2850,6 +2887,140 @@ impl Shell {
                 ))
                 .into_any_element(),
         )
+    }
+
+    /// Which caption buttons zeron itself must draw on Linux: under
+    /// client-side decorations (the Wayland default) nobody else will —
+    /// without these the window has NO minimize/maximize/close at all.
+    /// Server-side decorations (X11 WMs, KDE with SSD) already draw real
+    /// buttons, so `None` there. The desktop's layout (GNOME's
+    /// `button-layout` gsetting via `cx.button_layout()`) decides side and
+    /// order — min/max/close on the right by default; controls the
+    /// compositor can't do (e.g. minimize on some Wayland compositors) drop
+    /// out, close always stays.
+    #[cfg(target_os = "linux")]
+    fn resolve_linux_captions(window: &Window, cx: &App) -> Option<gpui::WindowButtonLayout> {
+        use gpui::{MAX_BUTTONS_PER_SIDE, WindowButton, WindowButtonLayout};
+        if !matches!(
+            window.window_decorations(),
+            gpui::Decorations::Client { .. }
+        ) {
+            return None;
+        }
+        let layout = cx
+            .button_layout()
+            .unwrap_or_else(WindowButtonLayout::linux_default);
+        let supported = window.window_controls();
+        let filter_side = |side: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE]| {
+            let mut out = [None; MAX_BUTTONS_PER_SIDE];
+            let mut i = 0;
+            for button in side.into_iter().flatten() {
+                let keep = match button {
+                    WindowButton::Minimize => supported.minimize,
+                    WindowButton::Maximize => supported.maximize,
+                    WindowButton::Close => true,
+                };
+                if keep {
+                    out[i] = Some(button);
+                    i += 1;
+                }
+            }
+            out
+        };
+        let layout = WindowButtonLayout {
+            left: filter_side(layout.left),
+            right: filter_side(layout.right),
+        };
+        (layout.left[0].is_some() || layout.right[0].is_some()).then_some(layout)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn resolve_linux_captions(_window: &Window, _cx: &App) -> Option<gpui::WindowButtonLayout> {
+        None
+    }
+
+    pub(super) fn linux_left_caption_count(&self) -> usize {
+        self.linux_captions
+            .map_or(0, |l| l.left.iter().flatten().count())
+    }
+
+    pub(super) fn linux_right_caption_count(&self) -> usize {
+        self.linux_captions
+            .map_or(0, |l| l.right.iter().flatten().count())
+    }
+
+    /// Right padding titlebar content needs to clear the platform's caption
+    /// controls (native Windows cluster / zeron-drawn Linux buttons).
+    pub(super) fn titlebar_right_pad(&self, base: f32) -> f32 {
+        titlebar_right_padding(
+            cfg!(target_os = "windows"),
+            self.linux_right_caption_count(),
+            base,
+        )
+    }
+
+    /// Zeron-drawn Linux caption controls, one overlay per populated side.
+    /// Shell-level chrome like the Windows cluster: mounted at the root so
+    /// they stay above the splash and every auth/org/error gate.
+    fn render_linux_caption_controls(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
+        let Some(layout) = self.linux_captions else {
+            return Vec::new();
+        };
+        let theme = Theme::of(cx);
+        let is_maximized = window.is_maximized();
+        // Ids can be per-button (not per-side): the layout parser dedups, so
+        // a button never appears on both sides at once.
+        let strip = |buttons: &[Option<gpui::WindowButton>]| {
+            div()
+                .absolute()
+                .top_0()
+                .h(px(Theme::TITLEBAR_HEIGHT))
+                .flex()
+                .flex_row()
+                .items_center()
+                .pt(px(Theme::TITLEBAR_TOP_PAD))
+                .gap(px(2.0))
+                .px(px(10.0))
+                .children(buttons.iter().flatten().map(|button| {
+                    match button {
+                        gpui::WindowButton::Minimize => linux_caption_button(
+                            "window-minimize",
+                            icons::WINDOW_MINIMIZE,
+                            false,
+                            theme,
+                            |_, window, _| window.minimize_window(),
+                        )
+                        .into_any_element(),
+                        gpui::WindowButton::Maximize => {
+                            let (id, icon_path) = if is_maximized {
+                                ("window-restore", icons::WINDOW_RESTORE)
+                            } else {
+                                ("window-maximize", icons::WINDOW_MAXIMIZE)
+                            };
+                            linux_caption_button(id, icon_path, false, theme, |_, window, _| {
+                                window.zoom_window()
+                            })
+                            .into_any_element()
+                        }
+                        gpui::WindowButton::Close => linux_caption_button(
+                            "window-close",
+                            icons::CLOSE,
+                            true,
+                            theme,
+                            |_, window, _| window.remove_window(),
+                        )
+                        .into_any_element(),
+                    }
+                }))
+        };
+        let mut out = Vec::new();
+        if layout.left[0].is_some() {
+            out.push(strip(&layout.left).left_0().into_any_element());
+        }
+        if layout.right[0].is_some() {
+            out.push(strip(&layout.right).right_0().into_any_element());
+        }
+        out
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -6014,9 +6185,14 @@ fn window_control_button(
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
 
-fn titlebar_right_padding(is_windows: bool, base: f32) -> f32 {
+/// Right padding for titlebar content: past the native Windows caption
+/// cluster, or past zeron's own Linux caption buttons (10px edge inset +
+/// the button row) when the layout puts any on the right.
+fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f32) -> f32 {
     base + if is_windows {
         WINDOWS_CAPTION_WIDTH
+    } else if linux_right_captions > 0 {
+        10.0 + caption_buttons_width(linux_right_captions)
     } else {
         0.0
     }
@@ -6062,6 +6238,54 @@ fn windows_caption_button(
         .occlude()
         .window_control_area(area)
         .child(glyph)
+}
+
+/// A Linux caption button in zeron's own cluster style (24px, rounded-6,
+/// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
+/// Linux, so unlike the Windows cluster these carry explicit click handlers
+/// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
+/// zed's Linux titlebar makes. `occlude` + `prevent_default` keep them out
+/// of the drag strip's event surface (see [`window_control_button`]).
+fn linux_caption_button(
+    id: &'static str,
+    icon_path: &'static str,
+    close: bool,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (muted, hover_bg, hover_fg) = if close {
+        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
+        (theme.text_muted, red, gpui::white())
+    } else {
+        (theme.text_muted, theme.glass_hover(), theme.text)
+    };
+    div()
+        .id(id)
+        // gpui svgs don't inherit the div's text color — recolor the glyph
+        // on hover through the group instead (zed's WindowControl idiom).
+        .group("linux-caption-button")
+        .size(px(24.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx)
+        })
+        .child(
+            icon(icon_path)
+                .size(px(16.0))
+                .text_color(muted)
+                .group_hover("linux-caption-button", move |style| {
+                    style.text_color(hover_fg)
+                }),
+        )
 }
 
 /// A titlebar history button (zeron window-controls.tsx): enabled it is a
@@ -6164,6 +6388,14 @@ impl Render for Shell {
                 ));
             }
             self.fullscreen = Some(fullscreen);
+        }
+        // Linux CSD: (re-)resolve which caption buttons we draw and on which
+        // side — decorations can flip server↔client at runtime and the
+        // desktop's button layout is user configuration.
+        self.linux_captions = Self::resolve_linux_captions(window, cx);
+        if cfg!(target_os = "linux") && self.button_layout_sub.is_none() {
+            self.button_layout_sub =
+                Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
         }
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
         self.reduced_motion = motion::reduced_motion(cx);
@@ -6421,24 +6653,31 @@ impl Render for Shell {
 
         // Caption controls are shell-level chrome, not Ready-page content:
         // keep them above the splash and every auth/org/error gate as well as
-        // the full application. Gate pages also need a native drag surface
-        // because they do not render the unified tabs/settings titlebar.
+        // the full application. Gate pages also need a drag surface because
+        // they do not render the unified tabs/settings titlebar — on Windows
+        // the native `Drag` control area, on Linux the explicit
+        // `start_window_move` strip (the control-area hit-test is inert
+        // there); macOS drags gate windows natively.
         let root = if (!restart_required && matches!(gate, GatePhase::Ready))
-            || !cfg!(target_os = "windows")
+            || cfg!(target_os = "macos")
         {
             root
         } else {
             root.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(Theme::TITLEBAR_HEIGHT))
-                    .window_control_area(WindowControlArea::Drag),
+                self.titlebar_drag_region(
+                    "gate-titlebar-drag",
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(Theme::TITLEBAR_HEIGHT)),
+                    cx,
+                ),
             )
         };
         root.children(self.render_windows_caption_controls(window, cx))
+            .children(self.render_linux_caption_controls(window, cx))
     }
 }
 
@@ -6813,24 +7052,46 @@ mod tests {
 
     #[test]
     fn windows_caption_controls_reserve_titlebar_space() {
-        assert_eq!(titlebar_right_padding(true, 16.0), 124.0);
-        assert_eq!(titlebar_right_padding(false, 16.0), 16.0);
+        assert_eq!(titlebar_right_padding(true, 0, 16.0), 124.0);
+        assert_eq!(titlebar_right_padding(false, 0, 16.0), 16.0);
+    }
+
+    #[test]
+    fn linux_caption_controls_reserve_titlebar_space() {
+        // 24px buttons on the cluster's 2px rhythm.
+        assert_eq!(caption_buttons_width(0), 0.0);
+        assert_eq!(caption_buttons_width(1), 24.0);
+        assert_eq!(caption_buttons_width(3), 76.0);
+        // Right-side captions (the Linux default: minimize,maximize,close):
+        // content pads past the 10px edge inset + the button row.
+        assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 76.0);
+        // GNOME-vanilla ":close" — a single right button.
+        assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 24.0);
+        // Left-side captions ("close:…" layouts) shift the app cluster right
+        // by the button row + one 2px gap.
+        assert_eq!(cluster_buttons_start(false, false, 0), 10.0);
+        assert_eq!(cluster_buttons_start(false, false, 1), 10.0 + 24.0 + 2.0);
+        assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 76.0 + 2.0);
+        // macOS ignores the Linux caption count entirely.
+        assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
     }
 
     #[test]
     fn cluster_clearance_clears_the_overlay_buttons() {
         // Linux: buttons at 10..86; a 16px-padded header needs 78 more px to
         // put content at 86 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 16.0), 78.0);
-        assert_eq!(cluster_clearance(false, false, 10.0), 84.0);
+        assert_eq!(cluster_clearance(false, false, 0, 16.0), 78.0);
+        assert_eq!(cluster_clearance(false, false, 0, 10.0), 84.0);
+        // Linux with a left-side close caption: everything shifts one slot.
+        assert_eq!(cluster_clearance(false, false, 1, 16.0), 78.0 + 26.0);
         // macOS: buttons start at the 88px traffic-light cluster start.
         assert_eq!(
-            cluster_clearance(true, false, 16.0),
+            cluster_clearance(true, false, 0, 16.0),
             88.0 + 76.0 + 8.0 - 16.0
         );
         // macOS fullscreen: cluster reclaims the inset (starts at 12).
         assert_eq!(
-            cluster_clearance(true, true, 16.0),
+            cluster_clearance(true, true, 0, 16.0),
             12.0 + 76.0 + 8.0 - 16.0
         );
     }

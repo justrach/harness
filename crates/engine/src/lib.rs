@@ -673,10 +673,16 @@ impl Engine {
         let edge_enabled = match profile.scope() {
             WorkspaceScope::Local => false,
             WorkspaceScope::Synced => {
-                // Validate a persisted session once so definitive revocation
-                // still transitions auth to SignedOut. A transient failure
-                // must not gate construction of the recovery supervisors.
-                let _ = auth.access_token().await;
+                // Validate the persisted session in the BACKGROUND: the probe
+                // still transitions auth to SignedOut on definitive revocation
+                // (and warms the single-flight refresh every first dial waits
+                // on), but assembly — and the viewport blocked on it — no
+                // longer stalls on a WorkOS round trip that can take seconds
+                // on a bad link. Everything shown at boot is local anyway.
+                let auth_probe = auth.clone();
+                tokio::spawn(async move {
+                    let _ = auth_probe.access_token().await;
+                });
                 true
             }
             // Dev Auth always exposes `dev_user_id` as its synthetic access
@@ -731,6 +737,10 @@ impl Engine {
             core.set_updater(updater);
         }
         tracing::info!(device_id = %core.device_id, "engine core assembled");
+        // Managed ACP adapters install in the background at boot (agents
+        // whose CLI is present but whose adapter isn't yet), so a first chat
+        // never waits on — or dies inside — an npm run.
+        zeron_harness::acp::prewarm_managed_adapters();
 
         let host_relay = edge.as_ref().map(|edge| {
             let links = zeron_rpc::LinkCache::new(zeron_rpc::LinkCacheConfig::new(

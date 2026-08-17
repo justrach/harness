@@ -498,6 +498,8 @@ pub enum RowKind {
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
+        /// Context the prompt folded in as text, lifted back out by `badges`.
+        badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -663,9 +665,12 @@ pub fn rows_for_entry(
         // File mentions render as chips here too, not just in the composer.
         // The projection is pure over the text, so the raw-length row version
         // below stays a valid cache/diff key.
-        let (text, mentions) = match crate::composer::sent_mention_display(&parsed.text) {
+        // Lifted before the mention projection, so a comment body's own
+        // Markdown never lands in the bubble.
+        let (body, badges) = crate::badges::split(&parsed.text);
+        let (text, mentions) = match crate::composer::sent_mention_display(&body) {
             Some((display, spans)) => (display, spans),
-            None => (parsed.text, Vec::new()),
+            None => (body, Vec::new()),
         };
         return vec![Row {
             id: entry.id.clone().into(),
@@ -675,6 +680,7 @@ pub fn rows_for_entry(
                 text: text.into(),
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
+                badges: Arc::new(badges),
                 pending,
             },
             entry_id,
@@ -2744,9 +2750,11 @@ impl Transcript {
                 text,
                 mentions,
                 attachments,
+                badges,
                 pending,
             } => {
                 let attachments = attachments.clone();
+                let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
                 let pending = *pending;
@@ -2756,6 +2764,26 @@ impl Transcript {
                 let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
+                }
+                if !badges.is_empty() {
+                    column = column.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .justify_end()
+                            .items_center()
+                            .gap(px(6.0))
+                            .pb(px(6.0))
+                            .children(badges.iter().enumerate().map(|(bix, badge)| {
+                                crate::badges::render(
+                                    SharedString::from(format!("{}#badge{bix}", row.id)),
+                                    badge,
+                                    &theme,
+                                )
+                            })),
+                    );
                 }
                 if !text.is_empty() {
                     // `min_w_0` is load-bearing: gpui text answers min/max-content
@@ -3542,12 +3570,15 @@ fn user_bubble_text(
         .into_any_element()
 }
 
-/// The transcript ErrorChip — an exact port of zeron chat-view.tsx
-/// `ErrorChip`: a 34px row (`rounded-[10px] border border-red-400/[0.16]
+/// The transcript ErrorChip — a port of zeron chat-view.tsx `ErrorChip`
+/// (34px-minimum row, `rounded-[10px] border border-red-400/[0.16]
 /// bg-red-400/[0.05] px-2 text-[12px]`) with a 20px red-washed tile holding a
 /// 12px DangerTriangle (`bg-red-400/[0.12] text-red-300/80`), a medium
-/// "Error" label, then the human message truncating at `text-foreground/80` —
-/// a subtle red-tinted wash, never a bare red-stroke box.
+/// "Error" label, then the human message at `text-foreground/80` — a subtle
+/// red-tinted wash, never a bare red-stroke box. Unlike the web port, the
+/// message WRAPS instead of truncating: startup-crash errors carry the
+/// agent's exit status and stderr, and a one-line ellipsis was exactly what
+/// made zeronsh/comet#95 undiagnosable from the screenshot.
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
     let red_300 = theme.danger_muted; // tailwind red-300
     let danger = theme.danger; // red-400
@@ -3556,7 +3587,7 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .w_full()
         .child(
             div()
-                .h(px(34.0))
+                .min_h(px(34.0))
                 .w_full()
                 .flex()
                 .items_center()
@@ -3567,6 +3598,7 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
                 .border_color(danger.opacity(0.16))
                 .bg(danger.opacity(0.05))
                 .px(px(8.0))
+                .py(px(7.0))
                 .text_size(px(12.0))
                 .child(
                     div()
@@ -3594,7 +3626,6 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
                     div()
                         .min_w_0()
                         .flex_1()
-                        .truncate()
                         .text_color(theme.text.opacity(0.8))
                         .child(message),
                 ),
@@ -3696,6 +3727,8 @@ fn detail_body(
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     match detail {
+        // No comment layer: an inline tool diff is a record of what the
+        // agent already did, not a review surface.
         ToolDetail::Diff { file, .. } => body
             .child(crate::changes::render_file_body_with_syntax(
                 file,
