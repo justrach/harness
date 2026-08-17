@@ -1,10 +1,13 @@
 //! ACP harness: spawns an Agent Client Protocol agent (JSON-RPC 2.0 over
-//! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s. One
-//! implementation covers every ACP agent; [`AcpHarness::grok`] configures it
-//! for xAI's Grok Build (`grok agent stdio`), the first registered agent —
-//! [`AcpHarness::hermes`] (Nous Research, `hermes acp`), [`AcpHarness::pi`]
-//! (pi.dev via `pi-acp`) and [`AcpHarness::cursor`] (`cursor-agent acp`)
-//! followed.
+//! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s.
+//!
+//! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
+//! `grok agent stdio`) and Hermes ([`AcpHarness::hermes`], `hermes acp`) —
+//! plus pi ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a
+//! native driver exists. Claude, Codex and Cursor moved to native drivers
+//! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
+//! after adapter-mediated ACP kept manufacturing done-status bugs the native
+//! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
 //!
 //! - `initialize` (protocolVersion 1, fs/terminal capabilities declined) →
 //!   `session/new`, or `session/load` with a fresh-session fallback when
@@ -12,24 +15,17 @@
 //!   holds it).
 //! - `session/prompt` owns the turn: its response's `stopReason` ends the
 //!   turn (`cancelled` → Interrupted, `refusal` → Errored, else Completed).
-//! - `session/update` notifications normalize per [`normalize::map_update`]:
-//!   message/thought chunks, tool calls with capped inline output + diffs,
-//!   plans → Todo, `available_commands_update` → [`AgentEvent::AvailableCommands`].
-//! - Permission requests are auto-accepted with the agent's preferred allow
-//!   option — parity with the claude/codex harnesses' unattended yolo mode.
-//! - Cursor's `cursor/*` extension methods get answered rather than refused:
-//!   `ask_question` and `create_plan` BLOCK the turn until the client replies,
-//!   so an unanswered one wedges the run. `ask_question` routes to the input
-//!   bridge, `create_plan` auto-accepts, and todos render as a chip.
-//! - Steering: agents advertising the `_session/steering` extension
-//!   (`initialize._meta.steering.supported`) get mid-turn injection; others
-//!   (Grok today) queue steers and deliver them as the next `session/prompt`
-//!   at the turn boundary. The session stays parked between turns while the
-//!   steering mailbox lives, like the codex harness.
+//! - `session/update` notifications normalize per [`normalize::map_update`].
+//! - Permission requests auto-accept with the agent's preferred allow option
+//!   (zeron sessions run unattended); question-shaped requests block on the
+//!   engine's input bridge.
+//! - Steering: agents advertising `_session/steering` get mid-turn injection;
+//!   others queue steers and deliver them as the next `session/prompt` at the
+//!   turn boundary. The session stays parked between turns while the
+//!   steering mailbox lives.
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
-mod cursor;
 mod normalize;
 
 use std::collections::VecDeque;
@@ -53,7 +49,7 @@ use zeron_proto::{
 
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
-use normalize::{cursor_todo_events, map_update, parse_commands, preferred_allow_option};
+use normalize::{map_update, parse_commands, preferred_allow_option};
 
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
@@ -151,90 +147,11 @@ fn default_effort_values(
     }
 }
 
-fn claude_spec() -> AcpAgentSpec {
-    AcpAgentSpec {
-        id: HarnessId::ClaudeCode,
-        display_name: "Claude Code",
-        executable: "claude-agent-acp",
-        env_override: "CLAUDE_ACP_EXECUTABLE",
-        args: &[],
-        npm_package: Some("@agentclientprotocol/claude-agent-acp@0.66.0"),
-        extra_paths: npm_global_paths("claude-agent-acp"),
-        cli_executable: "claude",
-        cli_extra_paths: || {
-            let mut dirs = npm_global_bins("claude");
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                // The native installer's launcher location.
-                dirs.push(home.join(".claude").join("local").join("claude"));
-            }
-            dirs
-        },
-        install_hint: "claude-agent-acp (searched PATH, the login shell's PATH, npm \
-             global bins, and fnm/nvm/volta/pnpm/bun install dirs; zeron installs \
-             the pinned @agentclientprotocol/claude-agent-acp automatically when \
-             npm is available; install npm/node, or \
-             `npm install -g @agentclientprotocol/claude-agent-acp`, or set \
-             CLAUDE_ACP_EXECUTABLE to override)",
-        models: crate::claude::catalog::static_models,
-        // `_session/steering` advertised by the adapter: priority-`now`
-        // injection, pre-empting the current generation.
-        steering_mode: SteeringMode::StepBoundary,
-        reasoning_levels: &[
-            ReasoningLevel::Low,
-            ReasoningLevel::Medium,
-            ReasoningLevel::High,
-            ReasoningLevel::XHigh,
-            ReasoningLevel::Max,
-        ],
-        prompt_transform: crate::claude::catalog::apply_ultrathink,
-        effort_values: |reasoning, model| {
-            crate::claude::catalog::to_effort(reasoning, model)
-                .into_iter()
-                .collect()
-        },
-        // Ultrathink is a prompt-prefix mode (see `prompt_transform`), so it
-        // never appears among the adapter's `thought_level` values.
-        ladder_extras: &[ReasoningLevel::Ultrathink],
-    }
-}
-
-fn codex_spec() -> AcpAgentSpec {
-    AcpAgentSpec {
-        id: HarnessId::Codex,
-        display_name: "Codex",
-        executable: "codex-acp",
-        env_override: "CODEX_ACP_EXECUTABLE",
-        args: &[],
-        npm_package: Some("@agentclientprotocol/codex-acp@1.1.14"),
-        extra_paths: npm_global_paths("codex-acp"),
-        cli_executable: "codex",
-        cli_extra_paths: || npm_global_bins("codex"),
-        install_hint: "codex-acp (searched PATH, the login shell's PATH, npm global \
-             bins, and fnm/nvm/volta/pnpm/bun install dirs; zeron installs the \
-             pinned @agentclientprotocol/codex-acp automatically when npm is \
-             available; install npm/node, or \
-             `npm install -g @agentclientprotocol/codex-acp`, or set \
-             CODEX_ACP_EXECUTABLE to override)",
-        models: crate::codex::catalog::static_models,
-        steering_mode: SteeringMode::StepBoundary,
-        reasoning_levels: crate::codex::catalog::REASONING_LEVELS,
-        prompt_transform: identity_transform,
-        effort_values: |reasoning, _model| {
-            crate::codex::catalog::to_effort(reasoning)
-                .into_iter()
-                .collect()
-        },
-        ladder_extras: &[],
-    }
-}
-
 /// npm-global bin dirs for an adapter binary (`npm i -g` installs).
 fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
     // fn pointers can't capture; probe the fixed npm-global locations and
     // append the exe at call time via a small per-exe shim table.
     match exe {
-        "claude-agent-acp" => || npm_global_bins("claude-agent-acp"),
-        "codex-acp" => || npm_global_bins("codex-acp"),
         "pi-acp" => || npm_global_bins("pi-acp"),
         _ => || Vec::new(),
     }
@@ -303,67 +220,6 @@ fn grok_spec() -> AcpAgentSpec {
         ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
-        ladder_extras: &[],
-    }
-}
-
-fn cursor_install_paths() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        dirs.push(home.join(".local").join("bin").join("cursor-agent"));
-        dirs.push(home.join(".cursor").join("bin").join("cursor-agent"));
-    }
-    dirs.push(PathBuf::from("/opt/homebrew/bin/cursor-agent"));
-    dirs.push(PathBuf::from("/usr/local/bin/cursor-agent"));
-    dirs
-}
-
-fn cursor_spec() -> AcpAgentSpec {
-    AcpAgentSpec {
-        id: HarnessId::Cursor,
-        display_name: "Cursor",
-        executable: "cursor-agent",
-        env_override: "CURSOR_EXECUTABLE",
-        // Native ACP server — no adapter package in between.
-        args: &["acp"],
-        npm_package: None,
-        extra_paths: cursor_install_paths,
-        cli_executable: "cursor-agent",
-        cli_extra_paths: cursor_install_paths,
-        install_hint: "cursor-agent (searched PATH, the login shell's PATH, ~/.local/bin, \
-             ~/.cursor/bin, /opt/homebrew/bin, and /usr/local/bin; install with \
-             `curl https://cursor.com/install -fsS | bash`, then `cursor-agent login`; \
-             set CURSOR_EXECUTABLE to override)",
-        // Fallback only: `session/new` advertises the account's models and
-        // the wire always wins. Keep this list to well-known public ids.
-        models: || {
-            vec![
-                Model {
-                    id: "auto-smart".into(),
-                    label: "Auto".into(),
-                    description: Some("Cursor picks the model per request".into()),
-                    reasoning_levels: Vec::new(),
-                    options: vec![cursor::optimize_for_option(Some("balanced"))],
-                },
-                Model {
-                    id: "composer-2.5".into(),
-                    label: "Composer 2.5".into(),
-                    description: Some("Cursor's own fast coding model".into()),
-                    reasoning_levels: Vec::new(),
-                    options: Vec::new(),
-                },
-            ]
-        },
-        // No `_session/steering` extension: steers deliver at turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
-        // Descriptor ladder stays empty; live discovery fills it for families
-        // that actually advertise effort variants (see `cursor::enrich_models`).
-        reasoning_levels: &[],
-        prompt_transform: identity_transform,
-        // Cursor has no thought_level config option — effort rides the model
-        // id. When a collapsed family exposes a Reasoning ladder, these
-        // tokens pick the matching sibling via `cursor::pick_model_id`.
-        effort_values: |reasoning, _| reasoning.map(cursor::effort_tokens).unwrap_or_default(),
         ladder_extras: &[],
     }
 }
@@ -492,7 +348,7 @@ pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
-    for spec in [claude_spec(), codex_spec(), grok_spec(), pi_spec()] {
+    for spec in [grok_spec(), pi_spec()] {
         let Some(pkg) = spec.npm_package else {
             continue;
         };
@@ -565,23 +421,6 @@ impl AcpHarness {
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::OnceCell::new(),
         }
-    }
-
-    /// Claude Code over ACP — the org-maintained `claude-agent-acp` adapter
-    /// on the Claude Agent SDK.
-    pub fn claude() -> Self {
-        Self::with_spec(claude_spec())
-    }
-
-    /// Codex over ACP — the org-maintained `codex-acp` adapter wrapping the
-    /// codex app-server.
-    pub fn codex() -> Self {
-        Self::with_spec(codex_spec())
-    }
-
-    /// Cursor Agent (`cursor-agent acp`) — Cursor's native ACP server.
-    pub fn cursor() -> Self {
-        Self::with_spec(cursor_spec())
     }
 
     /// Grok Build (`grok agent stdio`) — xAI's native ACP agent.
@@ -846,11 +685,6 @@ impl AcpHarness {
                 .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                 .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
-            // Cursor: parameterized picker (base ids + optimize_for / effort /
-            // fast) when the client opts in; exploded-variant fallback otherwise.
-            if self.spec.id == HarnessId::Cursor {
-                models = cursor::enrich_models(models, &session);
-            }
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
@@ -1235,17 +1069,11 @@ struct Session {
     stderr_tail: crate::StderrTail,
 }
 
-fn initialize_params(harness: HarnessId) -> Value {
-    let mut capabilities = json!({
+fn initialize_params(_harness: HarnessId) -> Value {
+    let capabilities = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "terminal": false,
     });
-    // Cursor's ACP server exposes Auto's Optimize For (and other model
-    // parameters) when the client opts into parameterizedModelPicker;
-    // without it the catalog uses exploded variant ids.
-    if harness == HarnessId::Cursor {
-        capabilities["_meta"] = json!({ "parameterizedModelPicker": true });
-    }
     json!({
         "protocolVersion": 1,
         "clientInfo": {
@@ -1410,18 +1238,9 @@ fn config_option_sets(
             .collect();
 
         let wanted: Option<Value> = match (kind, category) {
-            ("select", Some("model")) => {
-                // Parameterized Cursor uses base ids; a saved exploded id
-                // (`auto-smart[optimize_for=cost]`) still has to match. When
-                // the catalog is still exploded, effort siblings switch via
-                // `pick_model_id`.
-                let requested = model.map(cursor::strip_variant_suffix);
-                requested
-                    .and_then(|m| cursor::pick_model_id(m, efforts, &available))
-                    .or_else(|| requested.and_then(|m| pick_model_value(m, &available, context_1m)))
-                    .or_else(|| model.and_then(|m| pick_model_value(m, &available, context_1m)))
-                    .map(Value::String)
-            }
+            ("select", Some("model")) => model
+                .and_then(|m| pick_model_value(m, &available, context_1m))
+                .map(Value::String),
             // Unattended parity with the retired custom adapters (claude
             // bypassPermissions / codex approvalPolicy never): pick the
             // no-prompts mode when the agent offers one. claude-agent-acp
@@ -1581,36 +1400,6 @@ fn handle_server_request(
             }
             Vec::new()
         }
-        // Cursor blocks the turn on plan approval; unattended parity means
-        // accepting it and rendering the phases as a todo chip.
-        CURSOR_CREATE_PLAN => {
-            client.respond(&id, json!({ "outcome": { "outcome": "accepted" } }));
-            cursor_todo_events(params, CURSOR_PLAN_CHIP)
-        }
-        CURSOR_UPDATE_TODOS => {
-            let todos = params
-                .get("todos")
-                .cloned()
-                .unwrap_or(Value::Array(Vec::new()));
-            client.respond(
-                &id,
-                json!({ "outcome": { "outcome": "accepted", "todos": todos } }),
-            );
-            cursor_todo_events(params, CURSOR_TODOS_CHIP)
-        }
-        // Subagent tasks run inside cursor-agent; this only reports one
-        // finished. Image generation has nowhere to land in a zeron session.
-        CURSOR_TASK => {
-            client.respond(&id, json!({ "outcome": { "outcome": "completed" } }));
-            Vec::new()
-        }
-        CURSOR_GENERATE_IMAGE => {
-            client.respond(
-                &id,
-                json!({ "outcome": { "outcome": "rejected", "reason": "zeron cannot render generated images" } }),
-            );
-            Vec::new()
-        }
         _ => {
             tracing::debug!(target: "zeron_harness::acp", "unhandled server request: {method}");
             client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
@@ -1654,10 +1443,6 @@ fn handle_server_request_live(
     request_input: &std::sync::Arc<RequestInputFn>,
     open_questions: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> Vec<AgentEvent> {
-    if method == CURSOR_ASK_QUESTION {
-        ask_cursor_questions(client, id, params, request_input, open_questions);
-        return Vec::new();
-    }
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
@@ -1722,157 +1507,6 @@ fn handle_server_request_live(
     Vec::new()
 }
 
-/// Cursor's ACP extension methods (`https://cursor.com/docs/cli/acp`).
-/// `ask_question` and `create_plan` BLOCK the agent until answered, so every
-/// one of these gets a response even when zeron has nothing to do with it.
-const CURSOR_ASK_QUESTION: &str = "cursor/ask_question";
-const CURSOR_CREATE_PLAN: &str = "cursor/create_plan";
-const CURSOR_UPDATE_TODOS: &str = "cursor/update_todos";
-const CURSOR_TASK: &str = "cursor/task";
-const CURSOR_GENERATE_IMAGE: &str = "cursor/generate_image";
-
-/// Stable chip ids so repeated todo/plan updates refresh in place, matching
-/// the `acp-plan` convention in the normalizer.
-const CURSOR_PLAN_CHIP: &str = "cursor-plan";
-const CURSOR_TODOS_CHIP: &str = "cursor-todos";
-
-/// The same extension methods arriving without an id: nothing to answer, and
-/// only the todo-carrying ones have anything to render. The docs describe
-/// todos/task/image as fire-and-forget while also giving them response
-/// shapes, so both arrival styles are handled.
-fn cursor_notification_events(method: &str, params: &Value) -> Vec<AgentEvent> {
-    match method {
-        CURSOR_UPDATE_TODOS => cursor_todo_events(params, CURSOR_TODOS_CHIP),
-        CURSOR_CREATE_PLAN => cursor_todo_events(params, CURSOR_PLAN_CHIP),
-        _ => Vec::new(),
-    }
-}
-
-/// `cursor/ask_question` → the engine's input bridge. Unlike a permission
-/// question this carries a LIST of questions, each with its own labelled
-/// options and multi-select flag, and answers go back as option ids. Handled
-/// in a subtask so the message loop keeps draining while the user decides;
-/// a dropped resolver degrades to `cancelled`, never a silent pick.
-fn ask_cursor_questions(
-    client: &RpcClient,
-    id: Value,
-    params: &Value,
-    request_input: &std::sync::Arc<RequestInputFn>,
-    open_questions: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) {
-    let asked = cursor_questions(params);
-    if asked.is_empty() {
-        client.respond(
-            &id,
-            json!({ "outcome": { "outcome": "skipped", "reason": "no answerable questions" } }),
-        );
-        return;
-    }
-    let client = client.clone();
-    let request_input = std::sync::Arc::clone(request_input);
-    let open_questions = std::sync::Arc::clone(open_questions);
-    open_questions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    tokio::spawn(async move {
-        let answers = (request_input)(asked.iter().map(|q| q.question.clone()).collect())
-            .await
-            .unwrap_or_default();
-        client.respond(&id, cursor_answer_outcome(&asked, &answers));
-        open_questions.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    });
-}
-
-/// One `cursor/ask_question` entry: the zeron-side question plus what is
-/// needed to answer it — the wire id, and the label→optionId table (zeron's
-/// input bridge speaks labels, cursor expects option ids).
-struct CursorQuestion {
-    wire_id: String,
-    question: UserInputQuestion,
-    choices: Vec<(String, String)>,
-}
-
-fn cursor_questions(params: &Value) -> Vec<CursorQuestion> {
-    let header = params
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Agent question");
-    params
-        .get("questions")
-        .and_then(Value::as_array)
-        .map(|a| a.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|q| {
-            let wire_id = q.get("id").and_then(Value::as_str)?.to_owned();
-            let choices: Vec<(String, String)> = q
-                .get("options")
-                .and_then(Value::as_array)
-                .map(|a| a.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|o| {
-                    let oid = o.get("id").and_then(Value::as_str)?;
-                    let label = o.get("label").and_then(Value::as_str).unwrap_or(oid);
-                    Some((label.to_owned(), oid.to_owned()))
-                })
-                .collect();
-            // An option-less question has no answer zeron could send back.
-            if choices.is_empty() {
-                return None;
-            }
-            Some(CursorQuestion {
-                wire_id,
-                question: UserInputQuestion {
-                    // Zeron-minted: cursor's ids ("q1") repeat across turns.
-                    id: new_message_id(),
-                    header: header.to_owned(),
-                    question: q
-                        .get("prompt")
-                        .and_then(Value::as_str)
-                        .unwrap_or("The agent needs your input.")
-                        .to_owned(),
-                    options: choices.iter().map(|(label, _)| label.clone()).collect(),
-                    multi_select: q
-                        .get("allowMultiple")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                },
-                choices,
-            })
-        })
-        .collect()
-}
-
-/// Chosen labels → the `answered` outcome. Nothing recognisable coming back
-/// (dropped resolver, unknown labels) degrades to `cancelled` so the agent
-/// unblocks without zeron inventing a pick.
-fn cursor_answer_outcome(asked: &[CursorQuestion], answers: &[UserInputAnswer]) -> Value {
-    let picked: Vec<Value> = asked
-        .iter()
-        .filter_map(|asked| {
-            let labels = &answers
-                .iter()
-                .find(|a| a.question_id == asked.question.id)?
-                .labels;
-            let ids: Vec<&str> = labels
-                .iter()
-                .filter_map(|label| {
-                    asked
-                        .choices
-                        .iter()
-                        .find(|(l, _)| l == label)
-                        .map(|(_, oid)| oid.as_str())
-                })
-                .collect();
-            (!ids.is_empty())
-                .then(|| json!({ "questionId": asked.wire_id, "selectedOptionIds": ids }))
-        })
-        .collect();
-    if picked.is_empty() {
-        json!({ "outcome": { "outcome": "cancelled" } })
-    } else {
-        json!({ "outcome": { "outcome": "answered", "answers": picked } })
-    }
-}
 
 /// Await a setup request while draining incoming messages, so a `session/load`
 /// whose replay outruns the incoming channel's capacity can't deadlock the
@@ -1941,17 +1575,6 @@ fn track_turn_signals(
     }
 }
 
-/// True for the session's terminal accounting frame: a `usage_update`
-/// carrying `cost`, which claude-agent-acp derives once per turn from the
-/// CLI's result message — the turn-is-over tell that survives even when the
-/// prompt response itself is dropped (the starved-turn bug).
-fn is_turn_end_cost_update(params: &Value, session_id: &str) -> bool {
-    params.get("sessionId").and_then(Value::as_str) == Some(session_id)
-        && params.get("update").is_some_and(|u| {
-            u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
-                && u.get("cost").is_some()
-        })
-}
 
 /// A mid-turn `_session/steering` call. `idleBehavior: promptRequired`
 /// covers the turn-ended race: the agent hands the text back instead of
@@ -2051,59 +1674,15 @@ async fn run_session(session: Session) {
         // session's advertised config options (ACP has no per-prompt model
         // field). Best-effort: a rejected set is logged, never fatal — the
         // agent's default runs.
-        //
-        // Cursor parameterized mode only lists parameters for the *current*
-        // model. Set the model first, then apply optimize_for / effort / fast
-        // against the refreshed configOptions in the response.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
-        let requested_model = request.model.as_deref().map(cursor::strip_variant_suffix);
+        let requested_model = request.model.as_deref();
         let mut options_snapshot = session_response;
-        if harness == HarnessId::Cursor {
-            let model_sets = config_option_sets(
-                &options_snapshot,
-                requested_model,
-                &[],
-                &serde_json::Map::new(),
-            );
-            if let Some((_, payload)) = model_sets.iter().find(|(id, _)| id == "model") {
-                let mut params = serde_json::Map::new();
-                params.insert("sessionId".into(), session_id.clone().into());
-                params.insert("configId".into(), "model".into());
-                if let Some(payload) = payload.as_object() {
-                    for (k, v) in payload {
-                        params.insert(k.clone(), v.clone());
-                    }
-                }
-                match request_draining(
-                    &client,
-                    &mut incoming,
-                    "session/set_config_option",
-                    Value::Object(params),
-                )
-                .await
-                {
-                    Ok(resp) if resp.get("configOptions").is_some() => {
-                        options_snapshot = resp;
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            target: "zeron_harness::acp",
-                            "session/set_config_option model rejected (agent default runs): {e}"
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
             requested_model,
             &efforts,
             &request.model_options,
         ) {
-            if harness == HarnessId::Cursor && config_id == "model" {
-                continue;
-            }
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
             params.insert("configId".into(), config_id.clone().into());
@@ -2265,19 +1844,6 @@ async fn run_session(session: Session) {
     // the queued steer is promoted to a fresh turn.
     const STARVE_GRACE: Duration = Duration::from_secs(2);
     let mut starve_deadline: Option<tokio::time::Instant> = None;
-    // Deterministic turn-end hint (claude-agent-acp, verified against
-    // 0.66.0): the adapter derives exactly one cost-bearing `usage_update`
-    // per turn from the CLI's terminal result — INCLUDING turns whose
-    // prompt response it then drops (the starve above; the cost frame and
-    // the response share a timestamp in every healthy trace). While our
-    // prompt is outstanding, that update means the turn is already over:
-    // give the real response a short head start (it lands within
-    // milliseconds when it lands at all), then settle via the recovery arm.
-    // This is what keeps a dropped reply's stuck-Working window near zero
-    // instead of watchdog-length. Gated to Claude — the one adapter whose
-    // cost semantics are verified end-of-turn-only.
-    const COST_HINT_GRACE: Duration = Duration::from_secs(1);
-    let cost_hint_enabled = harness == HarnessId::ClaudeCode;
     // BLANKET dropped-reply settle, adapter-agnostic: any ACP agent whose
     // prompt response goes missing must not strand the turn. Signals that
     // exist in core ACP stand in for the adapter-specific cost frame: once
@@ -2290,27 +1856,14 @@ async fn run_session(session: Session) {
     // Done ever comes, and the session strands Working until the engine's
     // quiesce watchdog parks it.
     //
-    // Claude is EXEMPT, even from the env knob: claude-agent-acp forwards
-    // no thinking traffic, so a long silent reasoning stretch in exactly
-    // the "looks finished" state (content streamed, every tool resolved)
-    // is indistinguishable from a dropped reply — 30s of quiet falsely
-    // settled live turns mid-thought (2026-08-13), producing both a
-    // premature Done and the stuck-Working orphan above. Claude's
-    // genuinely dropped replies already settle deterministically (the
-    // cost-frame hint above, `noRunningTurn` steering evidence); the
-    // engine watchdog backstops anything left.
     // `ZERON_ACP_QUIET_SETTLE_MS` overrides; 0 disables.
-    let quiet_settle: Option<Duration> = if cost_hint_enabled {
-        None
-    } else {
-        match std::env::var("ZERON_ACP_QUIET_SETTLE_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-        {
-            Some(0) => None,
-            Some(ms) => Some(Duration::from_millis(ms)),
-            None => Some(Duration::from_secs(30)),
-        }
+    let quiet_settle: Option<Duration> = match std::env::var("ZERON_ACP_QUIET_SETTLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(Duration::from_secs(30)),
     };
     let mut last_update_at = tokio::time::Instant::now();
     let mut turn_content_seen = false;
@@ -2402,7 +1955,7 @@ async fn run_session(session: Session) {
                             let events = if method == "session/update" {
                                 session_update_events(&params, &session_id)
                             } else {
-                                cursor_notification_events(&method, &params)
+                                Vec::new()
                             };
                             for ev in events {
                                 if !send(&event_tx, ev).await {
@@ -2502,59 +2055,12 @@ async fn run_session(session: Session) {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                     last_update_at = tokio::time::Instant::now();
-                    // Turn-end cost hint (see COST_HINT_GRACE above): arm the
-                    // fast settle when the turn's terminal accounting frame
-                    // arrives with our prompt still unsettled.
-                    if cost_hint_enabled
-                        && turn.is_some()
-                        && !interrupted
-                        && !steered_this_turn
-                        // An in-flight steering call means an injection cost
-                        // frame may already be on the wire ahead of its
-                        // response (select order is not the pipe order).
-                        && steering_call.is_none()
-                        && starve_deadline.is_none()
-                        && method == "session/update"
-                        && is_turn_end_cost_update(&params, &session_id)
-                    {
-                        tracing::debug!(
-                            target: "zeron_harness::acp",
-                            "turn-end cost update observed with the prompt \
-                             unsettled; arming fast settle"
-                        );
-                        starve_deadline =
-                            Some(tokio::time::Instant::now() + COST_HINT_GRACE);
-                    }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events = if method == "session/update" {
                         session_update_events(&params, &session_id)
-                    } else if method == "_session/turn_ended" {
-                        // Autonomous turn-end (claude-agent-acp extension,
-                        // `_`-prefixed like `_session/steering`): a turn the
-                        // agent started on its own — a background-task wake —
-                        // has no `session/prompt` to settle, so its SDK-side
-                        // turn-end previously vanished at the adapter and the
-                        // engine's quiesce watchdog was the only settle path
-                        // (≤2min of phantom Working per notification, user
-                        // report 2026-08-13). Gated to BETWEEN prompts: a
-                        // live turn settles through its own response.
-                        if turn.is_none()
-                            && !interrupted
-                            && params.get("sessionId").and_then(Value::as_str)
-                                == Some(session_id.as_str())
-                        {
-                            vec![AgentEvent::Done {
-                                status: DoneStatus::Completed,
-                                result: None,
-                                error: None,
-                                session_id: Some(session_id.clone()),
-                            }]
-                        } else {
-                            Vec::new()
-                        }
                     } else {
-                        cursor_notification_events(&method, &params)
+                        Vec::new()
                     };
                     for ev in events {
                         track_turn_signals(&ev, &mut turn_content_seen, &mut open_tools);
@@ -2668,7 +2174,7 @@ async fn run_session(session: Session) {
                                     let events = if method == "session/update" {
                                         session_update_events(&params, &session_id)
                                     } else {
-                                        cursor_notification_events(&method, &params)
+                                        Vec::new()
                                     };
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
@@ -2912,7 +2418,6 @@ async fn run_session(session: Session) {
                         // steer lines up behind it and dispatches at flush.
                         queued_steers.push_back(text);
                     } else if turn.is_none()
-                        && !cost_hint_enabled
                         && (!open_tools.is_empty()
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
@@ -3047,7 +2552,6 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{TodoItem, ToolCall};
 
     #[test]
     fn steering_capability_reads_initialize_meta() {
@@ -3370,270 +2874,6 @@ mod tests {
         assert!(models[0].options.iter().any(|o| o.id == "serviceTier"));
         // …unknown ids get none.
         assert!(models[1].options.is_empty());
-    }
-
-    /// `cursor/ask_question` carries several questions at once, each with its
-    /// own labelled options — the round trip must answer with OPTION IDS,
-    /// keyed by cursor's wire ids, not the labels zeron showed the user.
-    #[test]
-    fn cursor_questions_round_trip_labels_back_to_option_ids() {
-        let asked = cursor_questions(&json!({
-            "toolCallId": "call_123",
-            "title": "Need input",
-            "questions": [
-                {
-                    "id": "q1",
-                    "prompt": "Which mode?",
-                    "options": [
-                        { "id": "agent", "label": "Agent" },
-                        { "id": "plan", "label": "Plan" },
-                    ],
-                },
-                {
-                    "id": "q2",
-                    "prompt": "Which targets?",
-                    "options": [
-                        { "id": "ios", "label": "iOS" },
-                        { "id": "mac", "label": "macOS" },
-                    ],
-                    "allowMultiple": true,
-                },
-                // No options: unanswerable, so it never reaches the user.
-                { "id": "q3", "prompt": "Anything else?" },
-            ],
-        }));
-        assert_eq!(asked.len(), 2);
-        assert_eq!(asked[0].question.header, "Need input");
-        assert_eq!(asked[0].question.question, "Which mode?");
-        assert_eq!(asked[0].question.options, vec!["Agent", "Plan"]);
-        assert!(!asked[0].question.multi_select);
-        assert!(asked[1].question.multi_select);
-        // Cursor's repeatable ids never leak into zeron's question ids.
-        assert_ne!(asked[0].question.id, "q1");
-
-        let answers = vec![
-            UserInputAnswer {
-                question_id: asked[0].question.id.clone(),
-                labels: vec!["Plan".into()],
-            },
-            UserInputAnswer {
-                question_id: asked[1].question.id.clone(),
-                labels: vec!["iOS".into(), "macOS".into()],
-            },
-        ];
-        assert_eq!(
-            cursor_answer_outcome(&asked, &answers),
-            json!({
-                "outcome": {
-                    "outcome": "answered",
-                    "answers": [
-                        { "questionId": "q1", "selectedOptionIds": ["plan"] },
-                        { "questionId": "q2", "selectedOptionIds": ["ios", "mac"] },
-                    ],
-                }
-            })
-        );
-    }
-
-    /// A dropped resolver (or labels from a stale panel) must unblock the
-    /// agent as `cancelled` — never a silent pick of some default option.
-    #[test]
-    fn cursor_answers_degrade_to_cancelled_not_a_silent_pick() {
-        let asked = cursor_questions(&json!({
-            "questions": [{
-                "id": "q1",
-                "prompt": "Ship it?",
-                "options": [{ "id": "yes", "label": "Yes" }],
-            }],
-        }));
-        let cancelled = json!({ "outcome": { "outcome": "cancelled" } });
-        assert_eq!(cursor_answer_outcome(&asked, &[]), cancelled);
-        let stale = vec![UserInputAnswer {
-            question_id: asked[0].question.id.clone(),
-            labels: vec!["Maybe".into()],
-        }];
-        assert_eq!(cursor_answer_outcome(&asked, &stale), cancelled);
-    }
-
-    /// Cursor's todo-bearing extension methods render as chips with stable
-    /// ids, so a stream of updates refreshes one chip instead of stacking.
-    #[test]
-    fn cursor_todo_notifications_map_to_stable_chips() {
-        let todos = json!({
-            "toolCallId": "call_125",
-            "merge": true,
-            "todos": [
-                { "id": "1", "content": "Set up project", "status": "completed" },
-                { "id": "2", "content": "Add auth", "status": "in_progress" },
-            ],
-        });
-        let chip_id = |events: &[AgentEvent]| match &events[0] {
-            AgentEvent::ToolCall { id, .. } => id.clone(),
-            other => panic!("expected a tool call, got {other:?}"),
-        };
-        let updated = cursor_notification_events(CURSOR_UPDATE_TODOS, &todos);
-        assert_eq!(chip_id(&updated), CURSOR_TODOS_CHIP);
-        assert_eq!(
-            updated[0],
-            AgentEvent::ToolCall {
-                id: CURSOR_TODOS_CHIP.into(),
-                call: ToolCall::Todo {
-                    items: vec![
-                        TodoItem {
-                            text: "Set up project".into(),
-                            done: true
-                        },
-                        TodoItem {
-                            text: "Add auth".into(),
-                            done: false
-                        },
-                    ]
-                },
-            }
-        );
-        // A plan lands on its own chip, so the two never overwrite each other.
-        let planned = cursor_notification_events(CURSOR_CREATE_PLAN, &todos);
-        assert_eq!(chip_id(&planned), CURSOR_PLAN_CHIP);
-        // Everything else is noise zeron has nothing to render for.
-        assert!(cursor_notification_events(CURSOR_TASK, &todos).is_empty());
-        assert!(cursor_notification_events(CURSOR_GENERATE_IMAGE, &todos).is_empty());
-        assert!(cursor_notification_events("cursor/unknown", &todos).is_empty());
-    }
-
-    /// The Cursor slot drives `cursor-agent acp` directly — no adapter
-    /// package — and opts into the parameterized model picker.
-    #[test]
-    fn cursor_spec_targets_the_native_acp_server() {
-        let spec = cursor_spec();
-        assert_eq!(spec.id, HarnessId::Cursor);
-        assert_eq!(spec.display_name, "Cursor");
-        assert_eq!(spec.executable, "cursor-agent");
-        assert_eq!(spec.args, &["acp"]);
-        assert!(spec.npm_package.is_none());
-        assert_eq!(spec.steering_mode, SteeringMode::TurnBoundary);
-        assert!(spec.reasoning_levels.is_empty());
-        assert!(
-            (spec.models)()
-                .iter()
-                .all(|m| m.reasoning_levels.is_empty())
-        );
-        let auto = (spec.models)()
-            .into_iter()
-            .find(|m| m.id == "auto-smart")
-            .expect("static Auto");
-        assert!(auto.options.iter().any(|o| o.id == "optimize_for"));
-        assert_eq!(
-            (spec.effort_values)(Some(ReasoningLevel::Low), None),
-            vec!["low"]
-        );
-        assert_eq!(
-            initialize_params(HarnessId::Cursor)["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
-            json!(true)
-        );
-        assert!(
-            initialize_params(HarnessId::Grok)["clientCapabilities"]
-                .get("_meta")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cursor_mode_trait_wins_over_no_prompt_fallback() {
-        let cursor = json!({
-            "sessionId": "s-1",
-            "configOptions": [{
-                "id": "mode",
-                "category": "mode",
-                "type": "select",
-                "currentValue": "agent",
-                "options": [
-                    { "value": "agent" },
-                    { "value": "plan" },
-                    { "value": "ask" },
-                ],
-            }, {
-                "id": "model",
-                "category": "model",
-                "type": "select",
-                "currentValue": "example[reasoning_effort=high]",
-                "options": [
-                    { "value": "example[reasoning_effort=high]" },
-                    { "value": "example-low[]" },
-                    { "value": "example-medium[]" },
-                ],
-            }],
-        });
-        let mut opts = serde_json::Map::new();
-        opts.insert("mode".into(), json!("plan"));
-        assert_eq!(
-            config_option_sets(&cursor, None, &[], &opts),
-            vec![("mode".to_owned(), json!({ "value": "plan" }))]
-        );
-        // Reasoning Low switches the effort family to the -low sibling.
-        assert_eq!(
-            config_option_sets(
-                &cursor,
-                Some("example[reasoning_effort=high]"),
-                &["low"],
-                &serde_json::Map::new()
-            ),
-            vec![("model".to_owned(), json!({ "value": "example-low[]" }))]
-        );
-    }
-
-    #[test]
-    fn cursor_optimize_for_sets_on_parameterized_auto() {
-        let cursor = json!({
-            "sessionId": "s-1",
-            "configOptions": [{
-                "id": "mode",
-                "category": "mode",
-                "type": "select",
-                "currentValue": "agent",
-                "options": [
-                    { "value": "agent" },
-                    { "value": "plan" },
-                    { "value": "ask" },
-                ],
-            }, {
-                "id": "model",
-                "category": "model",
-                "type": "select",
-                "currentValue": "composer-2.5",
-                "options": [
-                    { "value": "auto-smart" },
-                    { "value": "composer-2.5" },
-                ],
-            }, {
-                "id": "optimize_for",
-                "category": "model_config",
-                "type": "select",
-                "currentValue": "balanced",
-                "options": [
-                    { "value": "intelligence" },
-                    { "value": "balanced" },
-                    { "value": "cost" },
-                ],
-            }],
-        });
-        let mut opts = serde_json::Map::new();
-        opts.insert("optimize_for".into(), json!("cost"));
-        let sets = config_option_sets(
-            &cursor,
-            Some("auto-smart[optimize_for=balanced]"),
-            &[],
-            &opts,
-        );
-        assert!(
-            sets.iter()
-                .any(|(id, v)| id == "model" && v == &json!({ "value": "auto-smart" })),
-            "{sets:?}"
-        );
-        assert!(
-            sets.iter()
-                .any(|(id, v)| id == "optimize_for" && v == &json!({ "value": "cost" })),
-            "{sets:?}"
-        );
     }
 
     #[test]

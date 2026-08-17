@@ -150,6 +150,10 @@ impl Harness for CursorHarness {
         self.executable.is_some()
             || crate::acp::find_on_paths("cursor-agent", cursor_cli_paths()).is_some()
     }
+    /// Done is the SDK run's terminal result, for every turn shape.
+    fn deterministic_turn_end(&self) -> bool {
+        true
+    }
 
     /// Static catalog (the SDK's `Cursor.models.list()` needs its own auth;
     /// well-known public ids keep the picker useful without it).

@@ -268,6 +268,10 @@ impl Harness for ClaudeHarness {
     fn installed(&self) -> bool {
         self.executable.is_some() || resolve_claude_executable().is_some()
     }
+    /// Done is the CLI's own terminal frame, for wake turns too.
+    fn deterministic_turn_end(&self) -> bool {
+        true
+    }
 
     /// The curated static catalog (see [`catalog`]); requires an installed CLI
     /// so an absent binary surfaces as [`HarnessError::NotInstalled`] here,
