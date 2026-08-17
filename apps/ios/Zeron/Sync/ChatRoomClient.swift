@@ -88,6 +88,17 @@ actor ChatRoomClient {
     /// Non-nil while a checkpoint downloads in parallel with the row
     /// backfill: row/rowsDone frames land here and replay after the import.
     private var checkpointBuffer: [ChatWireFrame]?
+    /// One checkpoint download at a time, and it OUTLIVES socket redials: on
+    /// a saturated link the WS silence lease can trip mid-download (pongs
+    /// queue behind the blob), and discarding the bytes on every redial
+    /// looped a fresh-chat open forever (NLC Edge, 2026-08-17).
+    private var fetchInFlight = false
+    /// Partial download preserved across fetch attempts (Range-resumed).
+    private var partialCheckpoint = Data()
+    private var partialCheckpointSeq: String?
+    /// Bytes moved on the checkpoint stream recently — download progress IS
+    /// liveness while it runs; the silence lease defers to it.
+    private var checkpointProgressAt: DispatchTime?
     private var joined = false
     private var closed = false
     private var generation = 0
@@ -292,7 +303,14 @@ actor ChatRoomClient {
     private func pingTick(gen: Int) async {
         guard gen == generation, let socket else { return }
         let silence = DispatchTime.now().uptimeNanoseconds - lastInbound.uptimeNanoseconds
-        if silence > ChatRoomClient.silenceLeaseNs {
+        // A checkpoint download that is still moving bytes owns the pipe —
+        // pongs queueing behind it are not a dead socket. The 120s backfill
+        // deadline stays as the true backstop.
+        let fetchMoving = checkpointProgressAt.map {
+            DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds
+                < ChatRoomClient.silenceLeaseNs
+        } ?? false
+        if silence > ChatRoomClient.silenceLeaseNs, !fetchMoving {
             roomLog.warning("chat2 \(self.chatId, privacy: .public): socket silent past lease; treating as dead")
             await onSocketError(gen: gen)
             return
@@ -432,8 +450,14 @@ actor ChatRoomClient {
             // whole blob.
             roomLog.info("chat2 \(self.chatId, privacy: .public): fetching checkpoint (seq=\(state.checkpointSeq), \(state.checkpointSize)B, rows in parallel)")
             checkpointBuffer = []
-            let seq = state.checkpointSeq
-            Task { await self.completeCheckpointFetch(gen: gen, seq: seq) }
+            // One download per chat, and it survives redials: a new session
+            // that still needs the checkpoint just re-arms the buffer and
+            // waits for the in-flight fetch to land.
+            if !fetchInFlight {
+                fetchInFlight = true
+                let seq = state.checkpointSeq
+                Task { await self.completeCheckpointFetch(seq: seq) }
+            }
             after = a
         }
         await send(ChatWire.encode(ChatFrameType.rowsReq,
@@ -446,28 +470,40 @@ actor ChatRoomClient {
     }
 
     /// Second half of the parallel checkpoint fetch: import the blob, then
-    /// replay the rows that buffered while it downloaded.
-    private func completeCheckpointFetch(gen: Int, seq: UInt64) async {
+    /// replay the rows that buffered while it downloaded. Deliberately NOT
+    /// generation-guarded on the apply: the blob's content is socket-
+    /// independent (CRDT import, cursor advances via max), so a download
+    /// that outlived its socket still becomes progress — the next session's
+    /// frontier check finds it contained and joins RowsOnly instead of
+    /// starting the download over.
+    private func completeCheckpointFetch(seq: UInt64) async {
         let bytes = await fetchCheckpoint()
-        guard gen == generation, !closed else { return }
+        fetchInFlight = false
+        checkpointProgressAt = nil
+        guard !closed else { return }
         guard let bytes else {
-            roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint fetch failed; redialing")
-            checkpointBuffer = nil
-            await onSocketError(gen: gen)
+            // Redial only if a session is actually waiting on this blob
+            // (buffer armed) — a stale failure must not kill a healthy
+            // RowsOnly session that no longer needs it.
+            if checkpointBuffer != nil {
+                roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint fetch failed (partial kept); redialing")
+                checkpointBuffer = nil
+                await onSocketError(gen: generation)
+            }
             return
         }
-        guard await delegate.applyCheckpoint(bytes, seq), gen == generation, !closed else {
-            if gen == generation, !closed {
+        guard await delegate.applyCheckpoint(bytes, seq), !closed else {
+            if !closed {
                 roomLog.error("chat2 \(self.chatId, privacy: .public): checkpoint import failed; redialing")
                 checkpointBuffer = nil
-                await onSocketError(gen: gen)
+                await onSocketError(gen: generation)
             }
             return
         }
         while let frame = checkpointBuffer?.first {
             checkpointBuffer?.removeFirst()
             await applyRowFrame(frame)
-            guard gen == generation, !closed else { return }
+            guard !closed else { return }
         }
         checkpointBuffer = nil
     }
@@ -566,10 +602,20 @@ actor ChatRoomClient {
     /// response with the checkpoint's seq, and a mid-download replacement
     /// restarts from 0 (a Range against a new blob would splice two blobs).
     private func fetchCheckpoint() async -> Data? {
-        var got = Data()
-        var seenSeq: String?
+        // Resume from any partial a previous attempt (even a previous
+        // SOCKET generation) left behind — starting a slow blob over from
+        // zero on every hiccup is how a thin link never converges.
+        var got = partialCheckpoint
+        var seenSeq: String? = partialCheckpointSeq
+        func keepPartial() {
+            partialCheckpoint = got
+            partialCheckpointSeq = seenSeq
+        }
         for _ in 0..<4 {
-            guard var request = await checkpointRequest() else { return nil }
+            guard var request = await checkpointRequest() else {
+                keepPartial()
+                return nil
+            }
             if !got.isEmpty {
                 request.setValue("bytes=\(got.count)-", forHTTPHeaderField: "Range")
             }
@@ -590,18 +636,27 @@ actor ChatRoomClient {
             case 206: break
             default:
                 roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint HTTP \(http.statusCode)")
+                keepPartial()
                 return nil
             }
             do {
                 for try await byte in stream {
                     got.append(byte)
+                    // Download progress is liveness (see pingTick) — stamp
+                    // it every 8KB, not every byte.
+                    if got.count & 0x1FFF == 0 {
+                        checkpointProgressAt = .now()
+                    }
                 }
+                partialCheckpoint = Data()
+                partialCheckpointSeq = nil
                 return got
             } catch {
                 // Mid-body drop: keep the bytes, resume via Range.
                 roomLog.warning("chat2 \(self.chatId, privacy: .public): checkpoint stream dropped at \(got.count)B; resuming")
             }
         }
+        keepPartial()
         return nil
     }
 }

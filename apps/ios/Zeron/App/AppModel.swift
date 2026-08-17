@@ -634,6 +634,16 @@ final class AppModel {
             released += 1
             let delay = stagger
             Task { @MainActor in
+                // The registry (the sidebar the user is looking at) gets the
+                // pipe to itself first: on a 240kbps link, warm chat dials
+                // racing the registry's own handshake+state pushed the
+                // connect spinner from ~1.5s to ~7s (NLC Edge, 2026-08-17).
+                // An open view still dials instantly via releaseDial.
+                let start = DispatchTime.now()
+                while !(self.workspace?.connected ?? false),
+                      DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds < 10_000_000_000 {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
                 if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
                 store.releaseDial()
             }
