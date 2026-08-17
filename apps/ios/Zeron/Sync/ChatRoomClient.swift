@@ -175,13 +175,19 @@ actor ChatRoomClient {
                let seq = (ack["seq"] as? NSNumber)?.uint64Value {
                 pending.removeAll { $0.batchId == push.batchId }
                 await delegate.advanceCursor(seq)
-            } else if http.statusCode == 400 || http.statusCode == 413 {
-                // Permanent server verdict: retire, same as the error frame
-                // path — the ops stay in the local doc.
-                roomLog.error("chat2 \(self.chatId, privacy: .public): http push rejected (\(http.statusCode)); retiring batch")
+            } else if let err = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let code = err["error"] as? String,
+                      ["bad_push", "too_large", "empty"].contains(code) {
+                // Permanent verdict — and provably OUR edge's (a parsed error
+                // code, not a middlebox's arbitrary 4xx: captive portals
+                // answer POSTs with junk statuses, and retiring a real
+                // message batch on one would silently drop the send on
+                // exactly the networks this path exists for). Retire, same
+                // as the WS error-frame path; the ops stay in the local doc.
+                roomLog.error("chat2 \(self.chatId, privacy: .public): http push rejected (\(code, privacy: .public)); retiring batch")
                 pending.removeAll { $0.batchId == push.batchId }
             } else {
-                break  // quota/transient: retry next cycle
+                break  // quota/transient/middlebox: retry next cycle
             }
         }
         let after = await delegate.cursor()

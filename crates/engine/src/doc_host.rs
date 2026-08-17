@@ -1024,11 +1024,26 @@ impl DocHost {
                             let host = host.clone();
                             let weak = weak.clone();
                             host.clone().spawn_worker(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                // With the pull-first transport the client
+                                // constructs before any state answer — wait
+                                // until the server's view is KNOWN (bounded)
+                                // or the all-zero placeholder stats would
+                                // misread as "no checkpoint" and upload a
+                                // spurious full-doc heal on a thin link.
+                                for _ in 0..40u32 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    let Some(handle) = weak.upgrade() else { return };
+                                    let known = lock(&handle.chat2)
+                                        .as_ref()
+                                        .is_some_and(|c| c.stats().server_known);
+                                    if known {
+                                        break;
+                                    }
+                                }
                                 let Some(handle) = weak.upgrade() else { return };
                                 let no_checkpoint = lock(&handle.chat2)
                                     .as_ref()
-                                    .is_some_and(|c| c.stats().checkpoint_size == 0);
+                                    .is_some_and(|c| c.stats().server_known && c.stats().checkpoint_size == 0);
                                 let has_content = handle
                                     .doc
                                     .read_entries()

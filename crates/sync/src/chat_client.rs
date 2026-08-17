@@ -285,6 +285,10 @@ struct Shared {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatStatsSnapshot {
     pub connected: bool,
+    /// A state answer (socket hello or HTTPS pull) has been received —
+    /// until then every server-side field below is a placeholder zero, and
+    /// consumers like the host's bootstrap heal must not act on them.
+    pub server_known: bool,
     pub cursor: u64,
     pub head_seq: u64,
     pub seq_floor: u64,
@@ -555,6 +559,7 @@ impl ChatClient {
         });
         ChatStatsSnapshot {
             connected: self.flags.connected.load(Relaxed),
+            server_known: shared.server.is_some(),
             cursor: shared.cursor,
             // The server's honest view — deliberately NOT clamped to the
             // cursor: cursor > headSeq is the reset signal and must stay
