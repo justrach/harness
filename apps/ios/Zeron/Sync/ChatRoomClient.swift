@@ -74,9 +74,14 @@ actor ChatRoomClient {
     private let device: String
     private let urlProvider: @Sendable () async -> URL?
     private let checkpointRequest: @Sendable () async -> URLRequest?
+    /// GET /chat2/{id}/rows?after= — the HTTPS pull twin of the backfill.
+    private let rowsRequest: @Sendable (UInt64) async -> URLRequest?
+    /// POST /chat2/{id}/rows?batchId= — the HTTPS push twin.
+    private let pushRequest: @Sendable (String) async -> URLRequest?
     private let delegate: Delegate
 
     private var socket: URLSessionWebSocketTask?
+    private var pullTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
     private var livenessTask: Task<Void, Never>?
@@ -121,11 +126,15 @@ actor ChatRoomClient {
          device: String,
          urlProvider: @escaping @Sendable () async -> URL?,
          checkpointRequest: @escaping @Sendable () async -> URLRequest?,
+         rowsRequest: @escaping @Sendable (UInt64) async -> URLRequest?,
+         pushRequest: @escaping @Sendable (String) async -> URLRequest?,
          delegate: Delegate) {
         self.chatId = chatId
         self.device = device
         self.urlProvider = urlProvider
         self.checkpointRequest = checkpointRequest
+        self.rowsRequest = rowsRequest
+        self.pushRequest = pushRequest
         self.delegate = delegate
     }
 
@@ -134,12 +143,101 @@ actor ChatRoomClient {
     func start() {
         closed = false
         connect()
+        // Pull-first bootstrap + poll-while-unjoined: one HTTPS GET catches
+        // the doc up in ~1 RTT while the socket spends 4+ on TLS + upgrade +
+        // hello — and on networks that strip WS upgrades (airplane wifi) the
+        // 20s poll is the transport, delivering reads AND queued sends.
+        pullTask?.cancel()
+        pullTask = Task { [weak self] in
+            await self?.pullSync()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                if await self.shouldPoll() { await self.pullSync() }
+            }
+        }
+    }
+
+    /// One HTTPS sync cycle: flush pending batches (POST — batchId dedupe
+    /// makes replays no-ops), then pull rows (GET) and apply them through the
+    /// exact frame path the socket uses. The airplane-wifi transport.
+    func pullSync() async {
+        guard !closed else { return }
+        // Push first, so a message typed on dead wifi leaves the device on
+        // this cycle rather than the next.
+        for push in pending {
+            guard var request = await pushRequest(push.batchId) else { break }
+            request.httpBody = push.bytes
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { break }
+            if http.statusCode == 200,
+               let ack = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let seq = (ack["seq"] as? NSNumber)?.uint64Value {
+                pending.removeAll { $0.batchId == push.batchId }
+                await delegate.advanceCursor(seq)
+            } else if http.statusCode == 400 || http.statusCode == 413 {
+                // Permanent server verdict: retire, same as the error frame
+                // path — the ops stay in the local doc.
+                roomLog.error("chat2 \(self.chatId, privacy: .public): http push rejected (\(http.statusCode)); retiring batch")
+                pending.removeAll { $0.batchId == push.batchId }
+            } else {
+                break  // quota/transient: retry next cycle
+            }
+        }
+        let after = await delegate.cursor()
+        guard let request = await rowsRequest(after) else { return }
+        guard let (body, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+        // u32-LE length-prefixed frames: state first, then rows, rowsDone.
+        var frames: [ChatWireFrame] = []
+        var off = 0
+        while off + 4 <= body.count {
+            let len = body.subdata(in: off..<(off + 4)).withUnsafeBytes {
+                Int($0.loadUnaligned(as: UInt32.self).littleEndian)
+            }
+            off += 4
+            guard off + len <= body.count else { break }
+            if let frame = ChatWire.decode(body.subdata(in: off..<(off + len))) {
+                frames.append(frame)
+            }
+            off += len
+        }
+        guard let stateFrame = frames.first, stateFrame.kind == ChatFrameType.state,
+              let state = ChatStateHeader(stateFrame.header) else { return }
+        var contained = state.checkpointSize == 0
+        if !contained {
+            contained = await delegate.containsFrontier(stateFrame.payload)
+        }
+        if case .checkpointThenRows = chatPlanCatchUp(cursor: after, state: state,
+                                                      frontierContained: contained) {
+            // The local doc lacks the checkpoint's frontier — fetch it over
+            // HTTPS first (Range-resumed, shared with the socket path via
+            // fetchInFlight) so the rows below land on their base.
+            guard !fetchInFlight else { return }
+            fetchInFlight = true
+            let bytes = await fetchCheckpoint()
+            fetchInFlight = false
+            checkpointProgressAt = nil
+            guard let bytes, !closed,
+                  await delegate.applyCheckpoint(bytes, state.checkpointSeq) else { return }
+        }
+        guard !closed else { return }
+        for frame in frames.dropFirst()
+        where frame.kind == ChatFrameType.row || frame.kind == ChatFrameType.rowsDone {
+            await applyRowFrame(frame)
+        }
+    }
+
+    private func shouldPoll() -> Bool {
+        !closed && !joined
     }
 
     func stop() {
         closed = true
         generation += 1
         cancelTasks()
+        pullTask?.cancel()
+        pullTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         joined = false

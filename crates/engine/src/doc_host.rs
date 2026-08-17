@@ -962,14 +962,26 @@ impl DocHost {
                 if weak.upgrade().is_none() {
                     return; // evicted or purged while dialing
                 }
+                // Dual transport: WS dial + a plain-HTTPS pull/push seam
+                // (rows GET / POST on the same bearer auth as the checkpoint
+                // fetch) — bootstraps in ~1 RTT and keeps syncing at backoff
+                // cadence on networks that never pass the WS upgrade. With
+                // the transport, connect resolves immediately (local-first).
+                let transport = Arc::new(crate::chat2_host::EdgeChatTransport::new(
+                    host.inner.http.clone(),
+                    edge.clone(),
+                    chat.clone(),
+                    device.clone(),
+                ));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    zeron_sync::ChatClient::connect_via(
+                    zeron_sync::ChatClient::connect_via_transport(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
                         &device,
                         cursor,
+                        transport,
                     ),
                 )
                 .await;

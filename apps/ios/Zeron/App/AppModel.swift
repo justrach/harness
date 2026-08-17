@@ -261,7 +261,10 @@ final class AppModel {
 
     var spaces: [Space] { demo?.spaces ?? workspace?.spaces ?? [] }
 
-    var connected: Bool { demo != nil || workspace?.connected == true }
+    // "Connected" for the header spinner means "server state has reached this
+    // session" — over the socket OR the HTTPS pull (which lands in ~1 RTT and
+    // is the only transport airplane wifi permits).
+    var connected: Bool { demo != nil || workspace?.connected == true || workspace?.synced == true }
 
     var overviewChats: [Chat] {
         if let demo {

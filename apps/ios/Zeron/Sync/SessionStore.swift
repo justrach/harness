@@ -207,6 +207,12 @@ final class SessionStore {
             checkpointRequest: { [config, chatId] in
                 await config.chat2CheckpointRequest(chatId: chatId)
             },
+            rowsRequest: { [config, chatId] after in
+                await config.chat2RowsRequest(chatId: chatId, after: after)
+            },
+            pushRequest: { [config, chatId] batchId in
+                await config.chat2PushRequest(chatId: chatId, batchId: batchId)
+            },
             delegate: delegate)
         chatRoom = client
         // First contact with the room (cursor 0): everything committed
