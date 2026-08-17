@@ -337,10 +337,13 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             }
         }
         // AvailableCommands feeds the engine's per-harness command cache, not
-        // the transcript.
+        // the transcript. Subagent-attributed events belong to the SUBAGENT's
+        // own doc (the engine routes them there); the parent doc keeps only
+        // the spawn chip, so they fold to nothing here.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
-        | AgentEvent::AvailableCommands { .. } => {}
+        | AgentEvent::AvailableCommands { .. }
+        | AgentEvent::Subagent { .. } => {}
     }
 }
 

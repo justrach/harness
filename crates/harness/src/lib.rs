@@ -226,6 +226,7 @@ pub(crate) fn crash_message(
 }
 
 pub use acp::AcpHarness;
+pub use claude::ClaudeHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

@@ -334,8 +334,8 @@ pub fn default_registry() -> HarnessRegistry {
             name: "Claude Code".into(),
             supports_steering: true,
             steering_mode: SteeringMode::StepBoundary,
-            // Must mirror AcpHarness::claude()'s spec exactly — the
-            // descriptor-stability rule (see the codex test below).
+            // Must mirror ClaudeHarness exactly — the descriptor-stability
+            // rule (see the codex test below).
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -346,8 +346,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::claude().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::claude()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
