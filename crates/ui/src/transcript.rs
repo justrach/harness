@@ -1551,7 +1551,20 @@ impl Transcript {
     fn build(state: Entity<AppState>, doc_override: Option<String>, cx: &mut Context<Self>) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
-        let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW_PX));
+        //
+        // Override instances align TOP: a subagent transcript reads like a
+        // fresh notes page — entries anchored at the top, streaming growing
+        // into the empty space below, never rising from the pane's bottom.
+        // Top alignment gets that structurally, with none of the bottom-
+        // aligned machinery it would otherwise need: no reservation pad, and
+        // no glued end-sentinel to fight (a Bottom list re-glues at distance
+        // 0 and hard-tracks growth — the runway work's whole trap surface).
+        let alignment = if doc_override.is_some() {
+            ListAlignment::Top
+        } else {
+            ListAlignment::Bottom
+        };
+        let list = ListState::new(0, alignment, px(OVERDRAW_PX));
         let weak = cx.weak_entity();
         list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
             weak.update(cx, |this: &mut Transcript, cx| {
@@ -1563,6 +1576,10 @@ impl Transcript {
         // The rail is sized for the conversation column; a narrow right-pane
         // tab has no width gate driving it, so override instances skip it.
         let rail_enabled = doc_override.is_none();
+        // Top-aligned instances never pin: the stick-to-bottom spring is the
+        // Bottom-aligned tail-follow, and its glue avoidance assumes that
+        // alignment. Reading starts at the top; scrolling is free.
+        let pinned = doc_override.is_none();
         let mut this = Self {
             state,
             list,
@@ -1583,7 +1600,7 @@ impl Transcript {
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
-            pinned: true,
+            pinned,
             own_turn: None,
             own_turn_kick: false,
             own_turn_scheduled: false,
@@ -1785,8 +1802,10 @@ impl Transcript {
                     this.spring_last_tick = None;
                 } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
                     // Returning toward the bottom inside the 70px band (or
-                    // arriving at it) re-engages the pin with a glide.
-                    if !this.pinned {
+                    // arriving at it) re-engages the pin with a glide — never
+                    // on an override instance, whose top-aligned notes layout
+                    // has no bottom pin at all.
+                    if !this.pinned && this.doc_override.is_none() {
                         this.pinned = true;
                         this.wake_spring();
                     }
@@ -2826,9 +2845,15 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
-        // rests below the chrome it fades under.
+        // rests below the chrome it fades under. The right pane already pads
+        // for the titlebar — an override instance's first row keeps only the
+        // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
-            Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            if self.doc_override.is_some() {
+                GAP_TURN
+            } else {
+                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
@@ -4063,14 +4088,50 @@ fn chip_header(tool: &ToolItem, open: bool, theme: &Theme) -> gpui::Div {
     chip_header_row(tool, Some(open), theme)
 }
 
-/// Tab title for a spawn chip's subagent surface — the tool's own name is
-/// the best label the doc carries (harnesses put the task there).
-fn subagent_tab_title(call: &ToolCall) -> SharedString {
-    match call {
-        ToolCall::Unknown { name, .. } => name.clone().into(),
-        ToolCall::Mcp { tool, .. } => tool.clone().into(),
-        _ => "Subagent".into(),
+/// Max chars a subagent tab title keeps. The strip chip is fixed-width and
+/// truncates visually, but the derived title also rides drag ghosts and any
+/// future pickers — cap it at the source.
+const SUBAGENT_TITLE_MAX: usize = 40;
+
+/// First line of `text`, trimmed, capped at `max` chars with an ellipsis.
+fn title_line(text: &str, max: usize) -> Option<String> {
+    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
+    let mut out: String = line.chars().take(max).collect();
+    if line.chars().count() > max {
+        out.push('…');
     }
+    Some(out)
+}
+
+/// Tab title for a spawn chip's subagent surface — the tool's own name is
+/// the best label the doc carries (harnesses fold the task description into
+/// it, "Agent: scan repo"). A BARE "Agent"/"Task" (older docs, missing
+/// description) falls back to the call input's description/prompt field
+/// before settling for "Subagent".
+fn subagent_tab_title(call: &ToolCall) -> SharedString {
+    let (name, input) = match call {
+        ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
+        ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
+        _ => return "Subagent".into(),
+    };
+    let bare = {
+        let name = name.trim();
+        name.is_empty() || name.eq_ignore_ascii_case("agent") || name.eq_ignore_ascii_case("task")
+    };
+    if !bare {
+        if let Some(title) = title_line(name, SUBAGENT_TITLE_MAX) {
+            return title.into();
+        }
+    }
+    input
+        .and_then(|input| {
+            ["description", "prompt"]
+                .iter()
+                .find_map(|key| input.get(key)?.as_str())
+        })
+        .and_then(|text| title_line(text, SUBAGENT_TITLE_MAX))
+        .map(|task| SharedString::from(format!("Agent: {task}")))
+        .unwrap_or_else(|| "Subagent".into())
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
@@ -4924,6 +4985,47 @@ mod tests {
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
+    }
+
+    #[test]
+    fn subagent_tab_titles() {
+        // Descriptive Unknown names pass through.
+        let named = ToolCall::Unknown {
+            name: "Agent: scan repo".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&named).as_ref(), "Agent: scan repo");
+        // A bare "Task"/"Agent" digs the description out of the call input.
+        let bare = ToolCall::Unknown {
+            name: "Task".into(),
+            input: Some(serde_json::json!({
+                "description": "audit the auth flow",
+                "prompt": "very long instructions…",
+            })),
+        };
+        assert_eq!(subagent_tab_title(&bare).as_ref(), "Agent: audit the auth flow");
+        // Nothing to derive → the generic label.
+        let blank = ToolCall::Unknown {
+            name: "agent".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
+        // Absurd lengths cap with an ellipsis.
+        let long = ToolCall::Unknown {
+            name: "x".repeat(120),
+            input: None,
+        };
+        let title = subagent_tab_title(&long);
+        assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
+        assert!(title.ends_with('…'));
+        // Non-spawn-shaped calls stay generic.
+        assert_eq!(
+            subagent_tab_title(&ToolCall::Exec {
+                command: "ls".into()
+            })
+            .as_ref(),
+            "Subagent"
+        );
     }
 
     #[test]

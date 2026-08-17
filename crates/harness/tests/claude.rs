@@ -511,7 +511,7 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
         .iter()
         .find_map(|e| match e {
             AgentEvent::ToolCall { id, call } => match call {
-                ToolCall::Unknown { name, .. } if name == "Agent" => Some(id.clone()),
+                ToolCall::Unknown { name, .. } if name.starts_with("Agent") => Some(id.clone()),
                 _ => None,
             },
             _ => None,

@@ -112,6 +112,20 @@ pub(crate) fn decode_tool_use(name: &str, input: &Value) -> ToolCall {
                 })
                 .collect(),
         },
+        // The subagent spawn: name the chip — and the tab it opens — after
+        // the TASK, not the bare tool ("Agent" alone says nothing in a tab
+        // strip; the tool's `description` is where the work is named).
+        "Agent" | "Task" => {
+            let description = str_field(input, "description");
+            ToolCall::Unknown {
+                name: if description.is_empty() {
+                    "Agent".into()
+                } else {
+                    format!("Agent: {description}")
+                },
+                input: (!input.is_null()).then(|| input.clone()),
+            }
+        }
         // MCP tools arrive as `mcp__<server>__<tool>`.
         _ => match name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
             Some((server, tool)) => ToolCall::Mcp {
