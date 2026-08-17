@@ -210,6 +210,20 @@ final class SessionStore {
                 self.cursor = max(self.cursor, seq)
                 self.saver?.poke()
             },
+            clampCursor: { [weak self] seq in
+                guard let self, self.cursor > seq else { return }
+                // Cursor amnesty (see ChatRoomClient): a cursor above the
+                // room's checkpoint is only as trustworthy as the doc under
+                // it — rows imported while their deps were missing PARK
+                // silently, vanish on export, and the cursor lied forever
+                // ("Add Tweets" wedge: cursor 75 over a checkpoint-only doc,
+                // 2026-08-18). Clamping re-fetches rows since the checkpoint
+                // (KB-bounded by trim policy; re-imports are no-ops), which
+                // converts any lying cursor into a true one.
+                roomLog.info("chat2 \(self.chatId, privacy: .public): cursor amnesty \(self.cursor) → \(seq)")
+                self.cursor = seq
+                self.saver?.poke()
+            },
             event: { [weak self] event in self?.handle(event) }
         )
         let client = ChatRoomClient(

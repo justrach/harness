@@ -59,6 +59,10 @@ actor ChatRoomClient {
         var applyCheckpoint: @MainActor @Sendable (Data, UInt64) -> Bool
         var applyRow: @MainActor @Sendable (Data, UInt64) -> Void
         var advanceCursor: @MainActor @Sendable (UInt64) -> Void
+        /// Cursor amnesty: lower the cursor to the checkpoint seq (no-op if
+        /// already at or below). See the once-per-session clamp in
+        /// handleState/pullSync.
+        var clampCursor: @MainActor @Sendable (UInt64) -> Void
         var event: @MainActor @Sendable (ChatRoomEvent) -> Void
     }
 
@@ -98,6 +102,9 @@ actor ChatRoomClient {
     /// queue behind the blob), and discarding the bytes on every redial
     /// looped a fresh-chat open forever (NLC Edge, 2026-08-17).
     private var fetchInFlight = false
+    /// Once-per-client cursor amnesty (see handleState): a cursor above the
+    /// room's checkpoint is re-verified by refetching the rows above it.
+    private var cursorAmnestyDone = false
     /// Partial download preserved across fetch attempts (Range-resumed).
     private var partialCheckpoint = Data()
     private var partialCheckpointSeq: String?
@@ -230,11 +237,16 @@ actor ChatRoomClient {
             roomLog.error("chat2 \(self.chatId, privacy: .public): http pull body malformed (\(body.count)B, \(frames.count) frames)")
             return
         }
+        if !cursorAmnestyDone, state.checkpointSize > 0 {
+            cursorAmnestyDone = true
+            await delegate.clampCursor(state.checkpointSeq)
+        }
+        let planAfter = await delegate.cursor()
         var contained = state.checkpointSize == 0
         if !contained {
             contained = await delegate.containsFrontier(stateFrame.payload)
         }
-        if case .checkpointThenRows = chatPlanCatchUp(cursor: after, state: state,
+        if case .checkpointThenRows = chatPlanCatchUp(cursor: planAfter, state: state,
                                                       frontierContained: contained) {
             // The local doc lacks the checkpoint's frontier. Route through
             // completeCheckpointFetch — NOT an inline fetch: the socket
@@ -564,7 +576,16 @@ actor ChatRoomClient {
         if !contained {
             contained = await delegate.containsFrontier(frame.payload)
         }
-        let plan = chatPlanCatchUp(cursor: cursor, state: state, frontierContained: contained)
+        // Cursor amnesty, once per client: a cursor above the checkpoint seq
+        // claims history the doc may have silently parked and dropped (the
+        // "Add Tweets" wedge). Clamp and refetch — no-op re-imports, KB cost,
+        // converts a lying cursor into a true one.
+        if !cursorAmnestyDone, state.checkpointSize > 0 {
+            cursorAmnestyDone = true
+            await delegate.clampCursor(state.checkpointSeq)
+        }
+        let planCursor = await delegate.cursor()
+        let plan = chatPlanCatchUp(cursor: planCursor, state: state, frontierContained: contained)
         stateReceived = true
         let after: UInt64
         switch plan {

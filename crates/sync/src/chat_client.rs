@@ -454,6 +454,7 @@ impl ChatClient {
             presence_rx,
             flags: flags.clone(),
             resumed: false,
+            cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -611,6 +612,9 @@ struct Actor {
     redial_rx: mpsc::Receiver<()>,
     presence_rx: mpsc::Receiver<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
+    /// Once-per-actor cursor amnesty (see run_session): a cursor above the
+    /// room's checkpoint is re-verified by refetching the rows above it.
+    cursor_amnesty_done: std::sync::atomic::AtomicBool,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn ChatTransport>>,
     /// One offline sync in flight at a time.
@@ -798,6 +802,25 @@ impl Actor {
             return SessionEnd::Reconnect;
         };
         lock(&self.shared).server = Some(state);
+        // Cursor amnesty, once per client: a cursor above the checkpoint seq
+        // claims history the doc may have silently parked and dropped —
+        // parked imports vanish on export while the cursor advances, and
+        // nothing ever re-reads below the cursor ("Add Tweets" wedge:
+        // cursor 75 over a checkpoint-only doc, 2026-08-18). Clamp and
+        // refetch: re-imports are no-ops and the trim policy bounds the
+        // cost to the rows since the last checkpoint.
+        if state.checkpoint_size > 0 && !self.cursor_amnesty_done.swap(true, Relaxed) {
+            let mut shared = lock(&self.shared);
+            if shared.cursor > state.checkpoint_seq {
+                tracing::info!(
+                    from = shared.cursor,
+                    to = state.checkpoint_seq,
+                    "chat2: cursor amnesty — refetching rows above the checkpoint"
+                );
+                shared.cursor = state.checkpoint_seq;
+            }
+        }
+        let cursor = lock(&self.shared).cursor;
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
             self.flags.rejoins.fetch_add(1, Relaxed);
