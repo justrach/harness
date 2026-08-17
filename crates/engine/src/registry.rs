@@ -376,10 +376,9 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::CodexHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
     );
-    // Cursor Agent over ACP (`cursor-agent acp`), same lazy pattern: the
-    // static descriptor mirrors AcpHarness::cursor() exactly. No steering
-    // extension (turn boundaries) and no effort ladder — Cursor bakes effort
-    // into the model id's bracket suffix instead of a `thought_level` option.
+    // Cursor via the pinned @cursor/sdk shim (NOT ACP — that surface strips
+    // subagent transcripts), same lazy pattern: the static descriptor mirrors
+    // CursorHarness exactly. Turn-boundary steering; no effort ladder.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Cursor,
@@ -390,8 +389,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::cursor().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::cursor()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::CursorHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
     );
     // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
     // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
