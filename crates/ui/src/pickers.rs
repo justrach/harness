@@ -2715,7 +2715,7 @@ impl Pickers {
         //    a divider, one brand icon per harness. The selected tab wears a
         //    3px accent bar hugging the rail's right edge. Hidden while a
         //    search is live (the query spans every harness).
-        let rail: Option<AnyElement> = (!searching).then(|| {
+        let rail: Option<AnyElement> = (!searching && !descriptors.is_empty()).then(|| {
             let mut column = div()
                 .w(px(44.0))
                 .flex_none()
@@ -2965,6 +2965,11 @@ impl Pickers {
                     el.into_any_element()
                 })
                 .collect()
+        } else if descriptors.is_empty() {
+            vec![empty_list_note(
+                &theme,
+                "Enable an installed agent in Settings, or install an agent CLI",
+            )]
         } else if searching {
             vec![empty_list_note(&theme, "No models found")]
         } else if favorites_view {
@@ -3330,23 +3335,20 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
 /// catalog device's enabled set (Settings → Agents — per-device state, so a
 /// space on another device follows THAT device's toggles). The dev-rig mock
-/// opt-in survives the filter, and a catalog where nothing is enabled (or
-/// that predates the flag entirely and defaults empty) falls back to
-/// everything visible rather than an empty rail.
+/// opt-in survives the filter. An empty enabled set stays empty: resurfacing
+/// uninstalled harnesses here only defers the failure until run time.
 pub fn offered_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     offered_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
-    let visible = visible_harnesses_impl(list, allow_mock);
-    let offered: Vec<HarnessDescriptor> = visible
+    visible_harnesses_impl(list, allow_mock)
         .iter()
         .filter(|d| {
             zeron_engine::registry::descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock)
         })
         .cloned()
-        .collect();
-    if offered.is_empty() { visible } else { offered }
+        .collect()
 }
 
 /// Attach the (single) open popover overlay to its trigger chip.
@@ -3449,6 +3451,11 @@ impl Render for Pickers {
         // harness reads from the brand mark beside it. Never "Default model":
         // before the catalog lands the remembered label (or the configured id)
         // names the pick; the loaded list then resolves it to a concrete row.
+        let no_harnesses = self
+            .harnesses
+            .ready()
+            .is_some_and(|list| offered_harnesses(list).is_empty())
+            && self.effective_harness(cx).is_none();
         let model_label: SharedString = {
             let loaded = self.selected_model(cx).map(|m| m.label.clone());
             let label = loaded.or_else(|| {
@@ -3466,15 +3473,18 @@ impl Render for Pickers {
                     None => remembered.map(|m| m.label.clone()),
                 }
             });
-            label.map(SharedString::from).unwrap_or_default()
+            label.map(SharedString::from).unwrap_or_else(|| {
+                if no_harnesses {
+                    SharedString::from("No agents available")
+                } else {
+                    SharedString::default()
+                }
+            })
         };
         let harness_icon: (&'static str, Option<gpui::Hsla>) = self
             .effective_harness(cx)
             .map(harness_brand_icon)
-            .unwrap_or((
-                crate::icons::CLAUDE_MARK,
-                Some(crate::icons::claude_brand()),
-            ));
+            .unwrap_or((crate::icons::TERMINAL, None));
         let explicit_options = self.explicit_options(cx);
         let traits_set = traits_summary(
             self.selected_model(cx),
@@ -3544,7 +3554,7 @@ impl Render for Pickers {
         let model_chip = self.trigger_chip(
             PickerKind::HarnessModel,
             model_label,
-            true,
+            !no_harnesses,
             Some(harness_icon),
             None,
             &theme,
@@ -3991,12 +4001,12 @@ mod tests {
                 descriptor(HarnessId::Grok, "Grok", grok),
             ]
         };
-        // A catalog from an engine predating the flag (all None) falls back
-        // to default-set membership: Claude Code + Codex only.
+        // A catalog from an engine predating the flag (all None) follows its
+        // installed probes, so every detected real harness is offered.
         let offered = offered_harnesses_impl(&catalog(None, None, None), false);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Codex]
+            vec![HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Grok]
         );
         // The device's flags win: Grok on, Codex off; catalog order holds.
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), Some(true)), false);
@@ -4008,11 +4018,17 @@ mod tests {
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), None), true);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::Mock, HarnessId::ClaudeCode]
+            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Grok]
         );
-        // Nothing enabled falls back to the visible list, not an empty rail.
+        // Explicitly disabling every harness leaves an empty rail.
         let offered =
             offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
-        assert_eq!(offered.len(), 3);
+        assert!(offered.is_empty());
+
+        // So does a legacy catalog whose installed probes all failed: never
+        // resurface unrunnable agents just to avoid an empty picker.
+        let mut missing = catalog(None, None, None);
+        missing.iter_mut().for_each(|d| d.installed = false);
+        assert!(offered_harnesses_impl(&missing, false).is_empty());
     }
 }

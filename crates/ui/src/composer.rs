@@ -4402,13 +4402,18 @@ impl Composer {
         )
     }
 
-    /// New-chat sends need a project: with none picked (empty device, or a
-    /// selection healed away) the send button dims and submit is a no-op —
-    /// project-less `~`-cwd sessions are no longer mintable from the canvas.
-    /// Existing chats carry their own project, so they always send.
+    /// New-chat sends need a project and a runnable agent. If either selection
+    /// is missing, the send button dims and submit is a no-op. Existing chats
+    /// carry both in their persisted state, so they always send.
     fn send_blocked(&self, cx: &App) -> bool {
-        let state = self.state.read(cx);
-        state.selected_chat.is_none() && state.selected_space_row().is_none()
+        let (is_new, no_space) = {
+            let state = self.state.read(cx);
+            (
+                state.selected_chat.is_none(),
+                state.selected_space_row().is_none(),
+            )
+        };
+        is_new && (no_space || self.pickers.read(cx).resolved(cx).harness.is_none())
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -5234,8 +5239,8 @@ impl Composer {
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Steer => {
-                // Dimmed and inert while no project is picked (`send_blocked`
-                // also gates `on_submit`, so Enter is a no-op too).
+                // Dimmed and inert while a new chat has no project or runnable
+                // agent (`send_blocked` also gates Enter).
                 let blocked = self.send_blocked(cx);
                 div()
                     .id("composer-send")

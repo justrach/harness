@@ -197,6 +197,9 @@ impl HarnessRegistry {
         if !self.slots().contains_key(&id) {
             return Err(format!("unknown harness {id:?}"));
         }
+        if on && !auto_enabled(id) {
+            return Err(format!("{id:?} cannot be enabled from Settings"));
+        }
         if on && !self.installed_for(id) {
             return Err(format!("{id:?} CLI is not installed on this device"));
         }
@@ -678,6 +681,7 @@ mod tests {
         // The gate: a missing CLI can't be enabled; unknown ids refuse.
         assert!(registry.set_enabled(HarnessId::Hermes, true).is_err());
         assert!(registry.set_enabled(HarnessId::Pi, true).is_err());
+        assert!(registry.set_enabled(HarnessId::Mock, true).is_err());
         // Installed CLIs toggle both ways; no-op flips are fine.
         registry.set_enabled(HarnessId::Grok, true).unwrap();
         registry.set_enabled(HarnessId::Grok, true).unwrap();
