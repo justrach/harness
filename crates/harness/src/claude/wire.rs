@@ -33,6 +33,14 @@ pub(crate) struct SystemFrame {
     pub cwd: String,
     #[serde(default)]
     pub session_id: String,
+    /// `task_notification` (a background subagent settling): the spawning
+    /// Agent tool's id — the only TAGGED terminal signal the 2.1.x wire has
+    /// for a background subagent (its frames otherwise just stop).
+    #[serde(default, alias = "toolUseId")]
+    pub tool_use_id: Option<String>,
+    /// `task_notification` terminal status (`completed`/`failed`/`killed`…).
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -95,6 +103,8 @@ impl MessageBody {
 pub(crate) struct ContentBlock {
     #[serde(rename = "type", default)]
     pub kind: String,
+    #[serde(default)]
+    pub text: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]

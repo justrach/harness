@@ -651,6 +651,15 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(diff_stats) = &doc_part.diff_stats {
         map.insert("diffStats", loro_value_from_json(diff_stats))?;
     }
+    if let Some(subagent_ref) = &doc_part.subagent_ref {
+        map.insert("subagentRef", subagent_ref.as_str())?;
+    }
+    if let Some(subagent_status) = &doc_part.subagent_status {
+        map.insert("subagentStatus", subagent_status.as_str())?;
+    }
+    if let Some(subagent_tail) = &doc_part.subagent_tail {
+        map.insert("subagentTail", subagent_tail.as_str())?;
+    }
     Ok(())
 }
 
@@ -1023,6 +1032,15 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(diff_stats) = &doc_part.diff_stats {
         map.insert("diffStats", loro_value_from_json(diff_stats))?;
     }
+    if let Some(subagent_ref) = &doc_part.subagent_ref {
+        map.insert("subagentRef", subagent_ref.as_str())?;
+    }
+    if let Some(subagent_status) = &doc_part.subagent_status {
+        map.insert("subagentStatus", subagent_status.as_str())?;
+    }
+    if let Some(subagent_tail) = &doc_part.subagent_tail {
+        map.insert("subagentTail", subagent_tail.as_str())?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1106,6 +1124,60 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn segment_sync_persists_subagent_chip_fields_on_live_parts() {
+        // The eager-done world's OTHER path: the chip mutates while its
+        // segment still streams (codex fan-outs) — update_part_fields must
+        // carry the chip fields or SegmentWriter::sync drops them silently.
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let mut part = MessagePart::Tool {
+            id: "call_alpha".into(),
+            call: zeron_proto::ToolCall::Unknown {
+                name: "Agent: alpha".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: false,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        w.sync(std::slice::from_ref(&part)).unwrap();
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            subagent_tail,
+            ..
+        } = &mut part
+        {
+            *subagent_ref = Some("c1--sub--call_alpha".into());
+            *subagent_status = Some(SubagentStatus::Running);
+            *subagent_tail = Some("scanning".into());
+        }
+        w.sync(std::slice::from_ref(&part)).unwrap();
+        let entries = doc.read_entries().unwrap();
+        match &entries[0].parts[0] {
+            MessagePart::Tool {
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
+                ..
+            } => {
+                assert_eq!(subagent_ref.as_deref(), Some("c1--sub--call_alpha"));
+                assert_eq!(subagent_status, &Some(SubagentStatus::Running));
+                assert_eq!(subagent_tail.as_deref(), Some("scanning"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -179,6 +179,37 @@ impl Normalizer {
     pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<AgentEvent> {
         match frame {
             Frame::System(f) => {
+                // A background subagent's completion arrives as an UNTAGGED
+                // `task_notification` carrying the spawning tool's id — the
+                // wire's only terminal signal for it (live-verified 2.1.228:
+                // no tagged frame follows; the subagent's stream just stops).
+                // Surface it as the subagent's tagged Done so the chip flips
+                // done/failed and the transcript freezes.
+                if f.subtype == "task_notification" {
+                    let Some(parent) = f.tool_use_id.as_deref().filter(|t| !t.is_empty()) else {
+                        return Vec::new();
+                    };
+                    let status = match f.status.as_deref().unwrap_or("") {
+                        "completed" | "complete" | "succeeded" | "success" => {
+                            DoneStatus::Completed
+                        }
+                        "failed" | "errored" | "error" => DoneStatus::Errored,
+                        "killed" | "cancelled" | "canceled" | "stopped" | "interrupted" => {
+                            DoneStatus::Interrupted
+                        }
+                        // Non-terminal notification shapes: nothing to close.
+                        _ => return Vec::new(),
+                    };
+                    return vec![tag(
+                        parent,
+                        AgentEvent::Done {
+                            status,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        },
+                    )];
+                }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
                 }
@@ -246,22 +277,29 @@ impl Normalizer {
 
             Frame::Assistant(f) => {
                 if let Some(parent) = &f.parent_tool_use_id {
-                    // Subagent tool calls, attributed. Text/thinking already
-                    // arrived as tagged stream deltas; assistant-level error
-                    // codes surface in the subagent transcript, not the
-                    // parent's.
+                    // Subagent content, attributed. The 2.1.x wire streams NO
+                    // tagged partial deltas (live-verified): a subagent's text
+                    // arrives only as full text blocks on its tagged
+                    // assistant frames — emit them, in block order with the
+                    // tool calls, or subagent transcripts are tool-chips-only.
                     let mut out: Vec<AgentEvent> = f
                         .message
                         .blocks()
-                        .filter(|b: &ContentBlock| b.kind == "tool_use")
-                        .map(|b| {
-                            tag(
+                        .filter_map(|b: ContentBlock| match b.kind.as_str() {
+                            "text" if !b.text.is_empty() => Some(tag(
+                                parent,
+                                AgentEvent::TextDelta {
+                                    text: format!("{}\n\n", b.text.trim_end()),
+                                },
+                            )),
+                            "tool_use" => Some(tag(
                                 parent,
                                 AgentEvent::ToolCall {
                                     id: b.id.clone(),
                                     call: decode_tool_use(&b.name, &b.input),
                                 },
-                            )
+                            )),
+                            _ => None,
                         })
                         .collect();
                     if let Some(code) = &f.error {
@@ -588,6 +626,66 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn task_notification_settles_the_subagent_with_a_tagged_done() {
+        // The wire's ONLY terminal signal for a background subagent
+        // (live-verified 2.1.228): an untagged system frame carrying the
+        // spawning tool's id. Shape from the captured fixture.
+        let ev = normalize_one(
+            r#"{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_agent","status":"completed","summary":"DONE."}"#,
+        );
+        assert_eq!(
+            ev,
+            vec![AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_agent".into(),
+                event: Box::new(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            }]
+        );
+        let ev = normalize_one(
+            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"failed"}"#,
+        );
+        assert!(matches!(
+            &ev[..],
+            [AgentEvent::Subagent { event, .. }]
+                if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Errored, .. })
+        ));
+        // Non-terminal or id-less notifications close nothing.
+        assert!(normalize_one(
+            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"running"}"#,
+        )
+        .is_empty());
+        assert!(normalize_one(
+            r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn subagent_assistant_text_blocks_emit_tagged_text() {
+        // No tagged partial deltas exist on the 2.1.x wire: a subagent's text
+        // arrives only as full blocks on its tagged assistant frames.
+        let ev = normalize_one(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"working on it"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        );
+        assert_eq!(ev.len(), 2);
+        assert_eq!(
+            ev[0],
+            AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_sub".into(),
+                event: Box::new(AgentEvent::TextDelta {
+                    text: "working on it\n\n".into()
+                }),
+            }
+        );
+        assert!(matches!(&ev[1], AgentEvent::Subagent { event, .. }
+            if matches!(event.as_ref(), AgentEvent::ToolCall { .. })));
     }
 
     #[test]
