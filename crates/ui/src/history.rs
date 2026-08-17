@@ -3767,7 +3767,12 @@ impl GitHistory {
                         .border_color(crate::theme::hairline(0.12))
                         .bg(crate::theme::wash(0.08))
                         .when_some(avatar_image, |avatar, image| {
-                            avatar.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                            avatar.child(
+                                img(image)
+                                    .size_full()
+                                    .rounded_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
                         })
                         .when(!has_avatar, |avatar| {
                             avatar
