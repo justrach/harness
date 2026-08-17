@@ -339,6 +339,7 @@ struct TranscriptView: View {
         // same ~2s, but a transcript that converges in a few frames reveals
         // in ~50ms instead of holding the skeleton for multiples of 50ms —
         // this cadence IS the "cached session shows a skeleton" time.
+        var quietTicks = 0
         for _ in 0..<120 {
             guard scroll.pinned, !scroll.userScrolling else { break }
             // Don't chase targets through a keyboard transition — the edge
@@ -355,8 +356,22 @@ struct TranscriptView: View {
                 // poll spent here is the user staring at the loader.
                 if abs(error) < 24 { break }
                 scrollPosition.scrollTo(y: scroll.contentOffsetY + error)
+                quietTicks = 0
             } else {
                 scrollPosition.scrollTo(edge: .bottom)
+                // No pad report while we hold the bottom anchor means layout
+                // is quiescent exactly where defaultScrollAnchor put it — the
+                // warm cached-open case. The pad's onGeometryChange only
+                // fires on CHANGE, and the zeroing above discarded its last
+                // report, so a stable layout never re-reports: this loop then
+                // burned its whole budget blind (measured 2.1s on device for
+                // a 6-entry cached transcript, the "skeleton on every open").
+                // A short quiet streak WITH content = converged; reveal.
+                quietTicks += 1
+                if quietTicks >= 6,
+                   !store.entries.isEmpty || !store.pendingSends.isEmpty {
+                    break
+                }
             }
             try? await Task.sleep(nanoseconds: 16_000_000)
         }
