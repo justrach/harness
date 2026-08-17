@@ -216,16 +216,17 @@ actor ChatRoomClient {
         }
         if case .checkpointThenRows = chatPlanCatchUp(cursor: after, state: state,
                                                       frontierContained: contained) {
-            // The local doc lacks the checkpoint's frontier — fetch it over
-            // HTTPS first (Range-resumed, shared with the socket path via
-            // fetchInFlight) so the rows below land on their base.
-            guard !fetchInFlight else { return }
+            // The local doc lacks the checkpoint's frontier. Route through
+            // completeCheckpointFetch — NOT an inline fetch: the socket
+            // handshake may race this pull, see fetchInFlight set, skip its
+            // own fetch, and arm checkpointBuffer expecting the completion
+            // path to drain it. An inline fetch satisfied the guard but
+            // never drained, stranding every socket row in the buffer until
+            // the backfill deadline ("chat frozen", 2026-08-18).
+            guard !fetchInFlight else { return }  // socket's fetch owns it
             fetchInFlight = true
-            let bytes = await fetchCheckpoint()
-            fetchInFlight = false
-            checkpointProgressAt = nil
-            guard let bytes, !closed,
-                  await delegate.applyCheckpoint(bytes, state.checkpointSeq) else { return }
+            await completeCheckpointFetch(seq: state.checkpointSeq)
+            guard !closed, await delegate.containsFrontier(stateFrame.payload) else { return }
         }
         guard !closed else { return }
         for frame in frames.dropFirst()
