@@ -174,6 +174,13 @@ final class SessionStore {
                 // always safe, never silently skips history.
                 guard let self, !frontier.isEmpty,
                       let vv = try? VersionVector.decode(bytes: frontier) else { return false }
+                // A decoded-but-EMPTY version vector is a vacuous claim every
+                // doc "includes" — the actual poison, one representation
+                // deeper than zero-length bytes. Fetch.
+                guard !vv.toHashmap().isEmpty else {
+                    roomLog.info("chat2 \(self.chatId, privacy: .public): frontier decodes empty (vacuous); fetching checkpoint")
+                    return false
+                }
                 return self.doc.oplogVv().includesVv(other: vv)
             },
             applyCheckpoint: { [weak self] bytes, seq in

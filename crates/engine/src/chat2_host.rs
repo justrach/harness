@@ -114,8 +114,21 @@ impl ChatDocSink for EngineChatSink {
             // Unreadable frontier → claim NOT contained: the client then
             // fetches the checkpoint, which is always safe (full-state
             // merge), never silently skips history.
+            tracing::info!(chat = %self.chat_id, bytes = frontier.len(),
+                "chat2 frontier unreadable; fetching checkpoint");
             return false;
         };
+        // A decoded-but-EMPTY version vector is the vacuous claim: every doc
+        // "includes" empty, so the check would pass for readers that hold
+        // NOTHING and they'd skip the chat's founding ops (the actual "Add
+        // Tweets" poison, one representation deeper than zero-length bytes).
+        // A checkpoint the callers care about (size > 0) claiming empty
+        // state is a contradiction — fetch it.
+        if vv.is_empty() {
+            tracing::info!(chat = %self.chat_id,
+                "chat2 frontier decodes empty (vacuous); fetching checkpoint");
+            return false;
+        }
         doc.doc().oplog_vv().includes_vv(&vv)
     }
 
@@ -331,6 +344,25 @@ mod frontier_tests {
     /// invisibly ("Add Tweets" incident, 2026-08-18). An empty frontier on
     /// a present checkpoint must read as NOT contained — the fetch is
     /// always safe; the skip never is.
+    /// The 2026-08-18 room's actual poison, one level deeper: a frontier
+    /// that is a VALID ENCODING of an EMPTY version vector. Any doc
+    /// vacuously "includes" empty, so the containment check said yes and
+    /// fresh readers skipped the checkpoint anyway. A vacuous claim is not
+    /// containment.
+    #[test]
+    fn encoded_empty_frontier_is_not_contained() {
+        let dir = std::env::temp_dir().join(format!("zeron-frontier2-{}", std::process::id()));
+        let store = Arc::new(DocsStore::open(&dir).expect("store opens"));
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = EngineChatSink::new(&doc, store, "frontier-test-2");
+        let encoded_empty = loro::VersionVector::default().encode();
+        assert!(
+            !sink.contains_frontier(&encoded_empty),
+            "an encoded-empty frontier must trigger the fetch, not vacuous containment"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn empty_frontier_is_not_contained() {
         let dir = std::env::temp_dir().join(format!("zeron-frontier-test-{}", std::process::id()));
@@ -341,7 +373,13 @@ mod frontier_tests {
             !sink.contains_frontier(&[]),
             "empty frontier on a present checkpoint must trigger the fetch"
         );
-        // A real, contained frontier still short-circuits the fetch.
+        // A real, contained frontier still short-circuits the fetch — the
+        // doc needs actual ops, or its own frontier is the vacuous-empty one.
+        doc.doc()
+            .get_map("meta")
+            .insert("k", "v")
+            .expect("insert");
+        doc.doc().commit();
         let vv = doc.doc().oplog_vv().encode();
         assert!(sink.contains_frontier(&vv));
         let _ = std::fs::remove_dir_all(&dir);
