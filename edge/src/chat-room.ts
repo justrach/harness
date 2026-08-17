@@ -120,6 +120,14 @@ export class ChatRoom implements DurableObject {
       }
       const frontier = decodeBase64(request.headers.get("x-chat2-frontier") ?? "");
       if (frontier === undefined) return json({ error: "bad_frontier" }, 400);
+      // A checkpoint that claims to cover rows must name its state: an empty
+      // frontier label on a content-bearing checkpoint made every fresh
+      // reader skip it and park all dependent rows invisibly ("Add Tweets"
+      // incident, 2026-08-18). Empty stays legal only for seqCovered 0
+      // (the M1 empty-doc seed).
+      if (frontier.byteLength === 0 && seqCovered > 0) {
+        return json({ error: "bad_frontier", message: "empty frontier on a content checkpoint" }, 400);
+      }
       const body = new Uint8Array(await request.arrayBuffer());
       if (body.byteLength > MAX_CHECKPOINT_BYTES) return json({ error: "too_large" }, 413);
       const outcome = commitCheckpoint(sql, this.blobs, seqCovered, frontier, body, Date.now());

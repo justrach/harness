@@ -101,9 +101,15 @@ impl ChatDocSink for EngineChatSink {
         let Some(doc) = self.doc.upgrade() else {
             return true; // evicted: claim contained so the client idles, not refetches
         };
-        if frontier.is_empty() {
-            return true;
-        }
+        // NOTE deliberately no empty-frontier shortcut: an empty payload on
+        // a PRESENT checkpoint is unreadable provenance, not proof there is
+        // nothing to fetch — that shortcut made every fresh reader of such a
+        // room skip the chat's founding ops and park all dependent rows
+        // invisibly ("Add Tweets" incident, 2026-08-18). Empty falls through
+        // to the decode failure below: NOT contained, fetch the checkpoint —
+        // always safe (full-state merge; an empty-doc seed applies as a
+        // no-op), never silently skips history. Callers already short-circuit
+        // the checkpointSize == 0 (no checkpoint at all) case.
         let Ok(vv) = loro::VersionVector::decode(frontier) else {
             // Unreadable frontier → claim NOT contained: the client then
             // fetches the checkpoint, which is always safe (full-state
@@ -311,5 +317,33 @@ impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
                 .await
                 .map_err(|e| SyncError::WebSocket(e.to_string()))
         })
+    }
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// The empty-frontier-means-contained shortcut skipped the chat's
+    /// founding ops for every fresh reader of a room whose checkpoint
+    /// carries an empty frontier label, parking all dependent rows
+    /// invisibly ("Add Tweets" incident, 2026-08-18). An empty frontier on
+    /// a present checkpoint must read as NOT contained — the fetch is
+    /// always safe; the skip never is.
+    #[test]
+    fn empty_frontier_is_not_contained() {
+        let dir = std::env::temp_dir().join(format!("zeron-frontier-test-{}", std::process::id()));
+        let store = Arc::new(DocsStore::open(&dir).expect("store opens"));
+        let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
+        let sink = EngineChatSink::new(&doc, store, "frontier-test");
+        assert!(
+            !sink.contains_frontier(&[]),
+            "empty frontier on a present checkpoint must trigger the fetch"
+        );
+        // A real, contained frontier still short-circuits the fetch.
+        let vv = doc.doc().oplog_vv().encode();
+        assert!(sink.contains_frontier(&vv));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

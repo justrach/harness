@@ -874,3 +874,27 @@ async fn pending_push_flushes_before_backfill_completes() {
     assert_eq!(client.stats().cursor, 1, "early replay acked before ROWS_DONE");
     client.shutdown().await;
 }
+
+/// A checkpoint that EXISTS (size > 0) but whose frontier payload is empty
+/// must be fetched, not skipped: the empty-frontier-means-contained shortcut
+/// made every fresh reader of such a room skip the chat's founding ops and
+/// park all dependent rows invisibly ("Add Tweets" incident, 2026-08-18).
+/// Fetching is always safe (full-state merge); skipping history never is.
+#[test]
+fn empty_frontier_with_real_checkpoint_is_not_contained() {
+    let state = wire::StateHeader {
+        head_seq: 75,
+        seq_floor: 5,
+        checkpoint_seq: 5,
+        checkpoint_size: 2728,
+        row_count: 70,
+        row_bytes: 17150,
+    };
+    // The sink cannot vouch for a frontier it cannot read — an empty payload
+    // must plan a checkpoint fetch for a cursor-0 reader.
+    assert_eq!(
+        plan_catch_up(0, &state, false),
+        CatchUpPlan::CheckpointThenRows { after: 5 },
+        "fresh reader must fetch a present checkpoint when the frontier is unreadable"
+    );
+}

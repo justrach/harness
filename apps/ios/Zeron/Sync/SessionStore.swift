@@ -165,10 +165,14 @@ final class SessionStore {
         let delegate = ChatRoomClient.Delegate(
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
-                // Empty frontier = a checkpoint of an empty doc — nothing to
-                // fetch (mirror of EngineChatSink::contains_frontier).
-                guard !frontier.isEmpty else { return true }
-                guard let self,
+                // Deliberately NO empty-frontier shortcut (mirror of
+                // EngineChatSink::contains_frontier): an empty payload on a
+                // present checkpoint is unreadable provenance, not proof of
+                // emptiness — skipping made fresh readers park every row that
+                // depends on the chat's founding ops ("Add Tweets" incident,
+                // 2026-08-18). Empty fails the decode: NOT contained, fetch —
+                // always safe, never silently skips history.
+                guard let self, !frontier.isEmpty,
                       let vv = try? VersionVector.decode(bytes: frontier) else { return false }
                 return self.doc.oplogVv().includesVv(other: vv)
             },
