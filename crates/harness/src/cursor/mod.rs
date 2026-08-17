@@ -490,7 +490,14 @@ async fn run_session(session: Session) {
                 }))
                 .await;
         } else if !interrupted && !any_done {
-            let status = child.try_wait().ok().flatten();
+            // Give the just-died child a beat to be reaped and its stderr
+            // reader to drain, so the crash message carries the real exit
+            // status and tail instead of "still running".
+            let status = tokio::time::timeout(Duration::from_millis(500), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok);
+            tokio::task::yield_now().await;
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,

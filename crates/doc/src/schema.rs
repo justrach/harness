@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
-use crate::parts::{MessagePart, MessageStatus};
+use crate::parts::{MessagePart, MessageStatus, SubagentStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocError {
@@ -90,6 +90,15 @@ struct DocPartJson {
     /// Per-file diff stats (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diff_stats: Option<serde_json::Value>,
+    /// Subagent doc/blob ref carried by a spawn chip (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_ref: Option<String>,
+    /// Subagent lifecycle ("running"/"done"/"failed", additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_status: Option<String>,
+    /// One-line live tail of the subagent's output (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_tail: Option<String>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -112,6 +121,9 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             output_bytes,
             diff_ref,
             diff_stats,
+            subagent_ref,
+            subagent_status,
+            subagent_tail,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -125,6 +137,16 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             output_bytes: *output_bytes,
             diff_ref: diff_ref.clone(),
             diff_stats: diff_stats.as_ref().map(serde_json::to_value).transpose()?,
+            subagent_ref: subagent_ref.clone(),
+            subagent_status: subagent_status.map(|s| {
+                match s {
+                    SubagentStatus::Running => "running",
+                    SubagentStatus::Done => "done",
+                    SubagentStatus::Failed => "failed",
+                }
+                .to_owned()
+            }),
+            subagent_tail: subagent_tail.clone(),
             ..Default::default()
         },
         MessagePart::Input {
@@ -163,6 +185,14 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 output_bytes: p.output_bytes,
                 diff_ref: p.diff_ref,
                 diff_stats: p.diff_stats.and_then(|s| serde_json::from_value(s).ok()),
+                subagent_ref: p.subagent_ref,
+                subagent_status: p.subagent_status.as_deref().and_then(|s| match s {
+                    "running" => Some(SubagentStatus::Running),
+                    "done" => Some(SubagentStatus::Done),
+                    "failed" => Some(SubagentStatus::Failed),
+                    _ => None,
+                }),
+                subagent_tail: p.subagent_tail,
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -485,6 +515,62 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Update a subagent SPAWN CHIP (a tool part) in place, wherever it
+    /// lives: `resolved`-style stamping for the eager-done world, where the
+    /// chip's entry is usually already finished by the time the background
+    /// subagent produces its lifecycle. Searched from the NEWEST entry back
+    /// (the chip belongs to a recent turn). `None` fields are left as-is.
+    pub fn update_subagent_chip(
+        &self,
+        part_id: &str,
+        subagent_ref: Option<&str>,
+        status: Option<&str>,
+        tail: Option<&str>,
+    ) -> Result<bool, DocError> {
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(part))) =
+                    parts.get(j)
+                else {
+                    continue;
+                };
+                let is_tool = matches!(
+                    part.get("kind"),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == "tool"
+                );
+                let id_matches = matches!(
+                    part.get("id"),
+                    Some(loro::ValueOrContainer::Value(LoroValue::String(s))) if s.as_str() == part_id
+                );
+                if is_tool && id_matches {
+                    if let Some(r) = subagent_ref {
+                        part.insert("subagentRef", r)?;
+                    }
+                    if let Some(s) = status {
+                        part.insert("subagentStatus", s)?;
+                    }
+                    if let Some(t) = tail {
+                        part.insert("subagentTail", t)?;
+                    }
+                    self.doc.commit();
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
         self.doc
@@ -699,6 +785,9 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             output_bytes: None,
             diff_ref: None,
             diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -786,6 +875,23 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
         })
+    }
+
+    /// Reattach to a streaming entry a prior [`Self::begin`] pushed on the
+    /// same doc, with the caller-held mirror of what was already written —
+    /// the seam that lets a sink hold `(entry_index, written)` between
+    /// coalesced flushes instead of a doc-borrowing writer.
+    pub fn resume(doc: &'a SessionDoc, entry_index: usize, written: Vec<MessagePart>) -> Self {
+        Self {
+            doc,
+            entry_index,
+            written,
+        }
+    }
+
+    /// The state a later [`Self::resume`] needs.
+    pub fn into_state(self) -> (usize, Vec<MessagePart>) {
+        (self.entry_index, self.written)
     }
 
     fn entry_map(&self) -> Result<LoroMap, DocError> {
@@ -1216,6 +1322,9 @@ mod tests {
                 output_bytes: None,
                 diff_ref: None,
                 diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),
