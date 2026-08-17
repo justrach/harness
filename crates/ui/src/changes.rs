@@ -2709,9 +2709,21 @@ impl Changes {
             theme,
             cx,
         );
-        // Match the translucent in-list header without letting diff text show
-        // sharply through the overlay. Frosted is a pass-through on opaque
-        // platforms, where render_file_header keeps the solid fallback.
+        // The normal row inherits the right pane's light frost. A floating
+        // header needs to recreate that white material before its dark wash,
+        // otherwise the blurred diff underneath makes light mode look muddy.
+        let header =
+            if theme.is_glass() && matches!(theme.appearance, crate::theme::Appearance::Light) {
+                div()
+                    .w_full()
+                    .bg(theme.glass_overlay())
+                    .child(header)
+                    .into_any_element()
+            } else {
+                header
+            };
+        // Frosted is a pass-through on opaque platforms, where
+        // render_file_header keeps the solid fallback.
         let header = crate::frost::frosted(0.0, STICKY_FILE_HEADER_BLUR, header);
 
         Some(
