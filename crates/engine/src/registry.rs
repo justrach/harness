@@ -373,8 +373,8 @@ pub fn default_registry() -> HarnessRegistry {
             installed: true,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::codex().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::codex()) as Arc<dyn Harness>)),
+        Box::new(|| zeron_harness::CodexHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
     );
     // Cursor Agent over ACP (`cursor-agent acp`), same lazy pattern: the
     // static descriptor mirrors AcpHarness::cursor() exactly. No steering
