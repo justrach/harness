@@ -425,6 +425,22 @@ impl TerminalPanel {
         }
     }
 
+    /// Turn a placeholder into a visible failed tab without opening a PTY.
+    pub fn fail_reserved_tab(
+        &mut self,
+        chat: &str,
+        key: u64,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab.emulator
+                .feed(format!("\x1b[31mfailed to run action: {message}\x1b[0m\r\n").as_bytes());
+            tab.exited = Some(-1);
+            cx.notify();
+        }
+    }
+
     /// Make `key` the rendered tab of the selected chat.
     pub fn select_tab_by_key(&mut self, key: u64, cx: &mut Context<Self>) {
         let Some(chat) = self.selected_chat(cx) else {
