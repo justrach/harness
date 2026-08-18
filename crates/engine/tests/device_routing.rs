@@ -190,6 +190,24 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
 }
 
+async fn git(cwd: &std::path::Path, args: &[&str]) {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .output()
+        .await
+        .expect("git spawns");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -339,11 +357,15 @@ async fn target_device_id_routes_over_the_relay() {
     // profile store. A versioned project file only contributes import offers.
     let project_root = dirs.path().join("project-on-b");
     std::fs::create_dir_all(&project_root).expect("project root on B");
+    git(&project_root, &["init", "-b", "main"]).await;
+    std::fs::write(project_root.join("README.md"), "host B\n").expect("seed repo on B");
     std::fs::write(
         project_root.join("zeron.json"),
         r#"{"actions":[{"name":"Lint","command":"pnpm lint","icon":"lint"}]}"#,
     )
     .expect("project file");
+    git(&project_root, &["add", "."]).await;
+    git(&project_root, &["commit", "-m", "seed"]).await;
     core_b
         .workspace
         .create_space(
@@ -375,7 +397,7 @@ async fn target_device_id_routes_over_the_relay() {
                 "targetDeviceId": "device-b",
                 "action": {
                     "name": "Lint",
-                    "command": "printf 'remote-action\\n' > action-marker && printf 'remote-action\\n'",
+                    "command": "printf 'remote-action\\n' > action-marker; if [ -n \"$ZERON_WORKTREE_PATH\" ]; then printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' \"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" > setup-marker; fi; printf 'remote-action\\n'",
                     "icon": "lint",
                     "runOnWorktreeCreate": true,
                 },
@@ -472,6 +494,88 @@ async fn target_device_id_routes_over_the_relay() {
         )
         .await
         .expect("close remote Action terminal");
+
+    // New worktree setup runs entirely on B and returns an already-open PTY.
+    // Subscribe after a delay to prove the early output is recovered by replay.
+    let setup_outcome = client
+        .call(
+            methods::CREATE_WORKTREE,
+            serde_json::json!({
+                "repoPath": project_root,
+                "branch": "main",
+                "spaceId": "space-actions",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("create remote worktree with setup");
+    assert!(setup_outcome.get("setupError").is_none());
+    let setup_terminal = setup_outcome["setupAction"]["terminal"]["id"]
+        .as_str()
+        .expect("remote setup terminal")
+        .to_string();
+    let setup_worktree = std::path::PathBuf::from(
+        setup_outcome["path"]
+            .as_str()
+            .expect("remote setup worktree"),
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut setup_stream = client
+        .subscribe(
+            methods::SUBSCRIBE_TERMINAL,
+            serde_json::json!({
+                "terminalId": setup_terminal,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("subscribe remote setup replay");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, setup_stream.recv())
+            .await
+            .expect("remote setup replay before timeout")
+            .expect("setup stream alive");
+        if item["type"] == "data" {
+            let output = BASE64
+                .decode(item["data"].as_str().expect("setup data"))
+                .expect("setup base64");
+            if String::from_utf8_lossy(&output).contains("remote-action")
+                && setup_worktree.join("setup-marker").exists()
+            {
+                break;
+            }
+        }
+    }
+    let canonical_project = std::fs::canonicalize(&project_root).expect("canonical B project");
+    let canonical_worktree = std::fs::canonicalize(&setup_worktree).expect("canonical B worktree");
+    let setup_marker =
+        std::fs::read_to_string(setup_worktree.join("setup-marker")).expect("setup marker on B");
+    assert!(setup_marker.contains(&format!("ROOT={}", canonical_project.display())));
+    assert!(setup_marker.contains(&format!("WT={}", canonical_worktree.display())));
+    assert!(setup_marker.contains(&format!("CWD={}", canonical_worktree.display())));
+    assert!(!dirs.path().join("a").join("setup-marker").exists());
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({
+                "terminalId": setup_terminal,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("close remote setup terminal");
+    client
+        .call(
+            methods::DELETE_WORKTREE,
+            serde_json::json!({
+                "repoPath": project_root,
+                "worktreePath": setup_worktree,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("delete remote setup worktree");
 
     let deleted = client
         .call(
@@ -679,16 +783,59 @@ async fn remote_target_without_links_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
     let core = assemble(&dirs.path().join("solo"), "device-solo");
     let client = zeron_rpc::memory_client(core.rpc_service());
-    let err = client
-        .call(
-            methods::LIST_HARNESSES,
-            serde_json::json!({ "targetDeviceId": "device-elsewhere" }),
+    for (method, params) in [
+        (
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({
+                "spaceId": "remote-space",
+                "targetDeviceId": "device-elsewhere",
+            }),
+        ),
+        (
+            methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "remote-space",
+                "action": { "name": "Build", "command": "make", "icon": "build" },
+                "targetDeviceId": "device-elsewhere",
+            }),
+        ),
+        (
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "remote-space",
+                "chatId": "remote-chat",
+                "actionId": "build",
+                "cols": 80,
+                "rows": 24,
+                "targetDeviceId": "device-elsewhere",
+            }),
+        ),
+    ] {
+        let err = client
+            .call(method, params)
+            .await
+            .expect_err("offline Action forward must fail");
+        assert!(
+            err.to_string().contains("remote routing unavailable"),
+            "{method}: {err}"
+        );
+    }
+    let mut offline_stream = client
+        .subscribe(
+            methods::SUBSCRIBE_TERMINAL,
+            serde_json::json!({
+                "terminalId": "remote-terminal",
+                "targetDeviceId": "device-elsewhere",
+            }),
         )
         .await
-        .expect_err("offline forward must fail");
+        .expect("stream request is accepted before the server reports routing failure");
     assert!(
-        err.to_string().contains("remote routing unavailable"),
-        "got: {err}"
+        tokio::time::timeout(Duration::from_secs(1), offline_stream.recv())
+            .await
+            .expect("offline stream closes promptly")
+            .is_none(),
+        "offline subscribe must not produce local terminal output"
     );
     core.shutdown().await;
 }
