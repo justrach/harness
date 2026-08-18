@@ -23,9 +23,18 @@
 //     {"ev":"turn","status":"finished"|"error"|"cancelled","error"?}
 //     {"ev":"fatal","message"}              unrecoverable (auth, SDK init)
 //
+// Login mode (`node <shim> login <store-path>`): no stdin protocol — runs the
+// SDK's PKCE browser flow (`Cursor.auth.login`) writing the minted key to
+// <store-path> instead of the live `~/.cursor/sdk/auth.json` (the engine
+// snapshots it as an account slot, mirroring codex's throwaway CODEX_HOME).
+//   stdout: {"ev":"auth-url","url"}         open/show this to the user
+//           {"ev":"logged-in","email"?,"expiresAtMs"?}   then exit 0
+//           {"ev":"fatal","message"}                     then exit 1
+//
 // Unknown SDK update kinds are ignored (never fatal): the SDK is beta and
 // its delta union grows; the engine treats a degraded stream as chip-only.
 
+import os from "node:os";
 import readline from "node:readline";
 
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
@@ -40,7 +49,32 @@ try {
 } catch (e) {
   fatal(`@cursor/sdk failed to load: ${e?.message ?? e}`);
 }
-const { Agent, Cursor } = sdk;
+const { Agent, Cursor, FileCredentialStore } = sdk;
+
+// ---- login mode -----------------------------------------------------------
+// The browser flow never opens a browser itself (the engine may be headless;
+// the URL can be opened on whichever device is viewing the app), and the
+// minted key lands in the engine-chosen store file, never the live login.
+if (process.argv[2] === "login") {
+  const storePath = process.argv[3];
+  if (!storePath) fatal("login mode needs a store path");
+  try {
+    const result = await Cursor.auth.login({
+      openBrowser: false,
+      onLoginUrl: (url) => out({ ev: "auth-url", url }),
+      store: new FileCredentialStore(storePath),
+      apiKeyName: `zeron — ${os.hostname()}`,
+    });
+    out({
+      ev: "logged-in",
+      ...(result?.email ? { email: result.email } : {}),
+      ...(result?.apiKeyExpiresAtMs ? { expiresAtMs: result.apiKeyExpiresAtMs } : {}),
+    });
+    process.exit(0);
+  } catch (e) {
+    fatal(`cursor login failed: ${e?.message ?? e}`);
+  }
+}
 
 let agent = null;
 let run = null;
@@ -115,8 +149,8 @@ function withAuthHint(message) {
   if (/api key|not authenticated|unauthorized/i.test(text)) {
     return (
       text +
-      " — the Cursor SDK's login is separate from `cursor-agent login`: " +
-      "set CURSOR_API_KEY (from cursor.com/settings) in zeron's environment."
+      " — connect Cursor in Settings → Accounts (its login is separate from " +
+      "`cursor-agent login`), or set CURSOR_API_KEY from cursor.com/settings."
     );
   }
   return text;
@@ -179,9 +213,9 @@ async function start(msg) {
     const auth = await Cursor.auth.status().catch(() => null);
     if (!process.env.CURSOR_API_KEY && auth?.status !== "logged-in") {
       fatal(
-        "Cursor SDK is not authenticated (its login is separate from " +
-          "`cursor-agent login`): set CURSOR_API_KEY from cursor.com/settings, " +
-          `then retry. (${e?.message ?? e})`,
+        "Cursor is not connected (its login is separate from " +
+          "`cursor-agent login`): connect it in Settings → Accounts, or set " +
+          `CURSOR_API_KEY from cursor.com/settings, then retry. (${e?.message ?? e})`,
       );
     }
     fatal(`cursor agent failed to start: ${e?.message ?? e}`);
