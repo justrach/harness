@@ -458,6 +458,7 @@ impl Shell {
 
     pub(super) fn render_project_actions_control(
         &mut self,
+        available_titlebar_width: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.ensure_project_actions(cx);
@@ -483,7 +484,7 @@ impl Shell {
         .cloned();
         let has_imports = !snapshot.importable_actions.is_empty();
         let has_actions = !snapshot.actions.is_empty();
-        let show_label = show_action_label(self.viewport_width);
+        let show_label = show_action_label(available_titlebar_width);
         let menu_mounted = self.project_actions.menu.get().is_some();
         let menu_closing = self.project_actions.menu.closing_since();
 

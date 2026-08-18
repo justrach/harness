@@ -121,7 +121,8 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let right_pane_open = !on_canvas && self.right_pane_open(cx);
+        let takeover = right_pane_open && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -146,20 +147,32 @@ impl Shell {
         } else {
             content_left
         };
+        let row_gap = 8.0;
+        let right_pad = self.titlebar_right_pad(Theme::SPACE_LG);
+        let open_trailing_width = right_pane_open.then(|| {
+            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
+            let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
+            let avail = self.viewport_width - row_left - right_pad - gap_budget;
+            (right_now - right_pad).min(avail).max(0.0)
+        });
+        let trailing_width = if on_canvas {
+            0.0
+        } else {
+            open_trailing_width.unwrap_or(28.0)
+        };
+        let available_titlebar_width =
+            (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
+
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
-        } else if self.right_pane_open(cx) {
-            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
-            let pr = self.titlebar_right_pad(Theme::SPACE_LG);
+        } else if let Some(trailing_width) = open_trailing_width {
             // The row's own left padding is part of its content box: a strip
             // wider than what's left after it overflows and clips at the right
             // edge (flex_none never shrinks) — cap to the available width. The
             // row's 8px child gaps sit OUTSIDE the strip's width (one before
-            // the strip in takeover, two with the title row present): without
-            // budgeting them the capped strip overflows by exactly one gap and
+            // the strip in takeover, three when title, Actions and spacer are
+            // present): without budgeting them the capped strip overflows and
             // the buttons slide right on expand (user report).
-            let gap_budget = if takeover { 8.0 } else { 16.0 };
-            let avail = self.viewport_width - row_left - pr - gap_budget;
             // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
             // options that used to live here moved into the pane's own
             // second row; expand/close stay in this band (user request).
@@ -173,10 +186,10 @@ impl Shell {
                     .items_center()
                     .gap(px(4.0))
                     .overflow_hidden()
-                    // Right edge already sits at viewport − pr (the row's own
-                    // padding), so this width starts the strip exactly at the
-                    // pane's left border — and rides the open/close tween.
-                    .w(px((right_now - pr).min(avail).max(0.0)))
+                    // Right edge already sits at viewport minus the row's own
+                    // right padding, so this width starts the strip exactly at
+                    // the pane's left border and rides the open/close tween.
+                    .w(px(trailing_width))
                     // 8 + the trigger's own 8px pad = the pane's 16px text
                     // gutter, so the scope label sits flush over the stats
                     // strip below.
@@ -218,16 +231,16 @@ impl Shell {
         };
 
         let actions = (!takeover && !on_canvas)
-            .then(|| self.render_project_actions_control(cx))
+            .then(|| self.render_project_actions_control(available_titlebar_width, cx))
             .flatten();
         let inner = div()
             .size_full()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .gap(px(8.0))
+            .gap(px(row_gap))
             .pl(px(row_left))
-            .pr(px(self.titlebar_right_pad(Theme::SPACE_LG)))
+            .pr(px(right_pad))
             // In panel takeover the header strip spans the whole band — the
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.
@@ -235,6 +248,7 @@ impl Shell {
                 el.child(
                     div()
                         .min_w_0()
+                        .overflow_hidden()
                         .flex()
                         .flex_row()
                         .items_center()
@@ -266,7 +280,8 @@ impl Shell {
                         .when_some(target, |el, target| {
                             el.child(
                                 div()
-                                    .flex_none()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_size(px(12.0))
                                     .text_color(theme.text_muted.opacity(0.5))
                                     .child(target),
