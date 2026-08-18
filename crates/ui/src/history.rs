@@ -1832,6 +1832,8 @@ impl Render for GitHistoryCount {
                                 element.child(
                                     div()
                                         .id("history-comparison")
+                                        .relative()
+                                        .top(px(1.0))
                                         .flex_none()
                                         .flex()
                                         .items_center()
