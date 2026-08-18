@@ -1414,6 +1414,13 @@ pub struct Transcript {
     /// trailer, and no global attachment protection (that set is shared with
     /// the primary transcript and overwritten wholesale).
     doc_override: Option<String>,
+    /// One-shot "open at the latest content" for UNPINNED (frozen) override
+    /// instances: rows land ASYNC after the tab opens (watch replay / blob
+    /// fetch), so the end-scroll fires on the first non-empty sync, then
+    /// never again — landing at the end and FOLLOWING it are different
+    /// states, and the user owns the viewport from there. Pinned instances
+    /// don't need it (the pin branch already opens at the end).
+    land_end_pending: bool,
     row_cache: HashMap<String, CachedRows>,
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
@@ -1546,9 +1553,9 @@ impl Transcript {
     /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
     /// caller starts the feed (`watch_subagent_doc` or the frozen snapshot);
     /// this instance only renders whatever lands under `doc_id`. `follow` =
-    /// the doc is live: engage the end-follow pin from the start (a frozen
-    /// transcript reads top-down instead, pin off until the user scrolls to
-    /// the end).
+    /// the doc is live: engage the end-follow pin from the start. Either
+    /// way the tab OPENS at the latest content — a frozen transcript lands
+    /// at the end once, unpinned, and free-scrolls from there.
     pub fn for_doc(
         state: Entity<AppState>,
         doc_id: String,
@@ -1608,6 +1615,7 @@ impl Transcript {
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
+            land_end_pending: doc_override.is_some() && !follow,
             doc_override,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
@@ -2432,6 +2440,16 @@ impl Transcript {
         }
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
+        if self.land_end_pending && !self.rows.is_empty() {
+            // First content for an unpinned override tab: land at the end.
+            // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
+            // next layout materializes) — a pixel scroll off `max_offset`
+            // would land short here, since the freshly-spliced rows are
+            // still unmeasured. Short content clamps back to the top under
+            // Top alignment, so "end" and "top" coincide there.
+            self.land_end_pending = false;
+            self.list.scroll_to_end();
+        }
         if self.own_turn.is_some() {
             // Appending a reply moves the runway from the previous last row to
             // the new one. Both measurements must be invalidated because the
