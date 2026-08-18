@@ -245,7 +245,9 @@ pub struct ToolItem {
     /// Subagent lifecycle, distinct from `resolved` (eager-done: the spawn
     /// tool's own result lands while the subagent still runs).
     pub subagent_status: Option<SubagentStatus>,
-    /// One-line live tail of the subagent's latest output (display-only).
+    /// One-line live tail — LEGACY docs only (new runs stopped folding it;
+    /// per-delta header rewrites read as noise). Never rendered; still
+    /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
 }
 
@@ -1538,27 +1540,43 @@ impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::build(state, None, cx)
+        Self::build(state, None, true, cx)
     }
 
     /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
     /// caller starts the feed (`watch_subagent_doc` or the frozen snapshot);
-    /// this instance only renders whatever lands under `doc_id`.
-    pub fn for_doc(state: Entity<AppState>, doc_id: String, cx: &mut Context<Self>) -> Self {
-        Self::build(state, Some(doc_id), cx)
+    /// this instance only renders whatever lands under `doc_id`. `follow` =
+    /// the doc is live: engage the end-follow pin from the start (a frozen
+    /// transcript reads top-down instead, pin off until the user scrolls to
+    /// the end).
+    pub fn for_doc(
+        state: Entity<AppState>,
+        doc_id: String,
+        follow: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(state, Some(doc_id), follow, cx)
     }
 
-    fn build(state: Entity<AppState>, doc_override: Option<String>, cx: &mut Context<Self>) -> Self {
+    fn build(
+        state: Entity<AppState>,
+        doc_override: Option<String>,
+        follow: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
         //
         // Override instances align TOP: a subagent transcript reads like a
         // fresh notes page — entries anchored at the top, streaming growing
         // into the empty space below, never rising from the pane's bottom.
-        // Top alignment gets that structurally, with none of the bottom-
-        // aligned machinery it would otherwise need: no reservation pad, and
-        // no glued end-sentinel to fight (a Bottom list re-glues at distance
-        // 0 and hard-tracks growth — the runway work's whole trap surface).
+        // Top alignment gets that structurally (a short list rests at the
+        // top with no reservation pad), and the PIN machinery still runs on
+        // top of it for end-follow: the spring is purely distance-based, and
+        // the glue trap it was built around is Bottom-only — layout
+        // materializes a Top list's past-end offset to a CONCRETE position
+        // every frame (gpui list.rs: only `Bottom` re-glues to the `None`
+        // sentinel), so a parked spring can't re-glue and hard-track growth.
         let alignment = if doc_override.is_some() {
             ListAlignment::Top
         } else {
@@ -1576,10 +1594,13 @@ impl Transcript {
         // The rail is sized for the conversation column; a narrow right-pane
         // tab has no width gate driving it, so override instances skip it.
         let rail_enabled = doc_override.is_none();
-        // Top-aligned instances never pin: the stick-to-bottom spring is the
-        // Bottom-aligned tail-follow, and its glue avoidance assumes that
-        // alignment. Reading starts at the top; scrolling is free.
-        let pinned = doc_override.is_none();
+        // `follow` is the initial pin: the primary transcript always opens
+        // pinned; an override instance pins only while its doc is LIVE (a
+        // frozen transcript reads top-down, free-scrolling). Short content
+        // is at-end by definition (distance 0), so the pin is invisible
+        // until streaming overflows the pane — then it follows, releases on
+        // wheel-up, and resticks/jumps exactly like the main transcript.
+        let pinned = follow;
         let mut this = Self {
             state,
             list,
@@ -1802,10 +1823,8 @@ impl Transcript {
                     this.spring_last_tick = None;
                 } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
                     // Returning toward the bottom inside the 70px band (or
-                    // arriving at it) re-engages the pin with a glide — never
-                    // on an override instance, whose top-aligned notes layout
-                    // has no bottom pin at all.
-                    if !this.pinned && this.doc_override.is_none() {
+                    // arriving at it) re-engages the pin with a glide.
+                    if !this.pinned {
                         this.pinned = true;
                         this.wake_spring();
                     }
@@ -3577,11 +3596,9 @@ impl Transcript {
                             } => {
                                 // The shell hosts the surface — the chip only
                                 // announces which doc (and blob key base) it
-                                // indexes. Same voice as the sidecar rows
-                                // ("Show full output"): the transcript is
-                                // just the bigger payload behind this chip.
+                                // indexes.
                                 let chat_id = self.chat_id.clone().unwrap_or_default();
-                                base.child(SharedString::from("Show subagent transcript"))
+                                base.child(SharedString::from("Open subagent"))
                                     .cursor_pointer()
                                     .hover(|s| s.text_color(theme.text_muted))
                                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -3989,9 +4006,10 @@ fn detail_body(
 /// expandable chip card.
 ///
 /// Spawn chips carry their subagent's lifecycle VISUALLY, in the chip's own
-/// language: while running the detail slot shows the live tail and the mini
-/// working spinner (the sidebar's) pulses at the right; done is the ordinary
-/// quiet chip; failed takes the danger tint — no status words.
+/// language: while running the mini working spinner (the sidebar's) pulses
+/// at the right of the ordinary static detail; done is the ordinary quiet
+/// chip; failed takes the danger tint — no status words, no live text (a
+/// header rewriting itself per stream delta read as noise — user report).
 fn chip_header_row(
     tool: &ToolItem,
     chevron: Option<bool>,
@@ -3999,19 +4017,12 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, mut detail) = tool_chip_content(&tool.call);
+    let (label, detail) = tool_chip_content(&tool.call);
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
         || (tool.subagent_ref.is_some()
             && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
-    if running && let Some(tail) = &tool.subagent_tail {
-        // The tail rides the detail slot through the same single-line fold
-        // every chip detail gets (`tool_chip_content` folds its own) — raw
-        // text wraps inside the fixed-height header and spills out of the
-        // card's clip.
-        detail = single_line(tail);
-    }
     let tint = if failed {
         theme.danger
     } else {
@@ -4302,6 +4313,31 @@ impl Render for Transcript {
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
         // outlet — an overlay here would be tinted by the fade.
+        let list_el = list(self.list.clone(), cx.processor(Self::render_row))
+            .size_full()
+            .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
+        let content: AnyElement = if self.doc_override.is_some() {
+            // The primary transcript's fade lives on the SHELL's outlet
+            // wrapper (it spans the titlebar/composer chrome); an override
+            // instance owns its own — top edge only (nothing overlays the
+            // pane's bottom), gated on real overflow so a short top-anchored
+            // transcript shows no fade. Gated here rather than at paint via
+            // a ScrollHandle (the list isn't one); scrolls re-render this
+            // entity, so the flag can't go stale.
+            let scrolled_under_top = {
+                let max = f32::from(self.list.max_offset_for_scrollbar().y);
+                max - self.distance_from_bottom() > 1.0
+            };
+            crate::edge_fade::edge_faded(
+                Theme::TRANSCRIPT_FADE_BAND,
+                scrolled_under_top,
+                false,
+                list_el,
+            )
+            .into_any_element()
+        } else {
+            list_el.into_any_element()
+        };
         let root = div()
             .relative()
             .size_full()
@@ -4310,11 +4346,7 @@ impl Render for Transcript {
             // selection registry before any row's text elements re-register
             // (document paint order = selection order; see markdown/render.rs).
             .child(crate::markdown::render::selection_frame_reset())
-            .child(
-                list(self.list.clone(), cx.processor(Self::render_row))
-                    .size_full()
-                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-            )
+            .child(content)
             .child(rail);
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).

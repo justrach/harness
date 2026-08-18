@@ -366,28 +366,26 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         }
         // Subagent-attributed CONTENT belongs to the subagent's own doc (the
         // engine routes it there); the parent doc keeps only the spawn chip —
-        // which these events refresh in place: lifecycle + a one-line tail.
+        // which these events refresh in place: LIFECYCLE ONLY. A live tail
+        // was tried and rejected: rewriting the chip per delta batch grew
+        // the parent doc's oplog for the whole subagent run and rendered as
+        // distracting mid-stream fragments (user call, 2026-08-18). The
+        // `subagent_tail` field stays in the schema for docs that carry it.
         AgentEvent::Subagent {
             parent_tool_use_id,
             event,
         } => {
-            let (status, tail) = match event.as_ref() {
-                AgentEvent::Done { status, .. } => (
-                    Some(match status {
-                        zeron_proto::DoneStatus::Errored => SubagentStatus::Failed,
-                        _ => SubagentStatus::Done,
-                    }),
-                    None,
-                ),
-                AgentEvent::Error { message } => (None, Some(message.as_str())),
-                AgentEvent::TextDelta { text } => (None, Some(text.as_str())),
-                _ => (None, None),
+            let status = match event.as_ref() {
+                AgentEvent::Done { status, .. } => Some(match status {
+                    zeron_proto::DoneStatus::Errored => SubagentStatus::Failed,
+                    _ => SubagentStatus::Done,
+                }),
+                _ => None,
             };
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id,
                     subagent_status,
-                    subagent_tail,
                     ..
                 } = p
                     && id == parent_tool_use_id
@@ -405,9 +403,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                         }
                         None => {}
                     }
-                    if let Some(tail) = tail {
-                        push_subagent_tail(subagent_tail, tail);
-                    }
                 }
             }
         }
@@ -419,37 +414,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     }
 }
 
-/// Chip tail cap: one display line, small enough that per-delta doc commits
-/// stay cheap.
-const SUBAGENT_TAIL_MAX: usize = 120;
-
-/// Append delta text to the chip's one-line tail: keep the LAST line of the
-/// accumulated stream, capped to [`SUBAGENT_TAIL_MAX`] chars.
-fn push_subagent_tail(slot: &mut Option<String>, delta: &str) {
-    let mut tail = slot.take().unwrap_or_default();
-    tail.push_str(delta);
-    if let Some(nl) = tail.rfind('\n') {
-        // Keep text after the last newline; a trailing newline keeps the
-        // line before it.
-        let after = tail[nl + 1..].to_owned();
-        tail = if after.trim().is_empty() {
-            tail[..nl].rsplit('\n').next().unwrap_or("").to_owned()
-        } else {
-            after
-        };
-    }
-    if tail.chars().count() > SUBAGENT_TAIL_MAX {
-        tail = tail
-            .chars()
-            .skip(tail.chars().count() - SUBAGENT_TAIL_MAX)
-            .collect();
-    }
-    if !tail.trim().is_empty() {
-        *slot = Some(tail);
-    } else {
-        *slot = None;
-    }
-}
 
 /// Stamp sidecar keys onto resolved tool parts that have sidecar content.
 ///
@@ -939,7 +903,8 @@ mod tests {
                 },
             },
         );
-        // Tagged traffic marks the chip running and grows the one-line tail.
+        // Tagged traffic marks the chip running — and ONLY that: the tail
+        // stays untouched (per-delta chip rewrites polluted the parent doc).
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::Subagent {
@@ -956,7 +921,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*subagent_status, Some(SubagentStatus::Running));
-                assert_eq!(subagent_tail.as_deref(), Some("found 3 issues"));
+                assert_eq!(*subagent_tail, None);
             }
             other => panic!("{other:?}"),
         }

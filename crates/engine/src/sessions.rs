@@ -977,8 +977,6 @@ struct SubagentSink {
     written: Vec<MessagePart>,
     folded: Vec<MessagePart>,
     dirty: bool,
-    /// Throttle for in-place chip-tail stamps on the PARENT doc.
-    last_chip_tail: tokio::time::Instant,
 }
 
 impl SubagentSink {
@@ -1044,19 +1042,15 @@ impl SubagentSink {
 }
 
 /// The parent-chip refresh a tagged event implies, for the in-place (parked)
-/// path: `(status, tail)` — mirrors the fold's chip logic in parts.rs.
-fn subagent_chip_update(event: &AgentEvent) -> (Option<&'static str>, Option<&str>) {
+/// path — LIFECYCLE ONLY, mirroring the fold (live tails were rejected:
+/// per-delta chip rewrites grew the parent doc for the whole run).
+fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     match event {
-        AgentEvent::Done { status, .. } => (
-            Some(match status {
-                DoneStatus::Errored => "failed",
-                _ => "done",
-            }),
-            None,
-        ),
-        AgentEvent::TextDelta { text } => (Some("running"), Some(text.as_str())),
-        AgentEvent::Error { message } => (Some("running"), Some(message.as_str())),
-        _ => (Some("running"), None),
+        AgentEvent::Done { status, .. } => Some(match status {
+            DoneStatus::Errored => "failed",
+            _ => "done",
+        }),
+        _ => Some("running"),
     }
 }
 
@@ -1535,7 +1529,6 @@ async fn drive_run(
                             written: Vec::new(),
                             folded: Vec::new(),
                             dirty: false,
-                            last_chip_tail: tokio::time::Instant::now(),
                         },
                     );
                     if !chip_streaming {
@@ -1552,24 +1545,15 @@ async fn drive_run(
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
-                if !chip_streaming {
-                    // In-place chip refresh, tail throttled to ~1/s so a
-                    // token stream doesn't commit the parent doc per delta.
-                    let (status, tail) = subagent_chip_update(sub_event);
-                    let tail = tail.filter(|_| {
-                        sink.last_chip_tail.elapsed() >= std::time::Duration::from_secs(1)
-                    });
-                    if tail.is_some() {
-                        sink.last_chip_tail = tokio::time::Instant::now();
-                    }
-                    if done || tail.is_some() {
-                        let _ = doc_ref.update_subagent_chip(
-                            parent_tool_use_id,
-                            None,
-                            status,
-                            tail,
-                        );
-                    }
+                if !chip_streaming && done {
+                    // In-place chip refresh on lifecycle transitions only —
+                    // content never rewrites the parent doc.
+                    let _ = doc_ref.update_subagent_chip(
+                        parent_tool_use_id,
+                        None,
+                        subagent_chip_update(sub_event),
+                        None,
+                    );
                 }
                 if done {
                     let status = match sub_event.as_ref() {
