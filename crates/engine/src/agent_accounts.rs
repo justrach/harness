@@ -860,15 +860,14 @@ impl AgentAccounts {
                 let output = lock(&output);
                 // The cursor shim reports failures as a JSONL fatal frame;
                 // codex prints plain text. Surface the human part.
-                scan_shim_fatal(&output)
-                    .unwrap_or_else(|| {
-                        output
-                            .trim()
-                            .lines()
-                            .last()
-                            .unwrap_or("sign-in failed")
-                            .to_string()
-                    })
+                scan_shim_fatal(&output).unwrap_or_else(|| {
+                    output
+                        .trim()
+                        .lines()
+                        .last()
+                        .unwrap_or("sign-in failed")
+                        .to_string()
+                })
             };
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Error,
@@ -1064,8 +1063,14 @@ impl AgentAccounts {
             }
         }
         // Creation order — stable across switches (saved_at churns on every
-        // auto-snapshot; created_at never does).
-        slots.sort_by_key(|s| s.created_at.unwrap_or(s.saved_at));
+        // auto-snapshot; created_at never does). Slot id breaks creation-time
+        // ties: two logins saved in the same millisecond otherwise land in
+        // read_dir order, which is filesystem-arbitrary for UUID-named files
+        // and reshuffles the page between restarts (issue #161).
+        slots.sort_by(|a, b| {
+            (a.created_at.unwrap_or(a.saved_at), &a.id)
+                .cmp(&(b.created_at.unwrap_or(b.saved_at), &b.id))
+        });
         slots
     }
 
@@ -1080,7 +1085,20 @@ impl AgentAccounts {
         full.created_at = existing
             .and_then(|e| e.created_at.or(Some(e.saved_at)))
             .or(slot.created_at)
-            .or(Some(slot.saved_at));
+            .or_else(|| {
+                // A brand-new slot: stamp it strictly after every sibling, so
+                // two logins inside the same millisecond still list in the
+                // order they were saved (creation order is the page's sort
+                // key; ms-resolution ties otherwise fall to read_dir order).
+                let floor = self
+                    .read_slots(slot.harness)
+                    .iter()
+                    .map(|s| s.created_at.unwrap_or(s.saved_at))
+                    .max()
+                    .map(|newest| newest + 1)
+                    .unwrap_or(slot.saved_at);
+                Some(floor.max(slot.saved_at))
+            });
         let json = serde_json::to_string_pretty(&full)
             .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
         // Atomic + 0600 from birth: tokens must never be world-readable, and a
@@ -1364,6 +1382,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Grok => "grok",
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
+        HarnessId::Opencode => "opencode",
         HarnessId::Mock => "mock",
     }
 }
@@ -1515,7 +1534,10 @@ fn parse_cursor_auth(auth: serde_json::Value) -> Option<Detected> {
         account_key,
         profile: SlotProfile {
             email: email.unwrap_or_else(|| {
-                let tail: String = api_key.chars().skip(api_key.len().saturating_sub(4)).collect();
+                let tail: String = api_key
+                    .chars()
+                    .skip(api_key.len().saturating_sub(4))
+                    .collect();
                 format!("API key ·…{tail}")
             }),
             display_name: None,
@@ -1742,7 +1764,14 @@ mod tests {
         assert_eq!(detected.account_key, "dev@example.com");
         assert_eq!(detected.profile.email, "dev@example.com");
         assert_eq!(detected.profile.auth_kind, AgentAuthKind::Oauth);
-        assert!(detected.profile.plan.as_deref().unwrap().starts_with("Key expires"));
+        assert!(
+            detected
+                .profile
+                .plan
+                .as_deref()
+                .unwrap()
+                .starts_with("Key expires")
+        );
         assert!(cursor_key_usable(&live));
 
         let expired = serde_json::json!({

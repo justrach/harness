@@ -572,6 +572,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     };
     core.sessions
@@ -616,6 +617,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     };
     core.sessions
@@ -954,7 +956,10 @@ exit 0
         .await
         .expect("start");
     assert_eq!(start.mode, AgentLoginMode::Browser);
-    assert_eq!(start.url, "https://cursor.com/loginDeepControl?challenge=fake");
+    assert_eq!(
+        start.url,
+        "https://cursor.com/loginDeepControl?challenge=fake"
+    );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -964,10 +969,7 @@ exit 0
             AgentLoginStatus::Pending => {}
             AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "login never landed"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "login never landed");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 

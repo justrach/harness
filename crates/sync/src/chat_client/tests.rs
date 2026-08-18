@@ -788,7 +788,13 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
             b"r7",
         )
         .await;
-        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 7}), &[]).await;
+        send(
+            &end,
+            frame_type::ROWS_DONE,
+            serde_json::json!({"headSeq": 7}),
+            &[],
+        )
+        .await;
         // Only now does the "download" complete.
         let _ = gate_tx.send(());
         end
@@ -849,7 +855,13 @@ async fn pending_push_flushes_before_backfill_completes() {
             &[],
         )
         .await;
-        send(&end_b, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+        send(
+            &end_b,
+            frame_type::ROWS_DONE,
+            serde_json::json!({"headSeq": 1}),
+            &[],
+        )
+        .await;
         end_b
     });
 
@@ -871,7 +883,11 @@ async fn pending_push_flushes_before_backfill_completes() {
         let _ = events.recv().await;
     }
     let _end = server.await.unwrap();
-    assert_eq!(client.stats().cursor, 1, "early replay acked before ROWS_DONE");
+    assert_eq!(
+        client.stats().cursor,
+        1,
+        "early replay acked before ROWS_DONE"
+    );
     client.shutdown().await;
 }
 
