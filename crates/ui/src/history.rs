@@ -4020,8 +4020,6 @@ impl GitHistory {
             .flex()
             .flex_row()
             .items_center()
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.04))
             .text_size(px(11.0))
             .cursor_pointer()
             .when_some(focused_row_wash, |element, wash| element.bg(wash))
