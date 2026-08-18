@@ -3296,6 +3296,7 @@ impl GitHistory {
             graph_color(theme.danger),
             graph_color(theme.text_muted),
         ];
+        let graph_bg = theme.bg;
         let rows = self.graph.rows.clone();
         let list = self.list.clone();
         // Branch tips are independent overview entries: their parents are
@@ -3370,8 +3371,13 @@ impl GitHistory {
                                 if let Some(focus) = focus
                                     && !selected_pass
                                 {
-                                    paint_color.a *= 1.0
-                                        - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+                                    // Keep the dimmed stroke opaque: overlapping row
+                                    // segments otherwise stack alpha into tiny dark dots.
+                                    paint_color = crate::motion::mix(
+                                        paint_color,
+                                        graph_bg,
+                                        (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount,
+                                    );
                                 }
                                 window.paint_path(path, paint_color);
                             }
@@ -3485,8 +3491,13 @@ impl GitHistory {
                             if let Some(focus) = focus
                                 && !selected_pass
                             {
-                                paint_color.a *=
-                                    1.0 - (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount;
+                                // Keep the dimmed stroke opaque: overlapping row
+                                // segments otherwise stack alpha into tiny dark dots.
+                                paint_color = crate::motion::mix(
+                                    paint_color,
+                                    graph_bg,
+                                    (1.0 - HISTORY_GRAPH_UNFOCUSED_OPACITY) * focus.amount,
+                                );
                             }
                             window.paint_path(path, paint_color);
                         }
