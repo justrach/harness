@@ -64,6 +64,10 @@ pub const COMPOSER_MAX_HEIGHT: f32 = TEXTAREA_MAX + ACTIONS_ROW_HEIGHT + PILL_BO
 /// (scrollHeight rounds to 47 in the original) + the 2px hairline = 49. The
 /// compact cluster (`py-1.5` + h-8 = 44) is shorter, so the textarea wins.
 pub const COMPACT_TOTAL_HEIGHT: f32 = 49.0;
+/// `max-w-3xl`: stable outer width of the centered composer column.
+const COMPOSER_MAX_WIDTH: f32 = 768.0;
+/// Ignore subpixel noise when the shell reports the conversation width.
+const COMPOSER_WIDTH_EPSILON: f32 = 0.5;
 /// Below this pill input width the composer always expands.
 pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
@@ -111,6 +115,10 @@ pub fn composer_flip(
     } else {
         text_width > capacity
     }
+}
+
+fn composer_width_changed(previous: Option<f32>, current: f32) -> bool {
+    previous.is_none_or(|previous| (current - previous).abs() > COMPOSER_WIDTH_EPSILON)
 }
 
 /// Caret blink half-period (standard textarea cadence: ~500ms on / 500ms off).
@@ -1237,10 +1245,6 @@ pub enum ComposerInputEvent {
     Submitted,
     Edited,
     CursorMoved,
-    /// The measured input width changed during layout. The wrapper's layout
-    /// mode depends on this value, so it needs a fresh render even when no
-    /// edit, focus event, or caret blink happens to request one.
-    LayoutChanged,
     ViewportChanged,
     MentionNavigate(isize),
     MentionAccept,
@@ -2453,7 +2457,7 @@ impl ComposerInput {
         width: Pixels,
         style: &TextStyle,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &App,
     ) -> f32 {
         // Rebuild this even for an empty draft. Otherwise deleting the final
         // mention can leave its previous paint geometry alive while the
@@ -2554,14 +2558,8 @@ impl ComposerInput {
         self.line_starts = line_starts;
         self.content_height = content_height.max(INPUT_LINE_HEIGHT);
         self.max_line_width = if is_placeholder { 0.0 } else { max_line_width };
-        let measured_width = f32::from(width);
-        let width_changed =
-            self.last_width <= 0.0 || (measured_width - self.last_width).abs() > 0.5;
-        self.last_width = measured_width;
+        self.last_width = f32::from(width);
         self.layout_epoch += 1;
-        if width_changed {
-            cx.emit(ComposerInputEvent::LayoutChanged);
-        }
         self.content_height
     }
 
@@ -3358,6 +3356,10 @@ pub struct Composer {
     expanded_anchor: f32,
     /// Last input width seen in the current mode (resize detection).
     last_seen_width: f32,
+    /// Stable outer composer width supplied by the shell. Unlike Taffy's
+    /// provisional input measurements, this changes only when the actual
+    /// conversation column changes and can safely drive a follow-up render.
+    last_available_width: Option<f32>,
     /// Set while an interactive resize is in flight; collapse is deferred
     /// until widths have settled for [`RESIZE_SETTLE_MS`].
     width_changed_at: Option<Instant>,
@@ -3390,10 +3392,19 @@ impl Composer {
     /// controls. The text input's own width is unsuitable here because it
     /// changes when the Traits label is replaced by the overflow dots.
     pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let inner_width = (width.min(768.0) - 2.0 * Theme::SPACE_LG).max(0.0);
+        let composer_width = width.clamp(0.0, COMPOSER_MAX_WIDTH);
+        let inner_width = (composer_width - 2.0 * Theme::SPACE_LG).max(0.0);
         self.pickers.update(cx, |pickers, cx| {
             pickers.set_composer_width(inner_width, cx);
         });
+        if composer_width_changed(self.last_available_width, composer_width) {
+            self.last_available_width = Some(composer_width);
+            // The shell renders before this child, so this queues one more
+            // pass after the input has been laid out at its final width. That
+            // pass can consume the completed measurement without emitting an
+            // event from inside Taffy's multi-pass measurement callback.
+            cx.notify();
+        }
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -3413,7 +3424,7 @@ impl Composer {
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
                 this.on_input_edited(cx)
             }
-            ComposerInputEvent::LayoutChanged | ComposerInputEvent::ViewportChanged => cx.notify(),
+            ComposerInputEvent::ViewportChanged => cx.notify(),
             // The slash popup and the mention popup share the input's
             // completion key routing; they are mutually exclusive by token
             // shape (`/` at offset 0 vs `@` at a token boundary).
@@ -3476,6 +3487,7 @@ impl Composer {
             compact_capacity: 0.0,
             expanded_anchor: 0.0,
             last_seen_width: 0.0,
+            last_available_width: None,
             width_changed_at: None,
             settle_task: None,
             flip_morph: None,
@@ -5409,7 +5421,7 @@ impl Render for Composer {
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
-            .max_w(px(768.0))
+            .max_w(px(COMPOSER_MAX_WIDTH))
             .mx_auto()
             .flex()
             .flex_col()
@@ -5743,6 +5755,14 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_outer_width_only_schedules_reflow_on_real_changes() {
+        assert!(composer_width_changed(None, 400.0));
+        assert!(!composer_width_changed(Some(400.0), 400.0));
+        assert!(!composer_width_changed(Some(400.0), 400.5));
+        assert!(composer_width_changed(Some(400.0), 400.51));
+    }
 
     fn tooltip_target(range: Range<usize>, path: &str) -> MentionTooltipTarget {
         MentionTooltipTarget {

@@ -476,7 +476,6 @@ impl Pickers {
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::CursorMoved
-            | ComposerInputEvent::LayoutChanged
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
             | ComposerInputEvent::MentionAccept
