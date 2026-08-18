@@ -860,15 +860,14 @@ impl AgentAccounts {
                 let output = lock(&output);
                 // The cursor shim reports failures as a JSONL fatal frame;
                 // codex prints plain text. Surface the human part.
-                scan_shim_fatal(&output)
-                    .unwrap_or_else(|| {
-                        output
-                            .trim()
-                            .lines()
-                            .last()
-                            .unwrap_or("sign-in failed")
-                            .to_string()
-                    })
+                scan_shim_fatal(&output).unwrap_or_else(|| {
+                    output
+                        .trim()
+                        .lines()
+                        .last()
+                        .unwrap_or("sign-in failed")
+                        .to_string()
+                })
             };
             return Ok(AgentLoginPoll {
                 status: AgentLoginStatus::Error,
@@ -1364,6 +1363,7 @@ fn harness_slug(harness: HarnessId) -> &'static str {
         HarnessId::Grok => "grok",
         HarnessId::Hermes => "hermes",
         HarnessId::Pi => "pi",
+        HarnessId::Opencode => "opencode",
         HarnessId::Mock => "mock",
     }
 }
@@ -1515,7 +1515,10 @@ fn parse_cursor_auth(auth: serde_json::Value) -> Option<Detected> {
         account_key,
         profile: SlotProfile {
             email: email.unwrap_or_else(|| {
-                let tail: String = api_key.chars().skip(api_key.len().saturating_sub(4)).collect();
+                let tail: String = api_key
+                    .chars()
+                    .skip(api_key.len().saturating_sub(4))
+                    .collect();
                 format!("API key ·…{tail}")
             }),
             display_name: None,
@@ -1742,7 +1745,14 @@ mod tests {
         assert_eq!(detected.account_key, "dev@example.com");
         assert_eq!(detected.profile.email, "dev@example.com");
         assert_eq!(detected.profile.auth_kind, AgentAuthKind::Oauth);
-        assert!(detected.profile.plan.as_deref().unwrap().starts_with("Key expires"));
+        assert!(
+            detected
+                .profile
+                .plan
+                .as_deref()
+                .unwrap()
+                .starts_with("Key expires")
+        );
         assert!(cursor_key_usable(&live));
 
         let expired = serde_json::json!({
