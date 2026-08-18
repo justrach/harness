@@ -136,9 +136,13 @@ export class ChatRoom implements DurableObject {
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
-    // Everything below reads a claimed room.
-    if (!owner) return json({ error: "not_found" }, 404);
-    if (owner !== userId) return json({ error: "forbidden" }, 403);
+    // Claim-on-first-contact for the HTTP surface too — same client-minted-id
+    // discipline as /ws. The /rows twins predate the pull-first HTTPS
+    // transport and 404'd an unclaimed room, which deadlocked a brand-new
+    // chat on WS-hostile networks: the sender's push 404s, the host's pull
+    // 404s, and the only claimants (WS join, checkpoint heal) never run.
+    if (!owner) setMeta(sql, "owner", userId);
+    else if (owner !== userId) return json({ error: "forbidden" }, 403);
 
     if (url.pathname === "/checkpoint" && request.method === "GET") {
       const bytes = this.blobs.get(CHECKPOINT_BLOB);
