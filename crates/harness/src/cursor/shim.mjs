@@ -11,7 +11,7 @@
 //
 // Protocol: JSONL, one frame per line.
 //   stdin  (engine → shim):
-//     {"op":"run","prompt","cwd","model"?,"resume"?}   start / first turn
+//     {"op":"run","prompt","cwd","model"?,"modelOptions"?,"resume"?}   start / first turn
 //     {"op":"user","prompt"}                            next turn (parked)
 //     {"op":"interrupt"}                                cancel the live run
 //   stdout (shim → engine):
@@ -22,6 +22,9 @@
 //     {"ev":"usage","input","output"}
 //     {"ev":"turn","status":"finished"|"error"|"cancelled","error"?}
 //     {"ev":"fatal","message"}              unrecoverable (auth, SDK init)
+//
+// Models mode (`node <shim> models`): prints {"ev":"models","items":[…]} —
+// the live `Cursor.models.list()` catalog — and exits.
 //
 // Login mode (`node <shim> login <store-path>`): no stdin protocol — runs the
 // SDK's PKCE browser flow (`Cursor.auth.login`) writing the minted key to
@@ -50,6 +53,21 @@ try {
   fatal(`@cursor/sdk failed to load: ${e?.message ?? e}`);
 }
 const { Agent, Cursor, FileCredentialStore } = sdk;
+
+// ---- models mode ----------------------------------------------------------
+// `node <shim> models`: print the live catalog (`Cursor.models.list()` — no
+// auth required, verified live on 1.0.28) as one frame and exit. The harness
+// maps items (id/displayName/parameters/variants) into its picker models.
+if (process.argv[2] === "models") {
+  try {
+    const listed = await Cursor.models.list();
+    const items = Array.isArray(listed) ? listed : (listed?.items ?? []);
+    out({ ev: "models", items });
+    process.exit(0);
+  } catch (e) {
+    fatal(`cursor model discovery failed: ${e?.message ?? e}`);
+  }
+}
 
 // ---- login mode -----------------------------------------------------------
 // The browser flow never opens a browser itself (the engine may be headless;
@@ -193,8 +211,26 @@ async function runTurn(prompt) {
   });
 }
 
+// The run's ModelSelection: id + typed parameter values (thinking / context /
+// effort / fast / optimize_for — ids from the discovered catalog). Legacy
+// sessions may still carry the pre-discovery static option ("optimizeFor",
+// choice "speed") — translate rather than send an id the backend never knew.
+function modelSelection(msg) {
+  const id = msg.model || "auto";
+  const params = [];
+  for (const [key, value] of Object.entries(msg.modelOptions ?? {})) {
+    if (typeof value !== "string" || !value) continue;
+    if (key === "optimizeFor") {
+      params.push({ id: "optimize_for", value: value === "speed" ? "cost" : value });
+    } else {
+      params.push({ id: key, value });
+    }
+  }
+  return params.length ? { id, params } : { id };
+}
+
 async function start(msg) {
-  const model = msg.model ? { id: msg.model } : { id: "auto" };
+  const model = modelSelection(msg);
   const options = {
     model,
     // askQuestion has no public answer channel in this SDK (SDKRequestMessage
