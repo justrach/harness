@@ -1022,8 +1022,11 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_COMMANDS => {
                 // Same shape as ListModels: forces a lazy resolve, then the
-                // harness's own (cached) discovery. Non-ACP harnesses return
-                // an empty list from the trait default.
+                // harness's own (cached) discovery — ACP agents advertise
+                // availableCommands, claude answers the initialize control
+                // request, codex lists skills; only harnesses whose wire has
+                // no listing (cursor, mock) fall through to the trait's
+                // empty default.
                 let p: ListModelsParams = parse_params(params)?;
                 let harness = self
                     .registry
