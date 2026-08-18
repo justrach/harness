@@ -3924,6 +3924,11 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        // Subagent spawns (the "Agent[: <description>]" Unknown convention
+        // every native driver uses) carry the bot, matching their tab.
+        ToolCall::Unknown { name, .. } if name == "Agent" || name.starts_with("Agent: ") => {
+            crate::icons::BOT
+        }
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }

@@ -5636,7 +5636,7 @@ impl Shell {
             let is_active = surface == active;
             let icon_path = match surface {
                 RightSurface::Diff(_) => icons::GIT_BRANCH,
-                RightSurface::Subagent(_) => icons::CHAT_ROUND_LINE,
+                RightSurface::Subagent(_) => icons::BOT,
                 _ => icons::TERMINAL,
             };
             // A live subagent tab swaps its icon for the mini working
