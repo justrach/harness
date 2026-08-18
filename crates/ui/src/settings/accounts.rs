@@ -118,18 +118,19 @@ pub const PROVIDERS: [(HarnessId, &str, &str); 3] = [
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
 ];
 
-/// Accounts of one provider, active first (stable otherwise). Pure.
+/// Accounts of one provider, in the engine's order (slot creation). No
+/// active-first re-sort: switching accounts must not move the switched-to
+/// card — the Active badge already says which one is live, and a list that
+/// reshuffles under the click reads as broken. Pure.
 pub fn provider_accounts(
     snapshot: &AgentAccountsSnapshot,
     harness: HarnessId,
 ) -> Vec<&AgentAccount> {
-    let mut accounts: Vec<&AgentAccount> = snapshot
+    snapshot
         .accounts
         .iter()
         .filter(|a| a.harness == harness)
-        .collect();
-    accounts.sort_by_key(|a| !a.active);
-    accounts
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,7 +1541,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_grouping_puts_active_first() {
+    fn provider_grouping_keeps_engine_order_even_when_active_is_later() {
         let account = |id: &str, harness: HarnessId, active: bool| AgentAccount {
             id: id.into(),
             harness,
@@ -1564,7 +1565,11 @@ mod tests {
         };
         let claude = provider_accounts(&snapshot, HarnessId::ClaudeCode);
         let ids: Vec<&str> = claude.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["c2", "c1"], "active account leads");
+        assert_eq!(
+            ids,
+            ["c1", "c2"],
+            "engine (creation) order holds — switching must not move a card"
+        );
         assert_eq!(provider_accounts(&snapshot, HarnessId::Codex).len(), 1);
         assert!(provider_accounts(&snapshot, HarnessId::Cursor).is_empty());
     }
