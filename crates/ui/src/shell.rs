@@ -5216,21 +5216,33 @@ impl Shell {
                 .text_color(theme.danger)
                 .child(SharedString::from("Run failed"))
                 .into_any_element(),
-            Indicator::None if sending => strip
-                .child(loaders::gradient_spinner(
-                    "sending-indicator",
-                    &theme,
-                    2.5,
-                    cx.entity_id(),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Sending…")),
-                )
-                .into_any_element(),
+            Indicator::None if sending => {
+                // The attachment leg names itself with live progress — a slow
+                // upload must read as slow, never as a hang (2026-08-18). The
+                // spinner animates every frame, so the percent repaints
+                // without any notify plumbing.
+                let label = self
+                    .state
+                    .read(cx)
+                    .upload_progress_percent()
+                    .map(|pct| format!("Uploading… {pct}%"))
+                    .unwrap_or_else(|| "Sending…".to_string());
+                strip
+                    .child(loaders::gradient_spinner(
+                        "sending-indicator",
+                        &theme,
+                        2.5,
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(label)),
+                    )
+                    .into_any_element()
+            }
             Indicator::None => strip.into_any_element(),
         }
     }

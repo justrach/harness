@@ -2820,7 +2820,7 @@ impl Transcript {
         }
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs) = {
+        let (sending, elapsed_secs, upload_pct) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
@@ -2835,12 +2835,18 @@ impl Transcript {
             let elapsed = turn_started
                 .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                 .unwrap_or(0);
-            (sending, elapsed)
+            (sending, elapsed, state.upload_progress_percent())
         };
+        // The attachment leg names itself with live progress — a slow upload
+        // must read as slow, never as a hang (2026-08-18 user report). The
+        // spinner repaints every frame, so the percent stays live.
         let word = if sending {
-            "Sending"
+            match upload_pct {
+                Some(pct) => format!("Uploading… {pct}%"),
+                None => "Sending…".to_string(),
+            }
         } else {
-            flavour_word(flavour_seed(&chat_id), elapsed_secs)
+            format!("{}…", flavour_word(flavour_seed(&chat_id), elapsed_secs))
         };
         let theme = Theme::of(cx).clone();
         Some(
@@ -2862,7 +2868,7 @@ impl Transcript {
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{word}…"))),
+                        .child(SharedString::from(word)),
                 )
                 .when(!sending, |el| {
                     el.child(
