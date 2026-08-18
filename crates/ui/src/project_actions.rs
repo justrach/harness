@@ -65,6 +65,7 @@ pub struct ProjectActionEditor {
 pub struct ProjectActionsController {
     pub active: Option<ProjectActionsKey>,
     pub generation: u64,
+    mutation_generation: u64,
     pub cache: HashMap<ProjectActionsKey, ProjectActionsStatus>,
     pub menu: popover::Popup<()>,
     pub editor: Option<ProjectActionEditor>,
@@ -77,6 +78,7 @@ impl Default for ProjectActionsController {
         Self {
             active: None,
             generation: 0,
+            mutation_generation: 0,
             cache: HashMap::new(),
             menu: popover::Popup::default(),
             editor: None,
@@ -96,7 +98,22 @@ impl ProjectActionsController {
         self.menu = popover::Popup::default();
         self.editor = None;
         self.request_task = None;
+        self.invalidate_mutation();
         true
+    }
+
+    fn invalidate_mutation(&mut self) {
+        self.mutation_generation = self.mutation_generation.wrapping_add(1);
+        self.mutation_task = None;
+    }
+
+    pub fn begin_mutation(&mut self) -> u64 {
+        self.invalidate_mutation();
+        self.mutation_generation
+    }
+
+    pub fn is_current_mutation(&self, key: &ProjectActionsKey, generation: u64) -> bool {
+        self.active.as_ref() == Some(key) && self.mutation_generation == generation
     }
 
     pub fn active_status(&self) -> Option<&ProjectActionsStatus> {
@@ -342,5 +359,30 @@ mod tests {
         assert_eq!(visible.space_id, key.space_id);
         assert!(visible.actions.is_empty());
         assert!(visible.importable_actions.is_empty());
+    }
+
+    #[test]
+    fn mutations_are_invalidated_by_project_changes_and_newer_mutations() {
+        let mut controller = ProjectActionsController::default();
+        let first = ProjectActionsKey {
+            device_id: "a".into(),
+            space_id: "one".into(),
+        };
+        let second = ProjectActionsKey {
+            device_id: "b".into(),
+            space_id: "two".into(),
+        };
+
+        controller.activate(Some(first.clone()));
+        let first_generation = controller.begin_mutation();
+        assert!(controller.is_current_mutation(&first, first_generation));
+
+        controller.activate(Some(second.clone()));
+        assert!(!controller.is_current_mutation(&first, first_generation));
+
+        let superseded = controller.begin_mutation();
+        let current = controller.begin_mutation();
+        assert!(!controller.is_current_mutation(&second, superseded));
+        assert!(controller.is_current_mutation(&second, current));
     }
 }

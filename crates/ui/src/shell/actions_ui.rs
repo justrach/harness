@@ -254,26 +254,45 @@ impl Shell {
             &context.target_device_id,
         );
         let key = context.key.clone();
+        let mutation_generation = self.project_actions.begin_mutation();
         self.project_actions.mutation_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call_as::<ProjectActionsSnapshot>(methods::UPSERT_PROJECT_ACTION, params)
                 .await;
             this.update(cx, |shell, cx| {
+                if !shell
+                    .project_actions
+                    .is_current_mutation(&key, mutation_generation)
+                {
+                    return;
+                }
                 match result {
                     Ok(snapshot) => {
                         shell
                             .project_actions
                             .cache
-                            .insert(key, ProjectActionsStatus::Ready(snapshot));
-                        shell.project_actions.editor = None;
+                            .insert(key.clone(), ProjectActionsStatus::Ready(snapshot));
+                        if shell
+                            .project_actions
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.key == key && editor.saving)
+                        {
+                            shell.project_actions.editor = None;
+                        }
                     }
                     Err(err) => {
                         let message = err.to_string();
                         shell
                             .project_actions
                             .mark_unavailable(&key, message.clone());
-                        if let Some(editor) = shell.project_actions.editor.as_mut() {
+                        if let Some(editor) = shell
+                            .project_actions
+                            .editor
+                            .as_mut()
+                            .filter(|editor| editor.key == key && editor.saving)
+                        {
                             editor.saving = false;
                             editor.error = Some(message);
                         }
@@ -313,12 +332,19 @@ impl Shell {
             &context.target_device_id,
         );
         let key = context.key.clone();
+        let mutation_generation = self.project_actions.begin_mutation();
         self.project_actions.mutation_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call_as::<ProjectActionsSnapshot>(methods::DELETE_PROJECT_ACTION, params)
                 .await;
             this.update(cx, |shell, cx| {
+                if !shell
+                    .project_actions
+                    .is_current_mutation(&key, mutation_generation)
+                {
+                    return;
+                }
                 match result {
                     Ok(snapshot) => {
                         shell
@@ -337,14 +363,26 @@ impl Shell {
                                 .remove(&key.space_id);
                             shell.schedule_save(cx);
                         }
-                        shell.project_actions.editor = None;
+                        if shell
+                            .project_actions
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.key == key && editor.saving)
+                        {
+                            shell.project_actions.editor = None;
+                        }
                     }
                     Err(err) => {
                         let message = err.to_string();
                         shell
                             .project_actions
                             .mark_unavailable(&key, message.clone());
-                        if let Some(editor) = shell.project_actions.editor.as_mut() {
+                        if let Some(editor) = shell
+                            .project_actions
+                            .editor
+                            .as_mut()
+                            .filter(|editor| editor.key == key && editor.saving)
+                        {
                             editor.saving = false;
                             editor.confirm_delete = false;
                             editor.error = Some(message);
