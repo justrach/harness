@@ -43,6 +43,7 @@ async fn managed_install_reaches_session_started() {
         sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     };
 

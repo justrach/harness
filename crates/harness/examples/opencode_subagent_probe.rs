@@ -1,8 +1,15 @@
-//! Live probe: drive the real grok CLI through AcpHarness and print the
-//! event stream, verifying subagent spawn correlation + the disk-tailed
-//! transcript end-to-end. Needs a logged-in `grok` on PATH.
+//! Live probe: drive the real opencode CLI through AcpHarness and print the
+//! event stream, verifying task-chip correlation + the sidecar-bus-tailed
+//! subagent transcript end-to-end. Needs `opencode` on PATH (or
+//! OPENCODE_EXECUTABLE) with a model provider configured in the target cwd —
+//! the rig recipe uses a mock OpenAI-compatible provider in the workspace's
+//! opencode.json, so no real login is required:
 //!
-//!     cargo run -p zeron-harness --example grok_subagent_probe -- /tmp/probe-dir
+//!     cargo run -p zeron-harness --example opencode_subagent_probe -- /tmp/oc-probe/workspace
+//!
+//! Prompt content is irrelevant with the mock provider (it scripts a task
+//! spawn on the first parent round); against a real provider, ask for one
+//! `task` explicitly.
 
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
@@ -13,7 +20,7 @@ use zeron_proto::{AgentEvent, RunRequest, SandboxLevel, UserInputAnswer};
 async fn main() {
     let cwd = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/tmp/probe-grok-viz".into());
+        .unwrap_or_else(|| "/tmp/probe-opencode-viz".into());
     std::fs::create_dir_all(&cwd).unwrap();
     let (_steer_tx, steering) = mpsc::channel(8);
     let controls = RunControls {
@@ -32,12 +39,16 @@ async fn main() {
         steering,
         interrupt: CancellationToken::new(),
     };
+    // Optional second arg overrides the prompt (e.g. the mock rig's
+    // "TWO subagents" variant exercising concurrent binding).
+    let prompt = std::env::args().nth(2).unwrap_or_else(|| {
+        "Use the task tool to launch ONE general subagent with description \
+         'Viz probe' and prompt: 'Run `echo viz-probe-ok`, then reply with the \
+         word finished.'. Tell me its result."
+            .into()
+    });
     let request = RunRequest {
-        prompt: "Use spawn_subagent to launch ONE subagent of type general with description \
-                 'Viz probe' and prompt: 'Run the terminal command: echo viz-probe-ok && sleep 3. \
-                 Then reply with the word finished.'. Wait for it with \
-                 get_command_or_subagent_output and tell me its result."
-            .into(),
+        prompt,
         harness: None,
         model: None,
         reasoning: None,
@@ -46,10 +57,9 @@ async fn main() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
-        worktree: None,
         resume: None,
     };
-    let mut stream = AcpHarness::grok()
+    let mut stream = AcpHarness::opencode()
         .run(request, controls)
         .await
         .expect("run starts");
@@ -57,8 +67,8 @@ async fn main() {
     let mut tagged = 0u32;
     let mut parent_done = false;
     loop {
-        // After the parent turn settles the session stays alive for the
-        // steering mailbox — bound the wait for the subagent's tagged Done.
+        // The session stays alive for the steering mailbox after the parent
+        // turn settles — bound the wait for the subagent's tagged Done.
         let ev = match tokio::time::timeout(std::time::Duration::from_secs(90), stream.next()).await
         {
             Ok(Some(ev)) => ev,
