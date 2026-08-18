@@ -1068,11 +1068,25 @@ impl Shell {
     }
 
     /// Descend into the highlighted (filtered) folder; clears the query.
+    /// A path-shaped query with no matching rows browses the typed path
+    /// instead — `/disk2⏎` must work, not sit on "No folders match" (an
+    /// absolute query can never match a folder name anyway).
     fn add_space_open_active(&mut self, cx: &mut Context<Self>) {
         let rows = self.add_space_filtered(cx);
         let Some(flow) = self.add_space.as_ref() else {
             return;
         };
+        if rows.is_empty() {
+            let text = flow.search.read(cx).text().to_string();
+            if text.starts_with('/') || text.starts_with('~') {
+                if let Some(target) =
+                    crate::pickers::typed_path_target(&text, flow.home.as_deref())
+                {
+                    self.add_space_descend(target, false, cx);
+                }
+            }
+            return;
+        }
         let Some(listing) = flow.browser.ready() else {
             return;
         };
@@ -1096,6 +1110,26 @@ impl Shell {
     /// descending clears the query, so the caller must not keep acting on the
     /// old text.
     fn add_space_slash_descend(&mut self, cx: &mut Context<Self>) -> bool {
+        // A typed PATH jump: an absolute (`/disk2/`) or home-relative (`~/x/`)
+        // query browses that path directly — mounts at unconventional roots
+        // (and anywhere else) are reachable without a Locations row. Same
+        // trailing-`/` trigger as the folder-name descend below.
+        {
+            let Some(flow) = self.add_space.as_ref() else {
+                return false;
+            };
+            let text = flow.search.read(cx).text().to_string();
+            if text.ends_with('/') && (text.starts_with('/') || text.starts_with('~')) {
+                let target = crate::pickers::typed_path_target(&text, flow.home.as_deref());
+                let Some(target) = target else {
+                    // Path-shaped but unresolvable (`~/…` before home is
+                    // known) — leave the query alone.
+                    return false;
+                };
+                self.add_space_descend(target, false, cx);
+                return true;
+            }
+        }
         let target = {
             let Some(flow) = self.add_space.as_ref() else {
                 return false;
@@ -1767,10 +1801,18 @@ impl Shell {
                 ))
                 .into_any_element()
         } else if let Some(message) = load_error {
-            let device_line = device
-                .as_ref()
-                .map(|d| format!("{} didn't respond — is it online?", d.name))
-                .unwrap_or(message);
+            // Folder-level failures (typed path that doesn't exist, permission
+            // walls) show as themselves; only transport-shaped failures read
+            // as the device being unreachable. The engine's folder errors all
+            // name the folder ("could not read that folder: …").
+            let device_line = if message.contains("folder") {
+                message
+            } else {
+                device
+                    .as_ref()
+                    .map(|d| format!("{} didn't respond — is it online?", d.name))
+                    .unwrap_or(message)
+            };
             popover::error_row(&theme, &device_line)
                 .px(px(14.0))
                 .py(px(10.0))

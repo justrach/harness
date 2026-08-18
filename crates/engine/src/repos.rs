@@ -1003,23 +1003,66 @@ fn macos_drives() -> Vec<DriveEntry> {
     drives
 }
 
-/// External/removable mounts from `/proc/mounts` — udisks and friends mount
-/// under `/media` and `/run/media`, manual mounts conventionally under `/mnt`
-/// (WSL's drive letters included). Plus "System" for `/`: any drive mounted
-/// elsewhere stays reachable by browsing from the root.
+/// Top-level directories the FHS (or its de-facto extensions) owns. A
+/// depth-one mount point OUTSIDE this set is a user-created drive root
+/// (`/disk2`, `/data`, `/tank`) — the system's own split partitions
+/// (`/boot`, a separate `/var` or `/home`) are plumbing, not drives.
+#[cfg(any(target_os = "linux", test))]
+const FHS_TOP_LEVEL: &[&str] = &[
+    "bin",
+    "boot",
+    "dev",
+    "efi",
+    "etc",
+    "home",
+    "lib",
+    "lib32",
+    "lib64",
+    "libx32",
+    "lost+found",
+    "media",
+    "mnt",
+    "nix",
+    "opt",
+    "proc",
+    "root",
+    "run",
+    "sbin",
+    "snap",
+    "srv",
+    "sys",
+    "tmp",
+    "usr",
+    "var",
+];
+
+/// Mounted drives from `/proc/mounts`: the conventional removable locations
+/// (`/media`, `/run/media`, `/mnt` — udisks, WSL drive letters, manual
+/// mounts, whatever the filesystem) plus block-device partitions mounted at
+/// custom top-level paths like `/disk2` (PR #144 feedback) — `/dev/*`
+/// sources at depth-one non-FHS points, minus squashfs/erofs images (snaps).
+/// Plus "System" for `/`: anything mounted deeper stays reachable by
+/// browsing from the root, and the palette accepts typed paths besides.
 #[cfg(any(target_os = "linux", test))]
 fn linux_drives(mounts: &str) -> Vec<DriveEntry> {
     let mut drives: Vec<DriveEntry> = Vec::new();
     for line in mounts.lines() {
-        let Some(point) = line.split_whitespace().nth(1) else {
+        let mut fields = line.split_whitespace();
+        let (Some(source), Some(point), fstype) = (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
         let point = unescape_mount_point(point);
-        let external = point.starts_with("/media/")
+        let conventional = point.starts_with("/media/")
             || point.starts_with("/run/media/")
             || point == "/mnt"
             || point.starts_with("/mnt/");
-        if !external {
+        let custom_block = source.starts_with("/dev/")
+            && !matches!(fstype, Some("squashfs") | Some("erofs"))
+            && point
+                .strip_prefix('/')
+                .is_some_and(|p| !p.is_empty() && !p.contains('/') && !FHS_TOP_LEVEL.contains(&p));
+        if !conventional && !custom_block {
             continue;
         }
         let name = point
@@ -1391,6 +1434,27 @@ tmpfs /run tmpfs rw 0 0
                 ("T7 Shield", "/media/wing/T7 Shield"),
             ]
         );
+    }
+
+    #[test]
+    fn linux_drives_take_custom_top_level_block_mounts_not_system_splits() {
+        let mounts = "\
+/dev/nvme0n1p2 / ext4 rw 0 0
+/dev/sdb1 /disk2 ext4 rw 0 0
+/dev/mapper/vault /tank btrfs rw 0 0
+/dev/nvme0n1p1 /boot/efi vfat rw 0 0
+/dev/sdd1 /boot ext4 rw 0 0
+/dev/sde1 /home ext4 rw 0 0
+/dev/sdf1 /data/disks/a ext4 rw 0 0
+/dev/loop3 /snap/core22/1234 squashfs ro 0 0
+/dev/loop9 /disk3 ext4 rw 0 0
+";
+        let drives = finish_drives(linux_drives(mounts));
+        let rows: Vec<&str> = drives.iter().map(|d| d.path.as_str()).collect();
+        // /disk2 and /tank are user drive roots; a loop-mounted ext4 image at
+        // a custom root counts too (it's squashfs snaps that are noise). The
+        // system's own split partitions and deep mounts stay out.
+        assert_eq!(rows, vec!["/", "/disk2", "/disk3", "/tank"]);
     }
 
     #[test]
