@@ -333,6 +333,154 @@ async fn target_device_id_routes_over_the_relay() {
         "command must live in B's doc"
     );
 
+    // Project Actions are also device-routed and persist only in B's private
+    // profile store. A versioned project file only contributes import offers.
+    let project_root = dirs.path().join("project-on-b");
+    std::fs::create_dir_all(&project_root).expect("project root on B");
+    std::fs::write(
+        project_root.join("zeron.json"),
+        r#"{"actions":[{"name":"Lint","command":"pnpm lint","icon":"lint"}]}"#,
+    )
+    .expect("project file");
+    core_b
+        .workspace
+        .create_space(
+            "space-actions",
+            "device-b",
+            &project_root.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space row on B");
+    let listed = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("list remote Actions");
+    assert_eq!(listed["actions"].as_array().unwrap().len(), 0);
+    assert_eq!(listed["importableActions"].as_array().unwrap().len(), 1);
+
+    let saved = client
+        .call(
+            methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "targetDeviceId": "device-b",
+                "action": {
+                    "name": "Lint",
+                    "command": "pnpm lint",
+                    "icon": "lint",
+                    "runOnWorktreeCreate": true,
+                },
+            }),
+        )
+        .await
+        .expect("save remote Action");
+    let action_id = saved["actions"][0]["id"]
+        .as_str()
+        .expect("normalized action id")
+        .to_string();
+    assert!(saved["importableActions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        core_b
+            .project_actions
+            .actions("space-actions", &project_root)
+            .expect("B store")
+            .len(),
+        1
+    );
+    assert!(
+        core_a
+            .project_actions
+            .actions("space-actions", &project_root)
+            .expect("A store")
+            .is_empty(),
+        "the forwarding engine must not persist the command"
+    );
+
+    let deleted = client
+        .call(
+            methods::DELETE_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "actionId": action_id,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("delete remote Action");
+    assert!(deleted["actions"].as_array().unwrap().is_empty());
+
+    let moved_root = dirs.path().join("project-moved-on-b");
+    std::fs::create_dir_all(&moved_root).expect("moved project root");
+    let mut moved_space = core_b
+        .workspace
+        .space("space-actions")
+        .expect("read space")
+        .expect("space exists");
+    moved_space.path = moved_root.to_string_lossy().to_string();
+    core_b
+        .workspace
+        .import_space_row(&moved_space)
+        .expect("replace space root");
+    let changed_root = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect_err("changed project root rejected by B");
+    assert!(
+        changed_root
+            .to_string()
+            .contains("identity no longer matches")
+    );
+
+    let missing = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({
+                "spaceId": "missing",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect_err("missing space rejected by B");
+    assert!(missing.to_string().contains("Project space not found"));
+    core_b
+        .workspace
+        .create_space(
+            "space-wrong-owner",
+            "device-a",
+            &project_root.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("foreign-owned row on B");
+    let wrong_owner = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({
+                "spaceId": "space-wrong-owner",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect_err("foreign-owned space rejected by B");
+    assert!(
+        wrong_owner
+            .to_string()
+            .contains("belongs to another device")
+    );
+
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
