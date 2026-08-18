@@ -327,17 +327,16 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
 
 /// Human-readable combo for the shortcuts table ("mod-s" → "Cmd+S"/"Ctrl+S").
 pub fn display_combo(combo: &str) -> String {
+    display_combo_on(cfg!(target_os = "macos"), combo)
+}
+
+/// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
+pub fn display_combo_on(mac: bool, combo: &str) -> String {
     combo
         .split('-')
         .map(|part| match part {
-            "mod" => {
-                if cfg!(target_os = "macos") {
-                    "Cmd".to_string()
-                } else {
-                    "Ctrl".to_string()
-                }
-            }
-            "alt" => "Alt".to_string(),
+            "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
+            "alt" => if mac { "Opt" } else { "Alt" }.to_string(),
             "shift" => "Shift".to_string(),
             other => {
                 let mut chars = other.chars();
@@ -653,6 +652,8 @@ mod tests {
             format!("{display_primary}+Shift+S")
         );
         assert_eq!(display_combo("f5"), "F5");
+        assert_eq!(display_combo_on(true, "mod-alt-up"), "Cmd+Opt+Up");
+        assert_eq!(display_combo_on(false, "mod-alt-up"), "Ctrl+Alt+Up");
         // Literal ctrl passes through untouched — the macOS spelling of
         // session cycling.
         assert_eq!(platform_combo("ctrl-shift-tab"), "ctrl-shift-tab");
