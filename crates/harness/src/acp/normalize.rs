@@ -24,7 +24,7 @@ fn str_field(v: &Value, key: &str) -> String {
 }
 
 /// Truncate on a char boundary, marking the cut so the UI can say "truncated".
-fn cap_text(text: &str, cap: usize) -> String {
+pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_owned();
     }
@@ -89,6 +89,16 @@ fn tool_diff(update: &Value) -> Option<ToolDiff> {
             DIFF_TEXT_CAP,
         ),
     })
+}
+
+/// The grok-native tool name stamped on a tool call's `_meta` (`x.ai/tool`,
+/// present on every grok tool_call — verified live, 1.0.4).
+pub(crate) fn xai_tool_name(update: &Value) -> Option<&str> {
+    update
+        .get("_meta")?
+        .get("x.ai/tool")?
+        .get("name")?
+        .as_str()
 }
 
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
@@ -261,6 +271,15 @@ fn typed_call(update: &Value) -> ToolCall {
                 }
             }
         }
+        // Grok's subagent spawn: name the chip — and the subagent tab it
+        // opens — after the task, matching the claude driver's "Agent: {d}"
+        // (the bare tool name says nothing in a tab strip).
+        _ if xai_tool_name(update) == Some("spawn_subagent") => ToolCall::Unknown {
+            name: raw_str("description")
+                .map(|d| format!("Agent: {d}"))
+                .unwrap_or_else(|| "Agent".into()),
+            input: raw.cloned(),
+        },
         _ if raw_str("_toolName").as_deref() == Some("task") => ToolCall::Unknown {
             name: raw_str("description")
                 .filter(|d| d != "Subagent task")
