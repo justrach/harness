@@ -195,7 +195,17 @@ impl LoginFlow {
 // ── service ─────────────────────────────────────────────────────────────────
 
 /// Cached usage probe result: the windows (or a remembered miss) + fetch time.
-type CachedUsage = (Option<Vec<AgentUsageWindow>>, Instant);
+type CachedUsage = (Option<UsageSnapshot>, Instant);
+
+/// One live usage probe: rate-limit windows plus the plan label the provider
+/// reported alongside them (Codex's usage endpoint carries a live `plan_type`,
+/// which supersedes the login-time JWT claim — plan changes show up here
+/// without a re-login). Claude's usage endpoint has no plan field.
+#[derive(Clone, Default)]
+struct UsageSnapshot {
+    windows: Vec<AgentUsageWindow>,
+    plan_label: Option<String>,
+}
 
 struct Inner {
     config: AgentAccountsConfig,
@@ -290,9 +300,15 @@ impl AgentAccounts {
                     id: slot.id.clone(),
                     harness,
                     email: Some(slot.profile.email.clone()),
-                    plan_label: slot.profile.plan.clone(),
+                    // A live plan from the usage probe (Codex `plan_type`)
+                    // supersedes the login-time snapshot; fall back to the
+                    // snapshot when the probe wasn't forced or failed.
+                    plan_label: usage
+                        .as_ref()
+                        .and_then(|usage| usage.plan_label.clone())
+                        .or_else(|| slot.profile.plan.clone()),
                     active,
-                    usage_windows: usage.unwrap_or_default(),
+                    usage_windows: usage.map(|usage| usage.windows).unwrap_or_default(),
                     display_name: slot.profile.display_name.clone(),
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
@@ -1030,7 +1046,7 @@ impl AgentAccounts {
         slot: &Slot,
         is_active: bool,
         force: bool,
-    ) -> Option<Vec<AgentUsageWindow>> {
+    ) -> Option<UsageSnapshot> {
         let key = format!("{}:{}", harness_slug(harness), slot.account_key);
         if let Some((usage, at)) = lock(&self.inner.usage_cache).get(&key)
             && at.elapsed() < USAGE_TTL
@@ -1050,7 +1066,11 @@ impl AgentAccounts {
         usage
     }
 
-    async fn claude_usage(&self, slot: &Slot, is_active: bool) -> Option<Vec<AgentUsageWindow>> {
+    async fn claude_usage(
+        &self,
+        slot: &Slot,
+        is_active: bool,
+    ) -> Option<UsageSnapshot> {
         let oauth = slot.credentials.get("claudeAiOauth")?;
         let mut access_token = str_field(oauth, "accessToken")?;
         let expires_at = oauth.get("expiresAt").and_then(|v| v.as_i64());
@@ -1090,10 +1110,13 @@ impl AgentAccounts {
                 });
             }
         }
-        (!windows.is_empty()).then_some(windows)
+        (!windows.is_empty()).then_some(UsageSnapshot {
+            windows,
+            plan_label: None,
+        })
     }
 
-    async fn codex_usage(&self, slot: &Slot) -> Option<Vec<AgentUsageWindow>> {
+    async fn codex_usage(&self, slot: &Slot) -> Option<UsageSnapshot> {
         let tokens = slot.credentials.get("tokens")?;
         // api-key mode has no ChatGPT rate windows.
         let access_token = str_field(tokens, "access_token")?;
@@ -1125,13 +1148,20 @@ impl AgentAccounts {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 windows.push(AgentUsageWindow {
-                    label: if span > 86_400 { "Week" } else { "Session" }.to_string(),
+                    label: codex_window_label(span).to_string(),
                     used_fraction: (used / 100.0) as f32,
                     resets_at: parse_when(w.get("reset_at")),
                 });
             }
         }
-        (!windows.is_empty()).then_some(windows)
+        if windows.is_empty() {
+            return None;
+        }
+        // Live plan ("free"/"plus"/"pro"…) — beats the login-time JWT claim,
+        // so a plan change shows up on the next forced refresh without a
+        // re-login.
+        let plan_label = codex_plan(str_field(&body, "plan_type").as_deref());
+        Some(UsageSnapshot { windows, plan_label })
     }
 
     /// Refresh a saved Claude slot's expired access token so its usage stays
@@ -1374,6 +1404,22 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
+/// the free tier's window is a 30-day month (2_592_000s), Plus runs a 5-hour
+/// primary (~18_000s) with a weekly secondary (604_800s). A bare "> 1 day =
+/// week" rule mislabeled the monthly window "Week"; thresholds in seconds
+/// leave the middle gaps to the nearest label rather than guessing a plan.
+fn codex_window_label(span_seconds: i64) -> &'static str {
+    const DAY: i64 = 86_400;
+    if span_seconds >= 28 * DAY {
+        "Month"
+    } else if span_seconds >= 5 * DAY {
+        "Week"
+    } else {
+        "Session"
+    }
+}
+
 /// Parse a codex `auth.json` (the live one or a fresh login's).
 fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
     if let Some(id_token) = auth
@@ -1507,7 +1553,20 @@ mod tests {
         );
         assert_eq!(claude_plan(Some("free"), None), None);
         assert_eq!(codex_plan(Some("plus")).as_deref(), Some("ChatGPT Plus"));
+        assert_eq!(codex_plan(Some("free")).as_deref(), Some("ChatGPT Free"));
         assert_eq!(codex_plan(None), None);
+    }
+
+    #[test]
+    fn codex_window_labels_track_the_window_span() {
+        // Codex free tier: one 30-day window (observed live:
+        // limit_window_seconds = 2_592_000) — NOT a week.
+        assert_eq!(codex_window_label(2_592_000), "Month");
+        // Plus: 5-hour primary + weekly secondary.
+        assert_eq!(codex_window_label(18_000), "Session");
+        assert_eq!(codex_window_label(604_800), "Week");
+        // Unknown/absent span falls back to the shortest label.
+        assert_eq!(codex_window_label(0), "Session");
     }
 
     #[test]
