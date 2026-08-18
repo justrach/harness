@@ -46,6 +46,7 @@ async fn main() {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     };
     let mut stream = AcpHarness::grok()

@@ -38,6 +38,7 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     }
 }
