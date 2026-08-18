@@ -339,8 +339,9 @@ impl TerminalPanel {
         }
     }
 
-    // ---- embedded (right-pane surface) API — the shell's tab strip drives
-    // ---- these; keys are stable across reorders/closes.
+    // ---- externally managed session API. Project Actions use these helpers
+    // ---- in the bottom drawer; the right-pane host also uses the keyed tab
+    // ---- operations because its surface strip lives in Shell.
 
     /// `(key, title, exited)` for the selected chat's tabs, in tab order.
     pub fn tab_summaries(&self, cx: &App) -> Vec<(u64, SharedString, bool)> {

@@ -56,7 +56,7 @@ Only creation of a new worktree can start the setup Action. Reusing an existing 
 
 The owning engine starts setup inside the same `CreateWorktree` RPC that creates the worktree. Setup runs with the new worktree as its cwd and always receives both `ZERON_PROJECT_ROOT` and `ZERON_WORKTREE_PATH`. The RPC returns after the PTY accepts the command; it does not wait for the command to exit.
 
-Desktop attaches the returned terminal to the newly minted chat, even if another chat becomes selected while the request is in flight. iOS starts setup through the same host-side RPC but does not add a terminal surface in this release.
+Desktop attaches the returned terminal to the bottom terminal drawer of the newly minted chat, even if another chat becomes selected while the request is in flight. Manual Actions use the same bottom drawer. iOS starts setup through the same host-side RPC but does not add a terminal surface in this release.
 
 A failure to open or initialize the setup terminal is returned as `setupError`. The worktree remains available and the first agent turn continues; desktop presents the error as a non-blocking notice.
 
