@@ -27,6 +27,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 mod normalize;
+mod subagent;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ use zeron_proto::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
+use subagent::SubagentTracker;
 
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
@@ -420,6 +422,9 @@ enum Launch {
 pub struct AcpHarness {
     spec: AcpAgentSpec,
     executable: Option<PathBuf>,
+    /// Override of the agent's on-disk sessions root (grok's
+    /// `~/.grok/sessions`), where subagent transcripts are tailed from.
+    sessions_root: Option<PathBuf>,
     /// Grace between `session/cancel` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -439,6 +444,7 @@ impl AcpHarness {
         Self {
             spec,
             executable: None,
+            sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             // Generous: the handshake is local work for every agent
@@ -469,6 +475,14 @@ impl AcpHarness {
     /// Use a fixed agent binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self
+    }
+
+    /// Test seam: tail subagent transcripts from this sessions root instead
+    /// of the agent's real one (`~/.grok/sessions`).
+    #[doc(hidden)]
+    pub fn with_sessions_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.sessions_root = Some(root.into());
         self
     }
 
@@ -1064,6 +1078,7 @@ impl Harness for AcpHarness {
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
             prompt_stall: self.spec.prompt_stall,
+            sessions_root: self.sessions_root.clone(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
@@ -1092,6 +1107,8 @@ struct Session {
     agent_name: &'static str,
     prompt_complete_extension: bool,
     prompt_stall: Option<Duration>,
+    /// Sessions-root override for the subagent transcript tail (tests).
+    sessions_root: Option<PathBuf>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
     interrupt_grace: Duration,
@@ -1336,12 +1353,33 @@ fn config_option_sets(
     sets
 }
 
-/// The events of one `session/update` notification, session-filtered.
-fn session_update_events(params: &Value, session_id: &str) -> Vec<AgentEvent> {
+/// The events of one notification, session-filtered. `session/update` maps
+/// per [`map_update`]; `_x.ai/session_notification` is grok's extension
+/// channel — same `{sessionId, update}` envelope, but its updates (the
+/// `subagent_*` lifecycle) render nothing directly. The subagent tracker sees
+/// both first (spawn/finished correlation + transcript tails); its tagged
+/// events flow from its own tasks, not this return value.
+fn session_update_events(
+    method: &str,
+    params: &Value,
+    session_id: &str,
+    subagents: &mut SubagentTracker,
+) -> Vec<AgentEvent> {
     if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
         return Vec::new();
     }
-    map_update(params.get("update").unwrap_or(&Value::Null))
+    let update = params.get("update").unwrap_or(&Value::Null);
+    match method {
+        "session/update" => {
+            subagents.observe(update);
+            map_update(update)
+        }
+        "_x.ai/session_notification" => {
+            subagents.observe(update);
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Per-turn token usage from a settled `session/prompt` response, when the
@@ -1643,6 +1681,7 @@ async fn run_session(session: Session) {
         agent_name,
         prompt_complete_extension,
         prompt_stall,
+        sessions_root,
         prompt_transform,
         effort_values,
         interrupt_grace,
@@ -1846,6 +1885,10 @@ async fn run_session(session: Session) {
         return;
     }
 
+    // Grok subagent correlation + transcript tails; inert for agents that
+    // never emit the `subagent_*` extension updates.
+    let mut subagents = SubagentTracker::new(session_id.clone(), event_tx.clone(), sessions_root);
+
     // ---- main loop --------------------------------------------------------
     // Prompt-completion settlement state (the prompt-complete extension):
     // one prompt is outstanding at a time, identified by `current_prompt_id`;
@@ -2022,11 +2065,8 @@ async fn run_session(session: Session) {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
-                            let events = if method == "session/update" {
-                                session_update_events(&params, &session_id)
-                            } else {
-                                Vec::new()
-                            };
+                            let events =
+                                session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -2181,11 +2221,8 @@ async fn run_session(session: Session) {
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
-                    let events = if method == "session/update" {
-                        session_update_events(&params, &session_id)
-                    } else {
-                        Vec::new()
-                    };
+                    let events =
+                        session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
                         track_turn_signals(&ev, &mut turn_content_seen, &mut open_tools);
                         if !send(&event_tx, ev).await {
@@ -2296,11 +2333,8 @@ async fn run_session(session: Session) {
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
                                 Incoming::Notification { method, params } => {
-                                    let events = if method == "session/update" {
-                                        session_update_events(&params, &session_id)
-                                    } else {
-                                        Vec::new()
-                                    };
+                                    let events =
+                                        session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
