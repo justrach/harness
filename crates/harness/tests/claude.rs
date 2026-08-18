@@ -45,6 +45,7 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::DangerFullAccess,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     }
 }
@@ -226,7 +227,11 @@ async fn eager_done_forwards_wake_turn_as_second_done() {
         .enumerate()
         .filter_map(|(i, e)| matches!(e, AgentEvent::Done { .. }).then_some(i))
         .collect();
-    assert_eq!(done_positions.len(), 2, "eager done + wake done: {events:?}");
+    assert_eq!(
+        done_positions.len(),
+        2,
+        "eager done + wake done: {events:?}"
+    );
 
     // One SessionStarted total — the wake init is deduped.
     assert_eq!(
@@ -475,7 +480,10 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
     let cli = dir.join("replay.sh");
     std::fs::write(
         &cli,
-        format!("#!/bin/sh\nread -r _first || exit 1\ncat '{}'\n", frames.display()),
+        format!(
+            "#!/bin/sh\nread -r _first || exit 1\ncat '{}'\n",
+            frames.display()
+        ),
     )
     .expect("replayer written");
     #[cfg(unix)]
