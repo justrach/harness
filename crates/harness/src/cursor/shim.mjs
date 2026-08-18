@@ -37,7 +37,10 @@
 // Unknown SDK update kinds are ignored (never fatal): the SDK is beta and
 // its delta union grows; the engine treats a degraded stream as chip-only.
 
+import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
 
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
@@ -52,7 +55,57 @@ try {
 } catch (e) {
   fatal(`@cursor/sdk failed to load: ${e?.message ?? e}`);
 }
-const { Agent, Cursor, FileCredentialStore } = sdk;
+const { Agent, Cursor, FileCredentialStore, JsonlLocalAgentStore } = sdk;
+
+// ---- per-run agent store --------------------------------------------------
+// The SDK's default local store is SQLite keyed by WORKSPACE
+// (`getDefaultSdkStateRoot(cwd)`), designed for one process per workspace.
+// Zeron runs concurrent shims on the same cwd as a matter of course — the
+// chat turn and its title generation start together, and two chats can share
+// a worktree — and the second `Agent.create` dies with "database is locked"
+// (reproduced live, 1.0.28). The shared-root JSONL backend is no better: its
+// writes are only serialized process-WIDE and updates rewrite whole files.
+//
+// So each run gets its OWN JsonlLocalAgentStore directory (one agent per
+// store — the "huge catalog" caveat never applies), and a one-writer marker
+// file maps agentId → store dir so `Agent.resume` from a later process finds
+// it. Agents created before this scheme have no marker and fall back to the
+// SDK default store, which is where they live.
+const STATE_BASE =
+  process.env.ZERON_CURSOR_STATE_DIR || path.join(os.homedir(), ".zeron", "cursor-state");
+
+function agentDirMarker(agentId) {
+  return path.join(STATE_BASE, "by-agent", String(agentId));
+}
+
+function newRunStore() {
+  const dir = path.join(STATE_BASE, "agents", crypto.randomUUID());
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return { dir, store: new JsonlLocalAgentStore(dir) };
+}
+
+function storeForResume(agentId) {
+  try {
+    const dir = fs.readFileSync(agentDirMarker(agentId), "utf8").trim();
+    if (dir && fs.existsSync(dir)) return { dir, store: new JsonlLocalAgentStore(dir) };
+  } catch {
+    // No marker: a pre-isolation agent living in the SDK's default store.
+  }
+  return null;
+}
+
+function rememberAgentDir(agentId, dir) {
+  try {
+    const marker = agentDirMarker(agentId);
+    fs.mkdirSync(path.dirname(marker), { recursive: true, mode: 0o700 });
+    const tmp = `${marker}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, dir);
+    fs.renameSync(tmp, marker);
+  } catch {
+    // Fail soft: the run still works; only a future resume degrades to the
+    // default store (and surfaces as a fresh session, not a crash).
+  }
+}
 
 // ---- models mode ----------------------------------------------------------
 // `node <shim> models`: print the live catalog (`Cursor.models.list()` — no
@@ -231,13 +284,29 @@ function modelSelection(msg) {
 
 async function start(msg) {
   const model = modelSelection(msg);
+  const local = { cwd: msg.cwd || process.cwd(), enableAgentRetries: true };
+  // Isolated per-run store (see the header above). Resume looks the agent's
+  // store up by marker; a markerless (pre-isolation) agent resumes from the
+  // SDK's default store exactly as before.
+  let runDir = null;
+  if (msg.resume) {
+    const found = storeForResume(msg.resume);
+    if (found) {
+      local.store = found.store;
+      runDir = found.dir;
+    }
+  } else {
+    const fresh = newRunStore();
+    local.store = fresh.store;
+    runDir = fresh.dir;
+  }
   const options = {
     model,
     // askQuestion has no public answer channel in this SDK (SDKRequestMessage
     // carries only a request id) — a question would block the run forever.
     // generateImage has nowhere to land in a zeron session (ACP parity).
     disallowedTools: ["askQuestion", "generateImage"],
-    local: { cwd: msg.cwd || process.cwd(), enableAgentRetries: true },
+    local,
   };
   try {
     agent = msg.resume
@@ -256,6 +325,7 @@ async function start(msg) {
     }
     fatal(`cursor agent failed to start: ${e?.message ?? e}`);
   }
+  if (runDir) rememberAgentDir(agent.agentId, runDir);
   out({ ev: "ready", agentId: agent.agentId, model: agent.model?.id ?? model.id });
   await runTurn(msg.prompt ?? "");
 }
