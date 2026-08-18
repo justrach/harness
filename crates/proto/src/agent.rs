@@ -320,6 +320,18 @@ pub enum AgentEvent {
         error: Option<String>,
         session_id: Option<String>,
     },
+    /// An event belonging to a SUBAGENT's nested transcript, attributed to
+    /// the spawning tool call (`parent_tool_use_id` = the parent-feed
+    /// `ToolCall::id` that launched it). Never folded into the parent chat
+    /// doc — the engine routes these to the subagent's own doc; the parent
+    /// keeps only the spawn chip. Additive: old consumers that don't match
+    /// this variant drop the nested traffic, which is the pre-subagent-viz
+    /// behavior.
+    #[serde(rename_all = "camelCase")]
+    Subagent {
+        parent_tool_use_id: String,
+        event: Box<AgentEvent>,
+    },
 }
 
 #[cfg(test)]

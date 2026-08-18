@@ -113,6 +113,9 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    // Hand-drawn bot head (antenna + eyes + ears) in the Solar Linear style
+    // — the embedded set has no bot/robot glyph. Subagent tabs.
+    (BOT, "bot"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),

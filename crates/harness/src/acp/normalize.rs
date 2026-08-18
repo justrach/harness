@@ -415,34 +415,6 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
         .collect()
 }
 
-/// Cursor's `cursor/update_todos` and `cursor/create_plan` carry a `todos`
-/// array (`{id, content, status}`) instead of ACP's `plan`/`entries`. Both
-/// render as the same kind of chip; the caller picks a stable id so repeated
-/// updates refresh in place rather than stacking.
-pub(crate) fn cursor_todo_events(params: &Value, chip_id: &str) -> Vec<AgentEvent> {
-    let Some(todos) = params.get("todos").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let items = todos
-        .iter()
-        .map(|t| TodoItem {
-            text: str_field(t, "content"),
-            done: t.get("status").and_then(Value::as_str) == Some("completed"),
-        })
-        .collect();
-    vec![
-        AgentEvent::ToolCall {
-            id: chip_id.to_owned(),
-            call: ToolCall::Todo { items },
-        },
-        AgentEvent::ToolResult {
-            id: chip_id.to_owned(),
-            is_error: false,
-            output: None,
-            diff: None,
-        },
-    ]
-}
 
 /// `session/request_permission` options (`{optionId, name, kind}`) → the
 /// preferred auto-approve choice: `allow_always` > `allow_once` > first.
