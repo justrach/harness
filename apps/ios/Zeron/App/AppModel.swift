@@ -261,7 +261,10 @@ final class AppModel {
 
     var spaces: [Space] { demo?.spaces ?? workspace?.spaces ?? [] }
 
-    var connected: Bool { demo != nil || workspace?.connected == true }
+    // "Connected" for the header spinner means "server state has reached this
+    // session" — over the socket OR the HTTPS pull (which lands in ~1 RTT and
+    // is the only transport airplane wifi permits).
+    var connected: Bool { demo != nil || workspace?.connected == true || workspace?.synced == true }
 
     var overviewChats: [Chat] {
         if let demo {
@@ -523,12 +526,15 @@ final class AppModel {
         var delay: UInt64 = 0
         var kicked = Set<String>()
         for chat in overviewChats {
-            guard let store = sessionStores[chat.id] else { continue }
+            // Dial-held stores stay held: a kick force-dials, and sweeping 46
+            // of them on every foreground/path flap is the stampede the warm
+            // cap exists to prevent. Held chats reconnect on open.
+            guard let store = sessionStores[chat.id], !store.isDialHeld else { continue }
             kicked.insert(chat.id)
             scheduleKick(store, afterNs: delay)
             delay += 200_000_000
         }
-        for (id, store) in sessionStores where !kicked.contains(id) {
+        for (id, store) in sessionStores where !kicked.contains(id) && !store.isDialHeld {
             scheduleKick(store, afterNs: delay)
             delay += 200_000_000
         }
@@ -608,17 +614,39 @@ final class AppModel {
     /// uplink (and, pre-single-flight, raced N token refreshes), which was
     /// the cold-open "connecting…" stall. Opening a session releases its
     /// hold immediately (sessionStore(for:) above).
+    /// Sessions that keep a live socket without an open view. Everything else
+    /// hydrates from disk but dials on demand: 46 background joins (TLS +
+    /// hello + state each) drowned a 450kbps link for tens of seconds at
+    /// every cold open and network kick, for transcripts nobody was reading —
+    /// sidebar status (Working, presence, titles) rides the registry room, so
+    /// an undialed chat's row stays live regardless, and opening it releases
+    /// its dial instantly.
+    static let warmDialCap = 8
+
     func preloadSessions() {
         guard demo == nil, let config else { return }
         var stagger: UInt64 = 0
+        var released = 0
         for chat in overviewChats where sessionStores[chat.id] == nil {
             let store = SessionStore(chatId: chat.id, config: config)
             store.hostDeviceId = chat.deviceId
             sessionStores[chat.id] = store
             store.start(holdDial: true)
             store.updateRoomGen(chat.roomGen)
+            guard released < Self.warmDialCap else { continue }
+            released += 1
             let delay = stagger
             Task { @MainActor in
+                // The registry (the sidebar the user is looking at) gets the
+                // pipe to itself first: on a 240kbps link, warm chat dials
+                // racing the registry's own handshake+state pushed the
+                // connect spinner from ~1.5s to ~7s (NLC Edge, 2026-08-17).
+                // An open view still dials instantly via releaseDial.
+                let start = DispatchTime.now()
+                while !(self.workspace?.connected ?? false),
+                      DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds < 10_000_000_000 {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
                 if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
                 store.releaseDial()
             }
