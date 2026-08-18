@@ -7,9 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{
-    AcpHarness, CancellationToken, Harness, RunControls, SteerMessage,
-};
+use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, SteeringMode, TodoItem, ToolCall,
     UserInputAnswer,
@@ -43,6 +41,7 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     }
 }
@@ -575,6 +574,13 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
     assert!(hermes.reasoning_levels().is_empty());
 
+    let opencode = AcpHarness::opencode();
+    assert_eq!(opencode.id(), HarnessId::Opencode);
+    assert_eq!(opencode.display_name(), "OpenCode");
+    assert!(opencode.supports_steering());
+    assert_eq!(opencode.steering_mode(), SteeringMode::TurnBoundary);
+    assert!(opencode.reasoning_levels().is_empty());
+
     let pi = AcpHarness::pi();
     assert_eq!(pi.id(), HarnessId::Pi);
     assert_eq!(pi.display_name(), "Pi");
@@ -764,8 +770,9 @@ async fn grok_subagent_lifecycle_tails_the_disk_transcript_into_tagged_events() 
         )
     })
     .expect("tool result tailed");
-    let text = pos(&|e| matches!(e, AgentEvent::TextDelta { text } if text.starts_with("two files")))
-        .expect("mid-run append tailed");
+    let text =
+        pos(&|e| matches!(e, AgentEvent::TextDelta { text } if text.starts_with("two files")))
+            .expect("mid-run append tailed");
     let done = pos(&|e| {
         matches!(
             e,
