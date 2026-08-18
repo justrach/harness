@@ -289,8 +289,8 @@ impl Shell {
                         }),
                 )
             })
-            .children(actions)
             .child(div().flex_1())
+            .children(actions)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
