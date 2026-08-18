@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    fold_event_into_parts, sanitize_tool_call,
+    SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
@@ -1015,6 +1015,49 @@ impl SubagentSink {
         self.dirty = false;
     }
 
+    /// A parent→subagent steer ([`AgentEvent::UserMessage`], tagged): close
+    /// the open assistant segment (it reads Complete above the steer), write
+    /// the steer as its own USER entry, and reset so the next tagged delta
+    /// opens a fresh assistant entry below it — the subagent transcript then
+    /// reads like any steered chat.
+    fn push_user(&mut self, device_id: &str, text: &str) {
+        let rendered = render_parts(&self.folded);
+        let closed = match self.entry_index.take() {
+            Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
+                .finish(&rendered, MessageStatus::Complete),
+            None if !self.folded.is_empty() => {
+                match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
+                    Ok(w) => w.finish(&rendered, MessageStatus::Complete),
+                    Err(e) => Err(e),
+                }
+            }
+            None => Ok(()),
+        };
+        if let Err(err) = closed {
+            tracing::warn!(doc = %self.doc_id, error = %err, "subagent segment close failed");
+        }
+        let entry = SessionMessageEntry {
+            id: new_id(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.to_owned(),
+            }],
+            created_at: now_ms(),
+            device_id: device_id.to_owned(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        if let Err(err) = self.doc.push_message(&entry) {
+            tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
+        }
+        self.entry_id = new_id();
+        self.started_at = now_ms();
+        self.written = Vec::new();
+        self.folded = Vec::new();
+        self.dirty = false;
+    }
+
     /// Final flush + entry finalize; returns the transcript JSON for the
     /// frozen blob (entries as the client renders them).
     fn finish(mut self, device_id: &str, status: MessageStatus) -> Option<String> {
@@ -1539,6 +1582,12 @@ async fn drive_run(
             }
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
+                if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
+                    // A steer splits ENTRIES, not parts — handled at the
+                    // sink level (the fold ignores UserMessage).
+                    sink.push_user(&device_id, text);
+                    continue;
+                }
                 zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
                 if !chip_streaming && done {

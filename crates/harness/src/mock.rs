@@ -348,6 +348,49 @@ impl Harness for MockHarness {
                             text: "Commits land on the 120ms cadence; no commit carried more than one burst.".into(),
                         },
                     ),
+                    // A parent→subagent steer: splits the transcript into a
+                    // user entry + fresh assistant segment (like the claude
+                    // driver's tagged user text blocks).
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::UserMessage {
+                            text: "Also verify the cadence holds while a steer lands mid-burst.".into(),
+                        },
+                    ),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::TextDelta {
+                            text: "Re-running with a mid-burst steer injected.\n\n".into(),
+                        },
+                    ),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::ToolCall {
+                            id: "sub2-steer-burst".into(),
+                            call: zeron_proto::ToolCall::Exec {
+                                command: "cargo test -p zeron-doc cadence_steer -- --nocapture"
+                                    .into(),
+                            },
+                        },
+                    ),
+                    tag("mock-sub-2", resolve("sub2-steer-burst")),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::TextDelta {
+                            text: "Watching the commit log while the burst drains: ".into(),
+                        },
+                    ),
+                    tag("mock-sub-2", AgentEvent::TextDelta { text: "batch 1 clean, ".into() }),
+                    tag("mock-sub-2", AgentEvent::TextDelta { text: "batch 2 clean, ".into() }),
+                    tag("mock-sub-2", AgentEvent::TextDelta { text: "batch 3 clean, ".into() }),
+                    tag("mock-sub-2", AgentEvent::TextDelta { text: "batch 4 clean, ".into() }),
+                    tag("mock-sub-2", AgentEvent::TextDelta { text: "batch 5 clean — ".into() }),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::TextDelta {
+                            text: "every window under 120ms.\n\nSteer landed between commits; the cadence held.".into(),
+                        },
+                    ),
                     tag("mock-sub-2", done),
                 ]
             })
@@ -418,12 +461,27 @@ impl Harness for MockHarness {
                 })
                 .collect(),
         };
-        if delay_ms == 0 {
+        // Dev/testing knob: `ZERON_MOCK_SUBAGENT_DELAY_MS` paces TAGGED
+        // (subagent) events on their own clock — the parent turn settles at
+        // `ZERON_MOCK_DELAY_MS` speed while the background subagents stream
+        // on slowly, which is exactly the eager-done shape live tabs are
+        // observed under (and the only way a rig click can reliably land
+        // inside a subagent's streaming window).
+        let sub_delay_ms = std::env::var("ZERON_MOCK_SUBAGENT_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
+        if delay_ms == 0 && sub_delay_ms.is_none() {
             return Ok(futures::stream::iter(events).boxed());
         }
         Ok(futures::stream::iter(events)
             .then(move |event| async move {
-                tokio::time::sleep(delay).await;
+                let pause = match (&event, sub_delay_ms) {
+                    (Ok(AgentEvent::Subagent { .. }), Some(ms)) => {
+                        std::time::Duration::from_millis(ms)
+                    }
+                    _ => delay,
+                };
+                tokio::time::sleep(pause).await;
                 event
             })
             .boxed())
