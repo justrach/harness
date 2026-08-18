@@ -64,6 +64,7 @@ use crate::agent_accounts::AgentAccounts;
 use crate::auth::Auth;
 use crate::diff_sync::CheckoutDiffSync;
 use crate::doc_host::DocHost;
+use crate::project_actions::ProjectActionsStore;
 use crate::registry::HarnessRegistry;
 use crate::repos::{Repos, home_dir};
 use crate::sessions::SessionsEngine;
@@ -376,6 +377,7 @@ pub struct EngineRpc {
     registry: std::sync::Arc<HarnessRegistry>,
     repos: Repos,
     terminals: Terminals,
+    project_actions: ProjectActionsStore,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
     agent_accounts: AgentAccounts,
@@ -395,6 +397,7 @@ impl EngineRpc {
         registry: std::sync::Arc<HarnessRegistry>,
         repos: Repos,
         terminals: Terminals,
+        project_actions: ProjectActionsStore,
         diff_sync: CheckoutDiffSync,
         uploads: Uploads,
         agent_accounts: AgentAccounts,
@@ -411,6 +414,7 @@ impl EngineRpc {
             registry,
             repos,
             terminals,
+            project_actions,
             diff_sync,
             uploads,
             agent_accounts,
