@@ -108,7 +108,7 @@ impl CursorHarness {
     /// (program, args) for the shim process: the test override, or node
     /// running the shim inside the managed SDK install (installing it on
     /// first use).
-    async fn resolve_shim(&self) -> Result<(PathBuf, Vec<String>), HarnessError> {
+    pub async fn resolve_shim(&self) -> Result<(PathBuf, Vec<String>), HarnessError> {
         if let Some(p) = &self.executable {
             return Ok((p.clone(), Vec::new()));
         }
@@ -123,6 +123,20 @@ impl CursorHarness {
                 .await?;
         crate::adapter_install::launch_for_entry(&shim)
     }
+}
+
+/// A ready-to-spawn command for the shim's LOGIN mode: the SDK's PKCE
+/// browser flow, minting the key into `store_path` (never the live
+/// `~/.cursor/sdk/auth.json` — the engine snapshots the store file as an
+/// account slot). Emits `{"ev":"auth-url"}` then `{"ev":"logged-in"}` /
+/// `{"ev":"fatal"}` JSONL on stdout; kill to cancel.
+pub async fn login_command(store_path: &std::path::Path) -> Result<Command, HarnessError> {
+    let (exe, args) = CursorHarness::default().resolve_shim().await?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(&args);
+    crate::compose_child_path(&mut cmd, &exe);
+    cmd.arg("login").arg(store_path);
+    Ok(cmd)
 }
 
 #[async_trait]
