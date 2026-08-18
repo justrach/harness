@@ -1,5 +1,5 @@
 //! Settings → Agents / accounts (feature-inventory §1.9): provider cards
-//! (Claude Code, Codex) with account rows — email, plan badge, Active, usage
+//! (Claude Code, Codex, Cursor) with account rows — email, plan badge, Active, usage
 //! meters (indigo → amber ≥80% → red ≥95%, reset time), Switch / Forget — plus
 //! the add-account dialogs (paste-code and browser-poll flows) and
 //! account-shaped loading skeletons. Zeron retargets devices from the settings
@@ -112,9 +112,10 @@ pub fn format_reset(resets_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Opt
 
 /// The provider cards, in display order: (harness, name, CLI command — named
 /// in the empty-state copy, zeron settings.agents.tsx `PROVIDERS`).
-pub const PROVIDERS: [(HarnessId, &str, &str); 2] = [
+pub const PROVIDERS: [(HarnessId, &str, &str); 3] = [
     (HarnessId::ClaudeCode, "Claude Code", "claude"),
     (HarnessId::Codex, "Codex", "codex"),
+    (HarnessId::Cursor, "Cursor", "cursor-agent"),
 ];
 
 /// Accounts of one provider, active first (stable otherwise). Pure.
@@ -164,6 +165,7 @@ impl LoginFlow {
         };
         match harness {
             HarnessId::Codex => "Add Codex account",
+            HarnessId::Cursor => "Connect Cursor",
             _ => "Add Claude account",
         }
     }
@@ -1023,21 +1025,28 @@ impl AccountsPage {
                     .into_any_element()
             }
             LoginFlow::Browser {
+                harness,
                 start,
                 message,
                 error,
-                ..
             } => {
                 let has_error = error.is_some();
+                let body = match harness {
+                    HarnessId::Cursor => {
+                        "Finish signing in to Cursor in your browser. This mints a \
+                         zeron-named API key you can revoke any time from Cursor's \
+                         dashboard — it is separate from `cursor-agent login`."
+                    }
+                    _ => {
+                        "Finish signing in to OpenAI in your browser. The new login is \
+                         captured in an isolated profile — your current session is untouched \
+                         until you switch."
+                    }
+                };
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().mt(px(8.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in to OpenAI in your browser. The new login is \
-                         captured in an isolated profile — your current session is untouched \
-                         until you switch.",
-                    )))
+                    .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
                     .child(url_link(
                         "login-open-url-browser",
                         "Reopen the sign-in page",
@@ -1233,6 +1242,7 @@ impl Render for AccountsPage {
                 .map(|(harness, name, _cli)| {
                     let skeleton_id = match harness {
                         HarnessId::Codex => "accounts-skeleton-codex",
+                        HarnessId::Cursor => "accounts-skeleton-cursor",
                         _ => "accounts-skeleton-claude",
                     };
                     div()
@@ -1319,6 +1329,19 @@ impl Render for AccountsPage {
                             .collect();
                         let add_id: SharedString = format!("add-account-{name}").into();
                         let card = widgets::section_card(&theme).mt(px(8.0));
+                        let empty_copy = match harness {
+                            // Cursor's app login is SEPARATE from `cursor-agent
+                            // login` — pointing at the CLI would send users to a
+                            // sign-in that does not light this up.
+                            HarnessId::Cursor => format!(
+                                "{name} isn't connected on this device — connect it to run \
+                                 Cursor sessions."
+                            ),
+                            _ => format!(
+                                "No {name} login detected on this device — sign in \
+                                 with \u{201C}{cli}\u{201D} or add an account."
+                            ),
+                        };
                         let card = if rows.is_empty() {
                             card.child(
                                 div()
@@ -1327,10 +1350,7 @@ impl Render for AccountsPage {
                                     .text_center()
                                     .text_size(px(14.0))
                                     .text_color(theme.text_muted.opacity(0.6))
-                                    .child(SharedString::from(format!(
-                                        "No {name} login detected on this device — sign in \
-                                         with \u{201C}{cli}\u{201D} or add an account."
-                                    ))),
+                                    .child(SharedString::from(empty_copy)),
                             )
                         } else {
                             card.children(rows)
@@ -1419,9 +1439,9 @@ impl Render for AccountsPage {
                     )
                     .child(widgets::page_subtitle(
                         &theme,
-                        "The Claude Code and Codex logins on this device. Zeron detects the \
-                         live session, keeps each account backed up, and can swap between \
-                         them.",
+                        "The Claude Code, Codex, and Cursor logins on this device. Zeron \
+                         detects the live session, keeps each account backed up, and can \
+                         swap between them.",
                     ))
                     .when_some(self.error.clone(), |el, message| {
                         el.child(
