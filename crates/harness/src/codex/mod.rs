@@ -611,6 +611,36 @@ async fn run_session(session: Session) {
                             // passed to the parent path.
                             if let Some(parent_call) = children.get(&nthread).cloned() {
                                 let events: Vec<AgentEvent> = match method.as_str() {
+                                    // The child settling its turn IS the
+                                    // subagent finishing its assignment —
+                                    // the chip's terminal state.
+                                    "turn/completed" => vec![AgentEvent::Done {
+                                        status: if turn_error_message(&params).is_some()
+                                            || params
+                                                .pointer("/turn/status")
+                                                .and_then(Value::as_str)
+                                                == Some("failed")
+                                        {
+                                            DoneStatus::Errored
+                                        } else {
+                                            DoneStatus::Completed
+                                        },
+                                        result: None,
+                                        error: None,
+                                        session_id: Some(nthread.clone()),
+                                    }],
+                                    "turn/failed" => vec![AgentEvent::Done {
+                                        status: DoneStatus::Errored,
+                                        result: None,
+                                        error: turn_error_message(&params),
+                                        session_id: Some(nthread.clone()),
+                                    }],
+                                    "turn/aborted" => vec![AgentEvent::Done {
+                                        status: DoneStatus::Interrupted,
+                                        result: None,
+                                        error: None,
+                                        session_id: Some(nthread.clone()),
+                                    }],
                                     "item/agentMessage/delta" => delta_text(&params)
                                         .map(|text| AgentEvent::TextDelta { text })
                                         .into_iter()

@@ -646,18 +646,41 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                     id,
                     call: decode_tool(name, &args),
                 })],
-                Some("end") => vec![
-                    tag(AgentEvent::ToolCall {
-                        id: id.clone(),
-                        call: decode_tool(name, &args),
-                    }),
-                    tag(AgentEvent::ToolResult {
-                        id,
-                        is_error: frame.get("error").and_then(Value::as_bool) == Some(true),
-                        output: None,
-                        diff: None,
-                    }),
-                ],
+                Some("end") => {
+                    let is_error = frame.get("error").and_then(Value::as_bool) == Some(true);
+                    let mut events = vec![
+                        tag(AgentEvent::ToolCall {
+                            id: id.clone(),
+                            call: decode_tool(name, &args),
+                        }),
+                        tag(AgentEvent::ToolResult {
+                            id: id.clone(),
+                            is_error,
+                            output: None,
+                            diff: None,
+                        }),
+                    ];
+                    // A finished task IS the subagent finishing: the SDK has
+                    // no separate terminal frame for the nested transcript,
+                    // so the spawn tool's end doubles as the tagged Done that
+                    // flips the chip and freezes the subagent doc.
+                    if name == "task" && parent.is_none() {
+                        events.push(AgentEvent::Subagent {
+                            parent_tool_use_id: id,
+                            event: Box::new(AgentEvent::Done {
+                                status: if is_error {
+                                    DoneStatus::Errored
+                                } else {
+                                    DoneStatus::Completed
+                                },
+                                result: None,
+                                error: None,
+                                session_id: None,
+                            }),
+                        });
+                    }
+                    events
+                }
                 _ => Vec::new(),
             }
         }

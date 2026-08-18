@@ -283,20 +283,24 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         // Child message/reasoning deltas DO stream on this wire tagged with
         // the child's threadId (live-verified against codex-cli 0.146.1
         // multi-agent capture) — the subagent transcript is token-level live
-        // without touching the rollout file.
+        // without touching the rollout file. Child TURN ends are the
+        // subagent's terminal signal: `thread/closed` fires only via the
+        // collab close_agent tool, which real fan-outs never call
+        // (live-verified — chips stayed "running" forever without this).
         "item/started"
         | "item/completed"
         | "item/agentMessage/delta"
         | "item/reasoning/textDelta"
         | "item/reasoning/summaryTextDelta"
-        | "error"
-        | "thread/closed" => ChildRoute::Subagent,
-        // Child turn/status bookkeeping: consumed so it can never settle the
-        // PARENT turn (the exact bug class the explicit table exists for).
-        "turn/started"
         | "turn/completed"
         | "turn/failed"
         | "turn/aborted"
+        | "error"
+        | "thread/closed" => ChildRoute::Subagent,
+        // Child turn/status bookkeeping with no subagent meaning: consumed
+        // so it can never settle the PARENT turn (the exact bug class the
+        // explicit table exists for).
+        "turn/started"
         | "thread/status/changed"
         | "thread/tokenUsage/updated"
         // Child chatter with no consumer on this wire.
@@ -475,10 +479,16 @@ mod tests {
         ] {
             assert_eq!(route_child_notification(m), ChildRoute::Subagent, "{m}");
         }
-        // Child turn bookkeeping must never reach the parent turn router.
-        for m in ["turn/started", "turn/completed", "turn/aborted", "turn/failed"] {
-            assert_eq!(route_child_notification(m), ChildRoute::Consumed, "{m}");
+        // Child TURN ENDS are the subagent's terminal signal…
+        for m in ["turn/completed", "turn/aborted", "turn/failed"] {
+            assert_eq!(route_child_notification(m), ChildRoute::Subagent, "{m}");
         }
+        // …while turn/started stays consumed — and NONE of them may reach
+        // the parent turn router.
+        assert_eq!(
+            route_child_notification("turn/started"),
+            ChildRoute::Consumed
+        );
         // Child-owned thread lifecycle would rewrite parent state — consumed.
         for m in ["thread/archived", "thread/compacted", "thread/started"] {
             assert_eq!(route_child_notification(m), ChildRoute::Consumed, "{m}");

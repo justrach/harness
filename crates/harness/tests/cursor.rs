@@ -137,6 +137,15 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
             .any(|e| matches!(e, AgentEvent::ToolCall { id, .. } if id == "s1")),
         "subagent tool leaked into the parent feed: {events:?}"
     );
+    // The task tool's end doubles as the subagent's tagged terminal — the
+    // SDK has no separate frame for it, and without this the chip stays
+    // "running" forever.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == "task1"
+                && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+    )));
 
     assert!(events.contains(&AgentEvent::Usage {
         input_tokens: 11,

@@ -1510,7 +1510,12 @@ async fn drive_run(
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
-            if !sink_known {
+            // A Done with NO sink (a subagent that never streamed — codex
+            // turn ends can beat registration) is chip-only: minting a doc
+            // just to freeze it empty helps no one.
+            let done_only = !sink_known
+                && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            if !sink_known && !done_only {
                 let opened = inner.doc_host().and_then(|host| match host.open(&sub_id) {
                     Ok(handle) => Some(handle.doc_arc()),
                     Err(err) => {

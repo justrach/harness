@@ -672,13 +672,38 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
         "child tool call leaked into the parent feed: {events:?}"
     );
 
-    // thread/closed becomes the child's tagged terminal event.
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AgentEvent::Subagent { parent_tool_use_id, event }
-            if parent_tool_use_id == "call_alpha"
-                && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
-    )));
+    // The child's turn/completed (and later thread/closed) become tagged
+    // terminal events — real fan-outs never call close_agent, so the turn
+    // end is what flips the chip off "running".
+    assert!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if parent_tool_use_id == "call_alpha"
+                        && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+            ))
+            .count()
+            >= 1,
+        "{events:?}"
+    );
+    // The tagged terminal must arrive from turn/completed — BEFORE the
+    // parent delta that follows it in the script (not only at thread/closed).
+    let child_done = events
+        .iter()
+        .position(|e| matches!(
+            e,
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if parent_tool_use_id == "call_alpha"
+                    && matches!(event.as_ref(), AgentEvent::Done { .. })
+        ))
+        .expect("tagged done");
+    let late_parent_delta = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "parent still going"))
+        .expect("parent delta");
+    assert!(child_done < late_parent_delta, "{events:?}");
 }
 
 /// Live smoke against the REAL codex app-server (0.146.x, installed + authed):

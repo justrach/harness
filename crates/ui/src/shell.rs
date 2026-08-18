@@ -5578,6 +5578,20 @@ impl Shell {
                 RightSurface::Subagent(_) => icons::CHAT_ROUND_LINE,
                 _ => icons::TERMINAL,
             };
+            // A live subagent tab swaps its icon for the mini working
+            // spinner (the history fetch button's in-flight recipe) — the
+            // doc's streaming tail entry IS the run's liveness, so the swap
+            // settles by itself when the subagent finishes.
+            let subagent_running = match surface {
+                RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
+                    self.state
+                        .read(cx)
+                        .sub_transcript(&tab.doc_id)
+                        .last()
+                        .is_some_and(|e| e.status == Some(zeron_doc::MessageStatus::Streaming))
+                }),
+                _ => false,
+            };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
             // (same slot, no width jump) — the ✕ only shows while the tab is
             // hovered (user request).
@@ -5657,11 +5671,24 @@ impl Shell {
                                 .items_center()
                                 .justify_center()
                                 .group_hover(group.clone(), |s| s.opacity(0.0))
-                                .child(icon(icon_path).size(px(12.0)).text_color(if is_active {
-                                    theme.text_muted
+                                .child(if subagent_running {
+                                    loaders::mini_gradient_spinner(
+                                        format!("subagent-tab-{ix}"),
+                                        2.0,
+                                        cx.entity_id(),
+                                        cx,
+                                    )
+                                    .into_any_element()
                                 } else {
-                                    theme.text_muted.opacity(0.7)
-                                })),
+                                    icon(icon_path)
+                                        .size(px(12.0))
+                                        .text_color(if is_active {
+                                            theme.text_muted
+                                        } else {
+                                            theme.text_muted.opacity(0.7)
+                                        })
+                                        .into_any_element()
+                                }),
                         )
                         .child(
                             div()

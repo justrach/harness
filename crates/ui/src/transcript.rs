@@ -3439,7 +3439,7 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
-                    return tool_chip(tool, theme);
+                    return tool_chip(tool, theme, cx.entity_id(), cx);
                 }
                 let affordance = affordances[ix].clone();
                 let affordance_h = if affordance.is_some() {
@@ -3516,7 +3516,7 @@ impl Transcript {
                                 group.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme)),
+                            .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -3577,9 +3577,11 @@ impl Transcript {
                             } => {
                                 // The shell hosts the surface — the chip only
                                 // announces which doc (and blob key base) it
-                                // indexes.
+                                // indexes. Same voice as the sidecar rows
+                                // ("Show full output"): the transcript is
+                                // just the bigger payload behind this chip.
                                 let chat_id = self.chat_id.clone().unwrap_or_default();
-                                base.child(SharedString::from("Open subagent ▸"))
+                                base.child(SharedString::from("Show subagent transcript"))
                                     .cursor_pointer()
                                     .hover(|s| s.text_color(theme.text_muted))
                                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -3985,22 +3987,32 @@ fn detail_body(
 /// The chip's content row: icon tile + label + detail line (+ chevron tile
 /// when the chip expands). Shared between the plain chip and the header of an
 /// expandable chip card.
-fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpui::Div {
+///
+/// Spawn chips carry their subagent's lifecycle VISUALLY, in the chip's own
+/// language: while running the detail slot shows the live tail and the mini
+/// working spinner (the sidebar's) pulses at the right; done is the ordinary
+/// quiet chip; failed takes the danger tint — no status words.
+fn chip_header_row(
+    tool: &ToolItem,
+    chevron: Option<bool>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
     let (label, mut detail) = tool_chip_content(&tool.call);
-    // Spawn chips carry the subagent lifecycle: a status suffix, and while
-    // running the one-line tail replaces the (static) call detail — the
-    // closest thing to the subagent's live output without opening its tab.
-    let sub_status = tool
-        .subagent_ref
-        .is_some()
-        .then_some(tool.subagent_status)
-        .flatten();
-    if matches!(sub_status, Some(SubagentStatus::Running))
-        && let Some(tail) = &tool.subagent_tail
-    {
-        detail = tail.to_string();
+    let running = tool.subagent_ref.is_some()
+        && matches!(tool.subagent_status, Some(SubagentStatus::Running));
+    let failed = tool.is_error
+        || (tool.subagent_ref.is_some()
+            && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
+    if running && let Some(tail) = &tool.subagent_tail {
+        // The tail rides the detail slot through the same single-line fold
+        // every chip detail gets (`tool_chip_content` folds its own) — raw
+        // text wraps inside the fixed-height header and spills out of the
+        // card's clip.
+        detail = single_line(tail);
     }
-    let tint = if tool.is_error {
+    let tint = if failed {
         theme.danger
     } else {
         theme.text_muted
@@ -4044,24 +4056,26 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(if tool.is_error {
+                .text_color(if failed {
                     theme.danger
                 } else {
                     theme.text.opacity(0.85)
                 })
                 .child(SharedString::from(detail)),
         )
-        .when_some(sub_status, |row, status| {
-            let (text, color) = match status {
-                SubagentStatus::Running => ("· running", theme.text_faint),
-                SubagentStatus::Done => ("· done", theme.text_faint),
-                SubagentStatus::Failed => ("· failed", theme.danger),
-            };
+        .when(running, |row| {
+            // The sidebar working-row spinner, in the chip's trailing slot —
+            // paint-local (fixed footprint), so it never moves the layout.
             row.child(
-                div()
-                    .flex_none()
-                    .text_color(color)
-                    .child(SharedString::from(text)),
+                div().flex_none().child(crate::loaders::mini_gradient_spinner(
+                    format!(
+                        "subagent-chip-{}",
+                        tool.subagent_ref.as_deref().unwrap_or_default()
+                    ),
+                    2.0,
+                    view,
+                    cx,
+                )),
             )
         })
         .when_some(chevron, |row, open| {
@@ -4084,8 +4098,14 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
 }
 
 /// The header row of an expandable chip card.
-fn chip_header(tool: &ToolItem, open: bool, theme: &Theme) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme)
+fn chip_header(
+    tool: &ToolItem,
+    open: bool,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    chip_header_row(tool, Some(open), theme, view, cx)
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -4103,39 +4123,59 @@ fn title_line(text: &str, max: usize) -> Option<String> {
     Some(out)
 }
 
-/// Tab title for a spawn chip's subagent surface — the tool's own name is
-/// the best label the doc carries (harnesses fold the task description into
-/// it, "Agent: scan repo"). A BARE "Agent"/"Task" (older docs, missing
-/// description) falls back to the call input's description/prompt field
-/// before settling for "Subagent".
+/// Drop a leading "Agent"/"Task" genus (with its `:` and spacing) from a
+/// spawn-title candidate. Only a real word boundary strips — "Taskmaster"
+/// keeps its name. A bare "Agent"/"Task" strips to "" (no context at all).
+fn strip_spawn_prefix(text: &str) -> &str {
+    let t = text.trim();
+    for prefix in ["agent", "task"] {
+        if t.len() >= prefix.len()
+            && t.is_char_boundary(prefix.len())
+            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            let rest = &t[prefix.len()..];
+            if rest.is_empty() {
+                return "";
+            }
+            if rest.starts_with(':') || rest.starts_with(char::is_whitespace) {
+                return rest.trim_start_matches(':').trim();
+            }
+        }
+    }
+    t
+}
+
+/// Tab title for a spawn chip's subagent surface: the BARE task description
+/// ("verify the marker pipeline"). The chip keeps the tool's fuller name —
+/// a fixed-width tab spent on "Agent: " never shows the task, so the genus
+/// is stripped here and the call input's description/prompt fields back up
+/// a bare name (older docs); "Subagent" only as the last resort.
 fn subagent_tab_title(call: &ToolCall) -> SharedString {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
         _ => return "Subagent".into(),
     };
-    let bare = {
-        let name = name.trim();
-        name.is_empty() || name.eq_ignore_ascii_case("agent") || name.eq_ignore_ascii_case("task")
-    };
-    if !bare {
-        if let Some(title) = title_line(name, SUBAGENT_TITLE_MAX) {
+    let candidates = [
+        Some(name),
+        input.and_then(|i| i.get("description")?.as_str()),
+        input.and_then(|i| i.get("prompt")?.as_str()),
+    ];
+    for text in candidates.into_iter().flatten() {
+        if let Some(title) = title_line(strip_spawn_prefix(text), SUBAGENT_TITLE_MAX) {
             return title.into();
         }
     }
-    input
-        .and_then(|input| {
-            ["description", "prompt"]
-                .iter()
-                .find_map(|key| input.get(key)?.as_str())
-        })
-        .and_then(|text| title_line(text, SUBAGENT_TITLE_MAX))
-        .map(|task| SharedString::from(format!("Agent: {task}")))
-        .unwrap_or_else(|| "Subagent".into())
+    "Subagent".into()
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
+fn tool_chip(
+    tool: &ToolItem,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -4163,7 +4203,7 @@ fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .child(chip_header_row(tool, None, theme)),
+                .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
 }
@@ -4989,28 +5029,37 @@ mod tests {
 
     #[test]
     fn subagent_tab_titles() {
-        // Descriptive Unknown names pass through.
+        // The tab is the BARE task — the "Agent:" genus is stripped.
         let named = ToolCall::Unknown {
             name: "Agent: scan repo".into(),
             input: None,
         };
-        assert_eq!(subagent_tab_title(&named).as_ref(), "Agent: scan repo");
-        // A bare "Task"/"Agent" digs the description out of the call input.
+        assert_eq!(subagent_tab_title(&named).as_ref(), "scan repo");
+        // A bare "Task"/"Agent" digs the description out of the call input
+        // (which sheds any genus of its own).
         let bare = ToolCall::Unknown {
             name: "Task".into(),
             input: Some(serde_json::json!({
-                "description": "audit the auth flow",
+                "description": "Agent: audit the auth flow",
                 "prompt": "very long instructions…",
             })),
         };
-        assert_eq!(subagent_tab_title(&bare).as_ref(), "Agent: audit the auth flow");
+        assert_eq!(subagent_tab_title(&bare).as_ref(), "audit the auth flow");
+        // Word boundaries only — a name that merely STARTS with the genus
+        // keeps itself.
+        let compound = ToolCall::Unknown {
+            name: "Taskmaster".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&compound).as_ref(), "Taskmaster");
         // Nothing to derive → the generic label.
         let blank = ToolCall::Unknown {
             name: "agent".into(),
             input: None,
         };
         assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
-        // Absurd lengths cap with an ellipsis.
+        // Absurd lengths cap with an ellipsis; multiline prompts keep only
+        // their first line.
         let long = ToolCall::Unknown {
             name: "x".repeat(120),
             input: None,
