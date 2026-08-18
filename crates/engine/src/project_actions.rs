@@ -3,16 +3,18 @@
 //! Commands are intentionally stored outside the synced workspace registry. The
 //! owning engine is the only authority that can persist or execute them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeron_proto::{ProjectAction, ProjectActionDraft, ProjectActionIcon, ProjectActionsSnapshot};
+use zeron_proto::{
+    ProjectAction, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, ProjectActionsSnapshot,
+};
 
-use crate::EngineError;
+use crate::{EngineError, Terminals};
 
 pub const MAX_PROJECT_ACTIONS: usize = 50;
 pub const MAX_PROJECT_ACTION_NAME_CHARS: usize = 80;
@@ -233,6 +235,34 @@ pub fn preferred_action<'a>(
         .and_then(|id| actions.iter().find(|action| action.id == id))
         .or_else(|| actions.iter().find(|action| !action.run_on_worktree_create))
         .or_else(|| actions.first())
+}
+
+/// Launch a saved Action in a fresh managed terminal using only host-resolved
+/// paths and environment values.
+pub fn launch_project_action(
+    terminals: &Terminals,
+    action: &ProjectAction,
+    project_root: &Path,
+    cwd: &Path,
+    cols: u16,
+    rows: u16,
+) -> Result<ProjectActionRun, EngineError> {
+    let mut environment =
+        HashMap::from([("ZERON_PROJECT_ROOT".to_string(), root_string(project_root))]);
+    if cwd != project_root {
+        environment.insert("ZERON_WORKTREE_PATH".to_string(), root_string(cwd));
+    }
+    let session = terminals.open_with_environment(&root_string(cwd), cols, rows, &environment)?;
+    let input = format!("{}\r", action.command);
+    if let Err(err) = terminals.write_bytes(&session.id, input.as_bytes()) {
+        let _ = terminals.close(&session.id);
+        return Err(err);
+    }
+    Ok(ProjectActionRun {
+        action_id: action.id.clone(),
+        action_name: action.name.clone(),
+        terminal: session,
+    })
 }
 
 fn empty_file() -> ProjectActionsFile {

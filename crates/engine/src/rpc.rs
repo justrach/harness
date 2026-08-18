@@ -160,6 +160,16 @@ struct DeleteProjectActionParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RunProjectActionParams {
+    space_id: String,
+    chat_id: String,
+    action_id: String,
+    cols: u16,
+    rows: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListFoldersParams {
     #[serde(default)]
     path: Option<String>,
@@ -832,6 +842,7 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
             | methods::DELETE_PROJECT_ACTION
+            | methods::RUN_PROJECT_ACTION
             // Checkout diffs are produced on the device holding the checkout.
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::GET_CHECKOUT_DIFF
@@ -1640,6 +1651,53 @@ impl RpcService for EngineRpc {
                     .delete(&space.id, std::path::Path::new(&space.path), &p.action_id)
                     .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
+            }
+            methods::RUN_PROJECT_ACTION => {
+                let p: RunProjectActionParams = parse_params(params)?;
+                let space = self.local_project_action_space(&p.space_id)?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Project chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::Failed(
+                        "Project chat belongs to another device".into(),
+                    ));
+                }
+                if chat.space_id.as_deref() != Some(space.id.as_str()) {
+                    return Err(RpcError::Failed(
+                        "Project chat belongs to another space".into(),
+                    ));
+                }
+                let cwd = chat
+                    .cwd
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| RpcError::Failed("Project chat has no checkout".into()))?;
+                let checkout = self
+                    .repos
+                    .workspace_checkout(std::path::Path::new(&space.path), &cwd)
+                    .await
+                    .ok_or_else(|| {
+                        RpcError::Failed("Project chat checkout is unavailable".into())
+                    })?;
+                let project_root = std::fs::canonicalize(&space.path)
+                    .map_err(|_| RpcError::Failed("Project root is unavailable".into()))?;
+                let action = self
+                    .project_actions
+                    .action(&space.id, std::path::Path::new(&space.path), &p.action_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Project action not found".into()))?;
+                let run = crate::project_actions::launch_project_action(
+                    &self.terminals,
+                    &action,
+                    &project_root,
+                    &checkout,
+                    p.cols,
+                    p.rows,
+                )
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
+                RpcReply::value(&run)
             }
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;

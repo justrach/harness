@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -373,7 +375,7 @@ async fn target_device_id_routes_over_the_relay() {
                 "targetDeviceId": "device-b",
                 "action": {
                     "name": "Lint",
-                    "command": "pnpm lint",
+                    "command": "printf 'remote-action\\n' > action-marker && printf 'remote-action\\n'",
                     "icon": "lint",
                     "runOnWorktreeCreate": true,
                 },
@@ -402,6 +404,74 @@ async fn target_device_id_routes_over_the_relay() {
             .is_empty(),
         "the forwarding engine must not persist the command"
     );
+
+    core_b
+        .workspace
+        .create_chat("chat-actions", Some("space-actions"), None, None, None)
+        .expect("Action chat on B");
+    let run = client
+        .call(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-actions",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("run remote Action");
+    let action_terminal = run["terminal"]["id"]
+        .as_str()
+        .expect("Action terminal id")
+        .to_string();
+    let mut action_stream = client
+        .subscribe(
+            methods::SUBSCRIBE_TERMINAL,
+            serde_json::json!({
+                "terminalId": action_terminal,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("subscribe remote Action");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let item = tokio::time::timeout_at(deadline, action_stream.recv())
+            .await
+            .expect("remote Action output before timeout")
+            .expect("Action stream alive");
+        if item["type"] == "data" {
+            let output = BASE64
+                .decode(item["data"].as_str().expect("Action data"))
+                .expect("Action base64");
+            if String::from_utf8_lossy(&output).contains("remote-action")
+                && project_root.join("action-marker").exists()
+            {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(project_root.join("action-marker")).expect("marker on B"),
+        "remote-action\n"
+    );
+    assert!(
+        !dirs.path().join("a").join("action-marker").exists(),
+        "remote execution must not fall back to A's filesystem"
+    );
+    client
+        .call(
+            methods::CLOSE_TERMINAL,
+            serde_json::json!({
+                "terminalId": action_terminal,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("close remote Action terminal");
 
     let deleted = client
         .call(

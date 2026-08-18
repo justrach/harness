@@ -13,7 +13,9 @@ use zeron_engine::{
     capture_diff_against, capture_turn_diff, merge_base, read_diff_file_text, snapshot_tree,
     working_diff_base,
 };
-use zeron_proto::{GitHistoryRefKind, TerminalEvent};
+use zeron_proto::{
+    GitHistoryRefKind, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, TerminalEvent,
+};
 use zeron_rpc::methods;
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1055,223 @@ async fn terminal_guards_input_size_and_cwd() {
         "oversized input rejected"
     );
     terminals.close(&session.id).expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_actions_run_in_fresh_host_resolved_terminals() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let worktree = tmp.path().join("worktree");
+    init_repo(&repo).await;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "actions-test",
+            worktree.to_str().expect("utf8 worktree path"),
+        ],
+    )
+    .await;
+    let canonical_repo = std::fs::canonicalize(&repo).expect("canonical repo");
+    let canonical_worktree = std::fs::canonicalize(&worktree).expect("canonical worktree");
+
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-actions",
+            &core.device_id,
+            &repo.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space");
+    core.workspace
+        .create_chat("chat-main", Some("space-actions"), None, None, None)
+        .expect("main chat");
+    core.workspace
+        .create_chat(
+            "chat-worktree",
+            Some("space-actions"),
+            None,
+            None,
+            Some(worktree.to_string_lossy().into_owned()),
+        )
+        .expect("worktree chat");
+    let snapshot = core
+        .project_actions
+        .upsert(
+            "space-actions",
+            &repo,
+            None,
+            ProjectActionDraft {
+                name: "Environment".into(),
+                command: concat!(
+                    "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
+                    "\"$ZERON_PROJECT_ROOT\" ",
+                    "\"${ZERON_WORKTREE_PATH-unset}\" ",
+                    "\"$PWD\""
+                )
+                .into(),
+                icon: ProjectActionIcon::Debug,
+                run_on_worktree_create: false,
+            },
+        )
+        .expect("save Action");
+    let action_id = snapshot.actions[0].id.clone();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    let run = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-main",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("run in main checkout");
+    let mut main_rx = core
+        .terminals
+        .subscribe(&run.terminal.id, None)
+        .expect("main replay");
+    let mut main_events = Vec::new();
+    drain_until(&mut main_rx, &mut main_events, |events| {
+        decoded(events).contains("|WT=unset|")
+    })
+    .await;
+    let main_output = decoded(&main_events);
+    assert!(main_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(main_output.contains(&format!("CWD={}", canonical_repo.display())));
+
+    let second = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-main",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("second run");
+    assert_ne!(run.terminal.id, second.terminal.id);
+
+    let worktree_run = client
+        .call_as::<ProjectActionRun>(
+            methods::RUN_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "chatId": "chat-worktree",
+                "actionId": action_id,
+                "cols": 80,
+                "rows": 24,
+            }),
+        )
+        .await
+        .expect("run in worktree");
+    let mut worktree_rx = core
+        .terminals
+        .subscribe(&worktree_run.terminal.id, None)
+        .expect("worktree replay");
+    let mut worktree_events = Vec::new();
+    drain_until(&mut worktree_rx, &mut worktree_events, |events| {
+        decoded(events).contains(&format!("WT={}", canonical_worktree.display()))
+    })
+    .await;
+    let worktree_output = decoded(&worktree_events);
+    assert!(worktree_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(worktree_output.contains(&format!("CWD={}", canonical_worktree.display())));
+
+    core.workspace
+        .create_space(
+            "space-other",
+            &core.device_id,
+            &tmp.path().to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("other space");
+    core.workspace
+        .create_chat("chat-other", Some("space-other"), None, None, None)
+        .expect("other chat");
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-other",
+                    "actionId": action_id,
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("cross-space chat rejected")
+            .to_string()
+            .contains("another space")
+    );
+    let outside = tmp.path().join("outside-actions");
+    std::fs::create_dir(&outside).expect("outside Action cwd");
+    core.workspace
+        .create_chat(
+            "chat-invalid-cwd",
+            Some("space-actions"),
+            None,
+            None,
+            Some(outside.to_string_lossy().into_owned()),
+        )
+        .expect("invalid cwd chat");
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-invalid-cwd",
+                    "actionId": action_id,
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("outside checkout rejected")
+            .to_string()
+            .contains("checkout is unavailable")
+    );
+    assert!(
+        client
+            .call(
+                methods::RUN_PROJECT_ACTION,
+                serde_json::json!({
+                    "spaceId": "space-actions",
+                    "chatId": "chat-main",
+                    "actionId": "missing",
+                    "cols": 80,
+                    "rows": 24,
+                }),
+            )
+            .await
+            .expect_err("missing Action rejected")
+            .to_string()
+            .contains("not found")
+    );
+
+    for terminal_id in [
+        &run.terminal.id,
+        &second.terminal.id,
+        &worktree_run.terminal.id,
+    ] {
+        core.terminals.close(terminal_id).expect("close Action PTY");
+    }
+    core.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
