@@ -471,8 +471,9 @@ impl Shell {
         ) {
             return None;
         }
-        let snapshot = status.snapshot().cloned()?;
+        let snapshot = self.project_actions.visible_snapshot()?;
         let can_run = status.can_run();
+        let unavailable = matches!(status, ProjectActionsStatus::Unavailable { .. });
         let theme = Theme::of(cx).clone();
         let preferred = preferred_action(
             &snapshot.actions,
@@ -535,6 +536,25 @@ impl Shell {
                     }),
                 ),
             );
+        } else if unavailable {
+            let retry = action_segment(&theme, "project-actions-unavailable")
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| {
+                        this.project_actions.menu.note_trigger_press();
+                    }),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)))
+                .child(
+                    icon(icons::DANGER_TRIANGLE)
+                        .size(px(13.0))
+                        .text_color(theme.danger),
+                )
+                .when(show_label, |el| {
+                    el.child(SharedString::from("Actions unavailable"))
+                });
+            control = control.child(retry);
         } else {
             let add = action_segment(&theme, "project-action-add")
                 .cursor_pointer()

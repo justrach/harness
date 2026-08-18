@@ -108,6 +108,31 @@ impl ProjectActionsController {
             .and_then(ProjectActionsStatus::snapshot)
     }
 
+    /// Snapshot used to keep the control recoverable when the first request
+    /// fails before any host state has been cached.
+    pub fn visible_snapshot(&self) -> Option<ProjectActionsSnapshot> {
+        let key = self.active.as_ref()?;
+        match self.active_status()? {
+            ProjectActionsStatus::Ready(snapshot)
+            | ProjectActionsStatus::Saving(snapshot)
+            | ProjectActionsStatus::Unavailable {
+                snapshot: Some(snapshot),
+                ..
+            } => Some(snapshot.clone()),
+            ProjectActionsStatus::Unavailable { snapshot: None, .. } => {
+                Some(ProjectActionsSnapshot {
+                    space_id: key.space_id.clone(),
+                    actions: Vec::new(),
+                    importable_actions: Vec::new(),
+                    project_file_issue: None,
+                })
+            }
+            ProjectActionsStatus::Idle
+            | ProjectActionsStatus::Loading
+            | ProjectActionsStatus::Unsupported => None,
+        }
+    }
+
     pub fn begin_load(&mut self, key: &ProjectActionsKey) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
@@ -297,5 +322,25 @@ mod tests {
         controller.mark_unavailable(&key, "offline".into());
         assert_eq!(controller.active_snapshot().unwrap().actions[0].id, "dev");
         assert!(!controller.active_status().unwrap().can_run());
+    }
+
+    #[test]
+    fn initial_transport_error_keeps_a_visible_retry_surface() {
+        let mut controller = ProjectActionsController::default();
+        let key = ProjectActionsKey {
+            device_id: "remote".into(),
+            space_id: "project".into(),
+        };
+        controller.activate(Some(key.clone()));
+        let generation = controller.begin_load(&key);
+        assert!(controller.accept_load(&key, generation, Err("remote routing unavailable".into())));
+
+        assert!(controller.active_snapshot().is_none());
+        let visible = controller
+            .visible_snapshot()
+            .expect("unavailable control remains visible");
+        assert_eq!(visible.space_id, key.space_id);
+        assert!(visible.actions.is_empty());
+        assert!(visible.importable_actions.is_empty());
     }
 }
