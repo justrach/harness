@@ -658,7 +658,21 @@ async fn run_session(session: Session) {
                                         };
                                         let item =
                                             params.get("item").cloned().unwrap_or(Value::Null);
-                                        map_item(phase, &item)
+                                        // Same paragraphing as the parent:
+                                        // a child's completed message ends
+                                        // a paragraph in its transcript.
+                                        if phase == Phase::Completed
+                                            && matches!(
+                                                item_type(&item),
+                                                "agentMessage" | "agent_message"
+                                            )
+                                        {
+                                            vec![AgentEvent::TextDelta {
+                                                text: "\n\n".into(),
+                                            }]
+                                        } else {
+                                            map_item(phase, &item)
+                                        }
                                     }
                                     "error" => vec![AgentEvent::Error {
                                         message: params
@@ -761,6 +775,23 @@ async fn run_session(session: Session) {
                                 if !streamed_text.contains(id)
                                     && !text.is_empty()
                                     && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
+                                {
+                                    break 'main;
+                                }
+                                // Codex emits several assistant messages per
+                                // turn (commentary, final answer); their
+                                // deltas carry no separator, so consecutive
+                                // messages rendered concatenated
+                                // ("…waiting.Beta's 90-second…" — live
+                                // finding). Close each message as a
+                                // paragraph.
+                                if !send(
+                                    &event_tx,
+                                    AgentEvent::TextDelta {
+                                        text: "\n\n".into(),
+                                    },
+                                )
+                                .await
                                 {
                                     break 'main;
                                 }
