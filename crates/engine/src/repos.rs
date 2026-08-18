@@ -18,8 +18,8 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use zeron_proto::{
-    FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit, GitHistoryPage, GitHistoryRef,
-    GitHistoryRefKind, Repo, RepoRef, Worktree,
+    DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit, GitHistoryPage,
+    GitHistoryRef, GitHistoryRefKind, Repo, RepoRef, Worktree,
 };
 
 use crate::EngineError;
@@ -32,6 +32,9 @@ const PATH_EXISTS_TIMEOUT: Duration = Duration::from_secs(2);
 const FOLDER_LIST_TIMEOUT: Duration = Duration::from_secs(6);
 /// Cap on returned folder entries (bounds response size).
 const FOLDER_LIST_MAX_ENTRIES: usize = 500;
+/// Cap on returned drives (a machine with more mounts than this is a server
+/// farm, not a laptop picking a project folder).
+const DRIVE_LIST_MAX_ENTRIES: usize = 50;
 /// File mentions should remain responsive even in very large checkouts.
 const FILE_SEARCH_MAX_RESULTS: usize = 8;
 /// A dead network mount must not leave the composer search spinning forever.
@@ -879,6 +882,23 @@ impl Repos {
             )),
         }
     }
+
+    // ── ListDrives ──────────────────────────────────────────────────────────
+
+    /// Mounted drives/volumes — the browse roots beyond home. Same disposable
+    /// worker + wall-clock ceiling as `ListFolders`: a dead network mount can
+    /// wedge the probe (macOS `canonicalize` stats each volume), and that must
+    /// fail this listing, not the runtime.
+    pub async fn list_drives(&self) -> Result<Vec<DriveEntry>, EngineError> {
+        let worker = disposable_worker("drive-list", list_drives_blocking);
+        match tokio::time::timeout(FOLDER_LIST_TIMEOUT, worker).await {
+            Ok(Some(drives)) => Ok(drives),
+            Ok(None) => Err(EngineError::Other("drive listing worker exited".into())),
+            Err(_) => Err(EngineError::Other(
+                "drive listing timed out on the device".into(),
+            )),
+        }
+    }
 }
 
 struct CancelOnDrop(std::sync::Arc<AtomicBool>);
@@ -939,6 +959,133 @@ fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
         entries,
         truncated,
     })
+}
+
+/// The blocking drive walk. Best-effort everywhere: the list is navigation
+/// sugar for the folder browser, so an unreadable source means fewer rows,
+/// never an error (home always remains reachable without it).
+fn list_drives_blocking() -> Vec<DriveEntry> {
+    #[cfg(target_os = "macos")]
+    let drives = macos_drives();
+    #[cfg(target_os = "linux")]
+    let drives = linux_drives(&std::fs::read_to_string("/proc/mounts").unwrap_or_default());
+    #[cfg(windows)]
+    let drives = windows_drives();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let drives = Vec::new();
+    finish_drives(drives)
+}
+
+/// `/Volumes` holds every mounted volume; the boot volume is a symlink to `/`,
+/// which `canonicalize` resolves — so the system drive arrives under its real
+/// name ("Macintosh HD") and the fallback "System" row never shows on macOS.
+#[cfg(target_os = "macos")]
+fn macos_drives() -> Vec<DriveEntry> {
+    let mut drives: Vec<DriveEntry> = Vec::new();
+    if let Ok(read) = std::fs::read_dir("/Volumes") {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            // Follows the symlink — a dangling one (mid-eject) drops out here.
+            if !path.is_dir() {
+                continue;
+            }
+            let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+            drives.push(DriveEntry {
+                name,
+                path: resolved.to_string_lossy().to_string(),
+            });
+        }
+    }
+    drives
+}
+
+/// External/removable mounts from `/proc/mounts` — udisks and friends mount
+/// under `/media` and `/run/media`, manual mounts conventionally under `/mnt`
+/// (WSL's drive letters included). Plus "System" for `/`: any drive mounted
+/// elsewhere stays reachable by browsing from the root.
+#[cfg(any(target_os = "linux", test))]
+fn linux_drives(mounts: &str) -> Vec<DriveEntry> {
+    let mut drives: Vec<DriveEntry> = Vec::new();
+    for line in mounts.lines() {
+        let Some(point) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let point = unescape_mount_point(point);
+        let external = point.starts_with("/media/")
+            || point.starts_with("/run/media/")
+            || point == "/mnt"
+            || point.starts_with("/mnt/");
+        if !external {
+            continue;
+        }
+        let name = point
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Drive")
+            .to_string();
+        drives.push(DriveEntry { name, path: point });
+    }
+    drives.push(DriveEntry {
+        name: "System".into(),
+        path: "/".into(),
+    });
+    drives
+}
+
+/// Probe the drive letters. `exists` on a wedged network letter can hang —
+/// covered by the caller's disposable-worker timeout.
+#[cfg(windows)]
+fn windows_drives() -> Vec<DriveEntry> {
+    ('A'..='Z')
+        .filter_map(|letter| {
+            let path = format!("{letter}:\\");
+            std::path::Path::new(&path).exists().then(|| DriveEntry {
+                name: format!("{letter}:"),
+                path,
+            })
+        })
+        .collect()
+}
+
+/// Dedupe by mount point (first mention wins — the named row beats a
+/// late generic duplicate), system root first, then name order, capped.
+fn finish_drives(mut drives: Vec<DriveEntry>) -> Vec<DriveEntry> {
+    let mut seen = HashSet::new();
+    drives.retain(|d| seen.insert(d.path.clone()));
+    drives.sort_by(|a, b| {
+        (a.path != "/")
+            .cmp(&(b.path != "/"))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    drives.truncate(DRIVE_LIST_MAX_ENTRIES);
+    drives
+}
+
+/// `/proc/mounts` octal-escapes whitespace in mount points (`\040` = space).
+#[cfg(any(target_os = "linux", test))]
+fn unescape_mount_point(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let digits: String = chars.clone().take(3).collect();
+            if digits.len() == 3
+                && let Ok(code) = u8::from_str_radix(&digits, 8)
+            {
+                out.push(code as char);
+                chars.nth(2);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Case-insensitive subsequence score. Lower is better: adjacent and earlier
@@ -1218,6 +1365,69 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_drives_take_media_and_mnt_mounts_system_first() {
+        let mounts = "\
+sysfs /sys sysfs rw 0 0
+/dev/nvme0n1p2 / ext4 rw 0 0
+tmpfs /run tmpfs rw 0 0
+/dev/sda1 /media/wing/T7\\040Shield exfat rw 0 0
+/dev/sdb1 /run/media/wing/Backup ext4 rw 0 0
+/dev/sdc1 /mnt/scratch ext4 rw 0 0
+/dev/nvme0n1p2 /var/lib/docker ext4 rw 0 0
+";
+        let drives = finish_drives(linux_drives(mounts));
+        let rows: Vec<(&str, &str)> = drives
+            .iter()
+            .map(|d| (d.name.as_str(), d.path.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("System", "/"),
+                ("Backup", "/run/media/wing/Backup"),
+                ("scratch", "/mnt/scratch"),
+                ("T7 Shield", "/media/wing/T7 Shield"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finish_drives_dedupes_by_mount_point_keeping_the_first_name() {
+        let drives = finish_drives(vec![
+            DriveEntry {
+                name: "Macintosh HD".into(),
+                path: "/".into(),
+            },
+            DriveEntry {
+                name: "System".into(),
+                path: "/".into(),
+            },
+        ]);
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].name, "Macintosh HD");
+    }
+
+    #[test]
+    fn mount_point_unescape_handles_octal_and_lone_backslash() {
+        assert_eq!(unescape_mount_point("/media/a\\040b"), "/media/a b");
+        assert_eq!(unescape_mount_point("/media/tab\\011x"), "/media/tab\tx");
+        assert_eq!(unescape_mount_point("/media/plain"), "/media/plain");
+        assert_eq!(unescape_mount_point("/media/tail\\"), "/media/tail\\");
+    }
+
+    #[tokio::test]
+    async fn list_drives_resolves_on_this_platform() {
+        let data = tempfile::tempdir().unwrap();
+        let repos =
+            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
+        // Content is machine-dependent; the call must succeed and dedupe.
+        let drives = repos.list_drives().await.unwrap();
+        let mut paths: Vec<&String> = drives.iter().map(|d| &d.path).collect();
+        paths.dedup();
+        assert_eq!(paths.len(), drives.len());
+    }
 
     #[test]
     fn fuzzy_score_matches_a_path_subsequence() {
