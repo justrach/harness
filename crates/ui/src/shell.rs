@@ -5012,6 +5012,14 @@ impl Shell {
     /// The jump pill itself — shared between the conversation overlay and
     /// the subagent pane so both read as one control. `anim_key`/`hover_key`
     /// must be distinct per instance (they key global animation state).
+    ///
+    /// Glass-forward like the composer pill it floats near: a backdrop blur
+    /// under the floating-card tint ([`Theme::glass_overlay`]), hover
+    /// brightening via the standard glass wash painted OVER the tint —
+    /// mixing the tint TOWARD the wash would thin the pill on hover, the
+    /// exact see-through regression the old opaque pill's comment warned
+    /// about. Opaque appearances keep the raised-surface treatment
+    /// (`frosted` passes through there anyway).
     fn jump_pill(
         &self,
         anim_key: &'static str,
@@ -5020,48 +5028,61 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx);
-        motion::dialog_in(
-            anim_key,
-            div()
-                .id(anim_key)
-                .h(px(30.0))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .shadow_md()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .pl(px(11.0))
-                .pr(px(13.0))
-                .cursor_pointer()
-                // Hover must BRIGHTEN the opaque pill, never replace it
-                // with a translucent wash (a 10%-alpha bg here made the
-                // pill go see-through on hover — user-reported), and it
-                // fades over the CSS transition-colors 150ms, not snaps.
-                .bg(motion::hover_blend(
-                    hover_key,
-                    theme.surface_raised,
-                    theme.surface_raised_hover,
-                ))
-                .on_hover(motion::hover_listener(hover_key))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-                }))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("↓")),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .child(SharedString::from("Scroll to bottom")),
-                ),
-        )
-        .into_any_element()
+        let glass = theme.is_glass();
+        let base = if glass {
+            theme.glass_overlay()
+        } else {
+            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
+        };
+        let wash = if glass {
+            motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
+        } else {
+            gpui::transparent_black()
+        };
+        let pill = div()
+            .id(anim_key)
+            .h(px(30.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .cursor_pointer()
+            .bg(base)
+            .on_hover(motion::hover_listener(hover_key))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
+            }))
+            .child(
+                // The hover wash rides an inner full-height layer so it
+                // composites over the tint (a div has one bg).
+                div()
+                    .h_full()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(11.0))
+                    .pr(px(13.0))
+                    .bg(wash)
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("↓")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from("Scroll to bottom")),
+                    ),
+            );
+        // Frost OUTSIDE the entry animation (the composer pill's exact
+        // composition): one scene layer — blur, then the pill's quads, then
+        // glyphs — so the pill always composes over the transcript content
+        // scrolling under it, and never loses its washes to the kind-sorted
+        // draw order (frost.rs module docs).
+        crate::frost::frosted(15.0, 16.0, motion::dialog_in(anim_key, pill)).into_any_element()
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
