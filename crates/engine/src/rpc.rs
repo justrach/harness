@@ -58,7 +58,8 @@ use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
 use zeron_proto::{
-    ChatConfig, EngineInfo, HarnessId, ProjectActionDraft, Space, ToolCall, WorkspaceScope,
+    ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, ProjectActionDraft, Space, ToolCall,
+    WorkspaceScope,
 };
 use zeron_rpc::{LinkCache, RpcError, RpcReply, RpcService, methods, parse_params};
 
@@ -125,6 +126,8 @@ struct CreateWorktreeParams {
     #[serde(alias = "repo")]
     repo_path: String,
     branch: String,
+    #[serde(default)]
+    space_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1602,12 +1605,73 @@ impl RpcService for EngineRpc {
             }
             methods::CREATE_WORKTREE => {
                 let p: CreateWorktreeParams = parse_params(params)?;
+                let setup_space = match p.space_id.as_deref() {
+                    Some(space_id) => {
+                        let space = self.local_project_action_space(space_id)?;
+                        let space_root = std::fs::canonicalize(&space.path)
+                            .map_err(|_| RpcError::Failed("Project root is unavailable".into()))?;
+                        let repo_root = std::fs::canonicalize(&p.repo_path).map_err(|_| {
+                            RpcError::Failed("Worktree repository is unavailable".into())
+                        })?;
+                        if space_root != repo_root {
+                            return Err(RpcError::Failed(
+                                "Worktree repository does not match project space".into(),
+                            ));
+                        }
+                        Some((space, space_root))
+                    }
+                    None => None,
+                };
                 let worktree = self
                     .repos
                     .create_worktree(std::path::Path::new(&p.repo_path), &p.branch)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&worktree)
+                let mut outcome = CreateWorktreeOutcome {
+                    worktree,
+                    setup_action: None,
+                    setup_error: None,
+                };
+                if let Some((space, project_root)) = setup_space {
+                    match self
+                        .project_actions
+                        .setup_action(&space.id, std::path::Path::new(&space.path))
+                    {
+                        Ok(Some(action)) => {
+                            let worktree_root = std::fs::canonicalize(&outcome.worktree.path)
+                                .unwrap_or_else(|_| outcome.worktree.path.clone().into());
+                            match crate::project_actions::launch_project_setup_action(
+                                &self.terminals,
+                                &action,
+                                &project_root,
+                                &worktree_root,
+                                80,
+                                24,
+                            ) {
+                                Ok(run) => outcome.setup_action = Some(run),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        space_id = %space.id,
+                                        worktree = %outcome.worktree.path,
+                                        error = %err,
+                                        "failed to start project setup Action"
+                                    );
+                                    outcome.setup_error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                space_id = %space.id,
+                                error = %err,
+                                "failed to resolve project setup Action"
+                            );
+                            outcome.setup_error = Some(err.to_string());
+                        }
+                    }
+                }
+                RpcReply::value(&outcome)
             }
             methods::DELETE_WORKTREE => {
                 let p: DeleteWorktreeParams = parse_params(params)?;

@@ -3166,6 +3166,15 @@ pub enum ComposerEvent {
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
     Sent { chat_id: String, message_id: String },
+    /// A new worktree's host-side setup attempt completed after its chat id
+    /// was minted. The shell attaches an already-open terminal to that exact
+    /// chat, even when the user has selected another chat in the meantime.
+    WorktreeSetup {
+        chat_id: String,
+        setup_action: Option<zeron_proto::ProjectActionRun>,
+        setup_error: Option<String>,
+        target_device_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4609,6 +4618,8 @@ impl Composer {
                 }
                 .unwrap_or_else(|| ".".to_string());
                 let mut worktree_cwd: Option<String> = None;
+                let mut setup_action: Option<zeron_proto::ProjectActionRun> = None;
+                let mut setup_error: Option<String> = None;
                 // The picked ref rides createChat so the session footer names
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
@@ -4630,6 +4641,14 @@ impl Composer {
                                     "repoPath": repo_path,
                                     "branch": base,
                                 });
+                                if let (Some(space_id), Some(object)) =
+                                    (&space_id, params.as_object_mut())
+                                {
+                                    object.insert(
+                                        "spaceId".into(),
+                                        serde_json::Value::String(space_id.clone()),
+                                    );
+                                }
                                 if space_remote
                                     && let Some(object) = params.as_object_mut()
                                 {
@@ -4643,10 +4662,13 @@ impl Composer {
                                     .call(methods::CREATE_WORKTREE, params)
                                     .await
                                     .map_err(|e| format!("Worktree failed: {e}"))?;
-                                let worktree: zeron_proto::Worktree = serde_json::from_value(value)
+                                let outcome: zeron_proto::CreateWorktreeOutcome =
+                                    serde_json::from_value(value)
                                     .map_err(|e| format!("Worktree reply malformed: {e}"))?;
-                                cwd = worktree.path.clone();
-                                worktree_cwd = Some(worktree.path);
+                                cwd = outcome.worktree.path.clone();
+                                worktree_cwd = Some(outcome.worktree.path);
+                                setup_action = outcome.setup_action;
+                                setup_error = outcome.setup_error;
                             }
                         }
                     }
@@ -4699,6 +4721,19 @@ impl Composer {
                     }
                     if let Err(err) = engine.client().call(methods::MUTATE, mutate).await {
                         tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                    }
+                    if setup_action.is_some() || setup_error.is_some() {
+                        let setup_chat_id = chat_id.clone();
+                        let setup_target = host_device_id.clone();
+                        this.update(cx, |_, cx| {
+                            cx.emit(ComposerEvent::WorktreeSetup {
+                                chat_id: setup_chat_id,
+                                setup_action,
+                                setup_error,
+                                target_device_id: setup_target,
+                            });
+                        })
+                        .ok();
                     }
                 }
 

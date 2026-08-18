@@ -14,7 +14,8 @@ use zeron_engine::{
     working_diff_base,
 };
 use zeron_proto::{
-    GitHistoryRefKind, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, TerminalEvent,
+    CreateWorktreeOutcome, GitHistoryRefKind, ProjectActionDraft, ProjectActionIcon,
+    ProjectActionRun, TerminalEvent,
 };
 use zeron_rpc::methods;
 
@@ -1397,6 +1398,28 @@ async fn rpc_dispatch_for_m5_methods() {
         Some(&*tmp.path().to_string_lossy())
     );
 
+    // A legacy CreateWorktree caller does not trigger setup, even when one is
+    // configured for the project.
+    core.project_actions
+        .upsert(
+            "space-term",
+            &repo_dir,
+            None,
+            ProjectActionDraft {
+                name: "Setup".into(),
+                command: concat!(
+                    "sleep 2; ",
+                    "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
+                    "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
+                    "| tee .zeron-setup-env"
+                )
+                .into(),
+                icon: ProjectActionIcon::Configure,
+                run_on_worktree_create: true,
+            },
+        )
+        .expect("save setup Action");
+
     // CreateWorktree / DeleteWorktree.
     let worktree = client
         .call(
@@ -1416,6 +1439,12 @@ async fn rpc_dispatch_for_m5_methods() {
             .starts_with("zeron/")
     );
     assert!(worktree["checkoutId"].is_string());
+    assert!(worktree.get("setupAction").is_none());
+    assert!(
+        !PathBuf::from(&worktree_path)
+            .join(".zeron-setup-env")
+            .exists()
+    );
     let deleted = client
         .call(
             methods::DELETE_WORKTREE,
@@ -1425,6 +1454,82 @@ async fn rpc_dispatch_for_m5_methods() {
         .expect("DeleteWorktree");
     assert_eq!(deleted["ok"], true);
     assert!(!PathBuf::from(&worktree_path).exists());
+
+    core.workspace
+        .create_space(
+            "space-wrong-root",
+            &core.device_id,
+            &tmp.path().to_string_lossy(),
+            None,
+            false,
+        )
+        .expect("mismatched space");
+    assert!(
+        client
+            .call(
+                methods::CREATE_WORKTREE,
+                serde_json::json!({
+                    "repoPath": repo_path,
+                    "branch": "main",
+                    "spaceId": "space-wrong-root",
+                }),
+            )
+            .await
+            .expect_err("mismatched space rejected")
+            .to_string()
+            .contains("does not match")
+    );
+
+    // A space-aware caller gets the already-open setup terminal without
+    // waiting for the command to finish.
+    let started = tokio::time::Instant::now();
+    let outcome = client
+        .call_as::<CreateWorktreeOutcome>(
+            methods::CREATE_WORKTREE,
+            serde_json::json!({
+                "repoPath": repo_path,
+                "branch": "main",
+                "spaceId": "space-term",
+            }),
+        )
+        .await
+        .expect("CreateWorktree with setup");
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "CreateWorktree waited for the setup command"
+    );
+    assert!(outcome.setup_error.is_none());
+    let setup = outcome.setup_action.expect("setup terminal");
+    let mut setup_rx = core
+        .terminals
+        .subscribe(&setup.terminal.id, None)
+        .expect("setup replay");
+    let mut setup_events = Vec::new();
+    let canonical_repo = std::fs::canonicalize(&repo_dir).expect("canonical setup repo");
+    let canonical_worktree =
+        std::fs::canonicalize(&outcome.worktree.path).expect("canonical setup worktree");
+    drain_until(&mut setup_rx, &mut setup_events, |events| {
+        decoded(events).contains(&format!("ROOT={}", canonical_repo.display()))
+    })
+    .await;
+    let setup_output = decoded(&setup_events);
+    assert!(setup_output.contains(&format!("ROOT={}", canonical_repo.display())));
+    assert!(setup_output.contains(&format!("WT={}", canonical_worktree.display())));
+    assert!(setup_output.contains(&format!("CWD={}", canonical_worktree.display())));
+    assert!(canonical_worktree.join(".zeron-setup-env").exists());
+    core.terminals
+        .close(&setup.terminal.id)
+        .expect("close setup terminal");
+    client
+        .call(
+            methods::DELETE_WORKTREE,
+            serde_json::json!({
+                "repoPath": repo_path,
+                "worktreePath": outcome.worktree.path,
+            }),
+        )
+        .await
+        .expect("delete setup worktree");
 
     // WatchCheckoutDiffs: streams the current (empty) diff set immediately.
     let mut diffs_stream = client

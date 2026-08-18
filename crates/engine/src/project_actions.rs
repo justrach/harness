@@ -247,9 +247,42 @@ pub fn launch_project_action(
     cols: u16,
     rows: u16,
 ) -> Result<ProjectActionRun, EngineError> {
+    launch_project_action_with_environment(terminals, action, project_root, cwd, cols, rows, false)
+}
+
+/// Launch the setup Action for a newly created worktree. Setup always exposes
+/// both reserved paths, even if a future repository backend returns aliases.
+pub fn launch_project_setup_action(
+    terminals: &Terminals,
+    action: &ProjectAction,
+    project_root: &Path,
+    worktree: &Path,
+    cols: u16,
+    rows: u16,
+) -> Result<ProjectActionRun, EngineError> {
+    launch_project_action_with_environment(
+        terminals,
+        action,
+        project_root,
+        worktree,
+        cols,
+        rows,
+        true,
+    )
+}
+
+fn launch_project_action_with_environment(
+    terminals: &Terminals,
+    action: &ProjectAction,
+    project_root: &Path,
+    cwd: &Path,
+    cols: u16,
+    rows: u16,
+    always_include_worktree: bool,
+) -> Result<ProjectActionRun, EngineError> {
     let mut environment =
         HashMap::from([("ZERON_PROJECT_ROOT".to_string(), root_string(project_root))]);
-    if cwd != project_root {
+    if always_include_worktree || cwd != project_root {
         environment.insert("ZERON_WORKTREE_PATH".to_string(), root_string(cwd));
     }
     let session = terminals.open_with_environment(&root_string(cwd), cols, rows, &environment)?;

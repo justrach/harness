@@ -984,7 +984,7 @@ impl Shell {
         // reply's space below it (notes-app parity).
         let composer_events = cx.subscribe(&composer, {
             let transcript = transcript.clone();
-            move |_this: &mut Shell, _, event: &ComposerEvent, cx| match event {
+            move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,
@@ -993,6 +993,18 @@ impl Shell {
                         t.on_own_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::WorktreeSetup {
+                    chat_id,
+                    setup_action,
+                    setup_error,
+                    target_device_id,
+                } => this.attach_worktree_setup(
+                    chat_id.clone(),
+                    setup_action.clone(),
+                    setup_error.clone(),
+                    target_device_id.clone(),
+                    cx,
+                ),
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
