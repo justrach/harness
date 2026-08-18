@@ -38,7 +38,7 @@ use gpui::{
     Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
 use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
@@ -239,6 +239,16 @@ pub struct ToolItem {
     pub output_bytes: Option<u64>,
     /// Sidecar key of the full diff (doc carries only per-file stats).
     pub diff_ref: Option<SharedString>,
+    /// The spawned SUBAGENT's doc id — the chip IS the index (there is no
+    /// listing endpoint); with it the chip offers "Open subagent".
+    pub subagent_ref: Option<SharedString>,
+    /// Subagent lifecycle, distinct from `resolved` (eager-done: the spawn
+    /// tool's own result lands while the subagent still runs).
+    pub subagent_status: Option<SubagentStatus>,
+    /// One-line live tail — LEGACY docs only (new runs stopped folding it;
+    /// per-delta header rewrites read as noise). Never rendered; still
+    /// fingerprinted so an old doc's chips re-splice correctly.
+    pub subagent_tail: Option<SharedString>,
 }
 
 /// A chip's expandable detail payload.
@@ -630,6 +640,20 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         // Sidecar refs arriving after the resolve tick must re-splice too —
         // they add the fetch affordance without changing the detail payload.
         acc.push(t.output_ref.is_some() as u8 | (t.diff_ref.is_some() as u8) << 1);
+        // Subagent lifecycle mutates the chip in place (status flips, the
+        // live tail grows) — hash it so the row re-splices on every change.
+        acc.push(
+            t.subagent_ref.is_some() as u8
+                | match t.subagent_status {
+                    None => 0,
+                    Some(SubagentStatus::Running) => 1 << 1,
+                    Some(SubagentStatus::Done) => 2 << 1,
+                    Some(SubagentStatus::Failed) => 3 << 1,
+                },
+        );
+        if let Some(tail) = &t.subagent_tail {
+            acc.extend_from_slice(tail.as_bytes());
+        }
     }
     acc.push(auto_open as u8);
     fnv1a(&acc)
@@ -729,6 +753,9 @@ pub fn rows_for_entry(
                 output_bytes,
                 diff_ref,
                 diff_stats,
+                subagent_ref,
+                subagent_status,
+                subagent_tail,
                 ..
             } => {
                 pending_group.push(ToolItem {
@@ -741,6 +768,9 @@ pub fn rows_for_entry(
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
+                    subagent_ref: subagent_ref.clone().map(SharedString::from),
+                    subagent_status: *subagent_status,
+                    subagent_tail: subagent_tail.clone().map(SharedString::from),
                 });
                 group_last_part_ix = part_ix;
             }
@@ -1068,6 +1098,23 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
 /// open detail whose full payload lives in the sidecar (chat2-sync A3).
 pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 
+/// What an open chip's [`BLOB_AFFORDANCE_HEIGHT`] row offers. One slot, so
+/// the analytic height sums stay a single `is_some` check.
+#[derive(Clone)]
+enum ChipAffordance {
+    /// Lazy sidecar fetch ("Show full output/diff").
+    Blob {
+        blob_ref: SharedString,
+        label: SharedString,
+    },
+    /// The spawn chip's subagent transcript, opened as a right-pane tab.
+    Subagent {
+        doc_id: SharedString,
+        title: SharedString,
+        frozen: bool,
+    },
+}
+
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
 /// the harness bounds outputs at 4KiB, so this is rarely reached).
 const FULL_OUTPUT_MAX_LINES: usize = 400;
@@ -1361,6 +1408,19 @@ pub struct Transcript {
     list: ListState,
     rows: Vec<Row>,
     chat_id: Option<String>,
+    /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
+    /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
+    /// the instance is READ-ONLY — no echoes, no own-turn hold, no working
+    /// trailer, and no global attachment protection (that set is shared with
+    /// the primary transcript and overwritten wholesale).
+    doc_override: Option<String>,
+    /// One-shot "open at the latest content" for UNPINNED (frozen) override
+    /// instances: rows land ASYNC after the tab opens (watch replay / blob
+    /// fetch), so the end-scroll fires on the first non-empty sync, then
+    /// never again — landing at the end and FOLLOWING it are different
+    /// states, and the user owns the viewport from there. Pinned instances
+    /// don't need it (the pin branch already opens at the end).
+    land_end_pending: bool,
     row_cache: HashMap<String, CachedRows>,
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
@@ -1468,11 +1528,68 @@ enum BlobFetch {
     Ready(Arc<ToolDetail>),
 }
 
+/// Shell-facing events (the transcript itself hosts no surfaces).
+#[derive(Debug, Clone)]
+pub enum TranscriptEvent {
+    /// A spawn chip's "Open subagent" affordance: open the subagent's
+    /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
+    /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
+    /// the subagent finished — try the blob before watching the doc.
+    OpenSubagent {
+        chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+    },
+}
+
+impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
+
 impl Transcript {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::build(state, None, true, cx)
+    }
+
+    /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
+    /// caller starts the feed (`watch_subagent_doc` or the frozen snapshot);
+    /// this instance only renders whatever lands under `doc_id`. `follow` =
+    /// the doc is live: engage the end-follow pin from the start. Either
+    /// way the tab OPENS at the latest content — a frozen transcript lands
+    /// at the end once, unpinned, and free-scrolls from there.
+    pub fn for_doc(
+        state: Entity<AppState>,
+        doc_id: String,
+        follow: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(state, Some(doc_id), follow, cx)
+    }
+
+    fn build(
+        state: Entity<AppState>,
+        doc_override: Option<String>,
+        follow: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
-        let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW_PX));
+        //
+        // Override instances align TOP: a subagent transcript reads like a
+        // fresh notes page — entries anchored at the top, streaming growing
+        // into the empty space below, never rising from the pane's bottom.
+        // Top alignment gets that structurally (a short list rests at the
+        // top with no reservation pad), and the PIN machinery still runs on
+        // top of it for end-follow: the spring is purely distance-based, and
+        // the glue trap it was built around is Bottom-only — layout
+        // materializes a Top list's past-end offset to a CONCRETE position
+        // every frame (gpui list.rs: only `Bottom` re-glues to the `None`
+        // sentinel), so a parked spring can't re-glue and hard-track growth.
+        let alignment = if doc_override.is_some() {
+            ListAlignment::Top
+        } else {
+            ListAlignment::Bottom
+        };
+        let list = ListState::new(0, alignment, px(OVERDRAW_PX));
         let weak = cx.weak_entity();
         list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
             weak.update(cx, |this: &mut Transcript, cx| {
@@ -1481,11 +1598,25 @@ impl Transcript {
             .ok();
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        // The rail is sized for the conversation column; a narrow right-pane
+        // tab has no width gate driving it, so override instances skip it.
+        let rail_enabled = doc_override.is_none();
+        // `follow` is the initial pin: the primary transcript always opens
+        // pinned; an override instance pins only while its doc is LIVE (a
+        // frozen transcript reads top-down, free-scrolling). Short content
+        // is at-end by definition (distance 0), so the pin is invisible
+        // until streaming overflows the pane — then it follows, releases on
+        // wheel-up, and resticks/jumps exactly like the main transcript.
+        let pinned = follow;
         let mut this = Self {
             state,
             list,
             rows: Vec::new(),
-            chat_id: None,
+            // Pre-set so `sync` never sees an attach edge — an override
+            // instance must not reset (or re-pin) on selection changes.
+            chat_id: doc_override.clone(),
+            land_end_pending: doc_override.is_some() && !follow,
+            doc_override,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
@@ -1498,7 +1629,7 @@ impl Transcript {
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
-            pinned: true,
+            pinned,
             own_turn: None,
             own_turn_kick: false,
             own_turn_scheduled: false,
@@ -1509,7 +1640,7 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
-            rail_enabled: true,
+            rail_enabled,
             bottom_clearance: 0.0,
             rail_hover: None,
             hovered_entry: None,
@@ -2186,11 +2317,21 @@ impl Transcript {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let (selected, entries, echoes) = {
             let s = self.state.read(cx);
-            (
-                s.selected_chat.clone(),
-                s.transcript.clone(),
-                s.pending_echoes().to_vec(),
-            )
+            match &self.doc_override {
+                // Pinned to a subagent doc: `selected` equals `chat_id` by
+                // construction, so the attach/reset branch below never fires,
+                // and echoes stay empty (nothing is ever sent from here).
+                Some(doc_id) => (
+                    Some(doc_id.clone()),
+                    s.sub_transcript(doc_id).to_vec(),
+                    Vec::new(),
+                ),
+                None => (
+                    s.selected_chat.clone(),
+                    s.transcript.clone(),
+                    s.pending_echoes().to_vec(),
+                ),
+            }
         };
 
         let attached = selected != self.chat_id;
@@ -2299,6 +2440,16 @@ impl Transcript {
         }
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
+        if self.land_end_pending && !self.rows.is_empty() {
+            // First content for an unpinned override tab: land at the end.
+            // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
+            // next layout materializes) — a pixel scroll off `max_offset`
+            // would land short here, since the freshly-spliced rows are
+            // still unmeasured. Short content clamps back to the top under
+            // Top alignment, so "end" and "top" coincide there.
+            self.land_end_pending = false;
+            self.list.scroll_to_end();
+        }
         if self.own_turn.is_some() {
             // Appending a reply moves the runway from the previous last row to
             // the new one. Both measurements must be invalidated because the
@@ -2428,6 +2579,11 @@ impl Transcript {
     /// budget pressure evicted thumbnails still on screen (the list caches
     /// rendered rows, so a visible image's LRU tick goes stale).
     fn refresh_protected_attachments(&self, cx: &Context<Self>) {
+        // The protected set is GLOBAL and replaced wholesale — an override
+        // instance writing it would clobber the primary transcript's keys.
+        if self.doc_override.is_some() {
+            return;
+        }
         let devices = self.attachment_device_ids(cx);
         let mut keys = std::collections::HashSet::new();
         for row in &self.rows {
@@ -2446,6 +2602,12 @@ impl Transcript {
     /// device (uploads targeted it) plus this device (zeron's
     /// `uniqueIds([attachmentDeviceId, m.device_id])`).
     fn attachment_device_ids(&self, cx: &Context<Self>) -> Vec<String> {
+        // `selected_chat_row` belongs to the PRIMARY transcript's chat — an
+        // override instance has no chat row, so it claims no devices (its
+        // thumbnails degrade to placeholders instead of guessing).
+        if self.doc_override.is_some() {
+            return Vec::new();
+        }
         let state = self.state.read(cx);
         let mut ids = Vec::new();
         if let Some(chat) = state.selected_chat_row() {
@@ -2651,6 +2813,11 @@ impl Transcript {
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // A subagent doc has no Session row — `indicator_for` would read the
+        // PARENT chat's live state into a frozen tab.
+        if self.doc_override.is_some() {
+            return None;
+        }
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
         let (sending, elapsed_secs) = {
@@ -2715,9 +2882,15 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
-        // rests below the chrome it fades under.
+        // rests below the chrome it fades under. The right pane already pads
+        // for the titlebar — an override instance's first row keeps only the
+        // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
-            Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            if self.doc_override.is_some() {
+                GAP_TURN
+            } else {
+                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+            }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
@@ -3136,9 +3309,21 @@ impl Transcript {
         // upgrade), then the output — a fetched ref hands the affordance to
         // the NEXT unfetched one instead of retiring it (both must stay
         // reachable when a tool has both).
-        let affordances: Vec<Option<(SharedString, SharedString)>> = tools
+        let affordances: Vec<Option<ChipAffordance>> = tools
             .iter()
             .map(|tool| {
+                // A spawn chip's transcript wins the slot outright — the
+                // subagent doc is the richer record of what the tool did.
+                if let Some(doc_id) = &tool.subagent_ref {
+                    return Some(ChipAffordance::Subagent {
+                        doc_id: doc_id.clone(),
+                        title: subagent_tab_title(&tool.call),
+                        frozen: matches!(
+                            tool.subagent_status,
+                            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                        ),
+                    });
+                }
                 // The currently-displayed ref (same recency rule as
                 // `details` above): its affordance is spent; any OTHER
                 // Ready ref stays offered as a no-fetch toggle.
@@ -3176,7 +3361,10 @@ impl Transcript {
                             None => format!("Show full {what}"),
                         },
                     };
-                    return Some((blob_ref.clone(), SharedString::from(label)));
+                    return Some(ChipAffordance::Blob {
+                        blob_ref: blob_ref.clone(),
+                        label: SharedString::from(label),
+                    });
                 }
                 None
             })
@@ -3288,7 +3476,7 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
-                    return tool_chip(tool, theme);
+                    return tool_chip(tool, theme, cx.entity_id(), cx);
                 }
                 let affordance = affordances[ix].clone();
                 let affordance_h = if affordance.is_some() {
@@ -3365,7 +3553,7 @@ impl Transcript {
                                 group.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme)),
+                            .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -3391,12 +3579,8 @@ impl Transcript {
                             )
                             .child(detail_body(detail, detail_highlights[ix].clone(), theme));
                     }
-                    if let Some((blob_ref, label)) = affordance {
-                        let loading = matches!(
-                            self.blob_details.get(&blob_ref),
-                            Some(BlobFetch::Loading(_))
-                        );
-                        let mut row = div()
+                    if let Some(affordance) = affordance {
+                        let base = div()
                             .id(SharedString::from(format!("{key}-blob")))
                             .h(px(BLOB_AFFORDANCE_HEIGHT))
                             .flex_none()
@@ -3404,17 +3588,47 @@ impl Transcript {
                             .flex()
                             .items_center()
                             .text_size(px(10.5))
-                            .text_color(theme.text_faint)
-                            .child(label);
-                        if !loading {
-                            row = row
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.text_muted))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.spawn_blob_fetch(blob_ref.clone(), cx);
-                                    cx.notify();
-                                }));
-                        }
+                            .text_color(theme.text_faint);
+                        let row = match affordance {
+                            ChipAffordance::Blob { blob_ref, label } => {
+                                let loading = matches!(
+                                    self.blob_details.get(&blob_ref),
+                                    Some(BlobFetch::Loading(_))
+                                );
+                                let mut row = base.child(label);
+                                if !loading {
+                                    row = row
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text_muted))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.spawn_blob_fetch(blob_ref.clone(), cx);
+                                            cx.notify();
+                                        }));
+                                }
+                                row
+                            }
+                            ChipAffordance::Subagent {
+                                doc_id,
+                                title,
+                                frozen,
+                            } => {
+                                // The shell hosts the surface — the chip only
+                                // announces which doc (and blob key base) it
+                                // indexes.
+                                let chat_id = self.chat_id.clone().unwrap_or_default();
+                                base.child(SharedString::from("Open subagent"))
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.text_muted))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(TranscriptEvent::OpenSubagent {
+                                            chat_id: chat_id.clone(),
+                                            doc_id: doc_id.to_string(),
+                                            title: title.to_string(),
+                                            frozen,
+                                        });
+                                    }))
+                            }
+                        };
                         card = card.child(row);
                     }
                 }
@@ -3710,6 +3924,11 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        // Subagent spawns (the "Agent[: <description>]" Unknown convention
+        // every native driver uses) carry the bot, matching their tab.
+        ToolCall::Unknown { name, .. } if name == "Agent" || name.starts_with("Agent: ") => {
+            crate::icons::BOT
+        }
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
@@ -3808,9 +4027,26 @@ fn detail_body(
 /// The chip's content row: icon tile + label + detail line (+ chevron tile
 /// when the chip expands). Shared between the plain chip and the header of an
 /// expandable chip card.
-fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpui::Div {
+///
+/// Spawn chips carry their subagent's lifecycle VISUALLY, in the chip's own
+/// language: while running the mini working spinner (the sidebar's) pulses
+/// at the right of the ordinary static detail; done is the ordinary quiet
+/// chip; failed takes the danger tint — no status words, no live text (a
+/// header rewriting itself per stream delta read as noise — user report).
+fn chip_header_row(
+    tool: &ToolItem,
+    chevron: Option<bool>,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
     let (label, detail) = tool_chip_content(&tool.call);
-    let tint = if tool.is_error {
+    let running = tool.subagent_ref.is_some()
+        && matches!(tool.subagent_status, Some(SubagentStatus::Running));
+    let failed = tool.is_error
+        || (tool.subagent_ref.is_some()
+            && matches!(tool.subagent_status, Some(SubagentStatus::Failed)));
+    let tint = if failed {
         theme.danger
     } else {
         theme.text_muted
@@ -3854,13 +4090,28 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_color(if tool.is_error {
+                .text_color(if failed {
                     theme.danger
                 } else {
                     theme.text.opacity(0.85)
                 })
                 .child(SharedString::from(detail)),
         )
+        .when(running, |row| {
+            // The sidebar working-row spinner, in the chip's trailing slot —
+            // paint-local (fixed footprint), so it never moves the layout.
+            row.child(
+                div().flex_none().child(crate::loaders::mini_gradient_spinner(
+                    format!(
+                        "subagent-chip-{}",
+                        tool.subagent_ref.as_deref().unwrap_or_default()
+                    ),
+                    2.0,
+                    view,
+                    cx,
+                )),
+            )
+        })
         .when_some(chevron, |row, open| {
             // Output/diff affordance: a chevron tile matching the group
             // header's, flipped while the detail body is open.
@@ -3881,12 +4132,84 @@ fn chip_header_row(tool: &ToolItem, chevron: Option<bool>, theme: &Theme) -> gpu
 }
 
 /// The header row of an expandable chip card.
-fn chip_header(tool: &ToolItem, open: bool, theme: &Theme) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme)
+fn chip_header(
+    tool: &ToolItem,
+    open: bool,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
+    chip_header_row(tool, Some(open), theme, view, cx)
+}
+
+/// Max chars a subagent tab title keeps. The strip chip is fixed-width and
+/// truncates visually, but the derived title also rides drag ghosts and any
+/// future pickers — cap it at the source.
+const SUBAGENT_TITLE_MAX: usize = 40;
+
+/// First line of `text`, trimmed, capped at `max` chars with an ellipsis.
+fn title_line(text: &str, max: usize) -> Option<String> {
+    let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
+    let mut out: String = line.chars().take(max).collect();
+    if line.chars().count() > max {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Drop a leading "Agent"/"Task" genus (with its `:` and spacing) from a
+/// spawn-title candidate. Only a real word boundary strips — "Taskmaster"
+/// keeps its name. A bare "Agent"/"Task" strips to "" (no context at all).
+fn strip_spawn_prefix(text: &str) -> &str {
+    let t = text.trim();
+    for prefix in ["agent", "task"] {
+        if t.len() >= prefix.len()
+            && t.is_char_boundary(prefix.len())
+            && t[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            let rest = &t[prefix.len()..];
+            if rest.is_empty() {
+                return "";
+            }
+            if rest.starts_with(':') || rest.starts_with(char::is_whitespace) {
+                return rest.trim_start_matches(':').trim();
+            }
+        }
+    }
+    t
+}
+
+/// Tab title for a spawn chip's subagent surface: the BARE task description
+/// ("verify the marker pipeline"). The chip keeps the tool's fuller name —
+/// a fixed-width tab spent on "Agent: " never shows the task, so the genus
+/// is stripped here and the call input's description/prompt fields back up
+/// a bare name (older docs); "Subagent" only as the last resort.
+fn subagent_tab_title(call: &ToolCall) -> SharedString {
+    let (name, input) = match call {
+        ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
+        ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
+        _ => return "Subagent".into(),
+    };
+    let candidates = [
+        Some(name),
+        input.and_then(|i| i.get("description")?.as_str()),
+        input.and_then(|i| i.get("prompt")?.as_str()),
+    ];
+    for text in candidates.into_iter().flatten() {
+        if let Some(title) = title_line(strip_spawn_prefix(text), SUBAGENT_TITLE_MAX) {
+            return title.into();
+        }
+    }
+    "Subagent".into()
 }
 
 /// A plain (non-expandable) chip: guide rail + bordered card.
-fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
+fn tool_chip(
+    tool: &ToolItem,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
     div()
         .h(px(CHIP_HEIGHT))
         .w_full()
@@ -3914,7 +4237,7 @@ fn tool_chip(tool: &ToolItem, theme: &Theme) -> AnyElement {
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
-                .child(chip_header_row(tool, None, theme)),
+                .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
 }
@@ -3933,10 +4256,31 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
         if let MessagePart::Tool {
-            is_error, resolved, ..
+            is_error,
+            resolved,
+            subagent_ref,
+            subagent_status,
+            subagent_tail,
+            ..
         } = part
         {
             acc.push(*is_error as u8 | (*resolved as u8) << 1);
+            // Subagent lifecycle mutates a COMPLETED entry in place (eager-
+            // done: the spawn resolves while the subagent runs on) and
+            // `byte_len` above doesn't cover these fields — hash them or the
+            // cached rows never refresh on status/tail changes.
+            acc.push(
+                subagent_ref.is_some() as u8
+                    | match subagent_status {
+                        None => 0,
+                        Some(SubagentStatus::Running) => 1 << 1,
+                        Some(SubagentStatus::Done) => 2 << 1,
+                        Some(SubagentStatus::Failed) => 3 << 1,
+                    },
+            );
+            if let Some(tail) = subagent_tail {
+                acc.extend_from_slice(tail.as_bytes());
+            }
         }
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
@@ -3992,6 +4336,31 @@ impl Render for Transcript {
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
         // outlet — an overlay here would be tinted by the fade.
+        let list_el = list(self.list.clone(), cx.processor(Self::render_row))
+            .size_full()
+            .with_sizing_behavior(gpui::ListSizingBehavior::Auto);
+        let content: AnyElement = if self.doc_override.is_some() {
+            // The primary transcript's fade lives on the SHELL's outlet
+            // wrapper (it spans the titlebar/composer chrome); an override
+            // instance owns its own — top edge only (nothing overlays the
+            // pane's bottom), gated on real overflow so a short top-anchored
+            // transcript shows no fade. Gated here rather than at paint via
+            // a ScrollHandle (the list isn't one); scrolls re-render this
+            // entity, so the flag can't go stale.
+            let scrolled_under_top = {
+                let max = f32::from(self.list.max_offset_for_scrollbar().y);
+                max - self.distance_from_bottom() > 1.0
+            };
+            crate::edge_fade::edge_faded(
+                Theme::TRANSCRIPT_FADE_BAND,
+                scrolled_under_top,
+                false,
+                list_el,
+            )
+            .into_any_element()
+        } else {
+            list_el.into_any_element()
+        };
         let root = div()
             .relative()
             .size_full()
@@ -4000,11 +4369,7 @@ impl Render for Transcript {
             // selection registry before any row's text elements re-register
             // (document paint order = selection order; see markdown/render.rs).
             .child(crate::markdown::render::selection_frame_reset())
-            .child(
-                list(self.list.clone(), cx.processor(Self::render_row))
-                    .size_full()
-                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
-            )
+            .child(content)
             .child(rail);
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
@@ -4269,6 +4634,9 @@ mod tests {
             output_bytes: None,
             diff_ref: None,
             diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
         }
     }
 
@@ -4628,6 +4996,9 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
         };
         let edit = |p: &str| ToolItem {
             call: ToolCall::EditFile {
@@ -4642,6 +5013,9 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
         };
         let tools = vec![
             exec("ls"),
@@ -4672,6 +5046,9 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
             },
             ToolItem {
                 call: ToolCall::Glob {
@@ -4684,6 +5061,9 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
             },
             ToolItem {
                 call: ToolCall::WebSearch { query: "q".into() },
@@ -4694,9 +5074,62 @@ mod tests {
                 output_ref: None,
                 output_bytes: None,
                 diff_ref: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
+    }
+
+    #[test]
+    fn subagent_tab_titles() {
+        // The tab is the BARE task — the "Agent:" genus is stripped.
+        let named = ToolCall::Unknown {
+            name: "Agent: scan repo".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&named).as_ref(), "scan repo");
+        // A bare "Task"/"Agent" digs the description out of the call input
+        // (which sheds any genus of its own).
+        let bare = ToolCall::Unknown {
+            name: "Task".into(),
+            input: Some(serde_json::json!({
+                "description": "Agent: audit the auth flow",
+                "prompt": "very long instructions…",
+            })),
+        };
+        assert_eq!(subagent_tab_title(&bare).as_ref(), "audit the auth flow");
+        // Word boundaries only — a name that merely STARTS with the genus
+        // keeps itself.
+        let compound = ToolCall::Unknown {
+            name: "Taskmaster".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&compound).as_ref(), "Taskmaster");
+        // Nothing to derive → the generic label.
+        let blank = ToolCall::Unknown {
+            name: "agent".into(),
+            input: None,
+        };
+        assert_eq!(subagent_tab_title(&blank).as_ref(), "Subagent");
+        // Absurd lengths cap with an ellipsis; multiline prompts keep only
+        // their first line.
+        let long = ToolCall::Unknown {
+            name: "x".repeat(120),
+            input: None,
+        };
+        let title = subagent_tab_title(&long);
+        assert_eq!(title.chars().count(), SUBAGENT_TITLE_MAX + 1);
+        assert!(title.ends_with('…'));
+        // Non-spawn-shaped calls stay generic.
+        assert_eq!(
+            subagent_tab_title(&ToolCall::Exec {
+                command: "ls".into()
+            })
+            .as_ref(),
+            "Subagent"
+        );
     }
 
     #[test]

@@ -115,6 +115,9 @@ icon_assets![
     (INFO_CIRCLE, "info-circle"),
     (DANGER_TRIANGLE, "danger-triangle"),
     (CHAT_ROUND_LINE, "chat-round-line"),
+    // Hand-drawn bot head (antenna + eyes + ears) in the Solar Linear style
+    // — the embedded set has no bot/robot glyph. Subagent tabs.
+    (BOT, "bot"),
     // Hand-drawn bell + speaker in the Solar Linear style (like the terminal/
     // plus/return ports) — the embedded set has neither.
     (BELL, "bell"),
@@ -124,6 +127,13 @@ icon_assets![
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
+    // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
+    // restore stacked squares) in the same style as `close` — drawn for the
+    // client-side-decoration window controls; no system glyph font exists on
+    // Linux the way Segoe Fluent Icons does on Windows.
+    (WINDOW_MINIMIZE, "window-minimize"),
+    (WINDOW_MAXIMIZE, "window-maximize"),
+    (WINDOW_RESTORE, "window-restore"),
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),

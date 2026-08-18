@@ -24,6 +24,12 @@ final class WorkspaceStore {
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
     private(set) var changeRequestSnapshots: [ChangeRequestWatchKey: CheckoutChangeRequestStatus] = [:]
     private(set) var connected = false
+    /// True once ANY transport delivered server state this session (socket
+    /// state frame or HTTPS pull). Drives the "connecting" spinner: with the
+    /// pull-first bootstrap this flips in ~1 round trip, while the socket
+    /// spends 4+ on TLS + upgrade + hello — and on networks that strip WS
+    /// upgrades it's the only flag that ever would.
+    private(set) var synced = false
 
     /// Presence entries older than this are expired (mirrors the Rust
     /// client's 30s TTL, measured from RECEIPT — beats carry the sender's
@@ -67,6 +73,90 @@ final class WorkspaceStore {
                                     delegate: delegate)
         self.client = client
         Task { await client.start() }
+        // Pull-first bootstrap + poll-while-down: one HTTPS GET syncs the
+        // sidebar in ~1 RTT while the socket dials, and while the socket is
+        // down (airplane wifi strips WS upgrades) a 20s poll keeps rows,
+        // presence, and pending writes flowing. The GET doubles as our
+        // presence beat, so this device stays visible to peers.
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            await self?.pullDelta()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                if !self.connected {
+                    await self.pushPendingOverHTTP()
+                    await self.pullDelta()
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+
+    /// The WS hello's delta answer over plain HTTPS, applied through the
+    /// exact state path the socket uses.
+    private func pullDelta() async {
+        guard let request = await config.registryRowsRequest(since: doc.helloCursor) else {
+            roomLog.warning("registry: http pull skipped — no URL (token unavailable)")
+            return
+        }
+        let fetched = try? await URLSession.shared.data(for: request)
+        guard let (data, response) = fetched, let http = response as? HTTPURLResponse else {
+            roomLog.warning("registry: http pull transport error; will retry")
+            return
+        }
+        guard http.statusCode == 200 else {
+            roomLog.warning("registry: http pull http=\(http.statusCode); will retry")
+            return
+        }
+        struct PullBody: Decodable {
+            var seq: UInt64
+            var full: Bool
+            var gcFloor: UInt64?
+            var rows: [RegistryRow]
+            var presence: [String: Int64]?
+        }
+        guard let body = try? JSONDecoder().decode(PullBody.self, from: data) else {
+            roomLog.warning("registry: http pull body unparseable")
+            return
+        }
+        handle(.state(seq: body.seq, full: body.full, gcFloor: body.gcFloor ?? 0,
+                      rows: body.rows, presence: body.presence ?? [:]))
+    }
+
+    /// Flush pending op batches over HTTPS while the socket is down (LWW
+    /// clocks make replays apply zero ops).
+    private func pushPendingOverHTTP() async {
+        struct PushBody: Encodable {
+            var batch: String
+            var ops: [RegistryOp]
+        }
+        struct AckBody: Decodable {
+            var batch: String
+            var seq: UInt64
+            var applied: UInt64?
+        }
+        let batches = doc.takePushable()
+        guard !batches.isEmpty else { return }
+        for pending in batches {
+            guard var request = await config.registryPushRequest(),
+                  let body = try? JSONEncoder().encode(PushBody(batch: pending.batch,
+                                                                ops: pending.ops)) else { break }
+            request.httpBody = body
+            let result = try? await URLSession.shared.data(for: request)
+            let status = (result?.1 as? HTTPURLResponse)?.statusCode
+            guard let (data, _) = result, status == 200,
+                  let ack = try? JSONDecoder().decode(AckBody.self, from: data) else {
+                roomLog.warning("registry: http push failed (http=\(status ?? -1)); will retry")
+                // takePushable marked these in flight; nothing clears that
+                // until the next socket disconnect — un-mark so the next
+                // cycle (HTTP or WS) retries them.
+                doc.markDisconnected()
+                break
+            }
+            handle(.ack(batch: ack.batch, seq: ack.seq, applied: ack.applied ?? 0))
+        }
     }
 
     /// Backgrounding hook: persist immediately.
@@ -84,6 +174,8 @@ final class WorkspaceStore {
     }
 
     func stop() {
+        pollTask?.cancel()
+        pollTask = nil
         saver?.flush()
         if let client {
             Task { await client.stop() }
@@ -118,6 +210,7 @@ final class WorkspaceStore {
             }
             project()
             saver?.poke()
+            synced = true
         case .connected:
             let reconnected = !connected
             connected = true
@@ -151,6 +244,11 @@ final class WorkspaceStore {
         saver?.poke()
         if let client {
             Task { await client.nudge() }
+        }
+        // Socket down: the write still leaves the device promptly over
+        // HTTPS instead of waiting out the reconnect backoff.
+        if !connected {
+            Task { await self.pushPendingOverHTTP() }
         }
     }
 

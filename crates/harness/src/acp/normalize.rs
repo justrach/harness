@@ -24,7 +24,7 @@ fn str_field(v: &Value, key: &str) -> String {
 }
 
 /// Truncate on a char boundary, marking the cut so the UI can say "truncated".
-fn cap_text(text: &str, cap: usize) -> String {
+pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_owned();
     }
@@ -89,6 +89,16 @@ fn tool_diff(update: &Value) -> Option<ToolDiff> {
             DIFF_TEXT_CAP,
         ),
     })
+}
+
+/// The grok-native tool name stamped on a tool call's `_meta` (`x.ai/tool`,
+/// present on every grok tool_call — verified live, 1.0.4).
+pub(crate) fn xai_tool_name(update: &Value) -> Option<&str> {
+    update
+        .get("_meta")?
+        .get("x.ai/tool")?
+        .get("name")?
+        .as_str()
 }
 
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
@@ -261,6 +271,15 @@ fn typed_call(update: &Value) -> ToolCall {
                 }
             }
         }
+        // Grok's subagent spawn: name the chip — and the subagent tab it
+        // opens — after the task, matching the claude driver's "Agent: {d}"
+        // (the bare tool name says nothing in a tab strip).
+        _ if xai_tool_name(update) == Some("spawn_subagent") => ToolCall::Unknown {
+            name: raw_str("description")
+                .map(|d| format!("Agent: {d}"))
+                .unwrap_or_else(|| "Agent".into()),
+            input: raw.cloned(),
+        },
         _ if raw_str("_toolName").as_deref() == Some("task") => ToolCall::Unknown {
             name: raw_str("description")
                 .filter(|d| d != "Subagent task")
@@ -415,34 +434,6 @@ pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
         .collect()
 }
 
-/// Cursor's `cursor/update_todos` and `cursor/create_plan` carry a `todos`
-/// array (`{id, content, status}`) instead of ACP's `plan`/`entries`. Both
-/// render as the same kind of chip; the caller picks a stable id so repeated
-/// updates refresh in place rather than stacking.
-pub(crate) fn cursor_todo_events(params: &Value, chip_id: &str) -> Vec<AgentEvent> {
-    let Some(todos) = params.get("todos").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let items = todos
-        .iter()
-        .map(|t| TodoItem {
-            text: str_field(t, "content"),
-            done: t.get("status").and_then(Value::as_str) == Some("completed"),
-        })
-        .collect();
-    vec![
-        AgentEvent::ToolCall {
-            id: chip_id.to_owned(),
-            call: ToolCall::Todo { items },
-        },
-        AgentEvent::ToolResult {
-            id: chip_id.to_owned(),
-            is_error: false,
-            output: None,
-            diff: None,
-        },
-    ]
-}
 
 /// `session/request_permission` options (`{optionId, name, kind}`) → the
 /// preferred auto-approve choice: `allow_always` > `allow_once` > first.
