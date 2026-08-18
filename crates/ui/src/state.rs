@@ -27,6 +27,7 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
+use crate::comments::DiffComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
@@ -606,6 +607,8 @@ pub struct AppState {
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
+    /// Written by the changes pane, read by the composer.
+    diff_comments: HashMap<String, Vec<DiffComment>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
@@ -617,6 +620,15 @@ pub struct AppState {
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
+    /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
+    /// subagent tabs read these). Independent of `selected_chat`: a tab's
+    /// feed must survive chat switches — the tab itself is what scopes it.
+    sub_transcripts: HashMap<String, Vec<SessionMessageEntry>>,
+    /// One watch task per live subagent doc (single-flight per key).
+    /// Dropping a task cancels the engine-side watch and unpins the doc from
+    /// the engine LRU — closing a tab MUST go through
+    /// [`Self::unwatch_subagent_doc`].
+    sub_watch_tasks: HashMap<String, Task<()>>,
 }
 
 impl Default for AppState {
@@ -642,16 +654,57 @@ impl AppState {
             transcript: Vec::new(),
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
+            diff_comments: HashMap::new(),
             local_device_id: None,
             update: None,
             data_dir: None,
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
+            sub_transcripts: HashMap::new(),
+            sub_watch_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
         }
+    }
+
+    /// The selected chat, or `""` on the new-chat canvas. Identical to the
+    /// composer's own attachment/draft key, so a comment written before the
+    /// first send survives the chat being minted.
+    pub fn composer_key(&self) -> String {
+        self.selected_chat.clone().unwrap_or_default()
+    }
+
+    pub fn diff_comments(&self, key: &str) -> &[DiffComment] {
+        self.diff_comments
+            .get(key)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn add_diff_comment(&mut self, key: &str, comment: DiffComment) {
+        self.diff_comments
+            .entry(key.to_string())
+            .or_default()
+            .push(comment);
+    }
+
+    pub fn remove_diff_comment(&mut self, key: &str, id: &str) {
+        if let Some(list) = self.diff_comments.get_mut(key) {
+            list.retain(|c| c.id != id);
+            if list.is_empty() {
+                self.diff_comments.remove(key);
+            }
+        }
+    }
+
+    pub fn take_diff_comments(&mut self, key: &str) -> Vec<DiffComment> {
+        self.diff_comments.remove(key).unwrap_or_default()
+    }
+
+    pub fn purge_diff_comments(&mut self, key: &str) {
+        self.diff_comments.remove(key);
     }
 
     // ---- reducers (pure) ----
@@ -785,6 +838,44 @@ impl AppState {
         }
         self.ack_pending_send_from_transcript();
         Ok(())
+    }
+
+    /// A subagent doc's current transcript copy (empty until its watch's
+    /// replay frame lands, or its frozen snapshot is set).
+    pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
+        self.sub_transcripts
+            .get(doc_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
+    /// Single-flight per key; a frozen snapshot already in place wins — the
+    /// watch would race the (complete) blob with a possibly-purged live doc.
+    pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+        if self.sub_watch_tasks.contains_key(&doc_id) {
+            return;
+        }
+        let Some(handle) = self.engine.clone() else {
+            return;
+        };
+        self.sub_transcripts.entry(doc_id.clone()).or_default();
+        let task = spawn_subagent_watch(cx, handle, doc_id.clone());
+        self.sub_watch_tasks.insert(doc_id, task);
+    }
+
+    /// Tab closed: drop the watch task (cancels the engine-side watch and
+    /// unpins the doc from the engine LRU) and the rows.
+    pub fn unwatch_subagent_doc(&mut self, doc_id: &str) {
+        self.sub_watch_tasks.remove(doc_id);
+        self.sub_transcripts.remove(doc_id);
+    }
+
+    /// Frozen-blob path: the finished subagent's uploaded transcript, no
+    /// watch needed (and any in-flight watch is superseded).
+    pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
+        self.sub_watch_tasks.remove(&doc_id);
+        self.sub_transcripts.insert(doc_id, entries);
     }
 
     /// Add an optimistic user echo (composer send path).
@@ -1491,6 +1582,70 @@ fn spawn_transcript_watch(
             // Stream ended: engine restart, RPC drop, or chat purge. Retry;
             // the purge case is cleaned up by apply_chats dropping this task.
             tracing::debug!(%chat_id, "transcript stream ended; resubscribing");
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+/// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
+/// instead of the selected chat's transcript. The apply guard is PER KEY:
+/// the map still holding the key (unwatch/snapshot both remove it), never
+/// `selected_chat` — a subagent tab outlives chat switches.
+fn spawn_subagent_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    doc_id: String,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        'resubscribe: loop {
+            let params = serde_json::json!({ "chatId": doc_id });
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::warn!(%doc_id, error = %err, "subagent watch failed; retrying");
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue 'resubscribe;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let frame: TranscriptFrame = match serde_json::from_value(value) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
+                        cx.background_executor().timer(RETRY_DELAY).await;
+                        continue 'resubscribe;
+                    }
+                };
+                let mut desync = false;
+                let alive = this.update(cx, |state, cx| {
+                    // A stale pump racing a snapshot/unwatch finds no key.
+                    if let Some(rows) = state.sub_transcripts.get_mut(&doc_id) {
+                        if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
+                            tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
+                            desync = true;
+                        }
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+                if desync {
+                    continue 'resubscribe;
+                }
+            }
+            tracing::debug!(%doc_id, "subagent stream ended; resubscribing");
             if this.update(cx, |_, _| {}).is_err() {
                 return;
             }
