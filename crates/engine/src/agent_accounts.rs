@@ -531,14 +531,24 @@ impl AgentAccounts {
             .root_dir()
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
-        let mut child = match tokio::process::Command::new("codex")
+        let mut command = tokio::process::Command::new("codex");
+        command
             .arg("login")
             .env("CODEX_HOME", &home)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::piped());
+        // The CLI opens the authorization tab itself (via the `webbrowser`
+        // crate) AND the app opens the page when this start reply lands —
+        // users got TWO identical auth.openai.com tabs. `webbrowser` prefers
+        // $BROWSER over xdg-open, so a no-op script there keeps the CLI's
+        // open quiet; a failed open is advisory to `codex login` (it prints
+        // the URL and keeps serving the loopback callback either way).
+        #[cfg(unix)]
+        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop_browser);
+        }
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
                 let _ = std::fs::remove_dir_all(&home);
@@ -553,8 +563,8 @@ impl AgentAccounts {
         };
 
         // codex prints the authorize URL (to stderr as of 0.142 — scan both
-        // streams) and usually opens the browser itself; grab it so the app can
-        // open it too.
+        // streams); grab it so the app can open the single authorization tab
+        // (the CLI's own browser-open is suppressed via BROWSER above).
         let output = Arc::new(Mutex::new(String::new()));
         for pipe in [
             child
@@ -1488,6 +1498,22 @@ fn scan_openai_url(output: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Path of the no-op "browser" script `start_codex_login` hands the CLI via
+/// `BROWSER` so `codex login` doesn't open a second authorization tab (the
+/// app opens the one tab). Unix only — `webbrowser` only consults `BROWSER`
+/// on unix; elsewhere the CLI's own open is left as-is.
+#[cfg(unix)]
+fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
+    const SCRIPT: &str = "#!/bin/sh\nexit 0\n";
+    let path = root.join(".noop-browser");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::write(&path, SCRIPT).ok()?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(path)
+}
+
 /// Minimal percent-encoding for OAuth query params (matches `encodeURIComponent`
 /// for the constant inputs used here).
 fn urlencode(input: &str) -> String {
@@ -1577,6 +1603,24 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noop_browser_script_is_stable_and_executable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = ensure_noop_browser(root.path()).expect("script");
+        assert!(path.ends_with(".noop-browser"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(path.metadata().unwrap().permissions().mode() & 0o111 != 0);
+        }
+        // A second ensure is idempotent (same path, same content).
+        assert_eq!(ensure_noop_browser(root.path()), Some(path));
     }
 
     #[test]
