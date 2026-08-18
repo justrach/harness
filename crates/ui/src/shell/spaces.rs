@@ -1867,7 +1867,7 @@ impl Shell {
                 // The popover_card glass recipe: a translucent tint over the
                 // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
                 // an opaque fill here killed the vibrancy every other float has.
-                .bg(if theme.is_glass() {
+                .bg(if theme.is_frost() {
                     theme.glass_overlay()
                 } else {
                     theme.surface_overlay

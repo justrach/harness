@@ -55,14 +55,14 @@ loro-protocol = "0.3"
 # object-fit Cover cropping via atlas-tile UVs so image corner radii hold;
 # 8a8954c switches the macOS blurred view to UnderWindowBackground (macOS 26
 # stopped vending CABackdropLayer for Selection — window blur went dead).
-gpui = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
-gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d", features = [
+gpui = { git = "https://github.com/rabden/zed", rev = "b68970ebfc7fde158957ed0bd97acb1f43aaf903" }
+gpui_platform = { git = "https://github.com/rabden/zed", rev = "b68970ebfc7fde158957ed0bd97acb1f43aaf903", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+gpui_tokio = { git = "https://github.com/rabden/zed", rev = "b68970ebfc7fde158957ed0bd97acb1f43aaf903" }
 
 # diffs
 similar = "2"
