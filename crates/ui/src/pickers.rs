@@ -3328,25 +3328,34 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 }
 
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
-/// catalog device's enabled set (Settings → Agents — per-device state, so a
-/// space on another device follows THAT device's toggles). The dev-rig mock
-/// opt-in survives the filter, and a catalog where nothing is enabled (or
-/// that predates the flag entirely and defaults empty) falls back to
-/// everything visible rather than an empty rail.
+/// catalog device's enabled set AND installed CLIs (Settings → Agents is
+/// per-device state, so a space on another device follows THAT device's
+/// toggles; a default-enabled agent whose CLI is missing would only
+/// manufacture NotInstalled errors at send). The dev-rig mock opt-in
+/// survives the filter. A catalog where nothing is enabled+installed falls
+/// back to the enabled set (never an empty rail), and one where nothing is
+/// enabled at all (or that predates the flag) to everything visible.
 pub fn offered_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     offered_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
     let visible = visible_harnesses_impl(list, allow_mock);
-    let offered: Vec<HarnessDescriptor> = visible
+    let runnable = |d: &HarnessDescriptor| {
+        d.installed
+            && (zeron_engine::registry::descriptor_enabled(d)
+                || (allow_mock && d.id == HarnessId::Mock))
+    };
+    let offered: Vec<HarnessDescriptor> = visible.iter().filter(|d| runnable(d)).cloned().collect();
+    if !offered.is_empty() {
+        return offered;
+    }
+    let enabled: Vec<HarnessDescriptor> = visible
         .iter()
-        .filter(|d| {
-            zeron_engine::registry::descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock)
-        })
+        .filter(|d| zeron_engine::registry::descriptor_enabled(d))
         .cloned()
         .collect();
-    if offered.is_empty() { visible } else { offered }
+    if enabled.is_empty() { visible } else { enabled }
 }
 
 /// Attach the (single) open popover overlay to its trigger chip.
@@ -4014,5 +4023,44 @@ mod tests {
         let offered =
             offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
         assert_eq!(offered.len(), 3);
+    }
+
+    #[test]
+    fn offered_harnesses_require_an_installed_cli() {
+        let descriptor =
+            |id: HarnessId, name: &str, enabled: Option<bool>, installed: bool| HarnessDescriptor {
+                id,
+                name: name.into(),
+                supports_steering: true,
+                steering_mode: zeron_proto::SteeringMode::StepBoundary,
+                reasoning_levels: vec![],
+                installed,
+                enabled,
+            };
+        // Enabled-but-missing-CLI agents stay out of the rail; an installed
+        // enabled one rides along (the default-enabled, CLI-less Claude/Codex
+        // machine — Settings → Agents lets the user turn them off too).
+        let catalog = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
+            descriptor(HarnessId::Codex, "Codex", Some(true), false),
+            descriptor(HarnessId::Grok, "Grok", Some(true), true),
+        ];
+        let offered = offered_harnesses_impl(&catalog, false);
+        assert_eq!(
+            offered.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![HarnessId::Grok]
+        );
+        // Nothing enabled AND installed: the enabled set (not everything, not
+        // an empty rail) — the toggles the user left on stay represented.
+        let catalog = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
+            descriptor(HarnessId::Codex, "Codex", Some(false), false),
+            descriptor(HarnessId::Grok, "Grok", Some(false), true),
+        ];
+        let offered = offered_harnesses_impl(&catalog, false);
+        assert_eq!(
+            offered.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![HarnessId::ClaudeCode]
+        );
     }
 }

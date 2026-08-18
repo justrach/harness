@@ -9,10 +9,13 @@
 //!
 //! Only Claude Code and Codex ship enabled; the rest are opt-in. A harness
 //! whose CLI is missing on the target device renders dimmed with an install
-//! hint and its toggle inert — enabling an agent that can't run would only
-//! manufacture NotInstalled errors at send time. The engine enforces the same
-//! gate (plus "can't disable the last enabled harness") where the state
-//! lives, so a raced or stale toggle self-corrects from the RPC reply.
+//! hint. Turning one ON still requires the CLI there (enabling an agent that
+//! can't run would only manufacture NotInstalled errors at send time), but an
+//! ENABLED agent can always be turned OFF — a default-on agent the user never
+//! intends to use must not be stuck on just because its CLI is missing. The
+//! engine enforces the same gates (plus "can't disable the last enabled
+//! harness") where the state lives, so a raced or stale toggle self-corrects
+//! from the RPC reply.
 
 use gpui::{
     AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
@@ -346,7 +349,10 @@ impl HarnessesPage {
                 // The one enabled harness left can't be switched off — the
                 // composer needs something to run (mirrors the engine guard).
                 let last_enabled = enabled && enabled_count == 1;
-                let interactive = installed && !last_enabled;
+                // Turning OFF never needs the CLI (a default-on agent the
+                // user doesn't want must not be stuck on because it isn't
+                // installed); turning ON still does.
+                let interactive = !last_enabled && (enabled || installed);
                 let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
                 let mut meta: Vec<gpui::AnyElement> = vec![
                     div()
@@ -357,10 +363,14 @@ impl HarnessesPage {
                     meta.push(
                         div()
                             .text_color(theme.warning_muted.opacity(0.9))
-                            .child(SharedString::from(format!(
-                                "Install the {} CLI to enable",
-                                cli_name(harness)
-                            )))
+                            .child(SharedString::from(if enabled {
+                                format!(
+                                    "{} CLI not installed — turn it off or install it",
+                                    cli_name(harness)
+                                )
+                            } else {
+                                format!("Install the {} CLI to enable", cli_name(harness))
+                            }))
                             .into_any_element(),
                     );
                 }
