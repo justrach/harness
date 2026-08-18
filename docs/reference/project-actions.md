@@ -54,13 +54,17 @@ The main title-bar segment remembers the last successfully started Action for th
 
 Only creation of a new worktree can start the setup Action. Reusing an existing worktree and using the main checkout do not run setup again.
 
-The owning engine starts setup inside the same `CreateWorktree` RPC that creates the worktree. Setup runs with the new worktree as its cwd and always receives both `ZERON_PROJECT_ROOT` and `ZERON_WORKTREE_PATH`. The RPC returns after the PTY accepts the command; it does not wait for the command to exit.
+For desktop sends, the worktree directive rides the durable queued `Run` command. The owning engine creates the worktree and starts setup while draining that command, before dispatching the first agent turn. Setup runs with the new worktree as its cwd and always receives both `ZERON_PROJECT_ROOT` and `ZERON_WORKTREE_PATH`.
+
+The queue reply is not held open while the host creates the worktree. Desktop polls a short-lived, command-scoped handoff to attach the already-open setup terminal when it becomes available. A lost relay reply therefore cannot leave the composer stuck on `Sending…` while the agent runs remotely.
+
+Direct `CreateWorktree` callers, including iOS, retain the same host-side setup behavior and receive the optional setup terminal in the RPC outcome.
 
 Desktop attaches the returned terminal to the bottom terminal drawer of the newly minted chat, even if another chat becomes selected while the request is in flight. Manual Actions use the same bottom drawer. iOS starts setup through the same host-side RPC but does not add a terminal surface in this release.
 
 A failure to open or initialize the setup terminal is returned as `setupError`. The worktree remains available and the first agent turn continues; desktop presents the error as a non-blocking notice.
 
-`CreateWorktree` remains wire-compatible across versions. Callers that omit `spaceId` receive the legacy behavior and never trigger setup, legacy clients ignore the optional setup fields, and new clients accept legacy replies with those fields absent.
+`CreateWorktree` and `RunRequest.worktree` remain additive and wire-compatible across versions. Callers that omit `spaceId` receive worktree creation without setup, legacy clients ignore optional fields, and desktop silently skips the handoff when connected to an older host.
 
 ## Out of scope
 

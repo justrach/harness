@@ -126,8 +126,11 @@ pub trait CheckpointFetcher: Send + Sync + 'static {
 /// Both are safe at-least-once: batchId dedupe and Loro re-import no-ops.
 pub trait ChatTransport: Send + Sync + 'static {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>>;
-    fn push(&self, batch_id: String, bytes: Vec<u8>)
-    -> BoxFuture<'static, Result<String, SyncError>>;
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>>;
 }
 
 // ── catch-up planning (pure — the client-side precision rule) ───────────────
@@ -413,8 +416,16 @@ impl ChatClient {
         initial_cursor: u64,
         tuning: ChatTuning,
     ) -> Result<Self, SyncError> {
-        Self::connect_with_transport(connector, sink, fetcher, device_id, initial_cursor, tuning, None)
-            .await
+        Self::connect_with_transport(
+            connector,
+            sink,
+            fetcher,
+            device_id,
+            initial_cursor,
+            tuning,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn connect_with_transport(
@@ -1187,16 +1198,13 @@ impl Actor {
                     serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
                 {
                     lock(&shared).server = Some(state);
-                    let contained = state.checkpoint_size == 0
-                        || sink.contains_frontier(&state_frame.payload);
+                    let contained =
+                        state.checkpoint_size == 0 || sink.contains_frontier(&state_frame.payload);
                     if let CatchUpPlan::CheckpointThenRows { after } =
                         plan_catch_up(cursor, &state, contained)
                     {
-                        let fetched = tokio::time::timeout(
-                            CHECKPOINT_FETCH_DEADLINE,
-                            fetcher.fetch(),
-                        )
-                        .await;
+                        let fetched =
+                            tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
                         match fetched {
                             Ok(Ok(bytes)) => {
                                 if sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err() {

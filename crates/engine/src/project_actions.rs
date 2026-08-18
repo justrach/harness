@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,6 +26,19 @@ const STORE_FILE: &str = "project-actions.json";
 const STORE_VERSION: u32 = 1;
 const PROJECT_FILE: &str = "zeron.json";
 const MAX_PROJECT_FILE_BYTES: u64 = 256 * 1024;
+const SETUP_HANDOFF_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone)]
+pub struct ProjectActionSetupHandoff {
+    pub setup_action: Option<ProjectActionRun>,
+    pub setup_error: Option<String>,
+}
+
+struct StoredSetupHandoff {
+    chat_id: String,
+    completed_at: Instant,
+    outcome: ProjectActionSetupHandoff,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +59,7 @@ struct StoredProjectActions {
 struct ProjectActionsStoreInner {
     path: PathBuf,
     state: Mutex<ProjectActionsFile>,
+    setup_handoffs: Mutex<HashMap<String, StoredSetupHandoff>>,
 }
 
 /// Account-scoped storage for executable project Actions.
@@ -84,6 +99,7 @@ impl ProjectActionsStore {
             inner: Arc::new(ProjectActionsStoreInner {
                 path,
                 state: Mutex::new(state),
+                setup_handoffs: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -225,6 +241,44 @@ impl ProjectActionsStore {
             .into_iter()
             .find(|action| action.run_on_worktree_create))
     }
+
+    /// Publish the non-durable UI handoff for setup launched while the durable
+    /// Run command is drained. The command remains the source of truth; this
+    /// cache only lets the sender attach the resulting terminal.
+    pub fn complete_setup_handoff(
+        &self,
+        command_id: &str,
+        chat_id: &str,
+        outcome: ProjectActionSetupHandoff,
+    ) {
+        let mut handoffs = lock(&self.inner.setup_handoffs);
+        prune_setup_handoffs(&mut handoffs);
+        handoffs.insert(
+            command_id.to_string(),
+            StoredSetupHandoff {
+                chat_id: chat_id.to_string(),
+                completed_at: Instant::now(),
+                outcome,
+            },
+        );
+    }
+
+    pub fn take_setup_handoff(
+        &self,
+        command_id: &str,
+        chat_id: &str,
+    ) -> Option<ProjectActionSetupHandoff> {
+        let mut handoffs = lock(&self.inner.setup_handoffs);
+        prune_setup_handoffs(&mut handoffs);
+        if handoffs.get(command_id)?.chat_id != chat_id {
+            return None;
+        }
+        handoffs.remove(command_id).map(|stored| stored.outcome)
+    }
+}
+
+fn prune_setup_handoffs(handoffs: &mut HashMap<String, StoredSetupHandoff>) {
+    handoffs.retain(|_, handoff| handoff.completed_at.elapsed() < SETUP_HANDOFF_TTL);
 }
 
 pub fn preferred_action<'a>(
@@ -565,6 +619,27 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn setup_handoff_is_chat_scoped_and_consumed_once() {
+        let (_temp, store_root, _project_root) = roots();
+        let store = ProjectActionsStore::open(&store_root).unwrap();
+        store.complete_setup_handoff(
+            "command-1",
+            "chat-1",
+            ProjectActionSetupHandoff {
+                setup_action: None,
+                setup_error: Some("setup failed".into()),
+            },
+        );
+
+        assert!(store.take_setup_handoff("command-1", "chat-2").is_none());
+        let outcome = store
+            .take_setup_handoff("command-1", "chat-1")
+            .expect("matching sender takes handoff");
+        assert_eq!(outcome.setup_error.as_deref(), Some("setup failed"));
+        assert!(store.take_setup_handoff("command-1", "chat-1").is_none());
     }
 
     #[test]

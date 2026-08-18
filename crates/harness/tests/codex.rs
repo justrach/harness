@@ -44,6 +44,7 @@ fn request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     }
 }
@@ -692,12 +693,14 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
     // parent delta that follows it in the script (not only at thread/closed).
     let child_done = events
         .iter()
-        .position(|e| matches!(
-            e,
-            AgentEvent::Subagent { parent_tool_use_id, event }
-                if parent_tool_use_id == "call_alpha"
-                    && matches!(event.as_ref(), AgentEvent::Done { .. })
-        ))
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if parent_tool_use_id == "call_alpha"
+                        && matches!(event.as_ref(), AgentEvent::Done { .. })
+            )
+        })
         .expect("tagged done");
     let late_parent_delta = events
         .iter()

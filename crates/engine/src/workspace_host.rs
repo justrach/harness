@@ -1107,7 +1107,7 @@ impl WorkspaceHostInner {
 /// checkout (`.git` is a directory), a non-repo folder, or any other layout
 /// (bare-repo worktrees have no `<root>` working copy to attribute to). Pure
 /// fs reads — no git subprocess; this runs on the synchronous claim path.
-fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
+pub(crate) fn linked_worktree_root(path: &std::path::Path) -> Option<String> {
     let gitfile = path.join(".git");
     if !std::fs::metadata(&gitfile).ok()?.is_file() {
         return None;
@@ -1280,7 +1280,6 @@ fn device_name_on_boot(existing_name: Option<&str>, detected_name: &str) -> Stri
         .to_string()
 }
 
-
 /// Plain-HTTPS registry pull/push derived from the SAME WebSocket URL
 /// provider the dial uses (`wss://…/registry/{org}/ws?token=…&device=…`):
 /// swap the scheme, swap the `/ws` leaf for `/rows` or `/push`, keep the
@@ -1311,7 +1310,9 @@ impl WsDerivedRegistryTransport {
         let _ = u.set_scheme(scheme);
         let path = u.path().to_string();
         let Some(base) = path.strip_suffix("/ws") else {
-            return Err(zeron_sync::SyncError::Protocol("ws url without /ws leaf".into()));
+            return Err(zeron_sync::SyncError::Protocol(
+                "ws url without /ws leaf".into(),
+            ));
         };
         let new_path = format!("{base}/{leaf}");
         u.set_path(&new_path);
