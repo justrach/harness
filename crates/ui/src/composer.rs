@@ -5257,7 +5257,7 @@ impl Composer {
             .border_1()
             .border_color(theme.border)
             .bg(theme.input_glass_bg())
-            .when(!theme.is_glass(), |el| el.shadow_lg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
             .child(
@@ -5774,7 +5774,7 @@ impl Render for Composer {
             .bg(pill_bg)
             .border_1()
             .border_color(theme.border)
-            .when(!theme.is_glass(), |el| el.shadow_lg());
+            .when(!theme.is_frost(), |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal

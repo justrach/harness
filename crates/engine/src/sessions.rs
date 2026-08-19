@@ -1353,6 +1353,13 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    // Spawn chips that have SETTLED (tagged Done seen). Content events for a
+    // settled chip with no live sink are dropped — a straggler frame after
+    // the freeze must not mint a new doc entry or wedge the transcript back
+    // into Streaming. Only a steer (UserMessage) legitimately REOPENS a
+    // settled subagent: it announces more work is coming.
+    let mut settled_subagents: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
@@ -1519,6 +1526,16 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
+            let is_steer = matches!(sub_event.as_ref(), AgentEvent::UserMessage { .. });
+            if is_steer {
+                settled_subagents.remove(parent_tool_use_id);
+            } else if settled_subagents.contains(parent_tool_use_id)
+                && !subagents.contains_key(parent_tool_use_id)
+            {
+                // Straggler after the freeze: chip-only silence (the old
+                // pre-viz behavior), never a reopened doc.
+                continue;
+            }
             let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
             let chip_streaming = folded
                 .iter()
@@ -1581,6 +1598,9 @@ async fn drive_run(
                 }
             }
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            if done {
+                settled_subagents.insert(parent_tool_use_id.clone());
+            }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
                 if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
                     // A steer splits ENTRIES, not parts — handled at the
