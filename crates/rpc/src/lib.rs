@@ -47,6 +47,10 @@ pub mod methods {
     /// executing, so the doc row arriving later dedupes to a no-op —
     /// exactly-once by construction. Params `{chatId, entry}`.
     pub const RELAY_COMMAND: &str = "RelayCommand";
+    /// User-driven delivery retry for a chat with unadopted queued sends:
+    /// fresh chat2 socket, host nudge, drain pass, and a new delivery escort
+    /// per pending command. Params `{chatId}`; IPC-only.
+    pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Nudge every open room client to verify liveness NOW (window focus,
     /// app foregrounded). No params; IPC-only. Each room ignores the hint

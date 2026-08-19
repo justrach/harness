@@ -556,11 +556,12 @@ struct PendingSend {
     started: DateTime<Utc>,
 }
 
-/// How long the send-in-flight overlay may hold before the synced status
-/// shows through again. Covers the queue → nudge → drain → sync round-trip
-/// to a remote host; when the host is offline the dot falls back to the
-/// truth after this.
-pub const PENDING_SEND_TTL_MS: i64 = 30_000;
+/// How long an unadopted send reads as Working/Sending (or Queued when the
+/// path is degraded) before flipping to the EXPLICIT failed state with a
+/// retry affordance. The old 30s overlay silently expired back to Idle with
+/// no visible trace of the send at all — the exact hole the 2026-08-19
+/// incident fell into.
+pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
@@ -982,16 +983,33 @@ impl AppState {
         }
     }
 
-    /// Is a send still in flight for this chat (unacked)? Inside the TTL
-    /// normally; while the chat's delivery path is degraded the overlay
-    /// holds — the truth IS "Queued", and silently expiring back to Idle
-    /// left a queued send with no visible trace at all (the 30s→silence
-    /// hole, 2026-08-19).
+    /// Is a send still in flight for this chat (unacked)? Inside the grace
+    /// window normally; while the chat's delivery path is degraded the
+    /// overlay holds indefinitely — the truth IS "Queued", and silently
+    /// expiring back to Idle left a queued send with no visible trace at
+    /// all (the 30s→silence hole, 2026-08-19).
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+            now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                 || self.chat_delivery_degraded(chat_id)
         })
+    }
+
+    /// The send has sat unadopted past the grace window: surface the
+    /// EXPLICIT failed state ("Not delivered — retry") instead of either
+    /// faking progress or silently forgetting the send ever happened.
+    pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.pending_sends.get(chat_id).is_some_and(|p| {
+            now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
+        })
+    }
+
+    /// Retry pressed: restart the grace clock so the overlay returns to its
+    /// Sending/Queued phase while the re-kicked delivery runs.
+    pub fn retry_pending_send(&mut self, chat_id: &str, now: DateTime<Utc>) {
+        if let Some(p) = self.pending_sends.get_mut(chat_id) {
+            p.started = now;
+        }
     }
 
     /// When the in-flight send (if any, inside the TTL) was fired — the
@@ -1003,7 +1021,7 @@ impl AppState {
         self.pending_sends
             .get(chat_id)
             .filter(|p| {
-                now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+                now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
                     || self.chat_delivery_degraded(chat_id)
             })
             .map(|p| p.started)
@@ -2347,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn send_pending_overlays_working_until_ttl() {
+    fn send_pending_overlays_working_until_the_grace_window() {
         let now = Utc::now();
         let s_chat = chat("c", 0, Some(10)); // unseen, no session row
         let mut s = AppState::new();
@@ -2356,13 +2374,16 @@ mod tests {
         s.begin_pending_send("c", "m1", now);
         assert_eq!(s.display_status_for(&s_chat, now), ChatIndicator::Working);
         assert_eq!(s.indicator_for("c", now), Indicator::Working);
-        // Time-bounded: an offline host must not leave an eternal spinner.
-        let later = now + TimeDelta::milliseconds(PENDING_SEND_TTL_MS + 1);
+        // Time-bounded: an offline host must not leave an eternal spinner —
+        // past the grace the overlay yields (and `send_undelivered` takes
+        // over with the explicit failed state).
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
         assert_eq!(
             s.display_status_for(&s_chat, later),
             ChatIndicator::Completed
         );
         assert_eq!(s.indicator_for("c", later), Indicator::None);
+        assert!(s.send_undelivered("c", later));
     }
 
     #[test]
@@ -2995,15 +3016,25 @@ mod tests {
         assert!(!s.chat_delivery_degraded("c-remote"));
 
         // Queued = pending send + degraded path — and degradation HOLDS the
-        // overlay past the 30s TTL instead of silently expiring (the
+        // overlay past the grace window instead of silently expiring (the
         // no-trace hole).
         s.connectivity.state = ConnectivityState::Offline;
-        s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(60));
+        s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(200));
         assert!(s.send_pending("c-remote", now));
         assert!(s.send_queued("c-remote", now));
-        // Path healed: the TTL applies again and the stale overlay expires.
+        // Past the grace: the explicit failed state surfaces alongside.
+        assert!(s.send_undelivered("c-remote", now));
+        // Retry restarts the clock: back to Queued, no longer failed.
+        s.retry_pending_send("c-remote", now);
+        assert!(!s.send_undelivered("c-remote", now));
+        assert!(s.send_queued("c-remote", now));
+        // Path healed with a stale unacked send: the overlay expires after
+        // the grace rather than holding forever.
+        s.retry_pending_send("c-remote", now - TimeDelta::seconds(200));
         s.connectivity.state = ConnectivityState::Connected;
         assert!(!s.send_pending("c-remote", now));
         assert!(!s.send_queued("c-remote", now));
+        // …but the explicit undelivered flag still tells the truth.
+        assert!(s.send_undelivered("c-remote", now));
     }
 }

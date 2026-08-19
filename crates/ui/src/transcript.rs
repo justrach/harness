@@ -2812,6 +2812,34 @@ impl Transcript {
     /// — user request), so it reads as part of the streaming reply and
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
+    /// The failed-send retry (trailer affordance): re-kick every delivery
+    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
+    /// and restart the grace clock so the trailer returns to Sending/Queued
+    /// while the retry runs.
+    fn retry_send(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let engine = self.state.read(cx).engine().cloned();
+        self.state.update(cx, |s, cx| {
+            s.retry_pending_send(&chat_id, chrono::Utc::now());
+            cx.notify();
+        });
+        if let Some(engine) = engine {
+            cx.spawn(async move |_, _| {
+                let params = serde_json::json!({ "chatId": chat_id });
+                if let Err(err) = engine
+                    .client()
+                    .call(zeron_rpc::methods::RETRY_DELIVERY, params)
+                    .await
+                {
+                    tracing::warn!(error = %err, "delivery retry RPC failed");
+                }
+            })
+            .detach();
+        }
+    }
+
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // A subagent doc has no Session row — `indicator_for` would read the
         // PARENT chat's live state into a frozen tab.
@@ -2820,6 +2848,26 @@ impl Transcript {
         }
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
+        // Failed-send state first: past the grace window the trailer IS the
+        // retry affordance, whatever the indicator fell back to.
+        if self.state.read(cx).send_undelivered(&chat_id, now) {
+            let theme = Theme::of(cx).clone();
+            return Some(
+                div()
+                    .id("undelivered-retry")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .pt(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.danger)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                    .child(SharedString::from("Not delivered — click to retry"))
+                    .into_any_element(),
+            );
+        }
         let (sending, queued, elapsed_secs) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {

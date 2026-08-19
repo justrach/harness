@@ -1095,6 +1095,13 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "commandId": command_id }))
             }
+            methods::RETRY_DELIVERY => {
+                let p: ChatParams = parse_params(params)?;
+                self.doc_host
+                    .retry_delivery(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
+            }
             methods::RELAY_COMMAND => {
                 let p: RelayCommandParams = parse_params(params)?;
                 let outcome = self

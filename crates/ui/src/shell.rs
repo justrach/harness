@@ -3347,15 +3347,28 @@ impl Shell {
         // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
         // accordion), t3code's settle-on-hover.
         let corner_hovered = self.chat_status_hover.as_deref() == Some(id.as_str());
-        // A send whose delivery path is degraded is QUEUED, not Working —
-        // the pending pill tells the truth instead of faking a spinner.
-        let queued = self.state.read(cx).send_queued(&id, Utc::now());
-        let status_color = if queued {
+        // Send-truth overrides: a send unadopted past the grace window is
+        // FAILED (explicit, with the transcript's retry affordance); a send
+        // whose delivery path is degraded is QUEUED, not Working — the
+        // pending pill tells the truth instead of faking a spinner.
+        let (queued, undelivered) = {
+            let now = Utc::now();
+            let state = self.state.read(cx);
+            (
+                state.send_queued(&id, now),
+                state.send_undelivered(&id, now),
+            )
+        };
+        let status_color = if undelivered {
+            theme.danger
+        } else if queued {
             theme.warning
         } else {
             spaces::status_dot_color(status, theme)
         };
-        let status_label: Option<&'static str> = if queued {
+        let status_label: Option<&'static str> = if undelivered {
+            Some("Failed")
+        } else if queued {
             Some("Queued")
         } else {
             match status {
@@ -3366,6 +3379,7 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
+        let queued = queued && !undelivered;
         let corner_body: AnyElement = if corner_hovered {
             div()
                 .flex()
@@ -3607,8 +3621,10 @@ impl Shell {
                     })
                     // Working rows animate the spinner at the row's
                     // bottom-right (the status word keeps its dot up top).
-                    // Queued rows don't: a spinner would fake progress.
-                    .when(status == zeron_proto::ChatIndicator::Working && !queued, |el| {
+                    // Queued/Failed rows don't: a spinner would fake progress.
+                    .when(
+                        status == zeron_proto::ChatIndicator::Working && !queued && !undelivered,
+                        |el| {
                         el.child(div().flex_1())
                             .child(loaders::mini_gradient_spinner(
                                 format!("chat-working-{id}"),

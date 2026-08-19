@@ -2241,6 +2241,60 @@ impl DocHost {
         }
     }
 
+    /// User-driven retry (the failed-send affordance): re-kick every
+    /// delivery road for a chat whose queued sends haven't been adopted —
+    /// fresh chat2 socket (a zombie room is the usual suspect), host nudge,
+    /// a local drain pass, and a fresh delivery escort per still-pending
+    /// command with its attachment transfers re-derived from the entries'
+    /// `pending://` refs (idempotent: re-pushing landed bytes re-commits the
+    /// same file; the processed ledger keeps execution exactly-once).
+    pub fn retry_delivery(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        if let Some(chat2) = lock(&handle.chat2).as_ref() {
+            chat2.redial();
+        }
+        self.nudge_remote_host(chat_id);
+        let commands = handle.doc.read_commands()?;
+        let pending: Vec<SessionCommandEntry> = commands
+            .into_iter()
+            .filter(|c| {
+                c.status == SessionCommandStatus::Pending
+                    && !self.inner.store.is_processed(&c.id).unwrap_or(false)
+            })
+            .collect();
+        for entry in pending {
+            let refs: Vec<String> = match &entry.payload {
+                SessionCommandPayload::Run { request, .. } => request
+                    .attachments
+                    .iter()
+                    .filter(|p| crate::uploads::is_pending_ref(p))
+                    .cloned()
+                    .collect(),
+                SessionCommandPayload::Steer { prompt, .. } => {
+                    crate::uploads::pending_refs_in(prompt)
+                }
+                _ => Vec::new(),
+            };
+            let transfers: Vec<crate::uploads::AttachmentTransfer> = refs
+                .iter()
+                .filter_map(|r| crate::uploads::parse_pending_ref(r))
+                .map(|(upload_id, file_name)| crate::uploads::AttachmentTransfer {
+                    upload_id: upload_id.to_string(),
+                    file_name: file_name.to_string(),
+                })
+                .collect();
+            self.spawn_command_delivery(chat_id, entry, transfers);
+        }
+        // Locally-hosted (or already-synced) commands: a drain pass is the
+        // whole retry.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let host = self.clone();
+            let handle = handle.clone();
+            self.spawn_worker(async move { host.drain_commands(&handle).await });
+        }
+        Ok(())
+    }
+
     /// Host side of [`zeron_rpc::methods::RELAY_COMMAND`]: evaluate the
     /// forwarded entry against OUR doc (dedupe/TTL/supersede rules apply
     /// unchanged), claim its client-minted id in the processed ledger, then
@@ -2796,6 +2850,19 @@ impl DocHost {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
+                // Timestamp canonicalization: the user message lands in
+                // history at the moment the user SENT it (the entry's
+                // issued_at, clamped against clock skew) — not whenever this
+                // host got around to draining a queued command. Idempotent by
+                // id, so the dispatch path's own execution-time write dedupes
+                // to a no-op.
+                if let Err(err) = handle.write_user_message(
+                    message_id,
+                    &request.prompt,
+                    entry.issued_at.min(now_ms()),
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
+                }
                 sessions
                     .dispatch(chat_id, harness, request, Some(message_id.clone()))
                     .await?;
@@ -2804,6 +2871,16 @@ impl DocHost {
             SessionCommandPayload::Steer { prompt, message_id } => {
                 // Same `pending://` → absolute rewrite as the Run arm.
                 let prompt = &self.resolve_prompt_attachments(prompt);
+                // Same send-time canonicalization as the Run arm.
+                if let Some(message_id) = message_id
+                    && let Err(err) = handle.write_user_message(
+                        message_id,
+                        prompt,
+                        entry.issued_at.min(now_ms()),
+                    )
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
+                }
                 match sessions.steer(chat_id, prompt, message_id.clone()).await? {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
                     SteerOutcome::NotSteerable => {
