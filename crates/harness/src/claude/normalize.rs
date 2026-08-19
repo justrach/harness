@@ -330,9 +330,28 @@ impl Normalizer {
                     .message
                     .blocks()
                     .filter(|b: &ContentBlock| b.kind == "tool_use")
-                    .map(|b| AgentEvent::ToolCall {
-                        id: b.id.clone(),
-                        call: decode_tool_use(&b.name, &b.input),
+                    .flat_map(|b| {
+                        let call = AgentEvent::ToolCall {
+                            id: b.id.clone(),
+                            call: decode_tool_use(&b.name, &b.input),
+                        };
+                        // A spawn's `prompt` is the subagent's opening user
+                        // message — the wire never echoes it on the child
+                        // feed (child user frames carry tool results and
+                        // steers only), so seed it here and the subagent
+                        // transcript starts the way every chat does.
+                        let opening = matches!(b.name.as_str(), "Agent" | "Task")
+                            .then(|| b.input.get("prompt"))
+                            .flatten()
+                            .and_then(Value::as_str)
+                            .filter(|p| !p.trim().is_empty())
+                            .map(|prompt| tag(
+                                &b.id,
+                                AgentEvent::UserMessage {
+                                    text: prompt.to_owned(),
+                                },
+                            ));
+                        std::iter::once(call).chain(opening)
                     })
                     .collect();
                 // A failed turn (usage limit, billing, auth, overloaded, …)
@@ -655,6 +674,37 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn spawn_prompt_seeds_the_subagent_opening_user_message() {
+        // The wire never echoes a Task's prompt on the child feed, so the
+        // spawn itself seeds the subagent's opening user entry.
+        let ev = normalize_one(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{"description":"probe","prompt":"scan the fold path"}}]}}"#,
+        );
+        assert!(matches!(
+            &ev[..],
+            [
+                AgentEvent::ToolCall { id, .. },
+                AgentEvent::Subagent { parent_tool_use_id, event },
+                AgentEvent::AssistantMessageCompleted { .. },
+            ] if id == "toolu_sub"
+                && parent_tool_use_id == "toolu_sub"
+                && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "scan the fold path")
+        ));
+        // No prompt → no synthetic opening; ordinary tools never spawn one.
+        for frame in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Task","input":{"description":"probe"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"ls","prompt":"red herring"}}]}}"#,
+        ] {
+            let ev = normalize_one(frame);
+            assert!(
+                !ev.iter()
+                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                "{frame}: {ev:?}"
+            );
+        }
     }
 
     #[test]

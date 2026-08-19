@@ -301,6 +301,20 @@ impl Harness for MockHarness {
                         "Verify the commit cadence",
                         "Measure the 120ms coalesced commit cadence under a scripted delta burst.",
                     ),
+                    // The spawn prompts seed each subagent's opening user
+                    // entry (like the claude driver's Task-prompt seeding).
+                    tag(
+                        "mock-sub-1",
+                        AgentEvent::UserMessage {
+                            text: "Read crates/doc and list every call site of fold_event_into_parts, checking each holds the byte cap.".into(),
+                        },
+                    ),
+                    tag(
+                        "mock-sub-2",
+                        AgentEvent::UserMessage {
+                            text: "Measure the 120ms coalesced commit cadence under a scripted delta burst.".into(),
+                        },
+                    ),
                     tag(
                         "mock-sub-1",
                         AgentEvent::TextDelta {
