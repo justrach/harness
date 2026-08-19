@@ -756,10 +756,16 @@ impl Engine {
         zeron_harness::acp::prewarm_managed_adapters();
 
         let host_relay = edge.as_ref().map(|edge| {
-            let links = zeron_rpc::LinkCache::new(zeron_rpc::LinkCacheConfig::new(
-                edge.url.clone(),
-                Arc::new(auth.clone()),
-            ));
+            let mut link_config =
+                zeron_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));
+            // Registry-dark dial gate: devices with no recent presence fail
+            // fast with zero dials; presence returning un-parks them (the
+            // peer-alive hook below clears any cooldown at the same moment).
+            let workspace_for_liveness = core.workspace.clone();
+            link_config.liveness = Some(Arc::new(move |device_id: &str| {
+                workspace_for_liveness.peer_liveness(device_id)
+            }));
+            let links = zeron_rpc::LinkCache::new(link_config);
             let links_for_presence = links.clone();
             core.workspace
                 .set_peer_alive_hook(Arc::new(move |device_id: &str| {

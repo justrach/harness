@@ -43,6 +43,15 @@ pub const DEFAULT_ORG_ID: &str = "dev-org";
 pub const DEFAULT_USER_ID: &str = "dev-user";
 /// Presence beat cadence.
 const PRESENCE_INTERVAL_MS: u64 = 15_000;
+/// Dial-gate thresholds (`peer_liveness`): a device is judged `Dark` — dials
+/// parked with zero network traffic — only on POSITIVE evidence: our registry
+/// room joined and warm past the warm-up window, and the device's freshest
+/// known heartbeat (live map ∪ session cache ∪ durable row) older than the
+/// dark window. m1-laptop shape: offline 6 days, yet hot-dialed in 3-dial
+/// bursts every ~60s for the life of the app.
+const DIAL_GATE_WARMUP_MS: i64 = 60_000;
+const DIAL_GATE_DARK_MS: i64 = 5 * 60_000;
+
 /// A presence heartbeat younger than this marks the device alive (3 missed
 /// beats = offline). Also the "peer is reachable" signal that clears the
 /// peer-dial cooldown.
@@ -165,6 +174,10 @@ struct WorkspaceHostInner {
     peer_alive: Mutex<Option<PeerAliveHook>>,
     /// Deaf-socket tripwire state — see `check_presence_deafness`.
     presence_watch: Mutex<PresenceWatch>,
+    /// Epoch ms of the registry room's most recent (re)join — the dial gate's
+    /// warm-up clock (`peer_liveness`): a just-joined room hasn't heard
+    /// anyone's heartbeat yet, and that silence must not read as "offline".
+    room_joined_at: std::sync::atomic::AtomicI64,
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
@@ -278,6 +291,7 @@ impl WorkspaceHost {
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
+                room_joined_at: std::sync::atomic::AtomicI64::new(0),
             }),
         };
         // Persist immediately: after this boot the migration source is never
@@ -365,6 +379,9 @@ impl WorkspaceHost {
                         }
                         let Some(inner) = weak.upgrade() else { return };
                         *lock(&inner.room) = Some(client.clone());
+                        inner
+                            .room_joined_at
+                            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                         inner.bump_changed();
                         tracing::info!(org = %org_id, "registry room joined");
                         drop(inner);
@@ -377,8 +394,17 @@ impl WorkspaceHost {
                         loop {
                             tokio::select! {
                                 event = events.recv() => match event {
-                                    Ok(zeron_sync::RegistryEvent::Applied)
-                                    | Ok(zeron_sync::RegistryEvent::Connected) => {
+                                    Ok(zeron_sync::RegistryEvent::Connected) => {
+                                        let Some(inner) = weak.upgrade() else { return };
+                                        // Re-join: restart the dial gate's
+                                        // warm-up clock (presence map is empty
+                                        // again; silence isn't evidence yet).
+                                        inner
+                                            .room_joined_at
+                                            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+                                        inner.bump_changed();
+                                    }
+                                    Ok(zeron_sync::RegistryEvent::Applied) => {
                                         let Some(inner) = weak.upgrade() else { return };
                                         inner.bump_changed();
                                     }
@@ -443,6 +469,65 @@ impl WorkspaceHost {
     /// the engine points this at `LinkCache::reset_cooldown`.
     pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {
         *lock(&self.inner.peer_alive) = Some(hook);
+    }
+
+    /// Dial-gate verdict for `LinkCache` (park dials to registry-dark peers).
+    /// `Dark` requires positive evidence; every ambiguous state — registry
+    /// room down or still in its warm-up window, unknown device, heartbeat in
+    /// the gray zone — stays `Unknown`, because a dead registry room (rows
+    /// down, relay fine: the 2026-08-18 03:45 incident shape) must never
+    /// park the relay. Un-park is presence-driven: heartbeats resume → the
+    /// verdict flips and the peer-alive hook clears any dial cooldown.
+    pub fn peer_liveness(&self, device_id: &str) -> zeron_rpc::PeerLiveness {
+        use zeron_rpc::PeerLiveness::{Dark, Live, Unknown};
+        if device_id == self.inner.config.device_id {
+            return Live;
+        }
+        let now = now_ms();
+        let (connected, live_beat) = {
+            let room = lock(&self.inner.room);
+            match room.as_ref() {
+                Some(room) => (
+                    room.stats().connected,
+                    room.presence().get(device_id).copied(),
+                ),
+                None => (false, None),
+            }
+        };
+        if !connected {
+            return Unknown;
+        }
+        let cached = lock(&self.inner.presence_seen).get(device_id).copied();
+        match live_beat.into_iter().chain(cached).max() {
+            Some(ms) if now.saturating_sub(ms) < PRESENCE_FRESH_MS => Live,
+            Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => Dark,
+            Some(_) => Unknown,
+            None => {
+                // Never heard this device beat. Silence is only evidence once
+                // OUR room has been joined long enough to have heard it.
+                let joined_at = self
+                    .inner
+                    .room_joined_at
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if joined_at == 0 || now.saturating_sub(joined_at) < DIAL_GATE_WARMUP_MS {
+                    return Unknown;
+                }
+                // Fall back to the durable row: a device whose last stamped
+                // sighting is ancient AND which isn't beating now is dark.
+                let row_seen = self
+                    .read(|doc| doc.read_devices())
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .find(|d| d.id == device_id)
+                    .and_then(|d| d.last_seen_at)
+                    .map(|at| at.timestamp_millis());
+                match row_seen {
+                    Some(ms) if now.saturating_sub(ms) >= DIAL_GATE_DARK_MS => Dark,
+                    _ => Unknown,
+                }
+            }
+        }
     }
 
     pub fn device_id(&self) -> &str {
