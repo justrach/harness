@@ -17,6 +17,24 @@ import Foundation
 import Loro
 import Observation
 
+/// One queued-flow attachment: client-minted uploadId (the pending:// ref's
+/// identity), original file name, and the bytes the escort pushes.
+struct AttachmentTransfer {
+    let uploadId: String
+    let name: String
+    let data: Data
+}
+
+/// An optimistic echo the host hasn't materialized yet. `at` is the send's
+/// wall time (display); `started` is the delivery-grace clock, reset by the
+/// retry affordance so the surface returns to Sending/Queued.
+struct PendingSend {
+    let messageId: String
+    let text: String
+    let at: Int64
+    var started: Int64
+}
+
 @MainActor
 @Observable
 final class SessionStore {
@@ -41,7 +59,7 @@ final class SessionStore {
     @ObservationIgnored let transcriptCache = TranscriptBuilderCache()
     private(set) var connected = false
     /// Client-minted ids of sends the host hasn't materialized yet.
-    private(set) var pendingSends: [(messageId: String, text: String, at: Int64)] = []
+    private(set) var pendingSends: [PendingSend] = []
 
     let doc = LoroDoc()
     /// The chat2 room cursor — the last server row seq folded into `doc`.
@@ -76,19 +94,33 @@ final class SessionStore {
     // MARK: Attachments (uploads target the chat's host device)
 
     @ObservationIgnored private var hostRelay: (deviceId: String, client: DeviceRelayClient)?
+    /// Registry-presence dial gate for the host relay, wired by AppModel.
+    @ObservationIgnored var hostLiveness: (@MainActor @Sendable (String) -> PeerLiveness)?
 
-    /// Chunked upload of one staged image to the host device; returns the
-    /// durable absolute path on that device (what the refs trailer carries).
-    func uploadAttachment(name: String, data: Data) async throws -> String {
+    private func relayToHost() throws -> DeviceRelayClient {
         guard let hostDeviceId else { throw RelayError.hostOffline }
-        let relay: DeviceRelayClient
         if let hostRelay, hostRelay.deviceId == hostDeviceId {
-            relay = hostRelay.client
-        } else {
-            relay = DeviceRelayClient(deviceId: hostDeviceId, config: config)
-            hostRelay = (hostDeviceId, relay)
+            return hostRelay.client
         }
-        return try await uploadAttachmentChunked(relay: relay, name: name, data: data)
+        let target = hostDeviceId
+        let relay: DeviceRelayClient
+        if let gate = hostLiveness {
+            relay = DeviceRelayClient(deviceId: target, config: config,
+                                      liveness: { gate(target) })
+        } else {
+            relay = DeviceRelayClient(deviceId: target, config: config)
+        }
+        hostRelay = (target, relay)
+        return relay
+    }
+
+    /// Chunked upload of one staged image to the host device (the LEGACY
+    /// host-staged flow, for hosts < 0.2.12); returns the durable absolute
+    /// path on that device (what the refs trailer carries).
+    func uploadAttachment(name: String, data: Data, uploadId: String? = nil,
+                          progress: (@MainActor @Sendable (Double) -> Void)? = nil) async throws -> String {
+        try await uploadAttachmentChunked(relay: relayToHost(), name: name, data: data,
+                                          uploadId: uploadId, progress: progress)
     }
 
     /// Demo-mode injection point (also used by previews).
@@ -137,6 +169,9 @@ final class SessionStore {
         subscriptions.append(localSub)
         connectIfReady()
         project()
+        // A relaunch mid-send: re-arm the attachment escorts for any of our
+        // still-pending commands whose bytes sit in the stash.
+        respawnEscorts()
     }
 
     /// Registry projection hook (AppModel forwards the chat row's roomGen).
@@ -481,7 +516,8 @@ final class SessionStore {
 
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
 
-    func sendRun(prompt: String, chat: Chat, attachments: [String] = []) {
+    func sendRun(prompt: String, chat: Chat, attachments: [String] = [],
+                 worktree: WorktreeSpec? = nil) {
         if offline {
             demoResponder?(prompt)
             return
@@ -494,13 +530,15 @@ final class SessionStore {
                                  modelOptions: chat.config?.modelOptions ?? [:],
                                  cwd: chat.cwd ?? "",
                                  sandbox: chat.config?.sandbox ?? "workspace-write",
-                                 attachments: attachments)
+                                 attachments: attachments,
+                                 worktree: worktree)
         queueCommand(kind: "run", payload: [
             "kind": "run",
             "request": encodableJSON(request),
             "messageId": messageId,
         ])
-        pendingSends.append((messageId, prompt, nowMs()))
+        let now = nowMs()
+        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: now, started: now))
         revision &+= 1
     }
 
@@ -515,8 +553,33 @@ final class SessionStore {
             "prompt": prompt,
             "messageId": messageId,
         ])
-        pendingSends.append((messageId, prompt, nowMs()))
+        let now = nowMs()
+        pendingSends.append(PendingSend(messageId: messageId, text: prompt, at: now, started: now))
         revision &+= 1
+    }
+
+    /// The queued-attachment send (PR #168, host ≥ 0.2.12): the command
+    /// queues IMMEDIATELY with `pending://{uploadId}/{name}` refs — a durable
+    /// local write — and the bytes chase it over the relay (retry-forever on
+    /// the online bus). The host defers the command until every ref's bytes
+    /// land, then rewrites the refs to absolute paths at dispatch. An image
+    /// send no longer dies with a dead link.
+    func sendWithTransfers(prompt: String, chat: Chat, live: Bool,
+                           transfers: [AttachmentTransfer],
+                           worktree: WorktreeSpec? = nil) {
+        // Stash bytes FIRST — before anything references them — so escorts
+        // survive a relaunch and retries can re-derive their transfers.
+        for transfer in transfers {
+            UploadStash.save(uploadId: transfer.uploadId, data: transfer.data)
+        }
+        let refs = transfers.map { UploadStash.pendingRef(uploadId: $0.uploadId, name: $0.name) }
+        let content = withAttachments(text: prompt, paths: refs)
+        if live {
+            sendSteer(prompt: content)
+        } else {
+            sendRun(prompt: content, chat: chat, attachments: refs, worktree: worktree)
+        }
+        spawnEscort(transfers: transfers)
     }
 
     func sendInterrupt() {
@@ -562,6 +625,121 @@ final class SessionStore {
         Task { [config, chatId] in
             await config.nudge(deviceId: hostDeviceId, chatId: chatId)
         }
+    }
+
+    // MARK: Delivery escorts (doc_host.rs spawn_command_delivery, phone half)
+
+    /// doc_host.rs TRANSFER_BACKOFF_BASE / TRANSFER_BACKOFF_CAP /
+    /// ATTACHMENT_WAIT_MAX: the escort retries until the bytes land or the
+    /// host's own 15-minute defer window closes.
+    private static let transferBackoffBaseMs = 2_000
+    private static let transferBackoffCapMs = 30_000
+    private static let attachmentWaitMaxMs: Int64 = 15 * 60_000
+
+    /// uploadIds an escort is actively pushing — retry/respawn dedupes on it.
+    @ObservationIgnored private var activeEscorts: Set<String> = []
+
+    /// Whether this store has ever dialed its chat2 room (feeds the
+    /// connectivity center — an undialed room is not "degraded").
+    var roomActive: Bool { chatRoom != nil }
+
+    /// Push a queued send's bytes to the host: retry-forever (event-driven
+    /// backoff, cut short by online events) up to the host's defer window.
+    /// Success commits every upload and nudges the drain; the command stays
+    /// durably queued in the doc no matter what happens here.
+    private func spawnEscort(transfers: [AttachmentTransfer]) {
+        let remaining = transfers.filter { !activeEscorts.contains($0.uploadId) }
+        guard !remaining.isEmpty else { return }
+        for transfer in remaining {
+            activeEscorts.insert(transfer.uploadId)
+        }
+        Task { @MainActor [weak self] in
+            defer {
+                for transfer in remaining {
+                    self?.activeEscorts.remove(transfer.uploadId)
+                }
+            }
+            var pending = remaining
+            var backoffMs = Self.transferBackoffBaseMs
+            let deadline = nowMs() + Self.attachmentWaitMaxMs
+            while let self, !pending.isEmpty, nowMs() < deadline {
+                do {
+                    while let transfer = pending.first {
+                        _ = try await uploadAttachmentChunked(
+                            relay: self.relayToHost(),
+                            name: transfer.name, data: transfer.data,
+                            uploadId: transfer.uploadId)
+                        UploadStash.delete(uploadId: transfer.uploadId)
+                        pending.removeFirst()
+                    }
+                    self.nudgeHost()
+                    return
+                } catch {
+                    roomLog.warning("chat2 \(self.chatId, privacy: .public): attachment transfer failed (\(error.localizedDescription, privacy: .public)); retrying in \(backoffMs)ms")
+                    await OnlineBus.shared.waitBackoff(ms: backoffMs)
+                    backoffMs = min(backoffMs * 2, Self.transferBackoffCapMs)
+                }
+            }
+            if !pending.isEmpty {
+                roomLog.error("chat2 \(self?.chatId ?? "?", privacy: .public): attachment transfer gave up after 15min; the send stays queued — retry re-derives the transfers")
+            }
+        }
+    }
+
+    /// Re-derive escorts from the doc's own pending commands (retry taps,
+    /// app relaunch): scan our unexpired pending entries for pending:// refs
+    /// and re-push any whose bytes are still stashed. Idempotent — a re-push
+    /// re-commits the same file; the host's processed ledger keeps execution
+    /// exactly-once.
+    private func respawnEscorts() {
+        guard let root = doc.getDeepValue().mapValue,
+              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
+        let now = nowMs()
+        var transfers: [AttachmentTransfer] = []
+        var seen = Set<String>()
+        for value in commands {
+            guard let m = value.mapValue,
+                  m["status"]?.stringValue == "pending",
+                  m["issuedBy"]?.stringValue == config.deviceId,
+                  let payload = m["payload"]?.mapValue else { continue }
+            if let expires = m["expiresAt"]?.i64Value, expires <= now { continue }
+            var refs: [String] = []
+            if let request = payload["request"]?.mapValue,
+               let attachments = request["attachments"]?.listValue {
+                refs += attachments.compactMap(\.stringValue)
+            }
+            if let prompt = payload["prompt"]?.stringValue {
+                refs += prompt.split(separator: "\n").compactMap { line in
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.hasPrefix("- \(UploadStash.pendingRefPrefix)") else { return nil }
+                    return String(trimmed.dropFirst(2))
+                }
+            }
+            for ref in refs {
+                guard let (uploadId, name) = UploadStash.parseRef(ref),
+                      seen.insert(uploadId).inserted,
+                      let data = UploadStash.load(uploadId: uploadId) else { continue }
+                transfers.append(AttachmentTransfer(uploadId: uploadId, name: name, data: data))
+            }
+        }
+        guard !transfers.isEmpty else { return }
+        roomLog.info("chat2 \(self.chatId, privacy: .public): respawning \(transfers.count) attachment escort(s)")
+        spawnEscort(transfers: transfers)
+    }
+
+    /// The "Not delivered — tap to retry" affordance (doc_host.rs
+    /// retry_delivery): restart the grace clock so the surface returns to
+    /// Sending/Queued, kick the room on fresh backoff, nudge the host, and
+    /// re-derive attachment escorts from the still-pending refs.
+    func retryDelivery() {
+        let now = nowMs()
+        for ix in pendingSends.indices {
+            pendingSends[ix].started = now
+        }
+        revision &+= 1
+        kickRoom()
+        nudgeHost()
+        respawnEscorts()
     }
 }
 
