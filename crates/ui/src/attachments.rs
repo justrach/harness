@@ -335,18 +335,20 @@ fn chunk_ranges(b64_len: usize) -> Vec<(u64, std::ops::Range<usize>)> {
 /// [`UPLOAD_CHUNK_B64_CHARS`] slice (positional `seq` makes the cheap retry
 /// idempotent), a few chunks in flight at once, then
 /// `UploadCommit{uploadId,fileName}` → the durable absolute path on the target
-/// device. `progress` (when given) accumulates uploaded BINARY bytes — the
+/// device. The caller mints `upload_id` — the queued-attachment flow derives
+/// its `pending://` refs from the same identity before the bytes move.
+/// `progress` (when given) accumulates uploaded BINARY bytes — the
 /// composer's "Uploading… N%" reads it every paint. Errors return the raw
 /// cause (the composer shows friendly copy).
 pub async fn upload_attachment(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     target_device_id: Option<&str>,
+    upload_id: &str,
     attachment: &StagedAttachment,
     progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<String, String> {
     let b64 = BASE64.encode(attachment.bytes());
-    let upload_id = uuid::Uuid::new_v4().to_string();
     let ranges = chunk_ranges(b64.len());
     let deadline = executor.timer(attachment_deadline(ranges.len()));
     let upload = async {
@@ -388,7 +390,16 @@ pub async fn upload_attachment(
                             Ok(_) => break,
                             Err(err) if attempt < 2 => {
                                 attempt += 1;
-                                tracing::debug!(error = %err, seq, "upload chunk retry");
+                                // warn, not debug: the 2026-08-19 incident
+                                // ground through silent timeout/retry cycles
+                                // for minutes with a literally empty log —
+                                // degraded uploads must narrate.
+                                tracing::warn!(error = %err, seq, attempt, "upload chunk retry");
+                                // Stagger by seq so parallel chunks that failed
+                                // together don't re-collide in lockstep.
+                                executor
+                                    .timer(Duration::from_millis(50 * (attempt as u64) * (seq + 1)))
+                                    .await;
                             }
                             Err(err) => return Err(err),
                         }
