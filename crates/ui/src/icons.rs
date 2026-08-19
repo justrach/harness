@@ -77,6 +77,9 @@ icon_assets![
     // arrow-up mirrored (like the sidebar flip) — the Solar Linear set here
     // has no plain arrow-down.
     (ARROW_DOWN, "arrow-down"),
+    // arrow-up rotated 45° — the "opens elsewhere" glyph on spawn chips;
+    // the set has no diagonal arrow.
+    (ARROW_UP_RIGHT, "arrow-up-right"),
     // Hand-drawn return/enter arrow in the Solar Linear style (like the
     // terminal/plus/close ports) — the set has no return glyph.
     (RETURN, "return"),
@@ -134,6 +137,11 @@ icon_assets![
     (WINDOW_MINIMIZE, "window-minimize"),
     (WINDOW_MAXIMIZE, "window-maximize"),
     (WINDOW_RESTORE, "window-restore"),
+    // Hand-drawn hard-drive + home glyphs in the Solar Linear style (like the
+    // terminal/plus/return ports) — drawn for the add-space palette's
+    // Locations rail; the set has neither.
+    (HARD_DRIVE, "hard-drive"),
+    (HOME, "home"),
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),

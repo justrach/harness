@@ -1063,8 +1063,14 @@ impl AgentAccounts {
             }
         }
         // Creation order — stable across switches (saved_at churns on every
-        // auto-snapshot; created_at never does).
-        slots.sort_by_key(|s| s.created_at.unwrap_or(s.saved_at));
+        // auto-snapshot; created_at never does). Slot id breaks creation-time
+        // ties: two logins saved in the same millisecond otherwise land in
+        // read_dir order, which is filesystem-arbitrary for UUID-named files
+        // and reshuffles the page between restarts (issue #161).
+        slots.sort_by(|a, b| {
+            (a.created_at.unwrap_or(a.saved_at), &a.id)
+                .cmp(&(b.created_at.unwrap_or(b.saved_at), &b.id))
+        });
         slots
     }
 
@@ -1079,7 +1085,20 @@ impl AgentAccounts {
         full.created_at = existing
             .and_then(|e| e.created_at.or(Some(e.saved_at)))
             .or(slot.created_at)
-            .or(Some(slot.saved_at));
+            .or_else(|| {
+                // A brand-new slot: stamp it strictly after every sibling, so
+                // two logins inside the same millisecond still list in the
+                // order they were saved (creation order is the page's sort
+                // key; ms-resolution ties otherwise fall to read_dir order).
+                let floor = self
+                    .read_slots(slot.harness)
+                    .iter()
+                    .map(|s| s.created_at.unwrap_or(s.saved_at))
+                    .max()
+                    .map(|newest| newest + 1)
+                    .unwrap_or(slot.saved_at);
+                Some(floor.max(slot.saved_at))
+            });
         let json = serde_json::to_string_pretty(&full)
             .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
         // Atomic + 0600 from birth: tokens must never be world-readable, and a

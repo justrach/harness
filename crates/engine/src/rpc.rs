@@ -894,6 +894,7 @@ fn forwardable(method: &str) -> bool {
             | methods::FETCH_ALL
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
+            | methods::LIST_DRIVES
             | methods::SEARCH_FILES
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
@@ -1135,8 +1136,11 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_COMMANDS => {
                 // Same shape as ListModels: forces a lazy resolve, then the
-                // harness's own (cached) discovery. Non-ACP harnesses return
-                // an empty list from the trait default.
+                // harness's own (cached) discovery — ACP agents advertise
+                // availableCommands, claude answers the initialize control
+                // request, codex lists skills; only harnesses whose wire has
+                // no listing (cursor, mock) fall through to the trait's
+                // empty default.
                 let p: ListModelsParams = parse_params(params)?;
                 let harness = self
                     .registry
@@ -1642,6 +1646,14 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&listing)
+            }
+            methods::LIST_DRIVES => {
+                let drives = self
+                    .repos
+                    .list_drives()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&zeron_proto::DriveListing { drives })
             }
             methods::SEARCH_FILES => {
                 let p: FileSearchParams = parse_params(params)?;
