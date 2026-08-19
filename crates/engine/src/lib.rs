@@ -695,6 +695,13 @@ impl Engine {
                 .as_deref()
                 .is_some_and(|token| !token.trim().is_empty()),
         };
+        if edge_enabled {
+            // OS network-path events (macOS NWPathMonitor): the instant the
+            // path returns every parked reconnect backoff redials, and while
+            // the OS says there is no path the dial loops park instead of
+            // burning attempts. No-op on platforms without a monitor.
+            zeron_sync::net_path::spawn_path_monitor();
+        }
         let device_id = load_or_create_device_id(profile.device_root())?;
         let edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)

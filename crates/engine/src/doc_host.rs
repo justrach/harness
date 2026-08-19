@@ -966,6 +966,7 @@ impl DocHost {
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = zeron_sync::wake::subscribe();
+            let mut online = zeron_sync::wake::subscribe_online();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
@@ -1129,11 +1130,17 @@ impl DocHost {
                             "chat2 join timed out; retrying");
                     }
                 }
+                // Drain stale online events so only successes DURING this
+                // wait cut it short (our own failed dial doesn't count).
+                while online.try_recv().is_ok() {}
                 tokio::select! {
                     _ = tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()) => {
                         backoff = (backoff * 2).min(crate::workspace_host::JOIN_RETRY_CAP);
                     }
                     _ = wake.recv() => {
+                        backoff = crate::workspace_host::JOIN_RETRY_BASE;
+                    }
+                    _ = online.recv() => {
                         backoff = crate::workspace_host::JOIN_RETRY_BASE;
                     }
                     _ = crate::workspace_host::token_changed(&mut token_changes) => {
@@ -1676,6 +1683,35 @@ impl DocHost {
                 chat2.probe();
             }
         }
+    }
+
+    /// Window-focus fast path: one cheap HTTP probe of the edge decides
+    /// whether to un-park every reconnect backoff NOW (success → online
+    /// event → immediate redials with fresh backoff) or to leave them
+    /// backing off (failure — a dial can't succeed either, so don't burn
+    /// the attempt). Recovery rides the "user looked at the app" event
+    /// instead of timer luck.
+    pub fn probe_edge_reachability(&self) {
+        let Some(edge) = self.inner.config.edge.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let url = format!("{}/health", edge.url.trim_end_matches('/'));
+        let http = self.inner.http.clone();
+        self.spawn_worker_on(&runtime, async move {
+            let res = http
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+            if let Ok(res) = res
+                && res.status().is_success()
+            {
+                zeron_sync::wake::notify_online();
+            }
+        });
     }
 
     /// Per-open-chat room introspection for SyncStatus / `zeron sync`.

@@ -1094,6 +1094,7 @@ impl RpcService for EngineRpc {
             methods::PROBE_SYNC => {
                 self.workspace.probe();
                 self.doc_host.probe_open_chats();
+                self.doc_host.probe_edge_reachability();
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::SYNC_STATUS => {

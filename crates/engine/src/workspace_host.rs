@@ -65,7 +65,10 @@ const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
 /// it lands. Jittered so N devices restarting together don't resynchronize
 /// their retries into a thundering herd on the cold DO.
 pub(crate) const JOIN_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(500);
-pub(crate) const JOIN_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+/// 16s, matching the room clients' BACKOFF_CAP: the cap only bounds the dark
+/// window when every event wake (online bus, system wake, token change)
+/// missed, so it trades a few extra dials/minute for a tighter worst case.
+pub(crate) const JOIN_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(16);
 
 pub(crate) async fn token_changed(changes: &mut Option<tokio::sync::watch::Receiver<u64>>) {
     match changes {
@@ -320,6 +323,7 @@ impl WorkspaceHost {
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let mut wake = zeron_sync::wake::subscribe();
+            let mut online = zeron_sync::wake::subscribe_online();
             // `RegistryClient` only self-reconnects AFTER a first successful
             // join; an INITIAL failure (a 500 from an overloaded DO, a token
             // racing a refresh, an edge deploy) must not end this task and
@@ -405,11 +409,17 @@ impl WorkspaceHost {
                             "registry room join failed; retrying");
                     }
                 }
+                // Drain stale online events so only successes DURING this
+                // wait cut it short (our own failed dial doesn't count).
+                while online.try_recv().is_ok() {}
                 tokio::select! {
                     _ = tokio::time::sleep(backoff + join_retry_jitter()) => {
                         backoff = (backoff * 2).min(JOIN_RETRY_CAP);
                     }
                     _ = wake.recv() => {
+                        backoff = JOIN_RETRY_BASE;
+                    }
+                    _ = online.recv() => {
                         backoff = JOIN_RETRY_BASE;
                     }
                     _ = token_changed(&mut token_changes) => {

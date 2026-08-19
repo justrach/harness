@@ -49,19 +49,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Text `"ping"` keepalive — answered by the DO's hibernation-safe auto-response
 /// pair (`edge/src/device-room.ts`) without waking it.
 ///
-/// 15s, not 30: a laptop's uplink (corporate proxy, VPN split-tunnel extension,
+/// 10s, not 30: a laptop's uplink (corporate proxy, VPN split-tunnel extension,
 /// consumer NAT) can reap an idle flow well inside a minute, and a keepalive
 /// that races the reaper loses. The frame is 4 bytes and never wakes the DO, so
-/// the only cost of halving the interval is that the host stays reachable.
-const PING_INTERVAL: Duration = Duration::from_secs(15);
+/// the only cost of shortening the interval is that the host stays reachable —
+/// and a tight interval is what lets the silence lease below stay short.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// Silence lease: every ping elicits an auto-pong, so a healthy socket sees
 /// inbound traffic at least once per `PING_INTERVAL`. No inbound frame for a
 /// couple of intervals plus grace = dead socket (half-open TCP after NAT
 /// timeout or sleep/wake) — drop it and reconnect instead of waiting on a TCP
-/// write error. Must stay well under the relay's own host-liveness window
-/// (`HOST_LIVENESS_MS`, edge/src/device-room.ts) so a host replaces its dead
-/// socket before the relay gives up on the device.
-const SILENCE_LEASE: Duration = Duration::from_secs(40);
+/// write error. 25s tolerates one lost pong (pings at +10/+20) before ruling
+/// the socket dead; the old 40s left sends wedged for most of a minute after
+/// an unnoticed drop. Must stay well under the relay's own host-liveness
+/// window (`HOST_LIVENESS_MS`, edge/src/device-room.ts) so a host replaces
+/// its dead socket before the relay gives up on the device.
+const SILENCE_LEASE: Duration = Duration::from_secs(25);
 
 // ---------------------------------------------------------------------------
 // Frame codec
@@ -707,12 +710,16 @@ impl LinkCache {
         });
         // Wake = every cached link is half-open and every cooldown is moot
         // (the failures belonged to the pre-suspend network). Drop them so the
-        // next call redials immediately with fresh credentials. Skipped
-        // outside a runtime (sync unit tests).
+        // next call redials immediately with fresh credentials. An online
+        // event (network path back / sibling dial success) likewise voids the
+        // cooldowns — those failures belonged to the dead network — but keeps
+        // live links, which a mere network *recovery* has not invalidated.
+        // Skipped outside a runtime (sync unit tests).
         if tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cache);
             tokio::spawn(async move {
                 let mut wake = zeron_sync::wake::subscribe();
+                let mut online = zeron_sync::wake::subscribe_online();
                 let mut token_changes = weak
                     .upgrade()
                     .and_then(|cache| cache.config.token.subscribe());
@@ -724,6 +731,11 @@ impl LinkCache {
                             lock(&cache.links).clear();
                             lock(&cache.dial_state).clear();
                             tracing::info!("peer: links + cooldowns cleared after wake");
+                        }
+                        result = online.recv() => {
+                            if result.is_err() { return; }
+                            let Some(cache) = weak.upgrade() else { return };
+                            lock(&cache.dial_state).clear();
                         }
                         _ = token_changed(&mut token_changes) => {
                             let Some(cache) = weak.upgrade() else { return };
