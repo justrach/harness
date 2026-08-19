@@ -330,9 +330,28 @@ impl Normalizer {
                     .message
                     .blocks()
                     .filter(|b: &ContentBlock| b.kind == "tool_use")
-                    .map(|b| AgentEvent::ToolCall {
-                        id: b.id.clone(),
-                        call: decode_tool_use(&b.name, &b.input),
+                    .flat_map(|b| {
+                        let call = AgentEvent::ToolCall {
+                            id: b.id.clone(),
+                            call: decode_tool_use(&b.name, &b.input),
+                        };
+                        // A spawn's `prompt` is the subagent's opening user
+                        // message — the wire never echoes it on the child
+                        // feed (child user frames carry tool results and
+                        // steers only), so seed it here and the subagent
+                        // transcript starts the way every chat does.
+                        let opening = matches!(b.name.as_str(), "Agent" | "Task")
+                            .then(|| b.input.get("prompt"))
+                            .flatten()
+                            .and_then(Value::as_str)
+                            .filter(|p| !p.trim().is_empty())
+                            .map(|prompt| tag(
+                                &b.id,
+                                AgentEvent::UserMessage {
+                                    text: prompt.to_owned(),
+                                },
+                            ));
+                        std::iter::once(call).chain(opening)
                     })
                     .collect();
                 // A failed turn (usage limit, billing, auth, overloaded, …)
@@ -356,7 +375,7 @@ impl Normalizer {
                 if let Some(parent) = &f.parent_tool_use_id {
                     // A subagent's tool results echo on the main channel too;
                     // they belong to its transcript, attributed like its calls.
-                    return f
+                    let mut out: Vec<AgentEvent> = f
                         .message
                         .blocks()
                         .filter(|b: &ContentBlock| b.kind == "tool_result")
@@ -372,6 +391,21 @@ impl Normalizer {
                             )
                         })
                         .collect();
+                    // A tagged user frame's TEXT blocks are the parent
+                    // steering its subagent (SendMessage-style follow-ups —
+                    // tool results ride their own blocks, filtered above).
+                    // Synthetic harness injections are not conversation.
+                    out.extend(
+                        f.message
+                            .blocks()
+                            .filter(|b: &ContentBlock| {
+                                b.kind == "text"
+                                    && !b.text.trim().is_empty()
+                                    && !b.text.trim_start().starts_with("<system-reminder>")
+                            })
+                            .map(|b| tag(parent, AgentEvent::UserMessage { text: b.text })),
+                    );
+                    return out;
                 }
                 f.message
                     .blocks()
@@ -640,6 +674,78 @@ mod tests {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn spawn_prompt_seeds_the_subagent_opening_user_message() {
+        // The wire never echoes a Task's prompt on the child feed, so the
+        // spawn itself seeds the subagent's opening user entry.
+        let ev = normalize_one(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{"description":"probe","prompt":"scan the fold path"}}]}}"#,
+        );
+        assert!(matches!(
+            &ev[..],
+            [
+                AgentEvent::ToolCall { id, .. },
+                AgentEvent::Subagent { parent_tool_use_id, event },
+                AgentEvent::AssistantMessageCompleted { .. },
+            ] if id == "toolu_sub"
+                && parent_tool_use_id == "toolu_sub"
+                && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "scan the fold path")
+        ));
+        // No prompt → no synthetic opening; ordinary tools never spawn one.
+        for frame in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Task","input":{"description":"probe"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"ls","prompt":"red herring"}}]}}"#,
+        ] {
+            let ev = normalize_one(frame);
+            assert!(
+                !ev.iter()
+                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                "{frame}: {ev:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tagged_user_text_becomes_a_subagent_steer() {
+        // A tagged user frame's TEXT block is the parent steering its
+        // subagent — forwarded as a tagged UserMessage so the subagent doc
+        // grows a user entry.
+        let ev = normalize_one(
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"Also check the rebuild path."}]}}"#,
+        );
+        assert_eq!(
+            ev,
+            vec![AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_sub".into(),
+                event: Box::new(AgentEvent::UserMessage {
+                    text: "Also check the rebuild path.".into(),
+                }),
+            }]
+        );
+        // Synthetic harness injections are not conversation, and blank text
+        // is noise; an UNTAGGED user text frame is not a steer at all (the
+        // parent chat's user messages come from doc commands).
+        for frame in [
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"<system-reminder>tick</system-reminder>"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"   "}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"typed into the parent"}]}}"#,
+        ] {
+            assert_eq!(normalize_one(frame), Vec::new(), "frame: {frame}");
+        }
+        // Mixed frames keep both: the tool result AND the steer text.
+        let ev = normalize_one(
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false},{"type":"text","text":"Keep going."}]}}"#,
+        );
+        assert!(matches!(
+            &ev[..],
+            [
+                AgentEvent::Subagent { event: first, .. },
+                AgentEvent::Subagent { event: second, .. },
+            ] if matches!(first.as_ref(), AgentEvent::ToolResult { .. })
+                && matches!(second.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
+        ));
     }
 
     #[test]

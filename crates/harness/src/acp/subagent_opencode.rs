@@ -605,7 +605,32 @@ fn part_snapshot_events(child: &mut ChildState, part: &Value) -> Vec<AgentEvent>
     let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
     match kind {
         "text" | "reasoning" => {
-            // The child's own prompt arrives as a user-message text part.
+            // A user-role text part is the message INTO the child — its
+            // spawn prompt (and any future steer). opencode's own UI renders
+            // these, so we do too: one UserMessage per part (posted
+            // atomically — there is no user delta channel), which the engine
+            // writes as its own user entry.
+            if kind == "text" && child.assistant_messages.get(message_id) == Some(&false) {
+                let text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                if text.trim().is_empty() {
+                    return Vec::new();
+                }
+                let entry = child
+                    .parts
+                    .entry(part_id.to_owned())
+                    .or_insert_with(|| PartState {
+                        kind: kind.to_owned(),
+                        ..PartState::default()
+                    });
+                if entry.emitted > 0 {
+                    return Vec::new();
+                }
+                entry.emitted = text.len();
+                child.saw_transcript = true;
+                return vec![AgentEvent::UserMessage {
+                    text: text.to_owned(),
+                }];
+            }
             if child.assistant_messages.get(message_id) != Some(&true) {
                 return Vec::new();
             }
@@ -917,6 +942,14 @@ mod tests {
                 "id": "prt_u", "messageID": "msg_u", "sessionID": "ses_child",
                 "type": "text", "text": "run the probe",
             }}});
+            // The message INTO the child (its prompt / a steer) forwards as
+            // a UserMessage — once: a re-delivered snapshot must not double
+            // the entry.
+            assert!(matches!(
+                handle_bus_event(&mut state, &user_part).as_slice(),
+                [AgentEvent::Subagent { event, .. }]
+                    if matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "run the probe")
+            ));
             assert!(handle_bus_event(&mut state, &user_part).is_empty());
 
             let asst_msg = json!({"type": "message.updated", "properties": {"info": {

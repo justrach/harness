@@ -75,6 +75,9 @@ icon_assets![
     // arrow-up mirrored (like the sidebar flip) — the Solar Linear set here
     // has no plain arrow-down.
     (ARROW_DOWN, "arrow-down"),
+    // arrow-up rotated 45° — the "opens elsewhere" glyph on spawn chips;
+    // the set has no diagonal arrow.
+    (ARROW_UP_RIGHT, "arrow-up-right"),
     // Hand-drawn return/enter arrow in the Solar Linear style (like the
     // terminal/plus/close ports) — the set has no return glyph.
     (RETURN, "return"),
