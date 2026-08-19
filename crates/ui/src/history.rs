@@ -1776,7 +1776,6 @@ impl Render for GitHistoryCount {
         let theme = Theme::of(cx).clone();
         let history = self.history.read(cx);
         let count = history.commit_count();
-        let branch = history.current_branch(cx);
         let comparison = history
             .comparison
             .clone()
@@ -1809,18 +1808,6 @@ impl Render for GitHistoryCount {
                                         "{count} commit{}",
                                         if count == 1 { "" } else { "s" }
                                     ))),
-                            )
-                        })
-                        .when_some(branch.clone(), |element, branch| {
-                            element.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(theme.font_mono.clone())
-                                    .text_size(px(11.5))
-                                    .line_height(px(14.0))
-                                    .text_color(theme.text_dim)
-                                    .child(SharedString::from(branch)),
                             )
                         })
                         .when_some(
@@ -2109,13 +2096,6 @@ impl GitHistory {
         } else {
             self.head_commit_count
         }
-    }
-
-    fn current_branch(&self, cx: &App) -> Option<String> {
-        self.state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|chat| chat.branch.clone())
     }
 
     fn recompute_view(&mut self) {

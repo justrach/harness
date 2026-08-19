@@ -2708,6 +2708,13 @@ impl Changes {
                 .into_any_element();
         }
         let scope = self.scope;
+        let history_branch = (scope == DiffScope::History).then(|| {
+            self.state
+                .read(cx)
+                .selected_chat_row()
+                .and_then(|chat| chat.branch.clone())
+                .unwrap_or_else(|| "HEAD".to_string())
+        });
         let history_count = (scope == DiffScope::History).then(|| self.history_count(cx));
         let history_search_control =
             (scope == DiffScope::History).then(|| self.history_search_control(cx));
@@ -2762,8 +2769,8 @@ impl Changes {
                     .text_color(theme.text_muted.opacity(0.7)),
             );
         let trigger = if scope == DiffScope::History {
-            // History is its own surface: show its identity rather than a
-            // scope picker that could turn this tab back into a Diff tab.
+            // The tab already identifies this as History; use the fixed title
+            // slot for the current branch instead of repeating the surface name.
             div()
                 .id("history-surface-title")
                 .h(px(24.0))
@@ -2771,10 +2778,11 @@ impl Changes {
                 .flex_none()
                 .flex()
                 .items_center()
-                .text_size(px(12.0))
+                .font_family(theme.font_mono.clone())
+                .text_size(px(11.5))
                 .line_height(px(14.0))
-                .text_color(theme.text)
-                .child("History")
+                .text_color(theme.text_dim)
+                .child(SharedString::from(history_branch.unwrap_or_default()))
                 .into_any_element()
         } else if self.scope_menu.get().is_some() {
             let closing = self.scope_menu.closing_since();
