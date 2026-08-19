@@ -538,55 +538,101 @@ pub fn split_pairs(lines: &[DiffLine]) -> Vec<LinePair> {
 /// `max(dels, adds)` rows and so anything past the budget can only land past
 /// it as well.
 pub fn split_pairs_upto(lines: &[DiffLine], max_rows: usize) -> Vec<LinePair> {
-    fn flush(pairs: &mut Vec<LinePair>, dels: &mut Vec<u32>, adds: &mut Vec<u32>, max_rows: usize) {
-        for ix in 0..dels.len().max(adds.len()) {
-            if pairs.len() >= max_rows {
-                break;
+    /// The block being accumulated: the two sides' code lines, plus the
+    /// `\ No newline…` marker each side may end on.
+    #[derive(Default)]
+    struct Block {
+        dels: Vec<u32>,
+        adds: Vec<u32>,
+        del_meta: Vec<u32>,
+        add_meta: Vec<u32>,
+    }
+
+    fn flush(pairs: &mut Vec<LinePair>, block: &mut Block, max_rows: usize) {
+        let mut drain = |left: &mut Vec<u32>, right: &mut Vec<u32>| {
+            for ix in 0..left.len().max(right.len()) {
+                if pairs.len() >= max_rows {
+                    break;
+                }
+                pairs.push((left.get(ix).copied(), right.get(ix).copied()));
             }
-            pairs.push((dels.get(ix).copied(), adds.get(ix).copied()));
-        }
-        dels.clear();
-        adds.clear();
+            left.clear();
+            right.clear();
+        };
+        drain(&mut block.dels, &mut block.adds);
+        // Markers trail the code they annotate, and pair with each other — a
+        // modification where both files lost their final newline is one
+        // aligned row plus one marker row, not two one-sided rows plus two
+        // markers. They never share a row with code, so both render arms can
+        // treat a marker on either side as spanning the row.
+        drain(&mut block.del_meta, &mut block.add_meta);
     }
 
     let mut pairs = Vec::with_capacity(lines.len().min(max_rows));
-    let mut dels: Vec<u32> = Vec::new();
-    let mut adds: Vec<u32> = Vec::new();
+    let mut block = Block::default();
+    let mut pending_side: Option<LineKind> = None;
     for (ix, line) in lines.iter().enumerate() {
         match line.kind {
             LineKind::Del => {
-                if !adds.is_empty() {
-                    flush(&mut pairs, &mut dels, &mut adds, max_rows);
+                // A marker already closes its side, so code arriving after one
+                // starts a fresh block — the marker row keeps its place in the
+                // file's order.
+                if !block.adds.is_empty()
+                    || !block.del_meta.is_empty()
+                    || !block.add_meta.is_empty()
+                {
+                    flush(&mut pairs, &mut block, max_rows);
                 }
                 let remaining = max_rows - pairs.len().min(max_rows);
                 if remaining == 0 {
                     break;
                 }
-                if dels.len() < remaining {
-                    dels.push(ix as u32);
+                if block.dels.len() < remaining {
+                    block.dels.push(ix as u32);
                 }
+                pending_side = Some(LineKind::Del);
             }
             LineKind::Add => {
+                // The old side's marker is the one case where a marker does
+                // not close the block: `-old`, marker, `+new` is one edit.
+                if !block.add_meta.is_empty() {
+                    flush(&mut pairs, &mut block, max_rows);
+                }
                 let remaining = max_rows - pairs.len().min(max_rows);
                 if remaining == 0 {
                     break;
                 }
-                if adds.len() < remaining {
-                    adds.push(ix as u32);
+                if block.adds.len() < remaining {
+                    block.adds.push(ix as u32);
                 }
+                pending_side = Some(LineKind::Add);
             }
-            // Context sits on both sides; `\ No newline…` is carried the same
-            // way but renders across the row (see [`meta_line_row`]).
-            LineKind::Context | LineKind::Meta => {
-                flush(&mut pairs, &mut dels, &mut adds, max_rows);
+            // `\ No newline at end of file` belongs to the side whose line it
+            // follows, so it must NOT close the block: git writes `-old`,
+            // marker, `+new`, marker for an edited last line, and treating
+            // either marker as a boundary would tear that edit apart. A marker
+            // after context describes the same line on both sides.
+            LineKind::Meta => match pending_side {
+                Some(LineKind::Del) => block.del_meta.push(ix as u32),
+                Some(LineKind::Add) => block.add_meta.push(ix as u32),
+                _ => {
+                    block.del_meta.push(ix as u32);
+                    block.add_meta.push(ix as u32);
+                }
+            },
+            // Context sits on both sides.
+            LineKind::Context => {
+                flush(&mut pairs, &mut block, max_rows);
                 if pairs.len() >= max_rows {
                     break;
                 }
                 pairs.push((Some(ix as u32), Some(ix as u32)));
+                pending_side = Some(LineKind::Context);
             }
         }
     }
-    flush(&mut pairs, &mut dels, &mut adds, max_rows);
+    flush(&mut pairs, &mut block, max_rows);
+    pairs.truncate(max_rows);
     pairs
 }
 
@@ -2657,9 +2703,13 @@ impl Changes {
                 let left = left.and_then(|slot| lines.get(slot as usize));
                 let right = right.and_then(|slot| lines.get(slot as usize));
                 // `\ No newline at end of file` is not code on one side — it
-                // is a note about the row, so it spans both columns.
-                if let Some(line) = left
-                    && line.kind == LineKind::Meta
+                // is a note about the row, so it spans both columns. Pairing
+                // never puts a marker opposite code, so either side having one
+                // means the whole row is the marker.
+                if let Some(line) = [left, right]
+                    .into_iter()
+                    .flatten()
+                    .find(|line| line.kind == LineKind::Meta)
                 {
                     return meta_line_row(&line.text, &theme, 2.0 * (ACCENT_BAR_WIDTH + gutter_px));
                 }
@@ -4098,13 +4148,19 @@ fn render_file_body_upto(
                             None => split_filler().into_any_element(),
                         };
                         let (left, right) = (line_at(left), line_at(right));
-                        children.push(match left {
-                            Some(line) if line.kind == LineKind::Meta => meta_line_row(
+                        let marker = [left, right]
+                            .into_iter()
+                            .flatten()
+                            .find(|line| line.kind == LineKind::Meta);
+                        children.push(match marker {
+                            Some(line) => meta_line_row(
                                 &line.text,
                                 theme,
                                 2.0 * (ACCENT_BAR_WIDTH + gutter_px),
                             ),
-                            _ => split_row(cell(left, true), cell(right, false)).into_any_element(),
+                            None => {
+                                split_row(cell(left, true), cell(right, false)).into_any_element()
+                            }
                         });
                         y += DIFF_LINE_HEIGHT;
                     }
@@ -4461,11 +4517,12 @@ rename to new_name.rs
                 (Some(4), Some(4)),
             ]
         );
-        // A pure add: every row is right-only, and the trailing no-newline
-        // Meta line spans both columns.
+        // A pure add: every row is right-only, including the trailing
+        // no-newline Meta line — it belongs to the side it follows, and its
+        // row spans both columns at render.
         assert_eq!(
             split_pairs(&files[1].hunks[0].lines),
-            vec![(None, Some(0)), (None, Some(1)), (Some(2), Some(2))]
+            vec![(None, Some(0)), (None, Some(1)), (None, Some(2))]
         );
         // A pure delete strands the left.
         assert_eq!(split_pairs(&files[2].hunks[0].lines), vec![(Some(0), None)]);
@@ -4488,6 +4545,51 @@ rename to new_name.rs
         assert_eq!(
             split_pairs(&lines),
             vec![(Some(0), Some(1)), (Some(2), Some(3))]
+        );
+    }
+
+    #[test]
+    fn no_newline_markers_keep_their_edit_paired() {
+        // Both files lost their final newline: git writes the marker twice,
+        // once per side. Neither may split the edit into one-sided rows.
+        let both = "diff --git a/a.txt b/a.txt\n\
+             --- a/a.txt\n\
+             +++ b/a.txt\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             \\ No newline at end of file\n\
+             +new\n\
+             \\ No newline at end of file\n";
+        let files = parse_patch(both);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(
+            lines.iter().map(|line| line.kind).collect::<Vec<_>>(),
+            vec![LineKind::Del, LineKind::Meta, LineKind::Add, LineKind::Meta]
+        );
+        // One aligned old/new row, then the two markers on one row of their
+        // own — four lines read as two rows, not four.
+        assert_eq!(
+            split_pairs(lines),
+            vec![(Some(0), Some(2)), (Some(1), Some(3))]
+        );
+        let full = split_pairs(lines);
+        for cap in 0..=full.len() + 2 {
+            assert_eq!(split_pairs_upto(lines, cap), full[..cap.min(full.len())]);
+        }
+
+        // Only the old file lacked one: the edit still pairs, and the lone
+        // marker takes a row on its own side.
+        let old_only = "diff --git a/a.txt b/a.txt\n\
+             --- a/a.txt\n\
+             +++ b/a.txt\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             \\ No newline at end of file\n\
+             +new\n";
+        let files = parse_patch(old_only);
+        assert_eq!(
+            split_pairs(&files[0].hunks[0].lines),
+            vec![(Some(0), Some(2)), (Some(1), None)]
         );
     }
 
