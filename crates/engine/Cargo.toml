@@ -31,6 +31,7 @@ libc.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
+nucleo-matcher.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
