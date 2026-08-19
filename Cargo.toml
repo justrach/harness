@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.13"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -54,15 +54,17 @@ loro-protocol = "0.3"
 # per-pixel EdgeFade for quads/images (true fade-into-glass), and
 # object-fit Cover cropping via atlas-tile UVs so image corner radii hold;
 # 8a8954c switches the macOS blurred view to UnderWindowBackground (macOS 26
-# stopped vending CABackdropLayer for Selection — window blur went dead).
-gpui = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
-gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d", features = [
+# stopped vending CABackdropLayer for Selection — window blur went dead);
+# b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
+# Linux — the Metal path's snapshot/blur/composite, ported).
+gpui = { git = "https://github.com/wingleeio/zed", rev = "f8d8a90d914d26b68fb126040386fb08c2ada78a" }
+gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "f8d8a90d914d26b68fb126040386fb08c2ada78a", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "f8d8a90d914d26b68fb126040386fb08c2ada78a" }
 
 # diffs
 similar = "2"
