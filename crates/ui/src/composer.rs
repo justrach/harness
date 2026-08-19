@@ -4651,6 +4651,132 @@ impl Composer {
         let err_message_id = message_id.clone();
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<(), String> = async {
+                // Attachments stage FIRST — before the chat row or anything
+                // else exists. Staging is chat-independent (keyed by
+                // uploadId), and ordering it first makes a new-chat send
+                // atomic: a staging failure aborts with NOTHING created,
+                // instead of stranding a just-minted empty chat (v0.2.12
+                // "failed to stage → empty transcript" report).
+                //
+                // Queued flow: commit the bytes to the LOCAL engine's uploads
+                // dir (fast, offline-safe) — the queued command carries the
+                // `pending://` refs and the engine delivers the bytes to a
+                // remote host afterwards, retrying until they land. Legacy
+                // flow (old engines): stage on the host device up front,
+                // bounded by a total budget so a degraded link fails the send
+                // loudly instead of grinding through silent per-chunk retries
+                // for minutes.
+                let mut content = text.clone();
+                let mut attachment_paths: Vec<String> = Vec::new();
+                let mut transfers: Vec<serde_json::Value> = Vec::new();
+                if !staged.is_empty() && queued_flow {
+                    // Local staging is disk-speed; publish progress anyway so
+                    // huge files still narrate.
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                        if let Err(err) = attachments::upload_attachment(
+                            &engine,
+                            cx.background_executor(),
+                            None,
+                            upload_id,
+                            att,
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
+                            return Err("Couldn't stage the attachment locally.".to_string());
+                        }
+                        transfers.push(serde_json::json!({
+                            "uploadId": upload_id,
+                            "fileName": att.name,
+                        }));
+                    }
+                    // The echo refs ARE the persisted refs — no refresh pass.
+                    attachment_paths = echo_paths.clone();
+                    content = echo_text.clone();
+                } else if !staged.is_empty() {
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                        match attachments::upload_attachment(
+                            &engine,
+                            cx.background_executor(),
+                            host_device_id.as_deref(),
+                            upload_id,
+                            att,
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
+                            Ok(path) => attachment_paths.push(path),
+                            Err(err) => {
+                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
+                                return Err(
+                                    "Couldn't upload the attachment — the device may be offline."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    // Seed the transcript cache from local bytes so the sent
+                    // bubble's thumbnails never round-trip (seedTranscript-
+                    // Attachment in the original send path).
+                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
+                    for (path, att) in attachment_paths.iter().zip(&staged) {
+                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        if seed_device != device_id {
+                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                        }
+                    }
+                    content = attachments::with_attachments(&text, &attachment_paths);
+                    // Refresh the echo in place with the attachment refs
+                    // (same id, same clock — the bubble grows its thumbnails
+                    // without flickering).
+                    let refreshed = SessionMessageEntry {
+                        id: message_id.clone(),
+                        role: zeron_doc::MessageRole::User,
+                        parts: vec![MessagePart::Text {
+                            id: "t0".into(),
+                            text: content.clone(),
+                        }],
+                        created_at,
+                        device_id: "local".into(),
+                        status: None,
+                        continuation_of: None,
+                    };
+                    let echo_chat_id = chat_id.clone();
+                    this.update(cx, |composer, cx| {
+                        composer.state.update(cx, |s, cx| {
+                            s.remove_echo(&echo_chat_id, &message_id);
+                            s.push_echo(&echo_chat_id, refreshed);
+                            cx.notify();
+                        });
+                    })
+                    .ok();
+                }
+
                 // Resolve the working directory: existing chats keep theirs;
                 // new chats run per the checkout plan (t3code env-mode): the
                 // space's folder as-is, an EXISTING worktree of the picked ref
@@ -4772,132 +4898,6 @@ impl Composer {
                     }
                 }
 
-                // Attachments. Queued flow: commit the bytes to the LOCAL
-                // engine's uploads dir (fast, offline-safe) — the queued
-                // command carries the `pending://` refs and the engine
-                // delivers the bytes to a remote host afterwards, retrying
-                // until they land. Legacy flow (old engines): stage on the
-                // host device up front, bounded by a total budget so a
-                // degraded link fails the send loudly instead of grinding
-                // through silent per-chunk retries for minutes.
-                let mut content = text.clone();
-                let mut attachment_paths: Vec<String> = Vec::new();
-                let mut transfers: Vec<serde_json::Value> = Vec::new();
-                if !staged.is_empty() && queued_flow {
-                    // Local staging is disk-speed; publish progress anyway so
-                    // huge files still narrate.
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
-                        if let Err(err) = attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            None,
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
-                            return Err("Couldn't stage the attachment locally.".to_string());
-                        }
-                        transfers.push(serde_json::json!({
-                            "uploadId": upload_id,
-                            "fileName": att.name,
-                        }));
-                    }
-                    // The echo refs ARE the persisted refs — no refresh pass.
-                    attachment_paths = echo_paths.clone();
-                    content = echo_text.clone();
-                } else if !staged.is_empty() {
-                    // Legacy flow (old engines): stage on the host device up
-                    // front. Publish upload progress so the working label can
-                    // read "Uploading… N%" instead of an opaque "Sending…"
-                    // while the chunks cross the relay; the per-attachment
-                    // deadline inside `upload_attachment` bounds the whole
-                    // crawl (2026-08-19: silent per-chunk retries ground for
-                    // minutes with no total budget).
-                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
-                    {
-                        let progress = progress.clone();
-                        this.update(cx, |composer, cx| {
-                            composer.state.update(cx, |s, cx| {
-                                s.begin_upload_progress(total, progress);
-                                cx.notify();
-                            });
-                        })
-                        .ok();
-                    }
-                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
-                        match attachments::upload_attachment(
-                            &engine,
-                            cx.background_executor(),
-                            host_device_id.as_deref(),
-                            upload_id,
-                            att,
-                            Some(progress.clone()),
-                        )
-                        .await
-                        {
-                            Ok(path) => attachment_paths.push(path),
-                            Err(err) => {
-                                tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
-                                return Err(
-                                    "Couldn't upload the attachment — the device may be offline."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    // Seed the transcript cache from local bytes so the sent
-                    // bubble's thumbnails never round-trip (seedTranscript-
-                    // Attachment in the original send path).
-                    let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
-                    for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
-                        if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
-                        }
-                    }
-                    content = attachments::with_attachments(&text, &attachment_paths);
-                    // Refresh the echo in place with the attachment refs
-                    // (same id, same clock — the bubble grows its thumbnails
-                    // without flickering).
-                    let refreshed = SessionMessageEntry {
-                        id: message_id.clone(),
-                        role: zeron_doc::MessageRole::User,
-                        parts: vec![MessagePart::Text {
-                            id: "t0".into(),
-                            text: content.clone(),
-                        }],
-                        created_at,
-                        device_id: "local".into(),
-                        status: None,
-                        continuation_of: None,
-                    };
-                    let echo_chat_id = chat_id.clone();
-                    this.update(cx, |composer, cx| {
-                        composer.state.update(cx, |s, cx| {
-                            s.remove_echo(&echo_chat_id, &message_id);
-                            s.push_echo(&echo_chat_id, refreshed);
-                            cx.notify();
-                        });
-                    })
-                    .ok();
-                }
-
                 let command = if steer_cmd {
                     SessionCommandPayload::Steer {
                         prompt: content.clone(),
@@ -4942,6 +4942,22 @@ impl Composer {
                 Ok(())
             }
             .await;
+            if result.is_err() && is_new {
+                // A failed new-chat send must not strand a just-minted empty
+                // chat in the sidebar (v0.2.12 "empty transcript" report).
+                // Staging now runs before CreateChat, so usually nothing was
+                // created — but a post-mutate failure (QueueCommand) still
+                // leaves a row. Best-effort delete; a no-op if the chat was
+                // never materialized.
+                let _ = attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::MUTATE,
+                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            }
             this.update(cx, |composer, cx| {
                 composer.sending = false;
                 composer
@@ -4949,31 +4965,59 @@ impl Composer {
                     .update(cx, |s, _| s.end_upload_progress());
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the chat's stash.
+                    // draft, staged files back in the stash. A failed NEW
+                    // chat restores to the CANVAS (key "") and navigates back
+                    // there — the minted chat is gone (deleted above), so
+                    // nothing may restore under its key.
+                    let restore_key = if is_new {
+                        String::new()
+                    } else {
+                        err_chat_id.clone()
+                    };
                     composer.failure = Some(message.into());
-                    composer.failure_key = Some(err_chat_id.clone());
+                    composer.failure_key = Some(restore_key.clone());
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
-                        // Re-staged under the chat's key: a new chat's send has
-                        // already re-keyed the composer to the minted id by
-                        // now, exactly like the staged files below.
+                        if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
+                            // Back to the canvas; the navigation draft-swap
+                            // loads the restored draft below.
+                            s.select_chat(None, cx);
+                        }
                         for comment in &comments {
-                            s.add_diff_comment(&err_chat_id, comment.clone());
+                            s.add_diff_comment(&restore_key, comment.clone());
                         }
                         cx.notify();
                     });
-                    composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    if is_new && composer.current_key != restore_key {
+                        // A re-key swap to the canvas is pending (the
+                        // select_chat(None) above); it loads this draft into
+                        // the input on flush — setting the input directly
+                        // here would be clobbered by that same swap.
+                        composer.drafts.insert(restore_key.clone(), restore_text.clone());
+                    } else {
+                        // Already keyed to the restore target (either an
+                        // existing chat, or the deleted row's watch event
+                        // re-keyed to the canvas before this handler ran —
+                        // no further swap will fire). Set the input directly.
+                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    }
                     if !staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back.
-                        let slot = composer.attachments.entry(err_chat_id.clone()).or_default();
+                        // while the send was in flight survive the hand-back —
+                        // draining the minted chat's slot too when the restore
+                        // target is the canvas.
                         let mut merged = staged.clone();
-                        merged.extend(
-                            slot.drain(..)
-                                .filter(|e| !staged.iter().any(|f| f.id == e.id)),
-                        );
-                        *slot = merged;
+                        for key in [err_chat_id.clone(), restore_key.clone()] {
+                            if let Some(slot) = composer.attachments.get_mut(&key) {
+                                let fresh: Vec<_> = slot
+                                    .drain(..)
+                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
+                                    .collect();
+                                merged.extend(fresh);
+                            }
+                        }
+                        composer.attachments.insert(restore_key, merged);
                     }
                 }
                 cx.notify();
@@ -5551,7 +5595,7 @@ impl Render for Composer {
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
-        let queue_notice: Option<SharedString> = {
+        let queue_notice: Option<(SharedString, bool)> = {
             use zeron_proto::ConnectivityState as S;
             let state = self.state.read(cx);
             let degraded = match state.selected_chat.as_deref() {
@@ -5568,12 +5612,14 @@ impl Render for Composer {
                                 .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
                 }
             };
+            let offline = state.connectivity.state == S::Offline;
             degraded.then(|| {
-                if state.connectivity.state == S::Offline {
-                    "Offline — messages will queue and send automatically.".into()
+                let text: SharedString = if offline {
+                    "Offline — messages will send when you're back online.".into()
                 } else {
-                    "Connection degraded — messages will queue and send automatically.".into()
-                }
+                    "Messages will send once the connection recovers.".into()
+                };
+                (text, offline)
             })
         };
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
@@ -5643,30 +5689,31 @@ impl Render for Composer {
                         .child(div().min_w_0().child(message)),
                 )
             })
-            .when_some(queue_notice, |el, notice| {
-                // Same Notice shape as above, amber, not dismissable — it
+            .when_some(queue_notice, |el, (notice, offline)| {
+                // Not a warning box (v0.2.12 feedback: the amber Notice read
+                // as an error and flashed on every blip — pre-grace). One
+                // quiet caption line, amber dot only for hard offline; it
                 // clears itself the moment the path heals.
-                let amber = theme.warning;
-                let amber_200 = theme.warning_muted;
-                el.child(
+                let dot = if offline {
+                    theme.warning
+                } else {
+                    theme.text_faint
+                };
+                el.child(crate::motion::fade_in(
+                    "composer-queue-notice",
                     div()
                         .id("composer-queue-notice")
-                        .mx(px(4.0))
+                        .mx(px(8.0))
                         .mt(px(6.0))
                         .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(amber.opacity(0.16))
-                        .bg(amber.opacity(0.05))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(amber_200.opacity(0.9))
-                        .child(div().min_w_0().child(notice)),
-                )
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_faint)
+                        .child(div().size(px(5.0)).rounded_full().bg(dot))
+                        .child(div().min_w_0().truncate().child(notice)),
+                ))
             });
 
         // Turn-boundary steering notice: for agents without mid-turn
