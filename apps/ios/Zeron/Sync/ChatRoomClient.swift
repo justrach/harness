@@ -42,7 +42,11 @@ actor ChatRoomClient {
     static let probeQuietNs: UInt64 = 900_000_000_000  // 15min quiet-room probe
     static let livenessTickNs: UInt64 = 1_000_000_000
     static let backoffBaseMs = 250
-    static let backoffCapMs = 30_000
+    static let backoffCapMs = 16_000
+    /// Stability-gated backoff reset (chat_client.rs STABLE_RESET): only a
+    /// session that joined AND survived this long resets backoff to base —
+    /// reset-on-join let connect-and-die sockets hot-loop at 250ms forever.
+    static let stableResetNs: UInt64 = 30_000_000_000
     /// Re-push cadence after a `quota` rejection (server window is 60s).
     static let quotaRetryNs: UInt64 = 5_000_000_000
     /// Client-side push cap: the DO's per-row cap (1 MiB) minus frame-header
@@ -112,6 +116,8 @@ actor ChatRoomClient {
     /// liveness while it runs; the silence lease defers to it.
     private var checkpointProgressAt: DispatchTime?
     private var joined = false
+    /// When the current session joined — feeds the stability-gated reset.
+    private var joinedAt: DispatchTime?
     private var closed = false
     private var generation = 0
     private var backoffMs = ChatRoomClient.backoffBaseMs
@@ -431,10 +437,20 @@ actor ChatRoomClient {
         socket?.cancel(with: .abnormalClosure, reason: nil)
         socket = nil
         cancelTasks()
+        // Stability-gated reset: only a session that survived ≥30s earns a
+        // fresh 250ms; a connect-and-die session keeps growing the backoff.
+        if let joinedAt,
+           DispatchTime.now().uptimeNanoseconds - joinedAt.uptimeNanoseconds
+               >= ChatRoomClient.stableResetNs {
+            backoffMs = ChatRoomClient.backoffBaseMs
+        }
+        joinedAt = nil
         let delay = backoffMs
         backoffMs = min(backoffMs * 2, ChatRoomClient.backoffCapMs)
         Task {
-            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+            // Parked while the OS path is offline; cut short by any online
+            // event (a sibling dial success, path recovery, focus probe).
+            await OnlineBus.shared.waitBackoff(ms: delay)
             await self.connect()
         }
     }
@@ -675,8 +691,10 @@ actor ChatRoomClient {
         let wasResumed = resumed
         resumed = true
         joined = true
-        backoffMs = ChatRoomClient.backoffBaseMs
+        joinedAt = .now()
         roomLog.info("chat2 \(self.chatId, privacy: .public): joined (converged, resumed=\(wasResumed))")
+        // One recovered socket un-parks the whole fleet's backoffs.
+        OnlineBus.shared.notifyOnline()
         await delegate.event(.connected)
         // Anything not yet in flight goes now — the server's batchId dedupe
         // makes replays exact no-ops.
