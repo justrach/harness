@@ -27,6 +27,12 @@ has "$line" '"method":"initialized"' || exit 1
 # ---- thread start / resume -------------------------------------------------
 read -r line || exit 1
 thread_line="$line"
+if has "$line" '"method":"skills/list"'; then
+  # Command discovery probe: answer with two cwd groups sharing one skill
+  # (dedupe by name) and settle; no thread ever starts.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
+  exec sleep 30
+fi
 if has "$line" '"method":"thread/resume"'; then
   if has "$line" '"threadId":"resume-fail"'; then
     # Missing/foreign rollout: reject, expect the fresh-start fallback.
@@ -104,6 +110,10 @@ case "$turnline" in
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-1","itemId":"cm1","delta":"child says hi"}}'
   emit '{"method":"item/started","params":{"threadId":"child-1","item":{"id":"cs1","type":"commandExecution","command":"echo hi"}}}'
   emit '{"method":"item/completed","params":{"threadId":"child-1","item":{"id":"cs1","type":"commandExecution","command":"echo hi","status":"completed","exitCode":0}}}'
+  # The parent steering the child (collab send_message): a userMessage item
+  # on the CHILD thread — tagged UserMessage, emitted once (completed only).
+  emit '{"method":"item/started","params":{"threadId":"child-1","item":{"id":"cu1","type":"userMessage","text":"also check the rebuild"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"child-1","item":{"id":"cu1","type":"userMessage","text":"also check the rebuild"}}}'
   # The child settles ITS turn — the parent turn must keep running.
   emit '{"method":"turn/completed","params":{"threadId":"child-1","turn":{"id":"ct-1"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"parent still going"}}'

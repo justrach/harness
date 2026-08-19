@@ -911,10 +911,11 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
-    /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`) — see
-    /// [`Shell::new`].
+    /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`,
+    /// `ZERON_DEMO_UPLOAD`) — see [`Shell::new`].
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
+    debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
     right_tween: Option<WidthTween>,
     /// Changes-panel takeover (the header's expand button): the panel fills
@@ -1004,6 +1005,13 @@ impl Shell {
                         s.selected_chat
                             .as_deref()
                             .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
+                            // The connection pill's retry countdown needs the
+                            // same per-second refresh while degraded.
+                            || matches!(
+                                s.connectivity.state,
+                                zeron_proto::ConnectivityState::Offline
+                                    | zeron_proto::ConnectivityState::Reconnecting
+                            )
                     };
                     if live {
                         cx.notify();
@@ -1044,6 +1052,10 @@ impl Shell {
         // `ZERON_FORCE_GATE=signin|org|failed` renders that gate regardless of
         // real auth state (display-only — for styling passes).
         let debug_dialog = std::env::var("ZERON_OPEN_DIALOG").ok();
+        // `ZERON_DEMO_UPLOAD=<pct>:<image path>` fabricates an in-flight image
+        // send on the selected chat (echo bubble + frozen thumbnail progress
+        // ring) — display-only; a real upload can't be paused for a capture.
+        let debug_upload = std::env::var("ZERON_DEMO_UPLOAD").ok();
         let debug_gate = match std::env::var("ZERON_FORCE_GATE").ok().as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
@@ -1127,6 +1139,7 @@ impl Shell {
             was_window_active: false,
             debug_dialog,
             debug_gate,
+            debug_upload,
             sidebar_tween: None,
             right_tween: None,
             right_pane_expanded: false,
@@ -1197,6 +1210,64 @@ impl Shell {
                     self.delete_confirm = Some(first);
                 }
                 _ => {}
+            }
+        }
+        // Capture knob: `ZERON_DEMO_UPLOAD=<pct>:<image path>` — once a chat
+        // is selected, push a fake sending echo carrying that image as a
+        // pending attachment and freeze upload progress at <pct>, so the
+        // thumbnail progress ring can be styled/screenshotted (a real upload
+        // is too fast to pause).
+        if let Some(spec) = self.debug_upload.clone()
+            && let Some(chat_id) = state.read(cx).selected_chat.clone()
+        {
+            self.debug_upload = None;
+            if let Some((pct, img_path)) = spec.split_once(':')
+                && let Ok(pct) = pct.parse::<u64>()
+                && let Ok(att) =
+                    crate::attachments::stage_file(std::path::Path::new(img_path))
+            {
+                let pending_path = format!("pending/{}/{}", att.id, att.name);
+                let device_ids: Vec<String> = {
+                    let s = state.read(cx);
+                    s.selected_chat_row()
+                        .map(|c| c.device_id.clone())
+                        .into_iter()
+                        .chain(s.local_device_id.clone())
+                        .chain(Some("local".to_string()))
+                        .collect()
+                };
+                for device_id in &device_ids {
+                    crate::attachments::seed_attachment(
+                        device_id,
+                        &pending_path,
+                        &att.name,
+                        att.image.clone(),
+                    );
+                }
+                let text = crate::attachments::with_attachments(
+                    "Here is the screenshot of the bug.",
+                    std::slice::from_ref(&pending_path),
+                );
+                let echo = zeron_doc::SessionMessageEntry {
+                    id: "demo-upload-echo".into(),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "t0".into(),
+                        text,
+                    }],
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    device_id: "local".into(),
+                    status: None,
+                    continuation_of: None,
+                };
+                state.update(cx, |s, cx| {
+                    s.push_echo(&chat_id, echo);
+                    s.begin_upload_progress(
+                        100,
+                        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(pct)),
+                    );
+                    cx.notify();
+                });
             }
         }
         // Session chimes (herdr semantics, `sound::sound_for_transition`): a
@@ -1662,7 +1733,13 @@ impl Shell {
                 title,
                 frozen,
             } => {
-                self.add_subagent_surface(chat_id.clone(), doc_id.clone(), title.clone(), *frozen, cx);
+                self.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                );
             }
         }
     }
@@ -3304,6 +3381,7 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
+        change_request: Option<zeron_proto::ChangeRequestSummary>,
         harness: Option<zeron_proto::HarnessId>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -3318,14 +3396,39 @@ impl Shell {
         // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
         // accordion), t3code's settle-on-hover.
         let corner_hovered = self.chat_status_hover.as_deref() == Some(id.as_str());
-        let status_color = spaces::status_dot_color(status, theme);
-        let status_label: Option<&'static str> = match status {
-            zeron_proto::ChatIndicator::Working => Some("Working"),
-            zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-            zeron_proto::ChatIndicator::Errored => Some("Failed"),
-            zeron_proto::ChatIndicator::Completed => Some("Done"),
-            zeron_proto::ChatIndicator::Idle => None,
+        // Send-truth overrides: a send unadopted past the grace window is
+        // FAILED (explicit, with the transcript's retry affordance); a send
+        // whose delivery path is degraded is QUEUED, not Working — the
+        // pending pill tells the truth instead of faking a spinner.
+        let (queued, undelivered) = {
+            let now = Utc::now();
+            let state = self.state.read(cx);
+            (
+                state.send_queued(&id, now),
+                state.send_undelivered(&id, now),
+            )
         };
+        let status_color = if undelivered {
+            theme.danger
+        } else if queued {
+            theme.warning
+        } else {
+            spaces::status_dot_color(status, theme)
+        };
+        let status_label: Option<&'static str> = if undelivered {
+            Some("Failed")
+        } else if queued {
+            Some("Queued")
+        } else {
+            match status {
+                zeron_proto::ChatIndicator::Working => Some("Working"),
+                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                zeron_proto::ChatIndicator::Errored => Some("Failed"),
+                zeron_proto::ChatIndicator::Completed => Some("Done"),
+                zeron_proto::ChatIndicator::Idle => None,
+            }
+        };
+        let queued = queued && !undelivered;
         let corner_body: AnyElement = if corner_hovered {
             div()
                 .flex()
@@ -3528,8 +3631,8 @@ impl Shell {
                     .line_height(px(17.0))
                     .child(title),
             )
-            // Line 3 (always): harness brand mark; worktree sessions append
-            // the branch icon + name.
+            // Line 3 (always): harness brand mark, branch, optional PR badge,
+            // and the working spinner. Branch remains the only shrinking item.
             .child(
                 div()
                     .w_full()
@@ -3565,16 +3668,30 @@ impl Shell {
                                 .child(branch),
                         )
                     })
+                    // Stable invisible spring: keeps the optional spinner and
+                    // PR badge pinned right without changing no-PR paint.
+                    .child(div().flex_1().min_w_0())
                     // Working rows animate the spinner at the row's
                     // bottom-right (the status word keeps its dot up top).
-                    .when(status == zeron_proto::ChatIndicator::Working, |el| {
-                        el.child(div().flex_1())
-                            .child(loaders::mini_gradient_spinner(
+                    // Queued/Failed rows don't: a spinner would fake progress.
+                    .when(
+                        status == zeron_proto::ChatIndicator::Working && !queued && !undelivered,
+                        |el| {
+                            el.child(loaders::mini_gradient_spinner(
                                 format!("chat-working-{id}"),
                                 2.0,
                                 cx.entity_id(),
                                 cx,
                             ))
+                        },
+                    )
+                    .when_some(change_request, |el, summary| {
+                        el.child(crate::change_requests::pull_request_badge(
+                            format!("chat-pr-{id}").into(),
+                            summary,
+                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            theme,
+                        ))
                     }),
             )
             .into_any_element()
@@ -3583,6 +3700,61 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
+    /// The global connection line. `None` while healthy (`Connected`) or on
+    /// local profiles (`Disabled`) — and the engine's degrade grace means it
+    /// only exists during REAL outages, never join/wake blips. No surface,
+    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
+    /// reconnecting; an amber dot only when the OS says offline. The
+    /// transport error belongs in logs, not the sidebar.
+    fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use zeron_proto::ConnectivityState as S;
+        let conn = self.state.read(cx).connectivity.clone();
+        let (label, glyph): (SharedString, AnyElement) = match conn.state {
+            S::Disabled | S::Connected => return None,
+            S::Offline => (
+                "Offline — sends are saved".into(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
+            ),
+            S::Reconnecting => (
+                "Reconnecting…".into(),
+                loaders::mini_mono_spinner(
+                    "connection-spinner",
+                    2.0,
+                    theme.text_muted,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
+            ),
+        };
+        Some(
+            crate::motion::fade_in(
+                "connection-pill",
+                div()
+                    .id("connection-pill")
+                    .mx(px(Theme::SPACE_SM + 4.0))
+                    .mb(px(Theme::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(glyph)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_faint)
+                            .child(label),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
@@ -3740,6 +3912,12 @@ impl Shell {
                 )
                 .fade_overflow_y(&self.sidebar_scroll),
             )
+            // Global connection pill (durable-by-design UI truth): appears
+            // whenever the edge posture is degraded; hidden while healthy —
+            // appearing IS the signal.
+            .when_some(self.render_connection_pill(theme, cx), |el, pill| {
+                el.child(pill)
+            })
             // Update strip (above the user menu; below the lists).
             .when_some(self.render_update_strip(theme, cx), |el, strip| {
                 el.child(strip)
@@ -4977,12 +5155,7 @@ impl Shell {
                 .right(px(10.0))
                 .flex()
                 .justify_center()
-                .child(self.jump_pill(
-                    "jump-to-bottom",
-                    "jump-pill",
-                    self.transcript.clone(),
-                    cx,
-                ))
+                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
                 .into_any_element(),
         )
     }

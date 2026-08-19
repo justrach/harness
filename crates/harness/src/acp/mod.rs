@@ -2,9 +2,10 @@
 //! stdio, protocol v1) and maps its session updates onto [`AgentEvent`]s.
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
-//! `grok agent stdio`) and Hermes ([`AcpHarness::hermes`], `hermes acp`) —
-//! plus pi ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a
-//! native driver exists. Claude, Codex and Cursor moved to native drivers
+//! `grok agent stdio`), Hermes ([`AcpHarness::hermes`], `hermes acp`) and
+//! opencode ([`AcpHarness::opencode`], `opencode acp`) — plus pi
+//! ([`AcpHarness::pi`]) via the community `pi-acp` adapter until a native
+//! driver exists. Claude, Codex and Cursor moved to native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
@@ -27,6 +28,8 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 mod normalize;
+mod subagent;
+mod subagent_opencode;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -50,6 +53,8 @@ use zeron_proto::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
+use subagent::SubagentTracker;
+use subagent_opencode::OpencodeTracker;
 
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
@@ -106,10 +111,26 @@ struct AcpAgentSpec {
     /// a dead update check) — surface a visible error chip instead of
     /// indefinite Working.
     prompt_stall: Option<Duration>,
+    /// Agent-specific advice appended to the stall error chip: what a wedge
+    /// usually means for THIS agent and what the user can check.
+    stall_hint: &'static str,
+    /// The agent's ACP process doubles as its own HTTP server (opencode):
+    /// runs pass `--port <free>` and tail the `/event` SSE bus for subagent
+    /// transcripts, which never ride the ACP wire. A failed port pick (or a
+    /// server that never binds) degrades to chip + final output.
+    http_sidecar: bool,
 }
 
 fn identity_transform(_reasoning: Option<ReasoningLevel>, text: &str) -> String {
     text.to_owned()
+}
+
+/// A kernel-assigned free localhost port, released for the child to claim.
+fn free_localhost_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .ok()
 }
 
 /// PATH + login-shell + extra dirs + node-version-manager scan for a binary.
@@ -244,6 +265,10 @@ fn grok_spec() -> AcpAgentSpec {
         // `_meta.promptId`, just ahead of the RPC response.
         prompt_complete_extension: true,
         prompt_stall: Some(Duration::from_secs(30)),
+        stall_hint: "The agent process is likely wedged — a stale shared leader \
+             process or a hung startup check; zeron launches it with --no-leader \
+             and --no-auto-update to avoid both.",
+        http_sidecar: false,
     }
 }
 
@@ -308,6 +333,8 @@ fn hermes_spec() -> AcpAgentSpec {
         ladder_extras: &[],
         prompt_complete_extension: false,
         prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        http_sidecar: false,
     }
 }
 
@@ -363,6 +390,107 @@ fn pi_spec() -> AcpAgentSpec {
         ladder_extras: &[],
         prompt_complete_extension: false,
         prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        http_sidecar: false,
+    }
+}
+
+fn opencode_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".opencode").join("bin").join("opencode"));
+        dirs.push(home.join(".local").join("bin").join("opencode"));
+        dirs.push(home.join(".npm-global").join("bin").join("opencode"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/opencode"));
+    dirs.push(PathBuf::from("/usr/local/bin/opencode"));
+    dirs
+}
+
+fn opencode_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Opencode,
+        display_name: "OpenCode",
+        executable: "opencode",
+        env_override: "OPENCODE_EXECUTABLE",
+        args: &["acp"],
+        // The opencode-ai npm package ships a NATIVE platform binary (its
+        // `bin` entry is `opencode.exe` swapped in by postinstall), so the
+        // managed `node <entry>` adapter path can't launch it — the CLI
+        // itself is the ACP server, installed like grok/hermes.
+        npm_package: None,
+        extra_paths: opencode_install_paths,
+        cli_executable: "opencode",
+        cli_extra_paths: opencode_install_paths,
+        install_hint: "opencode (searched PATH, the login shell's PATH, ~/.opencode/bin, \
+             ~/.local/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
+             fnm/nvm/volta/pnpm/bun install dirs; install with \
+             `curl -fsSL https://opencode.ai/install | bash` or \
+             `npm install -g opencode-ai`, then `opencode auth login`; set \
+             OPENCODE_EXECUTABLE to override)",
+        // opencode routes models through its provider config (`opencode auth
+        // login` + opencode.json); the always-advertised OpenCode Zen frees
+        // anchor the static fallback. Ids the agent doesn't advertise are
+        // skipped by the config-option set (verified: the `model` config
+        // option lists every configured provider, no auth needed to probe).
+        models: || {
+            vec![
+                Model {
+                    id: "opencode/big-pickle".into(),
+                    label: "Big Pickle".into(),
+                    description: Some("OpenCode Zen's flagship coding model".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+                Model {
+                    id: "opencode/deepseek-v4-flash-free".into(),
+                    label: "DeepSeek V4 Flash (free)".into(),
+                    description: Some("Free tier on OpenCode Zen".into()),
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                },
+            ]
+        },
+        // No `_session/steering` extension (1.18.18): turn boundaries.
+        steering_mode: SteeringMode::TurnBoundary,
+        // Effort rides opencode's model VARIANTS: when the session's current
+        // model has variants (models.dev metadata, or `variants` in
+        // opencode.json), the session advertises an `effort` config option
+        // (category thought_level) whose values mirror them — verified live
+        // (1.18.18) end to end: set_config_option effort=high applies the
+        // variant's options to the provider request. Variant-less models
+        // (the Zen frees today) advertise no option and the run-start set
+        // skips, falling to the agent default — so the blanket ladder here
+        // is safe (pi precedent). The option is per-model and reactive;
+        // exact per-model ladders would need the sidecar's provider.list
+        // (model.variants) — follow-up.
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        // A failing model provider is INVISIBLE on this wire: opencode
+        // retries the provider stream forever without failing the
+        // session/prompt RPC, and neither session/update nor the /event bus
+        // carries the error (verified live, 1.18.18, unreachable provider —
+        // only ~/.local/share/opencode/log records the AI_APICallError
+        // retry loop). Fast provider rejections (e.g. a Zen model without a
+        // subscription) DO fail the RPC and surface as an error chip; total
+        // silence past the bound means the retry loop, so the watchdog is
+        // the only way the user ever learns.
+        prompt_stall: Some(Duration::from_secs(60)),
+        stall_hint: "The model provider is likely unreachable or rejecting \
+             requests — opencode retries these silently and never reports the \
+             failure. Check the model/provider setup (`opencode auth list`, \
+             opencode.json) or the opencode log \
+             (~/.local/share/opencode/log).",
+        http_sidecar: true,
     }
 }
 
@@ -420,6 +548,9 @@ enum Launch {
 pub struct AcpHarness {
     spec: AcpAgentSpec,
     executable: Option<PathBuf>,
+    /// Override of the agent's on-disk sessions root (grok's
+    /// `~/.grok/sessions`), where subagent transcripts are tailed from.
+    sessions_root: Option<PathBuf>,
     /// Grace between `session/cancel` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -439,6 +570,7 @@ impl AcpHarness {
         Self {
             spec,
             executable: None,
+            sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             // Generous: the handshake is local work for every agent
@@ -466,9 +598,22 @@ impl AcpHarness {
         Self::with_spec(pi_spec())
     }
 
+    /// opencode (`opencode acp`) — SST's native ACP agent.
+    pub fn opencode() -> Self {
+        Self::with_spec(opencode_spec())
+    }
+
     /// Use a fixed agent binary instead of PATH/known-location resolution.
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self
+    }
+
+    /// Test seam: tail subagent transcripts from this sessions root instead
+    /// of the agent's real one (`~/.grok/sessions`).
+    #[doc(hidden)]
+    pub fn with_sessions_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.sessions_root = Some(root.into());
         self
     }
 
@@ -592,10 +737,12 @@ impl AcpHarness {
         &self,
         cwd: Option<&str>,
         block_on_install: bool,
+        extra_args: &[String],
     ) -> Result<(Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
+        cmd.args(extra_args);
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
@@ -631,7 +778,7 @@ impl AcpHarness {
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false).await?;
+        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -695,7 +842,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false).await?;
+        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1040,7 +1187,18 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(Some(&request.cwd), true).await?;
+        // An http_sidecar agent (opencode) gets a per-run port: the default
+        // (4096) is shared, and a losing concurrent bind silently drops the
+        // server the subagent viz tails. The pick-then-release race is
+        // acceptable — a lost port only degrades transcripts to final output.
+        let sidecar_port = self.spec.http_sidecar.then(free_localhost_port).flatten();
+        let extra_args = match sidecar_port {
+            Some(port) => vec!["--port".to_owned(), port.to_string()],
+            None => Vec::new(),
+        };
+        let (mut child, stderr_tail) = self
+            .spawn_agent(Some(&request.cwd), true, &extra_args)
+            .await?;
         let stdin = child
             .stdin
             .take()
@@ -1064,6 +1222,9 @@ impl Harness for AcpHarness {
             effort_values: self.spec.effort_values,
             prompt_complete_extension: self.spec.prompt_complete_extension,
             prompt_stall: self.spec.prompt_stall,
+            stall_hint: self.spec.stall_hint,
+            sessions_root: self.sessions_root.clone(),
+            sidecar_port,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             handshake_timeout: self.handshake_timeout,
@@ -1092,6 +1253,11 @@ struct Session {
     agent_name: &'static str,
     prompt_complete_extension: bool,
     prompt_stall: Option<Duration>,
+    stall_hint: &'static str,
+    /// Sessions-root override for the subagent transcript tail (tests).
+    sessions_root: Option<PathBuf>,
+    /// The http_sidecar port this run's agent was told to bind (opencode).
+    sidecar_port: Option<u16>,
     prompt_transform: fn(Option<ReasoningLevel>, &str) -> String,
     effort_values: fn(Option<ReasoningLevel>, Option<&str>) -> Vec<&'static str>,
     interrupt_grace: Duration,
@@ -1336,12 +1502,51 @@ fn config_option_sets(
     sets
 }
 
-/// The events of one `session/update` notification, session-filtered.
-fn session_update_events(params: &Value, session_id: &str) -> Vec<AgentEvent> {
+/// The per-agent subagent correlator: grok's spawn-tool + disk-tail tracker
+/// (inert for agents that never emit `subagent_*` updates), or opencode's
+/// task-chip + sidecar-bus tracker. Both observe the raw updates ahead of
+/// [`map_update`]; their tagged events flow from their own tasks.
+enum SubagentObserver {
+    Grok(SubagentTracker),
+    Opencode(OpencodeTracker),
+}
+
+impl SubagentObserver {
+    fn observe(&mut self, update: &Value) {
+        match self {
+            SubagentObserver::Grok(tracker) => tracker.observe(update),
+            SubagentObserver::Opencode(tracker) => tracker.observe(update),
+        }
+    }
+}
+
+/// The events of one notification, session-filtered. `session/update` maps
+/// per [`map_update`]; `_x.ai/session_notification` is grok's extension
+/// channel — same `{sessionId, update}` envelope, but its updates (the
+/// `subagent_*` lifecycle) render nothing directly. The subagent tracker sees
+/// both first (spawn/finished correlation + transcript tails); its tagged
+/// events flow from its own tasks, not this return value.
+fn session_update_events(
+    method: &str,
+    params: &Value,
+    session_id: &str,
+    subagents: &mut SubagentObserver,
+) -> Vec<AgentEvent> {
     if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
         return Vec::new();
     }
-    map_update(params.get("update").unwrap_or(&Value::Null))
+    let update = params.get("update").unwrap_or(&Value::Null);
+    match method {
+        "session/update" => {
+            subagents.observe(update);
+            map_update(update)
+        }
+        "_x.ai/session_notification" => {
+            subagents.observe(update);
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Per-turn token usage from a settled `session/prompt` response, when the
@@ -1544,7 +1749,6 @@ fn handle_server_request_live(
     Vec::new()
 }
 
-
 /// Await a setup request while draining incoming messages, so a `session/load`
 /// whose replay outruns the incoming channel's capacity can't deadlock the
 /// reader. Replayed `session/update`s are dropped (the doc already holds the
@@ -1612,7 +1816,6 @@ fn track_turn_signals(
     }
 }
 
-
 /// A mid-turn `_session/steering` call. `idleBehavior: promptRequired`
 /// covers the turn-ended race: the agent hands the text back instead of
 /// firing an untracked turn.
@@ -1643,6 +1846,9 @@ async fn run_session(session: Session) {
         agent_name,
         prompt_complete_extension,
         prompt_stall,
+        stall_hint,
+        sessions_root,
+        sidecar_port,
         prompt_transform,
         effort_values,
         interrupt_grace,
@@ -1846,6 +2052,23 @@ async fn run_session(session: Session) {
         return;
     }
 
+    // Subagent correlation + transcript tails: opencode rides its sidecar
+    // event bus; everything else gets the grok tracker (inert for agents
+    // that never emit the `subagent_*` extension updates).
+    let mut subagents = if harness == HarnessId::Opencode {
+        SubagentObserver::Opencode(OpencodeTracker::new(
+            session_id.clone(),
+            event_tx.clone(),
+            sidecar_port.map(|p| format!("http://127.0.0.1:{p}")),
+        ))
+    } else {
+        SubagentObserver::Grok(SubagentTracker::new(
+            session_id.clone(),
+            event_tx.clone(),
+            sessions_root,
+        ))
+    };
+
     // ---- main loop --------------------------------------------------------
     // Prompt-completion settlement state (the prompt-complete extension):
     // one prompt is outstanding at a time, identified by `current_prompt_id`;
@@ -1867,8 +2090,7 @@ async fn run_session(session: Session) {
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_seq += 1;
-        current_prompt_id =
-            prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+        current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
         prompt_turn(
             client.clone(),
             session_id.clone(),
@@ -2022,11 +2244,8 @@ async fn run_session(session: Session) {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
-                            let events = if method == "session/update" {
-                                session_update_events(&params, &session_id)
-                            } else {
-                                Vec::new()
-                            };
+                            let events =
+                                session_update_events(&method, &params, &session_id, &mut subagents);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -2135,9 +2354,27 @@ async fn run_session(session: Session) {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                     last_update_at = tokio::time::Instant::now();
-                    // Any wire traffic is a sign of life: the prompt-stall
-                    // watchdog only guards TOTAL silence after a prompt.
-                    prompt_stall_deadline = None;
+                    // Wire traffic is a sign of life for the prompt-stall
+                    // watchdog — EXCEPT session boilerplate: opencode emits
+                    // available_commands_update right after session/new on
+                    // every session, including ones whose provider is down
+                    // (where it then retries the provider stream forever
+                    // with nothing further on the wire — verified live,
+                    // 1.18.18). One such frame must not disarm the watchdog
+                    // for the whole turn; only turn progress counts.
+                    let boilerplate = method == "session/update"
+                        && matches!(
+                            params
+                                .get("update")
+                                .and_then(|u| u.get("sessionUpdate"))
+                                .and_then(Value::as_str),
+                            Some("available_commands_update")
+                                | Some("config_option_update")
+                                | Some("current_mode_update")
+                        );
+                    if !boilerplate {
+                        prompt_stall_deadline = None;
+                    }
                     // `_x.ai/session/prompt_complete` — the AUTHORITATIVE
                     // turn end for agents advertising it (grok): the
                     // `session/prompt` RPC can hang after the turn really
@@ -2181,11 +2418,8 @@ async fn run_session(session: Session) {
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
-                    let events = if method == "session/update" {
-                        session_update_events(&params, &session_id)
-                    } else {
-                        Vec::new()
-                    };
+                    let events =
+                        session_update_events(&method, &params, &session_id, &mut subagents);
                     for ev in events {
                         track_turn_signals(&ev, &mut turn_content_seen, &mut open_tools);
                         if !send(&event_tx, ev).await {
@@ -2296,11 +2530,8 @@ async fn run_session(session: Session) {
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
                                 Incoming::Notification { method, params } => {
-                                    let events = if method == "session/update" {
-                                        session_update_events(&params, &session_id)
-                                    } else {
-                                        Vec::new()
-                                    };
+                                    let events =
+                                        session_update_events(&method, &params, &session_id, &mut subagents);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -2689,8 +2920,10 @@ async fn run_session(session: Session) {
                     &event_tx,
                     AgentEvent::Error {
                         message: format!(
-                            "{agent_name} did not respond to the prompt at all                              (no wire activity for {}s). The agent process is                              likely wedged — a stale shared leader process or a                              hung startup check; zeron launches it with                              --no-leader and --no-auto-update to avoid both.",
-                            prompt_stall.map(|d| d.as_secs()).unwrap_or(0)
+                            "{agent_name} did not respond to the prompt at all \
+                             (no wire activity for {}s). {}",
+                            prompt_stall.map(|d| d.as_secs()).unwrap_or(0),
+                            stall_hint,
                         ),
                     },
                 )

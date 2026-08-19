@@ -4,10 +4,11 @@
 //! stream-json ([`ClaudeHarness`]), Codex over the app-server JSON-RPC
 //! ([`CodexHarness`]), Cursor through a pinned @cursor/sdk shim
 //! ([`CursorHarness`]). The shared [`AcpHarness`] remains ONLY for agents
-//! built ground-up on ACP — Grok (`grok agent stdio`) and Hermes
-//! (`hermes acp`) — plus pi via the community `pi-acp` adapter until a
-//! native driver exists. Adapter-mediated ACP for claude/codex/cursor was
-//! retired: the adapters held prompt turns open for background work the
+//! built ground-up on ACP — Grok (`grok agent stdio`), Hermes
+//! (`hermes acp`) and opencode (`opencode acp`) — plus pi via the community
+//! `pi-acp` adapter until a native driver exists. Adapter-mediated ACP for
+//! claude/codex/cursor was retired: the
+//! adapters held prompt turns open for background work the
 //! CLIs themselves settle eagerly, manufacturing done-status bugs the
 //! native wires don't have (decision record: docs/research/acp.md).
 
@@ -140,14 +141,28 @@ pub(crate) fn node_version_manager_bins() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Add the login shell's PATH to a child process while preserving the PATH of
+/// the current process. This lets GUI/service launches find user-installed
+/// CLIs such as Homebrew's `gh` without changing the daemon's own environment.
+pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
+    compose_path(cmd, std::iter::empty());
+}
+
 /// Compose the child's PATH: the resolved executable's directory first, then
 /// our own PATH, then the login-shell PATH snapshot — deduped. npm-shim CLIs
 /// are `#!/usr/bin/env node` scripts whose `node` lives beside them in the
 /// version manager's bin dir, and the CLIs themselves shell out to tools
 /// (git, rg, node) that a GUI/service launch's own PATH may lack.
 pub(crate) fn compose_child_path(cmd: &mut tokio::process::Command, exe: &std::path::Path) {
+    compose_path(cmd, exe.parent().filter(|d| !d.as_os_str().is_empty()));
+}
+
+fn compose_path<'a>(
+    cmd: &mut tokio::process::Command,
+    executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
+) {
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(dir) = exe.parent().filter(|d| !d.as_os_str().is_empty()) {
+    for dir in executable_dir {
         paths.push(dir.to_path_buf());
     }
     if let Some(path) = std::env::var_os("PATH") {

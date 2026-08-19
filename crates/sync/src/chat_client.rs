@@ -36,7 +36,16 @@ const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 const BACKFILL_DEADLINE: Duration = Duration::from_secs(120);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
-const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Worst-case dark window after the network returns (event wakes usually
+/// beat this; the cap only matters when every event path missed).
+const BACKOFF_CAP: Duration = Duration::from_secs(16);
+/// A joined session must survive this long before a disconnect resets the
+/// backoff to base (see registry.rs STABLE_RESET — same connect-and-die
+/// hot-loop rationale).
+const STABLE_RESET: Duration = Duration::from_secs(30);
+/// Safety re-check cadence while parked on "OS says offline" — a stuck or
+/// wrong path monitor degrades to slow polling, never to silence.
+const OFFLINE_PARK_RECHECK: Duration = Duration::from_secs(30);
 /// Quiet-room probe cadence default (matches the registry's fleet math).
 const PROBE_QUIET_DEFAULT: Duration = Duration::from_secs(900);
 /// A checkpoint fetch that hasn't finished by now is treated as a dead link
@@ -126,8 +135,11 @@ pub trait CheckpointFetcher: Send + Sync + 'static {
 /// Both are safe at-least-once: batchId dedupe and Loro re-import no-ops.
 pub trait ChatTransport: Send + Sync + 'static {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>>;
-    fn push(&self, batch_id: String, bytes: Vec<u8>)
-    -> BoxFuture<'static, Result<String, SyncError>>;
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>>;
 }
 
 // ── catch-up planning (pure — the client-side precision rule) ───────────────
@@ -334,6 +346,9 @@ struct Flags {
     disconnects: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
     server_resets: std::sync::atomic::AtomicU64,
+    /// Monotonic dial-attempt counter; each attempt's number is its trace id
+    /// in logs, so an incident reads as one numbered sequence.
+    dial_seq: std::sync::atomic::AtomicU64,
 }
 
 impl ChatClient {
@@ -413,8 +428,16 @@ impl ChatClient {
         initial_cursor: u64,
         tuning: ChatTuning,
     ) -> Result<Self, SyncError> {
-        Self::connect_with_transport(connector, sink, fetcher, device_id, initial_cursor, tuning, None)
-            .await
+        Self::connect_with_transport(
+            connector,
+            sink,
+            fetcher,
+            device_id,
+            initial_cursor,
+            tuning,
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn connect_with_transport(
@@ -668,6 +691,11 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
+            let attempt = self
+                .flags
+                .dial_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
             let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
@@ -676,7 +704,7 @@ impl Actor {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
                     }
-                    tracing::warn!(error = %err, "chat2 dial failed; backing off");
+                    tracing::warn!(error = %err, attempt, "chat2 dial failed; backing off");
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -690,7 +718,7 @@ impl Actor {
                         let _ = ready.send(Err(SyncError::WebSocket("connect timeout".into())));
                         return;
                     }
-                    tracing::warn!("chat2 dial timed out; backing off");
+                    tracing::warn!(attempt, "chat2 dial timed out; backing off");
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -701,13 +729,16 @@ impl Actor {
                 }
             };
 
+            let session_started = tokio::time::Instant::now();
             match self.run_session(pipe, &mut ready).await {
                 SessionEnd::Stop => return,
                 SessionEnd::Reconnect => {
                     use std::sync::atomic::Ordering::Relaxed;
-                    // A session that had joined resets the backoff — without
-                    // this, ~7 flaps pinned every future reconnect at the cap
-                    // for the life of the client.
+                    // Only a session that joined AND stayed healthy for a
+                    // while earns a fresh backoff. Reset-on-join alone let a
+                    // connect-and-die socket hot-loop at 250ms forever;
+                    // without any reset, ~7 flaps pinned every future
+                    // reconnect at the cap for the life of the client.
                     let joined = self.flags.connected.swap(false, Relaxed);
                     self.flags.disconnects.fetch_add(1, Relaxed);
                     let _ = self.events.send(ChatEvent::Disconnected);
@@ -718,7 +749,7 @@ impl Actor {
                         }
                         return;
                     }
-                    if joined {
+                    if joined && session_started.elapsed() >= STABLE_RESET {
                         backoff = BACKOFF_BASE;
                     }
                     self.spawn_offline_sync();
@@ -733,7 +764,9 @@ impl Actor {
     }
 
     /// Sleep out one backoff, cut short by system wake, a sibling dial
-    /// success, or shutdown.
+    /// success, or shutdown. While the OS reports no network path, the wait
+    /// parks on the event buses (with a coarse safety timer) instead of
+    /// burning dial attempts that cannot succeed.
     async fn wait_backoff(
         &mut self,
         wake: &mut tokio::sync::broadcast::Receiver<()>,
@@ -744,6 +777,11 @@ impl Actor {
         // or our own last dial would cut every wait to zero.
         while wake.try_recv().is_ok() {}
         while online.try_recv().is_ok() {}
+        let wait = if crate::wake::path_is_offline() {
+            wait.max(OFFLINE_PARK_RECHECK)
+        } else {
+            wait
+        };
         tokio::select! {
             _ = tokio::time::sleep(wait) => Waited::Elapsed,
             _ = wake.recv() => Waited::Woke,
@@ -1187,16 +1225,13 @@ impl Actor {
                     serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
                 {
                     lock(&shared).server = Some(state);
-                    let contained = state.checkpoint_size == 0
-                        || sink.contains_frontier(&state_frame.payload);
+                    let contained =
+                        state.checkpoint_size == 0 || sink.contains_frontier(&state_frame.payload);
                     if let CatchUpPlan::CheckpointThenRows { after } =
                         plan_catch_up(cursor, &state, contained)
                     {
-                        let fetched = tokio::time::timeout(
-                            CHECKPOINT_FETCH_DEADLINE,
-                            fetcher.fetch(),
-                        )
-                        .await;
+                        let fetched =
+                            tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
                         match fetched {
                             Ok(Ok(bytes)) => {
                                 if sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err() {

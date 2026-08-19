@@ -788,7 +788,13 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
             b"r7",
         )
         .await;
-        send(&end, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 7}), &[]).await;
+        send(
+            &end,
+            frame_type::ROWS_DONE,
+            serde_json::json!({"headSeq": 7}),
+            &[],
+        )
+        .await;
         // Only now does the "download" complete.
         let _ = gate_tx.send(());
         end
@@ -849,7 +855,13 @@ async fn pending_push_flushes_before_backfill_completes() {
             &[],
         )
         .await;
-        send(&end_b, frame_type::ROWS_DONE, serde_json::json!({"headSeq": 1}), &[]).await;
+        send(
+            &end_b,
+            frame_type::ROWS_DONE,
+            serde_json::json!({"headSeq": 1}),
+            &[],
+        )
+        .await;
         end_b
     });
 
@@ -871,7 +883,11 @@ async fn pending_push_flushes_before_backfill_completes() {
         let _ = events.recv().await;
     }
     let _end = server.await.unwrap();
-    assert_eq!(client.stats().cursor, 1, "early replay acked before ROWS_DONE");
+    assert_eq!(
+        client.stats().cursor,
+        1,
+        "early replay acked before ROWS_DONE"
+    );
     client.shutdown().await;
 }
 
@@ -897,4 +913,298 @@ fn empty_frontier_with_real_checkpoint_is_not_contained() {
         CatchUpPlan::CheckpointThenRows { after: 5 },
         "fresh reader must fetch a present checkpoint when the frontier is unreadable"
     );
+}
+
+// ── flaky-network suite (durable-by-design §Phase 3) ────────────────────────
+//
+// The deterministic drop harness: a scripted connector where each dial slot
+// is either a live pipe or a refusal, with connect times recorded on the
+// virtual clock. The contract under test: every send delivers exactly once
+// or surfaces a visible degraded state — silence is a failure.
+
+/// Tests that flip the process-global OS-path flag or assert precise dial
+/// timing serialize through this: a park triggered by one test inflates
+/// another's measured backoff gaps.
+static PATH_AND_TIMING: Mutex<()> = Mutex::new(());
+
+struct FlakyConnector {
+    /// One entry per dial: `Some(pipe)` connects, `None` refuses.
+    script: Mutex<VecDeque<Option<BinPipe>>>,
+    /// Virtual-clock instant of every dial attempt (gap assertions).
+    times: Mutex<Vec<tokio::time::Instant>>,
+}
+
+impl FlakyConnector {
+    fn new(script: Vec<Option<BinPipe>>) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(script.into_iter().collect()),
+            times: Mutex::new(Vec::new()),
+        })
+    }
+    fn dial_times(&self) -> Vec<tokio::time::Instant> {
+        lock(&self.times).clone()
+    }
+}
+
+impl BinConnector for FlakyConnector {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        lock(&self.times).push(tokio::time::Instant::now());
+        let slot = lock(&self.script).pop_front().flatten();
+        Box::pin(async move { slot.ok_or(SyncError::Closed) })
+    }
+}
+
+fn empty_state_json() -> serde_json::Value {
+    serde_json::json!({"headSeq": 0, "seqFloor": 0,
+        "checkpointSeq": 0, "checkpointSize": 0, "rowCount": 0, "rowBytes": 0})
+}
+
+/// A network that drops the socket mid-push and then refuses two dials must
+/// still deliver the batch EXACTLY once (same batch id, one ack, cursor 1)
+/// and must narrate the outage (Disconnected event + disconnect counters) —
+/// the UI-truth signal the pill and Queued badges ride on.
+#[tokio::test(start_paused = true)]
+async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
+    let _serial = lock(&PATH_AND_TIMING);
+    let (pipe1, mut end1) = pipe_pair();
+    let (pipe2, mut end2) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    // Dial script: connect, then two refusals (the flap), then recover.
+    let flaky = FlakyConnector::new(vec![Some(pipe1), None, None, Some(pipe2)]);
+
+    let s1 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end1, state, &[], vec![], false).await;
+            let push = expect_kind(&mut end1, frame_type::PUSH).await;
+            let batch_id = push.header["batchId"].as_str().unwrap().to_string();
+            drop(end1); // mid-push socket death: no ack
+            batch_id
+        }
+    });
+
+    let client = ChatClient::connect_with_tuned(
+        flaky.clone(),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .expect("first join succeeds");
+    let mut events = client.events();
+
+    client.enqueue_update(vec![0xEE]);
+    let first_batch = s1.await.unwrap();
+
+    // The outage narrates: a Disconnected event reaches subscribers.
+    let mut saw_disconnect = false;
+    // Serve the recovery session concurrently so the actor can get there.
+    let s2 = tokio::spawn({
+        let state = empty_state_json();
+        async move {
+            serve_join(&mut end2, state, &[], vec![], true).await;
+            let push = expect_kind(&mut end2, frame_type::PUSH).await;
+            let batch_id = push.header["batchId"].as_str().unwrap().to_string();
+            send(
+                &end2,
+                frame_type::ACK,
+                serde_json::json!({"batchId": batch_id, "seq": 1, "dup": false}),
+                &[],
+            )
+            .await;
+            (batch_id, end2)
+        }
+    });
+    let (replayed, _keep_alive) = s2.await.unwrap();
+    assert_eq!(
+        replayed, first_batch,
+        "the SAME batch replays — no dupes, no loss"
+    );
+
+    while client.stats().pending_pushes > 0 {
+        if matches!(events.recv().await, Ok(ChatEvent::Disconnected)) {
+            saw_disconnect = true;
+        }
+    }
+    while let Ok(event) = events.try_recv() {
+        if matches!(event, ChatEvent::Disconnected) {
+            saw_disconnect = true;
+        }
+    }
+    assert!(
+        saw_disconnect,
+        "the outage must surface as a Disconnected event"
+    );
+    let stats = client.stats();
+    assert_eq!(stats.cursor, 1, "exactly one ack advanced the cursor");
+    assert_eq!(*lock(&sink.cursor_advances), vec![1]);
+    assert!(
+        stats.disconnects >= 1,
+        "disconnect counter recorded the drop"
+    );
+    assert_eq!(
+        flaky.dial_times().len(),
+        4,
+        "exactly the scripted dials: join, two refusals, recovery"
+    );
+    client.shutdown().await;
+}
+
+/// Stability-gated backoff reset: sessions that JOIN and then die immediately
+/// (captive portal / connect-and-die socket) must keep growing their backoff
+/// — reset-on-join alone hot-looped at 250ms forever. A session that stays
+/// healthy past STABLE_RESET earns the fresh 250ms base again.
+#[tokio::test(start_paused = true)]
+async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it() {
+    let _serial = lock(&PATH_AND_TIMING);
+    let mut pipes = Vec::new();
+    let mut ends = VecDeque::new();
+    for _ in 0..5 {
+        let (pipe, end) = pipe_pair();
+        pipes.push(Some(pipe));
+        ends.push_back(end);
+    }
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(pipes);
+
+    // Sessions 1-4: join then die instantly. Session 5: join, stay healthy
+    // past STABLE_RESET, then die.
+    let server = tokio::spawn(async move {
+        for i in 0..4 {
+            let mut end = ends.pop_front().unwrap();
+            serve_join(&mut end, empty_state_json(), &[], vec![], i > 0).await;
+            drop(end); // joined-and-died: an unstable session
+        }
+        let mut end = ends.pop_front().unwrap();
+        serve_join(&mut end, empty_state_json(), &[], vec![], true).await;
+        // Outlive the stability gate on the virtual clock, then die.
+        tokio::time::sleep(STABLE_RESET + Duration::from_secs(1)).await;
+        drop(end);
+    });
+
+    let client = ChatClient::connect_with_tuned(
+        flaky.clone(),
+        sink,
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .expect("first join succeeds");
+
+    // Wait until all five scripted sessions have been dialed (the 6th dial
+    // attempt hits the exhausted script and keeps failing — ignore it).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    while flaky.dial_times().len() < 6 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "dials never happened"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    server.await.unwrap();
+    let times = flaky.dial_times();
+    // Gaps between redials after unstable sessions must GROW (each joined
+    // session died in ~0 virtual time, so the gap is ~the backoff).
+    let gap = |i: usize| times[i + 1].duration_since(times[i]);
+    assert!(
+        gap(1) >= Duration::from_millis(400),
+        "second redial backed off: {:?}",
+        gap(1)
+    );
+    assert!(
+        gap(2) > gap(1),
+        "backoff grows across unstable sessions: {:?} vs {:?}",
+        gap(2),
+        gap(1)
+    );
+    assert!(
+        gap(3) > gap(2),
+        "…and keeps growing: {:?} vs {:?}",
+        gap(3),
+        gap(2)
+    );
+    // The stable session (index 4→5 gap includes its >30s healthy lifetime):
+    // after it died, the backoff was reset to base — the redial came within
+    // ~base of the death, i.e. the whole gap is dominated by the 31s life.
+    let stable_gap = gap(4);
+    assert!(
+        stable_gap < STABLE_RESET + Duration::from_secs(3),
+        "a stable session resets the backoff to base: {stable_gap:?}"
+    );
+    client.shutdown().await;
+}
+
+/// Park-while-offline: while the OS reports no network path, the backoff
+/// waiter parks on the event buses instead of burning dial attempts — and
+/// the online event un-parks it IMMEDIATELY (event-driven recovery, not
+/// timer luck).
+#[tokio::test(start_paused = true)]
+async fn os_offline_parks_dials_and_the_online_event_unparks_immediately() {
+    let _serial = lock(&PATH_AND_TIMING);
+    let (pipe1, mut end1) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let flaky = FlakyConnector::new(vec![Some(pipe1)]);
+
+    let server = tokio::spawn(async move {
+        serve_join(&mut end1, empty_state_json(), &[], vec![], false).await;
+        // Hold the session; the path flag flips BEFORE this socket dies, so
+        // the redial wait is born parked.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(end1); // the network goes away
+    });
+
+    let client = ChatClient::connect_with_tuned(
+        flaky.clone(),
+        sink,
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .expect("join succeeds");
+
+    // The OS says the path is gone while the session is still up.
+    crate::wake::set_path_online(false);
+    server.await.unwrap();
+    // Give the actor a beat to observe the death and enter the parked wait.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let dials_before = flaky.dial_times().len();
+
+    // 5 virtual seconds pass — far beyond the normal 250-500ms backoff. A
+    // parked waiter must NOT have dialed (the un-parked pre-fix behavior
+    // would have burned several attempts by now).
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        flaky.dial_times().len(),
+        dials_before,
+        "no dial attempts while the OS says there is no path"
+    );
+
+    // The path returns: the transition broadcasts the online event and the
+    // parked waiter redials NOW.
+    let restored_at = tokio::time::Instant::now();
+    crate::wake::set_path_online(true);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while flaky.dial_times().len() == dials_before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "online event never un-parked the dialer"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let redial_at = *flaky.dial_times().last().unwrap();
+    assert!(
+        redial_at.duration_since(restored_at) < Duration::from_secs(2),
+        "redial rides the event, not a timer: {:?}",
+        redial_at.duration_since(restored_at)
+    );
+    client.shutdown().await;
 }

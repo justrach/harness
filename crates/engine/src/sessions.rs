@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use zeron_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
-    fold_event_into_parts, sanitize_tool_call,
+    SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
 use zeron_proto::{
@@ -677,6 +677,7 @@ impl SessionsEngine {
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
+                            worktree: None,
                         })
                     });
                 let Some(mut request) = request else {
@@ -939,7 +940,6 @@ impl Inner {
 
 // ── run task ────────────────────────────────────────────────────────────────
 
-
 // ── subagent docs ───────────────────────────────────────────────────────────
 
 /// The per-subagent doc id: `{chatId}--sub--{suffix}`. Constrained by the
@@ -994,27 +994,67 @@ impl SubagentSink {
                 self.written = written;
                 r
             }
-            None => match SegmentWriter::begin(
-                &self.doc,
-                &self.entry_id,
-                device_id,
-                self.started_at,
-            ) {
-                Ok(mut w) => {
-                    let r = w.sync(&rendered);
-                    let (ix, written) = w.into_state();
-                    self.entry_index = Some(ix);
-                    self.written = written;
-                    r
+            None => {
+                match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
+                    Ok(mut w) => {
+                        let r = w.sync(&rendered);
+                        let (ix, written) = w.into_state();
+                        self.entry_index = Some(ix);
+                        self.written = written;
+                        r
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            },
+            }
         };
         if let Err(err) = result {
             // Fail soft: a broken subagent doc degrades to chip-only, never
             // errors the chat.
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent sink flush failed");
         }
+        self.dirty = false;
+    }
+
+    /// A parent→subagent steer ([`AgentEvent::UserMessage`], tagged): close
+    /// the open assistant segment (it reads Complete above the steer), write
+    /// the steer as its own USER entry, and reset so the next tagged delta
+    /// opens a fresh assistant entry below it — the subagent transcript then
+    /// reads like any steered chat.
+    fn push_user(&mut self, device_id: &str, text: &str) {
+        let rendered = render_parts(&self.folded);
+        let closed = match self.entry_index.take() {
+            Some(ix) => SegmentWriter::resume(&self.doc, ix, std::mem::take(&mut self.written))
+                .finish(&rendered, MessageStatus::Complete),
+            None if !self.folded.is_empty() => {
+                match SegmentWriter::begin(&self.doc, &self.entry_id, device_id, self.started_at) {
+                    Ok(w) => w.finish(&rendered, MessageStatus::Complete),
+                    Err(e) => Err(e),
+                }
+            }
+            None => Ok(()),
+        };
+        if let Err(err) = closed {
+            tracing::warn!(doc = %self.doc_id, error = %err, "subagent segment close failed");
+        }
+        let entry = SessionMessageEntry {
+            id: new_id(),
+            role: MessageRole::User,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.to_owned(),
+            }],
+            created_at: now_ms(),
+            device_id: device_id.to_owned(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        };
+        if let Err(err) = self.doc.push_message(&entry) {
+            tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
+        }
+        self.entry_id = new_id();
+        self.started_at = now_ms();
+        self.written = Vec::new();
+        self.folded = Vec::new();
         self.dirty = false;
     }
 
@@ -1313,6 +1353,13 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(20)),
         };
     let mut self_continued_turn = false;
+    // Spawn chips that have SETTLED (tagged Done seen). Content events for a
+    // settled chip with no live sink are dropped — a straggler frame after
+    // the freeze must not mint a new doc entry or wedge the transcript back
+    // into Streaming. Only a steer (UserMessage) legitimately REOPENS a
+    // settled subagent: it announces more work is coming.
+    let mut settled_subagents: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
@@ -1479,10 +1526,20 @@ async fn drive_run(
         } = &event
         {
             inner.publish(&chat_id, &event);
+            let is_steer = matches!(sub_event.as_ref(), AgentEvent::UserMessage { .. });
+            if is_steer {
+                settled_subagents.remove(parent_tool_use_id);
+            } else if settled_subagents.contains(parent_tool_use_id)
+                && !subagents.contains_key(parent_tool_use_id)
+            {
+                // Straggler after the freeze: chip-only silence (the old
+                // pre-viz behavior), never a reopened doc.
+                continue;
+            }
             let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
-            let chip_streaming = folded.iter().any(
-                |p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id),
-            );
+            let chip_streaming = folded
+                .iter()
+                .any(|p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id));
             let sink_known = subagents.contains_key(parent_tool_use_id);
             if chip_streaming {
                 if !sink_known {
@@ -1507,8 +1564,7 @@ async fn drive_run(
             // A Done with NO sink (a subagent that never streamed — codex
             // turn ends can beat registration) is chip-only: minting a doc
             // just to freeze it empty helps no one.
-            let done_only = !sink_known
-                && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if !sink_known && !done_only {
                 let opened = inner.doc_host().and_then(|host| match host.open(&sub_id) {
                     Ok(handle) => Some(handle.doc_arc()),
@@ -1542,7 +1598,16 @@ async fn drive_run(
                 }
             }
             let done = matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            if done {
+                settled_subagents.insert(parent_tool_use_id.clone());
+            }
             if let Some(sink) = subagents.get_mut(parent_tool_use_id) {
+                if let AgentEvent::UserMessage { text } = sub_event.as_ref() {
+                    // A steer splits ENTRIES, not parts — handled at the
+                    // sink level (the fold ignores UserMessage).
+                    sink.push_user(&device_id, text);
+                    continue;
+                }
                 zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
                 if !chip_streaming && done {
