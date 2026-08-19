@@ -2390,14 +2390,22 @@ impl ComposerInput {
         let Some(bounds) = self.last_bounds else {
             return;
         };
+        let viewport_height = f32::from(bounds.size.height);
         let delta_y = f32::from(event.delta.pixel_delta(self.line_height).y);
         let next = input_scroll_offset(
             self.scroll_top,
             delta_y,
             self.content_height,
-            f32::from(bounds.size.height),
+            viewport_height,
         );
         if next == self.scroll_top {
+            // Overscroll guard: when the input itself is scrollable (content
+            // taller than the viewport), swallow the wheel event even at the
+            // scroll boundary so it never chains into the outer transcript
+            // list (the native equivalent of `overscroll-behavior: contain`).
+            if delta_y != 0.0 && input_max_scroll(self.content_height, viewport_height) > 0.0 {
+                cx.stop_propagation();
+            }
             return;
         }
         self.invalidate_mention_tooltip();
