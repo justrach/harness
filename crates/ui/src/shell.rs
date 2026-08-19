@@ -3743,9 +3743,10 @@ impl Shell {
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
-                loaders::mini_gradient_spinner(
+                loaders::mini_mono_spinner(
                     "connection-spinner",
                     2.0,
+                    theme.text_muted,
                     cx.entity_id(),
                     cx,
                 )
