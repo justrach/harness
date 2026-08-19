@@ -3563,7 +3563,8 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
+        let installed_theme = Theme::of(cx);
+        let theme = Theme::sidebar(installed_theme.appearance, installed_theme.accent_color);
         let inner: AnyElement = match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
@@ -3754,6 +3755,8 @@ impl Shell {
             }
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
+        let queued = queued && !undelivered;
+        let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         let corner_body: AnyElement = if corner_hovered {
             div()
                 .flex()
@@ -3796,22 +3799,20 @@ impl Shell {
         } else {
             match status_label {
                 Some(label) => {
-                    // Glyph slot: Working carries its active thread glyph
-                    // beside the accent word; Done wears the check; other
-                    // statuses retain a quiet semantic dot.
+                    // Glyph slot: Working wears the preset's animated pixel
+                    // glyph beside its label, Done wears the check, and the
+                    // remaining statuses use a compact dot.
                     let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
                             .into_any_element()
-                    } else if status == zeron_proto::ChatIndicator::Working
-                        && !queued
-                        && !undelivered
-                    {
-                        loaders::mini_gradient_spinner(
+                    } else if working {
+                        loaders::mini_glyph_spinner(
                             format!("chat-working-{id}"),
                             2.0,
+                            theme.glyph,
                             cx.entity_id(),
                             cx,
                         )
@@ -4325,23 +4326,12 @@ impl Shell {
         };
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
         let tone = if failed { theme.danger } else { theme.accent };
-        // Dark-purple GLASS tint (user request), not the 400-level accent as
-        // a fill: deep pigment at partial alpha tints the blur showing
-        // through instead of compositing into the slab that a bright indigo
-        // fill produced (earlier user report). Light chrome gets a lavender
-        // accent wash instead — dark purple under indigo-600 text goes muddy.
+        // Follow the selected spectrum with a low-emphasis glass tint rather
+        // than painting the bright text accent as a solid slab.
         let (chip_bg, chip_bg_hover) = if failed {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
-            match theme.appearance {
-                crate::theme::Appearance::Dark => {
-                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
-                    (purple.opacity(0.45), purple.opacity(0.60))
-                }
-                crate::theme::Appearance::Light => {
-                    (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
-                }
-            }
+            (theme.accent_wash, theme.accent.opacity(0.16))
         };
 
         let mut strip = div()
@@ -6301,9 +6291,10 @@ impl Shell {
                                 .justify_center()
                                 .group_hover(group.clone(), |s| s.opacity(0.0))
                                 .child(if subagent_running {
-                                    loaders::mini_gradient_spinner(
+                                    loaders::mini_glyph_spinner(
                                         format!("subagent-tab-{ix}"),
                                         2.0,
+                                        theme.glyph,
                                         cx.entity_id(),
                                         cx,
                                     )
@@ -7201,6 +7192,10 @@ fn header_icon_button(
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport_width = f32::from(window.viewport_size().width);
+        // Appearance actions persist independently of the shell. Mirror the
+        // globals before any later debounced settings save can overwrite them.
+        self.settings.appearance = crate::appearance::mode(cx);
+        self.settings.accent_color = crate::appearance::accent(cx);
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the

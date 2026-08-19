@@ -3226,9 +3226,7 @@ impl Pickers {
                                 theme.text_muted.opacity(0.75)
                             }),
                     )
-                    .when(favorites_view, |el| {
-                        el.child(rail_indicator(picker_purple(&theme)))
-                    }),
+                    .when(favorites_view, |el| el.child(rail_indicator(theme.accent))),
             );
             // Full-bleed divider, aligned with the search row's bottom
             // hairline (see the height math there) — one line across.
@@ -3271,9 +3269,7 @@ impl Pickers {
                                 theme.text_muted
                             }),
                         ))
-                        .when(is_viewed, |el| {
-                            el.child(rail_indicator(picker_purple(&theme)))
-                        }),
+                        .when(is_viewed, |el| el.child(rail_indicator(theme.accent))),
                 );
             }
             column.into_any_element()
@@ -3716,17 +3712,6 @@ fn rail_indicator(tint: gpui::Hsla) -> gpui::Div {
         .rounded_tl(px(3.0))
         .rounded_bl(px(3.0))
         .bg(tint)
-}
-
-/// The picker's selection purple — the app's violet identity (the "nice
-/// purple" family inline code wears), NOT the indigo `accent`: the indigo
-/// bar read blue against the glass (user request). violet-400 on dark,
-/// violet-600 on light (AA against white).
-fn picker_purple(theme: &Theme) -> gpui::Hsla {
-    match theme.appearance {
-        crate::theme::Appearance::Dark => crate::theme::oklch(0.702, 0.183, 293.541),
-        crate::theme::Appearance::Light => crate::theme::oklch(0.541, 0.281, 293.009),
-    }
 }
 
 /// Centered muted note filling an empty model list ("No models found").

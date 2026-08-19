@@ -88,14 +88,11 @@ pub const OPTION_CARD_HEIGHT: f32 = 148.0;
 /// are axis-aligned rectangles, so `overflow_hidden` on the frame clips to its
 /// bounding box and not to its corner radius — a preview that paints its own
 /// background will square off the corners and cover the frame's border with it.
-pub const OPTION_CARD_RADIUS: f32 = 10.0;
-/// Clear space between the frame and the selection ring.
-const RING_GAP: f32 = 2.0;
-/// Thickness of the selection ring.
-const RING_WIDTH: f32 = 2.0;
+pub const OPTION_CARD_RADIUS: f32 = 6.0;
 
-/// One card in an [`option_card_row`]: a fixed-height preview frame that carries
-/// the selection ring, with a caption underneath.
+/// One card in an [`option_card_row`]: a fixed-height preview frame with a quiet
+/// selected edge and caption underneath. There is deliberately no outer card
+/// or ring; the preview itself is the control.
 ///
 /// `preview` fills the frame and **must round its own corners** to
 /// [`OPTION_CARD_RADIUS`] if it paints a background — see that constant.
@@ -109,22 +106,6 @@ pub fn option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
-    let frame = div()
-        .h(px(OPTION_CARD_HEIGHT))
-        .w_full()
-        .rounded(px(OPTION_CARD_RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(theme.border)
-        .child(preview);
-
-    // The ring is a *wrapper border*, not a spread shadow. A shadow's spread
-    // grows the rectangle without growing its corner radius, so the halo's
-    // corners tighten relative to the frame's and the two visibly drift apart by
-    // a pixel at each rounded corner. Concentric borders can't do that: each
-    // element rounds itself, and the outer radius is the inner one plus the gap
-    // it sits behind. Always present, transparent when unselected, so selecting a
-    // card never reflows the row.
     div()
         .flex_1()
         .min_w_0()
@@ -135,22 +116,24 @@ pub fn option_card(
         .cursor_pointer()
         .child(
             div()
+                .h(px(OPTION_CARD_HEIGHT))
                 .w_full()
-                .rounded(px(OPTION_CARD_RADIUS + RING_GAP + RING_WIDTH))
-                .p(px(RING_GAP))
-                .border_2()
-                .border_color(if selected {
-                    theme.accent
-                } else {
-                    gpui::transparent_black()
-                })
-                .child(frame),
+                .rounded(px(OPTION_CARD_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(if selected { theme.accent } else { theme.border })
+                .child(preview),
         )
         .child(
             div()
                 .text_size(px(13.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .text_color(if selected {
-                    theme.text
+                    theme.accent
                 } else {
                     theme.text_muted
                 })

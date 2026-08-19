@@ -232,13 +232,11 @@ pub(super) struct RenameSpaceDialog {
 /// Dot color for a chat's display status (tab dots + Sessions rows).
 pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
     match status {
-        // Pink, not amber — the harsh yellow read as a warning; running is
-        // routine (user request). Non-done statuses sit well below full
+        // Preset activity tone, not warning amber: running is routine.
+        // Non-done statuses sit well below full
         // strength: at full alpha the colored words shouted across the
         // whole sidebar (user request) — only Done keeps its pop.
-        ChatIndicator::Working => {
-            theme.busy.opacity(0.55) // pink-400, muted
-        }
+        ChatIndicator::Working => theme.busy.opacity(0.55),
         // Blue: "asking you a question" must read differently from "busy
         // working" at a glance.
         ChatIndicator::AwaitingInput => theme.accent.opacity(0.6),

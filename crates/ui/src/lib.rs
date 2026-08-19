@@ -160,8 +160,10 @@ pub fn run_app(config: UiConfig) {
         // final one on the very first frame, or the window flashes the wrong
         // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
+        let ui_settings = settings::UiSettings::load(&data_dir);
         appearance::init(
-            settings::UiSettings::load(&data_dir).appearance,
+            ui_settings.appearance,
+            ui_settings.accent_color,
             data_dir,
             cx,
         );

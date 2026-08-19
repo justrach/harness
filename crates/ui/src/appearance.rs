@@ -25,7 +25,7 @@ use gpui::{App, Global, Subscription, Window};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::UiSettings;
-use crate::theme::{Appearance, Theme};
+use crate::theme::{AccentColor, Appearance, Theme};
 
 /// The user's appearance preference. Persisted in `ui-settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -59,6 +59,7 @@ impl AppearanceMode {
 pub struct AppearanceState {
     pub mode: AppearanceMode,
     pub system: Appearance,
+    pub accent: AccentColor,
     /// Where `ui-settings.json` lives, so a menu action can persist the choice
     /// without routing through the shell entity that normally owns settings.
     pub data_dir: PathBuf,
@@ -78,22 +79,29 @@ pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
 /// Install the appearance globals and the matching theme. Call once at boot,
 /// before any window opens, so the first frame is already the right palette
 /// (installing later produces a visible dark-to-light flash).
-pub fn init(mode: AppearanceMode, data_dir: impl Into<PathBuf>, cx: &mut App) {
+pub fn init(mode: AppearanceMode, accent: AccentColor, data_dir: impl Into<PathBuf>, cx: &mut App) {
     let system = Appearance::from_window(cx.window_appearance());
     tracing::debug!(?mode, ?system, "appearance: initial");
     cx.set_global(AppearanceState {
         mode,
         system,
+        accent,
         data_dir: data_dir.into(),
     });
     sync_ns_appearance(mode);
-    Theme::install(resolve(mode, system), cx);
+    Theme::install_preferences(resolve(mode, system), accent, cx);
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
 pub fn mode(cx: &App) -> AppearanceMode {
     cx.try_global::<AppearanceState>()
         .map(|s| s.mode)
+        .unwrap_or_default()
+}
+
+pub fn accent(cx: &App) -> AccentColor {
+    cx.try_global::<AppearanceState>()
+        .map(|state| state.accent)
         .unwrap_or_default()
 }
 
@@ -113,6 +121,21 @@ pub fn set_mode(mode: AppearanceMode, cx: &mut App) {
     persist(mode, &data_dir);
 }
 
+/// Change the interactive accent without changing any semantic theme roles.
+pub fn set_accent(accent: AccentColor, cx: &mut App) {
+    if !cx.has_global::<AppearanceState>() {
+        return;
+    }
+    let state = cx.global_mut::<AppearanceState>();
+    if state.accent == accent {
+        return;
+    }
+    state.accent = accent;
+    let data_dir = state.data_dir.clone();
+    apply(cx);
+    persist_accent(accent, &data_dir);
+}
+
 /// Read-modify-write `ui-settings.json` for just the appearance key.
 ///
 /// Deliberately a fresh load rather than a write of some cached struct: the
@@ -124,6 +147,14 @@ fn persist(mode: AppearanceMode, data_dir: &Path) {
     settings.appearance = mode;
     if let Err(err) = settings.save(data_dir) {
         tracing::warn!(error = %err, "could not persist appearance");
+    }
+}
+
+fn persist_accent(accent: AccentColor, data_dir: &Path) {
+    let mut settings = UiSettings::load(data_dir);
+    settings.accent_color = accent;
+    if let Err(err) = settings.save(data_dir) {
+        tracing::warn!(error = %err, "could not persist accent color");
     }
 }
 
@@ -172,12 +203,13 @@ pub fn apply(cx: &mut App) {
     };
     sync_ns_appearance(state.mode);
     let wanted = resolve(state.mode, state.system);
+    let accent = state.accent;
     let changed = !cx
         .try_global::<Theme>()
-        .is_some_and(|t| t.appearance == wanted);
+        .is_some_and(|theme| theme.appearance == wanted && theme.accent_color == accent);
     if changed {
         tracing::debug!(?wanted, "appearance: installing palette");
-        Theme::install(wanted, cx);
+        Theme::install_preferences(wanted, accent, cx);
         cx.refresh_windows();
     }
     // Unconditional, even when the palette did not move: this is the only thing

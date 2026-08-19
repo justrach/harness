@@ -14,8 +14,9 @@ use gpui::{
 };
 
 use crate::appearance::{self, AppearanceMode};
+use crate::icons;
 use crate::settings::widgets;
-use crate::theme::{Appearance, Theme};
+use crate::theme::{AccentColor, Appearance, Theme};
 
 pub struct AppearancePage;
 
@@ -37,6 +38,13 @@ fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
         .w(gpui::relative(fraction))
         .rounded(px(3.0))
         .bg(tone)
+}
+
+fn accent_helper(accent: AccentColor) -> String {
+    format!(
+        "{} · Controls, glyphs, selections, code, and activity.",
+        accent.label()
+    )
 }
 
 /// Which corners a miniature rounds — the split card needs each half to round
@@ -110,7 +118,7 @@ fn miniature(theme: &Theme, corners: Corners) -> AnyElement {
 /// The System card: light on the left, dark on the right. Each half is a
 /// complete miniature clipped to its side, which is what makes the card read as
 /// "whichever one the system is on".
-fn miniature_split() -> AnyElement {
+fn miniature_split(accent: AccentColor) -> AnyElement {
     div()
         .size_full()
         .flex()
@@ -120,14 +128,14 @@ fn miniature_split() -> AnyElement {
                 .w_1_2()
                 .h_full()
                 .overflow_hidden()
-                .child(miniature(&Theme::light(), Corners::Left)),
+                .child(miniature(&Theme::light_with_accent(accent), Corners::Left)),
         )
         .child(
             div()
                 .w_1_2()
                 .h_full()
                 .overflow_hidden()
-                .child(miniature(&Theme::dark(), Corners::Right)),
+                .child(miniature(&Theme::dark_with_accent(accent), Corners::Right)),
         )
         .into_any_element()
 }
@@ -136,11 +144,11 @@ fn miniature_split() -> AnyElement {
 ///
 /// The one place `Theme::light()`/`Theme::dark()` are legitimately built outside
 /// the installed global: a preview has to show the palette you are *not* using.
-fn preview(mode: AppearanceMode) -> AnyElement {
+fn preview(mode: AppearanceMode, accent: AccentColor) -> AnyElement {
     match mode {
-        AppearanceMode::System => miniature_split(),
-        AppearanceMode::Light => miniature(&Theme::light(), Corners::All),
-        AppearanceMode::Dark => miniature(&Theme::dark(), Corners::All),
+        AppearanceMode::System => miniature_split(accent),
+        AppearanceMode::Light => miniature(&Theme::light_with_accent(accent), Corners::All),
+        AppearanceMode::Dark => miniature(&Theme::dark_with_accent(accent), Corners::All),
     }
 }
 
@@ -166,18 +174,47 @@ impl Render for AppearancePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let current = appearance::mode(cx);
+        let current_accent = appearance::accent(cx);
         let system = cx
             .try_global::<appearance::AppearanceState>()
             .map(|state| state.system)
             .unwrap_or_default();
 
         let cards = AppearanceMode::ALL.into_iter().map(|mode| {
-            widgets::option_card(&theme, mode.label(), mode == current, preview(mode))
-                .id(SharedString::from(format!("appearance-{}", mode.label())))
+            widgets::option_card(
+                &theme,
+                mode.label(),
+                mode == current,
+                preview(mode, current_accent),
+            )
+            .id(SharedString::from(format!("appearance-{}", mode.label())))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                appearance::set_mode(mode, cx);
+                cx.notify();
+            }))
+        });
+
+        let accent_swatches = AccentColor::ALL.into_iter().map(|accent| {
+            let swatch_theme = Theme::for_preferences(theme.appearance, accent);
+            let selected = accent == current_accent;
+            div()
+                .id(SharedString::from(format!("accent-{}", accent.label())))
+                .flex_none()
+                .w(px(28.0))
+                .h(px(32.0))
+                .pb(px(4.0))
+                .border_b_2()
+                .border_color(if selected {
+                    swatch_theme.accent
+                } else {
+                    theme.border
+                })
+                .cursor_pointer()
                 .on_click(cx.listener(move |_, _, _, cx| {
-                    appearance::set_mode(mode, cx);
+                    appearance::set_accent(accent, cx);
                     cx.notify();
                 }))
+                .child(div().size_full().rounded(px(5.0)).bg(swatch_theme.accent))
         });
 
         div()
@@ -190,8 +227,7 @@ impl Render for AppearancePage {
                     .child(
                         widgets::page_subtitle(
                             &theme,
-                            "How zeron picks between light and dark. This setting stays on this \
-                             device.",
+                            "Choose how Zeron looks. These settings stay on this device.",
                         )
                         .max_w(px(512.0))
                         .line_height(px(20.0)),
@@ -212,6 +248,44 @@ impl Render for AppearancePage {
                             .text_color(theme.text_muted)
                             .line_height(px(18.0))
                             .child(helper(current, system)),
+                    )
+                    .child(
+                        widgets::section_card(&theme).child(
+                            widgets::card_row(&theme, true)
+                                .child(widgets::row_tile(&theme, icons::TUNING))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .flex()
+                                        .flex_col()
+                                        .child(widgets::row_title(&theme, "Accent color"))
+                                        .child(widgets::meta_line(
+                                            &theme,
+                                            vec![
+                                                div()
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(SharedString::from(accent_helper(
+                                                        current_accent,
+                                                    )))
+                                                    .into_any_element(),
+                                            ],
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .ml(px(24.0))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .children(accent_swatches),
+                                ),
+                        ),
                     ),
             )
     }
@@ -227,6 +301,28 @@ mod tests {
         for mode in AppearanceMode::ALL {
             assert!(!mode.label().is_empty());
         }
+    }
+
+    #[test]
+    fn accent_choices_form_a_labeled_palette() {
+        assert_eq!(AccentColor::default(), AccentColor::Zeron);
+        assert_eq!(AccentColor::ALL.len(), 7);
+        for accent in AccentColor::ALL {
+            assert!(!accent.label().is_empty());
+            assert!(!matches!(accent.label(), "Red" | "Purple"));
+        }
+    }
+
+    #[test]
+    fn accent_helper_describes_the_palette_roles_concisely() {
+        let copy = accent_helper(AccentColor::Pink);
+        assert!(copy.starts_with("Pink ·"));
+        assert!(copy.contains("glyphs"));
+        assert!(!copy.contains("Sidebar stays"));
+        assert!(
+            copy.len() < 64,
+            "copy is too long for the settings row: {copy}"
+        );
     }
 
     #[test]
