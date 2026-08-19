@@ -4694,10 +4694,20 @@ impl Composer {
                             // know the spec degrades to the main checkout
                             // instead of failing the run.
                             chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
+                            if let Some(repo_path) = &space_path {
+                                // A remote repo's branch list loads over the
+                                // relay — on a bad link it may never arrive
+                                // and the picker has no base. That must NOT
+                                // silently drop the isolation the user picked
+                                // (2026-08-19: "New worktree" ran in the main
+                                // checkout): default to HEAD, which git — any
+                                // host version — resolves as the repo's
+                                // current checkout state.
+                                let base =
+                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
                                 run_worktree = Some(zeron_proto::WorktreeSpec {
                                     repo_path: repo_path.clone(),
-                                    base: base.clone(),
+                                    base,
                                 });
                             }
                         }
@@ -4774,6 +4784,20 @@ impl Composer {
                 let mut attachment_paths: Vec<String> = Vec::new();
                 let mut transfers: Vec<serde_json::Value> = Vec::new();
                 if !staged.is_empty() && queued_flow {
+                    // Local staging is disk-speed; publish progress anyway so
+                    // huge files still narrate.
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
                     for (att, upload_id) in staged.iter().zip(&upload_ids) {
                         if let Err(err) = attachments::upload_attachment(
                             &engine,
@@ -4781,6 +4805,7 @@ impl Composer {
                             None,
                             upload_id,
                             att,
+                            Some(progress.clone()),
                         )
                         .await
                         {
@@ -4796,38 +4821,36 @@ impl Composer {
                     attachment_paths = echo_paths.clone();
                     content = echo_text.clone();
                 } else if !staged.is_empty() {
-                    // Legacy: total wall-clock budget across all attachments —
-                    // per-chunk deadlines alone let a degraded relay grind
-                    // silently for the whole chunk count (2026-08-19).
-                    const LEGACY_UPLOAD_BUDGET: std::time::Duration =
-                        std::time::Duration::from_secs(300);
-                    let upload_started = std::time::Instant::now();
+                    // Legacy flow (old engines): stage on the host device up
+                    // front. Publish upload progress so the working label can
+                    // read "Uploading… N%" instead of an opaque "Sending…"
+                    // while the chunks cross the relay; the per-attachment
+                    // deadline inside `upload_attachment` bounds the whole
+                    // crawl (2026-08-19: silent per-chunk retries ground for
+                    // minutes with no total budget).
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
                     for (att, upload_id) in staged.iter().zip(&upload_ids) {
-                        let Some(remaining) =
-                            LEGACY_UPLOAD_BUDGET.checked_sub(upload_started.elapsed())
-                        else {
-                            tracing::warn!(name = %att.name, "attachment upload budget exhausted");
-                            return Err(
-                                "Couldn't upload the attachment — the device may be offline."
-                                    .to_string(),
-                            );
-                        };
-                        let upload = attachments::upload_attachment(
+                        match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
                             host_device_id.as_deref(),
                             upload_id,
                             att,
-                        );
-                        let timer = cx.background_executor().timer(remaining);
-                        futures::pin_mut!(upload);
-                        let result = match futures::future::select(upload, timer).await {
-                            futures::future::Either::Left((result, _)) => result,
-                            futures::future::Either::Right(_) => {
-                                Err("upload budget exhausted".to_string())
-                            }
-                        };
-                        match result {
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
                             Ok(path) => attachment_paths.push(path),
                             Err(err) => {
                                 tracing::warn!(name = %att.name, error = %err, "attachment upload failed");
@@ -4921,6 +4944,9 @@ impl Composer {
             .await;
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                composer
+                    .state
+                    .update(cx, |s, _| s.end_upload_progress());
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
                     // draft, staged files back in the chat's stash.
