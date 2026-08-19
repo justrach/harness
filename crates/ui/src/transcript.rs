@@ -1098,21 +1098,13 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
 /// open detail whose full payload lives in the sidecar (chat2-sync A3).
 pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 
-/// What an open chip's [`BLOB_AFFORDANCE_HEIGHT`] row offers. One slot, so
-/// the analytic height sums stay a single `is_some` check.
+/// What an open chip's [`BLOB_AFFORDANCE_HEIGHT`] row offers: a lazy sidecar
+/// fetch ("Show full output/diff"). One slot, so the analytic height sums
+/// stay a single `is_some` check.
 #[derive(Clone)]
-enum ChipAffordance {
-    /// Lazy sidecar fetch ("Show full output/diff").
-    Blob {
-        blob_ref: SharedString,
-        label: SharedString,
-    },
-    /// The spawn chip's subagent transcript, opened as a right-pane tab.
-    Subagent {
-        doc_id: SharedString,
-        title: SharedString,
-        frozen: bool,
-    },
+struct ChipAffordance {
+    blob_ref: SharedString,
+    label: SharedString,
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -1410,10 +1402,14 @@ pub struct Transcript {
     chat_id: Option<String>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
-    /// the instance is READ-ONLY — no echoes, no own-turn hold, no working
-    /// trailer, and no global attachment protection (that set is shared with
-    /// the primary transcript and overwritten wholesale).
+    /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
+    /// attachment protection (that set is shared with the primary transcript
+    /// and overwritten wholesale).
     doc_override: Option<String>,
+    /// Whether an override instance watches a LIVE doc (`for_doc(follow)`):
+    /// only then may the working trailer render — a frozen snapshot must
+    /// never spin, whatever its entries claim.
+    doc_live: bool,
     /// One-shot "open at the latest content" for UNPINNED (frozen) override
     /// instances: rows land ASYNC after the tab opens (watch replay / blob
     /// fetch), so the end-scroll fires on the first non-empty sync, then
@@ -1616,6 +1612,7 @@ impl Transcript {
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
             land_end_pending: doc_override.is_some() && !follow,
+            doc_live: doc_override.is_some() && follow,
             doc_override,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
@@ -2743,6 +2740,15 @@ impl Transcript {
             .pt(px(4.0));
         for (aix, att) in atts.iter().enumerate() {
             let state = self.attachment_state(&device_ids, &att.path, cx);
+            // The in-flight send's upload progress belongs ON the thumbnail:
+            // only the un-refreshed echo carries synthetic `pending/` refs, so
+            // the pair (pending path, upload in flight) is exactly "this image
+            // is crossing the relay right now" (2026-08-18 user request).
+            let uploading = att
+                .path
+                .starts_with("pending/")
+                .then(|| self.state.read(cx).upload_progress_percent())
+                .flatten();
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
@@ -2757,6 +2763,7 @@ impl Transcript {
                     };
                     frame
                         .id(SharedString::from(format!("{row_id}#att{aix}")))
+                        .relative()
                         .border_1()
                         .border_color(crate::theme::hairline(0.11))
                         .bg(crate::theme::ink(0.035))
@@ -2776,6 +2783,27 @@ impl Transcript {
                                 .rounded(px(7.0))
                                 .object_fit(ObjectFit::Cover),
                         )
+                        .when_some(uploading, |el, pct| {
+                            // The pulse read registers this entity for frames,
+                            // so the percent stays live even once the trailer's
+                            // 30s pending-send bridge has lapsed.
+                            let pulse = motion::pulse_wave(motion::pulse_delta(
+                                &motion::ZERON_PULSE,
+                                cx.entity_id(),
+                                cx,
+                            ));
+                            el.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.38 + 0.05 * pulse))
+                                    .child(crate::loaders::upload_progress_ring(pct, 34.0)),
+                            )
+                        })
                         .into_any_element()
                 }
                 // Errored/unavailable: the dashed "missing" thumb.
@@ -2813,34 +2841,73 @@ impl Transcript {
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // A subagent doc has no Session row — `indicator_for` would read the
-        // PARENT chat's live state into a frozen tab.
-        if self.doc_override.is_some() {
-            return None;
-        }
-        let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs) = {
-            let state = self.state.read(cx);
-            if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+        let (sending, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
+            // A subagent doc has no Session row — `indicator_for` would read
+            // the PARENT chat's live state into this tab. Liveness rides the
+            // doc itself instead: the sink's assistant entry streams until
+            // the subagent settles (run teardown finalizes abandoned sinks),
+            // and a trailing USER entry is a steer still awaiting its reply
+            // segment. Frozen snapshots never spin, whatever they claim.
+            if !self.doc_live {
                 return None;
             }
-            // During the send→turn window the session row's `started_at`
-            // still belongs to the PREVIOUS turn — a timer based on the send
-            // counted the round-trip and then restarted when the turn
-            // actually began (user report). Bridge it as "Sending…" with no
-            // timer instead; the word + timer start with the turn.
-            let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-            let sending = sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
-            let elapsed = turn_started
-                .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                .unwrap_or(0);
-            (sending, elapsed)
+            let state = self.state.read(cx);
+            let last = state.sub_transcript(doc_id).last()?;
+            let live = last.status == Some(MessageStatus::Streaming)
+                || last.role == MessageRole::User;
+            if !live {
+                return None;
+            }
+            let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
+            (false, elapsed, flavour_seed(doc_id))
+        } else {
+            let chat_id = self.chat_id.clone()?;
+            let (sending, elapsed) = {
+                let state = self.state.read(cx);
+                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+                    // Past the pending-send TTL with no ack, the Working
+                    // overlay has lapsed but the queued command is still
+                    // undelivered (edge link down). Silence here read as a
+                    // hang (2026-08-19) — say what's actually happening.
+                    // Static line, no spinner: nothing is progressing; the
+                    // ack notify clears it.
+                    if state.send_queued_unacked(&chat_id, now) {
+                        let theme = Theme::of(cx).clone();
+                        return Some(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .pt(px(10.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from("Queued — waiting for connection…"))
+                                .into_any_element(),
+                        );
+                    }
+                    return None;
+                }
+                // During the send→turn window the session row's `started_at`
+                // still belongs to the PREVIOUS turn — a timer based on the
+                // send counted the round-trip and then restarted when the
+                // turn actually began (user report). Bridge it as "Sending…"
+                // with no timer instead; the word + timer start with the
+                // turn.
+                let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                let sending =
+                    sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
+                let elapsed = turn_started
+                    .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                    .unwrap_or(0);
+                (sending, elapsed)
+            };
+            (sending, elapsed, flavour_seed(&chat_id))
         };
         let word = if sending {
             "Sending"
         } else {
-            flavour_word(flavour_seed(&chat_id), elapsed_secs)
+            flavour_word(seed, elapsed_secs)
         };
         let theme = Theme::of(cx).clone();
         Some(
@@ -3285,6 +3352,12 @@ impl Transcript {
         let details: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
             .map(|tool| {
+                // Spawn chips never expand — the subagent doc is the record
+                // of what the tool did, and an inline body would only repeat
+                // it. The whole chip is the "open that doc" click instead.
+                if tool.subagent_ref.is_some() {
+                    return None;
+                }
                 // Among fetched blobs, the most recently REQUESTED one wins —
                 // a tool can carry both a diff and an output ref, and the
                 // user's last click decides which upgrade is showing.
@@ -3302,8 +3375,14 @@ impl Transcript {
             .collect();
         // Full-invocation blocks — with them, EVERY chip expands: the click
         // always answers "what exactly was this call?", output or not.
-        let invocations: Vec<Option<Arc<ToolDetail>>> =
-            tools.iter().map(|tool| tool.invocation.clone()).collect();
+        let invocations: Vec<Option<Arc<ToolDetail>>> = tools
+            .iter()
+            .map(|tool| {
+                tool.invocation
+                    .clone()
+                    .filter(|_| tool.subagent_ref.is_none())
+            })
+            .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
         // upgrade), then the output — a fetched ref hands the affordance to
@@ -3312,18 +3391,6 @@ impl Transcript {
         let affordances: Vec<Option<ChipAffordance>> = tools
             .iter()
             .map(|tool| {
-                // A spawn chip's transcript wins the slot outright — the
-                // subagent doc is the richer record of what the tool did.
-                if let Some(doc_id) = &tool.subagent_ref {
-                    return Some(ChipAffordance::Subagent {
-                        doc_id: doc_id.clone(),
-                        title: subagent_tab_title(&tool.call),
-                        frozen: matches!(
-                            tool.subagent_status,
-                            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
-                        ),
-                    });
-                }
                 // The currently-displayed ref (same recency rule as
                 // `details` above): its affordance is spent; any OTHER
                 // Ready ref stays offered as a no-fetch toggle.
@@ -3361,7 +3428,7 @@ impl Transcript {
                             None => format!("Show full {what}"),
                         },
                     };
-                    return Some(ChipAffordance::Blob {
+                    return Some(ChipAffordance {
                         blob_ref: blob_ref.clone(),
                         label: SharedString::from(label),
                     });
@@ -3473,6 +3540,33 @@ impl Transcript {
             .flex_col()
             .gap(px(CHIP_GAP))
             .children(tools.iter().enumerate().map(|(ix, tool)| {
+                // Spawn chips are LINKS, not accordions: the click opens the
+                // subagent's transcript as a right-pane tab (the shell hosts
+                // the surface — the chip only announces which doc it indexes).
+                if let Some(doc_id) = &tool.subagent_ref {
+                    let chat_id = self.chat_id.clone().unwrap_or_default();
+                    let doc_id = doc_id.clone();
+                    let title = subagent_tab_title(&tool.call);
+                    let frozen = matches!(
+                        tool.subagent_status,
+                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                    );
+                    return subagent_chip(
+                        tool,
+                        SharedString::from(format!("{row_id}#s{ix}")),
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::OpenSubagent {
+                                chat_id: chat_id.clone(),
+                                doc_id: doc_id.to_string(),
+                                title: title.to_string(),
+                                frozen,
+                            });
+                        }),
+                        theme,
+                        cx.entity_id(),
+                        cx,
+                    );
+                }
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
@@ -3579,8 +3673,12 @@ impl Transcript {
                             )
                             .child(detail_body(detail, detail_highlights[ix].clone(), theme));
                     }
-                    if let Some(affordance) = affordance {
-                        let base = div()
+                    if let Some(ChipAffordance { blob_ref, label }) = affordance {
+                        let loading = matches!(
+                            self.blob_details.get(&blob_ref),
+                            Some(BlobFetch::Loading(_))
+                        );
+                        let mut row = div()
                             .id(SharedString::from(format!("{key}-blob")))
                             .h(px(BLOB_AFFORDANCE_HEIGHT))
                             .flex_none()
@@ -3588,47 +3686,17 @@ impl Transcript {
                             .flex()
                             .items_center()
                             .text_size(px(10.5))
-                            .text_color(theme.text_faint);
-                        let row = match affordance {
-                            ChipAffordance::Blob { blob_ref, label } => {
-                                let loading = matches!(
-                                    self.blob_details.get(&blob_ref),
-                                    Some(BlobFetch::Loading(_))
-                                );
-                                let mut row = base.child(label);
-                                if !loading {
-                                    row = row
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme.text_muted))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.spawn_blob_fetch(blob_ref.clone(), cx);
-                                            cx.notify();
-                                        }));
-                                }
-                                row
-                            }
-                            ChipAffordance::Subagent {
-                                doc_id,
-                                title,
-                                frozen,
-                            } => {
-                                // The shell hosts the surface — the chip only
-                                // announces which doc (and blob key base) it
-                                // indexes.
-                                let chat_id = self.chat_id.clone().unwrap_or_default();
-                                base.child(SharedString::from("Open subagent"))
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(theme.text_muted))
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(TranscriptEvent::OpenSubagent {
-                                            chat_id: chat_id.clone(),
-                                            doc_id: doc_id.to_string(),
-                                            title: title.to_string(),
-                                            frozen,
-                                        });
-                                    }))
-                            }
-                        };
+                            .text_color(theme.text_faint)
+                            .child(label);
+                        if !loading {
+                            row = row
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.text_muted))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.spawn_blob_fetch(blob_ref.clone(), cx);
+                                    cx.notify();
+                                }));
+                        }
                         card = card.child(row);
                     }
                 }
@@ -4024,9 +4092,18 @@ fn detail_body(
     }
 }
 
-/// The chip's content row: icon tile + label + detail line (+ chevron tile
-/// when the chip expands). Shared between the plain chip and the header of an
-/// expandable chip card.
+/// The trailing tile on a chip header, when it has one.
+enum ChipTrail {
+    /// Expand/collapse chevron — flipped while the detail body is open.
+    Chevron { open: bool },
+    /// Top-right "opens elsewhere" arrow — the spawn chip's link to its
+    /// subagent tab.
+    OpenArrow,
+}
+
+/// The chip's content row: icon tile + label + detail line (+ trailing tile
+/// when the chip expands or links out). Shared between the plain chip, the
+/// header of an expandable chip card, and the spawn link chip.
 ///
 /// Spawn chips carry their subagent's lifecycle VISUALLY, in the chip's own
 /// language: while running the mini working spinner (the sidebar's) pulses
@@ -4035,7 +4112,7 @@ fn detail_body(
 /// header rewriting itself per stream delta read as noise — user report).
 fn chip_header_row(
     tool: &ToolItem,
-    chevron: Option<bool>,
+    trail: Option<ChipTrail>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -4101,33 +4178,41 @@ fn chip_header_row(
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
             row.child(
-                div().flex_none().child(crate::loaders::mini_gradient_spinner(
-                    format!(
-                        "subagent-chip-{}",
-                        tool.subagent_ref.as_deref().unwrap_or_default()
-                    ),
-                    2.0,
-                    view,
-                    cx,
-                )),
+                div()
+                    .flex_none()
+                    .child(crate::loaders::mini_gradient_spinner(
+                        format!(
+                            "subagent-chip-{}",
+                            tool.subagent_ref.as_deref().unwrap_or_default()
+                        ),
+                        2.0,
+                        view,
+                        cx,
+                    )),
             )
         })
-        .when_some(chevron, |row, open| {
-            // Output/diff affordance: a chevron tile matching the group
-            // header's, flipped while the detail body is open.
-            row.child(
-                div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.06))
-                    .flex()
-                    .items_center()
-                    .justify_center()
+        .when_some(trail, |row, trail| {
+            // Trailing tile matching the group header's: a chevron for the
+            // output/diff accordion, or the open-arrow for spawn chips.
+            let tile = div()
+                .size(px(18.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .bg(crate::theme::ink(0.06))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.text_muted.opacity(0.8));
+            row.child(match trail {
+                ChipTrail::Chevron { open } => tile
                     .text_size(px(10.0))
-                    .text_color(theme.text_muted.opacity(0.8))
                     .child(SharedString::from(if open { "▾" } else { "▸" })),
-            )
+                ChipTrail::OpenArrow => tile.child(
+                    crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.8)),
+                ),
+            })
         })
 }
 
@@ -4139,7 +4224,7 @@ fn chip_header(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    chip_header_row(tool, Some(open), theme, view, cx)
+    chip_header_row(tool, Some(ChipTrail::Chevron { open }), theme, view, cx)
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -4238,6 +4323,60 @@ fn tool_chip(
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.03))
                 .child(chip_header_row(tool, None, theme, view, cx)),
+        )
+        .into_any_element()
+}
+
+/// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
+/// "open the subagent tab" click (open-arrow tile in the trailing slot).
+/// No accordion — an inline body would only repeat the subagent's own
+/// transcript.
+fn subagent_chip(
+    tool: &ToolItem,
+    id: SharedString,
+    on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    theme: &Theme,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    div()
+        .h(px(CHIP_HEIGHT))
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        // Guide rail: hairline centered under the header's chevron tile.
+        .child(
+            div()
+                .ml(px(12.0))
+                .h_full()
+                .w(px(1.0))
+                .flex_none()
+                .bg(crate::theme::ink(0.08)),
+        )
+        .child(
+            div()
+                .id(id)
+                .ml(px(12.0))
+                .h(px(CHIP_CARD_HEIGHT))
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.07))
+                .bg(crate::theme::ink(0.03))
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .on_click(on_open)
+                .child(chip_header_row(
+                    tool,
+                    Some(ChipTrail::OpenArrow),
+                    theme,
+                    view,
+                    cx,
+                )),
         )
         .into_any_element()
 }

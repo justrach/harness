@@ -4647,10 +4647,20 @@ impl Composer {
                             // know the spec degrades to the main checkout
                             // instead of failing the run.
                             chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
+                            if let Some(repo_path) = &space_path {
+                                // A remote repo's branch list loads over the
+                                // relay — on a bad link it may never arrive
+                                // and the picker has no base. That must NOT
+                                // silently drop the isolation the user picked
+                                // (2026-08-19: "New worktree" ran in the main
+                                // checkout): default to HEAD, which git — any
+                                // host version — resolves as the repo's
+                                // current checkout state.
+                                let base =
+                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
                                 run_worktree = Some(zeron_proto::WorktreeSpec {
                                     repo_path: repo_path.clone(),
-                                    base: base.clone(),
+                                    base,
                                 });
                             }
                         }
@@ -4714,12 +4724,28 @@ impl Composer {
                 let mut content = text.clone();
                 let mut attachment_paths: Vec<String> = Vec::new();
                 if !staged.is_empty() {
+                    // Publish upload progress so the working label can read
+                    // "Uploading… N%" instead of an opaque "Sending…" while
+                    // the chunks cross the relay.
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
                     for att in &staged {
                         match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
                             host_device_id.as_deref(),
                             att,
+                            Some(progress.clone()),
                         )
                         .await
                         {
@@ -4806,6 +4832,9 @@ impl Composer {
             .await;
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                composer
+                    .state
+                    .update(cx, |s, _| s.end_upload_progress());
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
                     // draft, staged files back in the chat's stash.
