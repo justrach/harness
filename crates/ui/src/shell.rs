@@ -3722,43 +3722,53 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
-    /// The global connection pill. `None` while healthy (`Connected`) or on
+    /// The global connection line. `None` while healthy (`Connected`) or on
     /// local profiles (`Disabled`) — and the engine's degrade grace means it
-    /// only exists during REAL outages, never join/wake blips. Quiet by
-    /// design (v0.2.12 feedback): one soft-frost line, a status dot (amber
-    /// only when the OS says offline), no failure dump — the transport error
-    /// belongs in logs, not the sidebar.
-    fn render_connection_pill(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+    /// only exists during REAL outages, never join/wake blips. No surface,
+    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
+    /// reconnecting; an amber dot only when the OS says offline. The
+    /// transport error belongs in logs, not the sidebar.
+    fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
-        let (label, dot): (SharedString, gpui::Hsla) = match conn.state {
+        let (label, glyph): (SharedString, AnyElement) = match conn.state {
             S::Disabled | S::Connected => return None,
-            S::Offline => ("Offline — sends are saved".into(), theme.warning),
-            S::Reconnecting => ("Reconnecting…".into(), theme.text_faint),
+            S::Offline => (
+                "Offline — sends are saved".into(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
+            ),
+            S::Reconnecting => (
+                "Reconnecting…".into(),
+                loaders::mini_gradient_spinner(
+                    "connection-spinner",
+                    2.0,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
+            ),
         };
         Some(
             crate::motion::fade_in(
                 "connection-pill",
                 div()
                     .id("connection-pill")
-                    .mx(px(Theme::SPACE_SM))
+                    .mx(px(Theme::SPACE_SM + 4.0))
                     .mb(px(Theme::SPACE_SM))
-                    .px(px(Theme::SPACE_SM))
-                    .py(px(4.0))
-                    .rounded_full()
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().size(px(5.0)).rounded_full().bg(dot))
+                    .child(glyph)
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
                             .text_size(px(11.0))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.text_faint)
                             .child(label),
                     ),
             )
