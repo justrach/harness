@@ -277,6 +277,10 @@ pub struct TerminalPanel {
     /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
     /// must not dispatch the bottom drawer's [`ToggleTerminal`].
     embedded: bool,
+    /// The right pane is in its width tween. Keep painting the retained grid
+    /// through the changing clip, but do not feed transient widths into the
+    /// emulator: alternate-screen rows truncate rather than reflow.
+    resize_suspended: bool,
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
@@ -296,6 +300,7 @@ impl TerminalPanel {
             chats: HashMap::new(),
             open: false,
             embedded: false,
+            resize_suspended: false,
             tab_seq: 0,
             drag: None,
             last_selected: None,
@@ -314,6 +319,10 @@ impl TerminalPanel {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    pub fn set_resize_suspended(&mut self, suspended: bool) {
+        self.resize_suspended = suspended;
     }
 
     /// Shell toggle hook. Opening lazily creates the first tab for the
@@ -790,6 +799,9 @@ impl TerminalPanel {
         // mapping needs the placement even on frames where nothing resized,
         // which is almost all of them.
         self.geometry = Some(geometry);
+        if self.resize_suspended {
+            return;
+        }
         let (cols, rows) = (geometry.cols, geometry.rows);
         let Some(chat) = self.selected_chat(cx) else {
             return;
@@ -1029,6 +1041,7 @@ impl TerminalPanel {
     fn select_tab(&mut self, chat: &str, ix: usize, cx: &mut Context<Self>) {
         if let Some(tabs) = self.chats.get_mut(chat)
             && ix < tabs.tabs.len()
+            && tabs.active != ix
         {
             tabs.active = ix;
             cx.notify();
