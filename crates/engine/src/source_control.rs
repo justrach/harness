@@ -228,6 +228,42 @@ impl GitHubCli {
         }
         serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)
     }
+
+    /// Resolve the remote's default branch through the provider API.
+    ///
+    /// This deliberately never uses Git remote transport (`git ls-remote`)
+    /// against the watched checkout, which would honor repository-controlled
+    /// transport and credential configuration. `gh` queries the
+    /// already-sanitized host/owner/repository identity with its own
+    /// credentials. Failures degrade to "unknown", matching the pre-existing
+    /// behavior when a default branch cannot be determined.
+    async fn default_branch(&self, source: &CheckoutSourceContext) -> Option<String> {
+        let host = source.branch.host.as_deref()?;
+        let owner = source.branch.owner.as_deref()?;
+        let repository = source.branch.repository.as_deref()?;
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args: vec![
+                "repo".into(),
+                "view".into(),
+                format!("{host}/{owner}/{repository}"),
+                "--json".into(),
+                "defaultBranchRef".into(),
+            ],
+            cwd: source.checkout_root.clone(),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout: GITHUB_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+        };
+        let output = self.runner.run(request).await.ok()?;
+        if !output.success || output.stdout_truncated {
+            return None;
+        }
+        let view: GhRepoView = serde_json::from_slice(&output.stdout).ok()?;
+        view.default_branch_ref
+            .map(|reference| reference.name)
+            .filter(|name| !name.is_empty())
+    }
 }
 
 impl Default for GitHubCli {
@@ -261,7 +297,19 @@ impl ChangeRequestProvider for GitHubCli {
             if candidates.is_empty() {
                 continue;
             }
-            return select_pull_request(self.provider(), source, candidates);
+            let default_branch = match source.default_branch.clone() {
+                Some(branch) => Some(branch),
+                None if needs_default_branch(source, &candidates) => {
+                    self.default_branch(source).await
+                }
+                None => None,
+            };
+            return select_pull_request(
+                self.provider(),
+                source,
+                default_branch.as_deref(),
+                candidates,
+            );
         }
         Ok(None)
     }
@@ -398,22 +446,6 @@ fn normalized_upstream(upstream: &str) -> &str {
     upstream.strip_prefix("refs/remotes/").unwrap_or(upstream)
 }
 
-/// Extract `main` from `git ls-remote --symref <remote> HEAD` output.
-///
-/// A local `refs/remotes/<remote>/HEAD` is merely a fetch-time cache and is
-/// absent in freshly configured or manually created checkouts. The remote's
-/// advertised symbolic HEAD is authoritative without changing local refs.
-fn default_branch_from_ls_remote(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let (reference, name) = line.split_once('\t')?;
-        (name == "HEAD")
-            .then(|| reference.strip_prefix("ref: refs/heads/"))
-            .flatten()
-            .filter(|branch| !branch.is_empty())
-            .map(str::to_owned)
-    })
-}
-
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
@@ -510,25 +542,21 @@ impl GitCheckoutInspector {
             remote_name.as_deref(),
             remote_url.as_deref(),
         );
+        // The default branch is read from local refs only. `refs/remotes/
+        // <remote>/HEAD` is a fetch-time cache and may be absent; the provider
+        // resolves the remote's default branch itself when needed. Never fall
+        // back to `git ls-remote` here: it executes repository-controlled
+        // transport and credential configuration (for example
+        // `core.sshCommand`), which would let any watched checkout run
+        // arbitrary commands on the host.
         let default_branch = if let Some(remote) = branch.remote_name.as_deref() {
             let remote_head = format!("refs/remotes/{remote}/HEAD");
-            let local_default_branch = self
-                .git_optional(
-                    &checkout_root,
-                    &["symbolic-ref", "--quiet", "--short", &remote_head],
-                )
-                .await
-                .and_then(|reference| {
-                    branch_from_upstream(&reference, Some(remote)).map(str::to_owned)
-                });
-            if local_default_branch.is_some() {
-                local_default_branch
-            } else {
-                self.git_optional(&checkout_root, &["ls-remote", "--symref", remote, "HEAD"])
-                    .await
-                    .as_deref()
-                    .and_then(default_branch_from_ls_remote)
-            }
+            self.git_optional(
+                &checkout_root,
+                &["symbolic-ref", "--quiet", "--short", &remote_head],
+            )
+            .await
+            .and_then(|reference| branch_from_upstream(&reference, Some(remote)).map(str::to_owned))
         } else {
             None
         };
@@ -574,6 +602,17 @@ impl GitCheckoutInspector {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GhRepoView {
+    default_branch_ref: Option<GhBranchRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhBranchRef {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GhPullRequest {
     number: u64,
     title: String,
@@ -609,13 +648,24 @@ struct GhRepositoryOwner {
     login: String,
 }
 
+/// The default branch only matters to suppress historical terminal pull
+/// requests on the default branch itself; skip the extra provider request
+/// unless a terminal candidate could actually be suppressed.
+fn needs_default_branch(source: &CheckoutSourceContext, candidates: &[GhPullRequest]) -> bool {
+    candidates.iter().any(|candidate| {
+        candidate.head_ref_name == source.branch.head_branch
+            && !matches!(candidate.state, GhPullRequestState::Open)
+    })
+}
+
 fn select_pull_request(
     provider: &str,
     source: &CheckoutSourceContext,
+    default_branch: Option<&str>,
     candidates: Vec<GhPullRequest>,
 ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
     let expected_owner = source.branch.owner.as_deref();
-    let on_default_branch = source.default_branch.as_deref() == Some(&source.branch.head_branch);
+    let on_default_branch = default_branch == Some(&source.branch.head_branch);
     let mut matching: Vec<GhPullRequest> = candidates
         .into_iter()
         .filter(|candidate| candidate.head_ref_name == source.branch.head_branch)
@@ -1077,51 +1127,11 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
     }
 
     #[tokio::test]
-    async fn git_inspector_reads_default_branch_from_remote_when_local_head_is_absent() {
+    async fn git_inspector_never_runs_remote_transport_for_an_absent_default_branch() {
         let temp = tempfile::tempdir().expect("fixture tempdir");
-        let remote = temp.path().join("origin.git");
         let checkout = temp.path().join("checkout");
-        let init_remote = std::process::Command::new("git")
-            .args([
-                "init",
-                "--bare",
-                "-q",
-                remote.to_str().expect("remote path"),
-            ])
-            .output()
-            .expect("create bare remote");
-        assert!(
-            init_remote.status.success(),
-            "create bare remote failed: {}",
-            String::from_utf8_lossy(&init_remote.stderr)
-        );
-        let remote_head = std::process::Command::new("git")
-            .args([
-                "--git-dir",
-                remote.to_str().expect("remote path"),
-                "symbolic-ref",
-                "HEAD",
-                "refs/heads/main",
-            ])
-            .output()
-            .expect("set bare remote head");
-        assert!(
-            remote_head.status.success(),
-            "set bare remote head failed: {}",
-            String::from_utf8_lossy(&remote_head.stderr)
-        );
-
         std::fs::create_dir_all(&checkout).expect("checkout directory");
         run_git(&checkout, &["init", "-q", "-b", "main"]);
-        run_git(
-            &checkout,
-            &[
-                "remote",
-                "add",
-                "origin",
-                remote.to_str().expect("remote path"),
-            ],
-        );
         run_git(
             &checkout,
             &[
@@ -1135,15 +1145,37 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 "fixture",
             ],
         );
-        run_git(&checkout, &["push", "-q", "origin", "main"]);
+        run_git(
+            &checkout,
+            &["remote", "add", "origin", "git@github.com:acme/zeron.git"],
+        );
+        // A repository-controlled transport command: any Git subcommand that
+        // touches the remote (such as the former `ls-remote` default-branch
+        // fallback) would execute it and create the marker.
+        let marker = temp.path().join("transport-ran");
+        run_git(
+            &checkout,
+            &[
+                "config",
+                "core.sshCommand",
+                &format!("sh -c 'touch {}; exit 1'", marker.display()),
+            ],
+        );
 
         let source = ChangeRequestResolver::new()
             .inspect_checkout(&checkout)
             .await
-            .expect("inspect checkout with an unfetched remote HEAD");
+            .expect("inspect checkout without a cached remote HEAD");
 
         assert_eq!(source.branch.remote_name.as_deref(), Some("origin"));
-        assert_eq!(source.default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            source.default_branch, None,
+            "an unfetched default branch stays unknown until the provider resolves it"
+        );
+        assert!(
+            !marker.exists(),
+            "checkout inspection must never invoke Git remote transport"
+        );
     }
 
     #[tokio::test]
@@ -1361,6 +1393,82 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
 
         let (result, _) = resolve_with(&source, command_success(json)).await;
         assert_eq!(result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn unknown_default_branch_resolves_through_the_provider_before_suppression() {
+        let source = source("main", "acme", None);
+        let list = serde_json::to_vec(&vec![pull_request(
+            99,
+            "MERGED",
+            "acme",
+            "main",
+            "2026-08-15T12:00:00Z",
+        )])
+        .unwrap();
+        let runner = FakeProcessRunner::with_responses([
+            command_success(list),
+            command_success(br#"{"defaultBranchRef":{"name":"main"}}"#.to_vec()),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone());
+
+        let result = github.find_for_branch(&source).await;
+
+        assert_eq!(result.unwrap(), None, "historical PR on main is suppressed");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].program, "gh");
+        assert_eq!(
+            requests[1].args,
+            [
+                "repo",
+                "view",
+                "github.com/acme/zeron",
+                "--json",
+                "defaultBranchRef"
+            ]
+        );
+        assert_eq!(requests[1].env, [("GH_PROMPT_DISABLED".into(), "1".into())]);
+    }
+
+    #[tokio::test]
+    async fn open_candidates_skip_the_provider_default_branch_lookup() {
+        let source = source("feature/status", "acme", None);
+        let json = serde_json::to_vec(&vec![pull_request(
+            90,
+            "OPEN",
+            "acme",
+            "feature/status",
+            "2026-08-15T12:00:00Z",
+        )])
+        .unwrap();
+
+        let (result, runner) = resolve_with(&source, command_success(json)).await;
+
+        assert_eq!(result.unwrap().unwrap().number, 90);
+        assert_eq!(runner.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_default_branch_failure_keeps_the_terminal_pull_request() {
+        let source = source("main", "acme", None);
+        let list = serde_json::to_vec(&vec![pull_request(
+            99,
+            "MERGED",
+            "acme",
+            "main",
+            "2026-08-15T12:00:00Z",
+        )])
+        .unwrap();
+        let runner = FakeProcessRunner::with_responses([
+            command_success(list),
+            command_failure("could not resolve repository"),
+        ]);
+        let github = GitHubCli::with_runner(runner);
+
+        let result = github.find_for_branch(&source).await;
+
+        assert_eq!(result.unwrap().unwrap().number, 99);
     }
 
     #[tokio::test]
