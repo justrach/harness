@@ -982,6 +982,14 @@ impl DocHost {
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = zeron_sync::wake::subscribe();
+            // Sibling-dial successes end a backoff wait immediately, exactly
+            // like the joined clients' own reconnect loops (chat_client.rs).
+            // Without this, a NEW chat whose first joins hit a network blip
+            // waited out the full accumulated backoff (→30s) while every
+            // established room redialed instantly on recovery — fresh sends
+            // to new sessions stalled while other chats hummed (2026-08-19
+            // user report, reproduced on two networks).
+            let mut online = zeron_sync::wake::subscribe_online();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
@@ -1145,11 +1153,18 @@ impl DocHost {
                             "chat2 join timed out; retrying");
                     }
                 }
+                // Drain stale online events first: only successes DURING this
+                // wait count, or our own last dial would cut every wait to
+                // zero (same discipline as chat_client's wait_backoff).
+                while online.try_recv().is_ok() {}
                 tokio::select! {
                     _ = tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()) => {
                         backoff = (backoff * 2).min(crate::workspace_host::JOIN_RETRY_CAP);
                     }
                     _ = wake.recv() => {
+                        backoff = crate::workspace_host::JOIN_RETRY_BASE;
+                    }
+                    _ = online.recv() => {
                         backoff = crate::workspace_host::JOIN_RETRY_BASE;
                     }
                     _ = crate::workspace_host::token_changed(&mut token_changes) => {

@@ -525,12 +525,34 @@ async fn captured_live_background_subagent_frames_replay_correctly() {
             _ => None,
         })
         .expect("Agent spawn tool call in the parent feed");
+    // The synthesized opening user message rides WITH the spawn (before the
+    // eager done); the child's own interior streams between the two dones.
+    let opening: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if *parent_tool_use_id == spawn_id
+                        && matches!(event.as_ref(), AgentEvent::UserMessage { .. })
+            )
+            .then_some(i)
+        })
+        .collect();
+    assert_eq!(opening.len(), 1, "one seeded opening prompt: {events:?}");
+    assert!(opening[0] < dones[0], "opening rides with the spawn");
     let tagged: Vec<usize> = events
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            matches!(e, AgentEvent::Subagent { parent_tool_use_id, .. } if *parent_tool_use_id == spawn_id)
-                .then_some(i)
+            matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if *parent_tool_use_id == spawn_id
+                        && !matches!(event.as_ref(), AgentEvent::UserMessage { .. })
+            )
+            .then_some(i)
         })
         .collect();
     assert!(!tagged.is_empty(), "tagged subagent traffic: {events:?}");
@@ -592,4 +614,37 @@ async fn live_real_cli_single_turn() {
             ..
         })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Slash-command discovery
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn commands_come_from_the_initialize_control_request() {
+    let h = harness();
+    let commands = h.commands().await.expect("discovery succeeds");
+    assert_eq!(commands.len(), 2, "nameless entries are dropped: {commands:?}");
+    assert_eq!(commands[0].name, "review");
+    assert_eq!(commands[0].description, "Review a pull request");
+    assert_eq!(commands[0].input_hint.as_deref(), Some("[pr number]"));
+    assert_eq!(commands[1].name, "compact");
+    assert_eq!(commands[1].input_hint, None, "empty hint reads as None");
+
+    // Cached: the second call reuses the first probe's result (the fake has
+    // exited; a re-probe against a dead binary path would still work here,
+    // but object identity of the cached list is the cheap assertion).
+    let again = h.commands().await.expect("cache hit");
+    assert_eq!(again, commands);
+}
+
+/// Live smoke against the real CLI: `cargo test -p zeron-harness --test
+/// claude -- --ignored live_commands`. No model turn, no API cost.
+#[tokio::test]
+#[ignore]
+async fn live_commands_discovery() {
+    let h = ClaudeHarness::new();
+    let commands = h.commands().await.expect("live discovery");
+    assert!(!commands.is_empty());
+    eprintln!("{} commands, first: {:?}", commands.len(), commands.first());
 }

@@ -58,6 +58,7 @@ async fn main() {
         auto_approve: true,
         attachments: Vec::new(),
         resume: None,
+        worktree: None,
     };
     let mut stream = AcpHarness::opencode()
         .run(request, controls)
