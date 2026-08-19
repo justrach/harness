@@ -607,8 +607,9 @@ impl DeviceLink {
             // host has echoed at least once, so old hosts keep working.
             let mut last_echo = tokio::time::Instant::now();
             let mut echo_seen = false;
-            let echo_frame = encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
-                .unwrap_or_default();
+            let echo_frame =
+                encode_device_frame(&DeviceFrameHeader::new(ECHO_KIND, ECHO_KIND), &[])
+                    .unwrap_or_default();
             // First echo right away: fast feature detection + instant proof
             // the host leg is alive (the dial's readiness probe proves it
             // too; this seeds the ongoing cadence).

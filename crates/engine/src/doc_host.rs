@@ -2278,10 +2278,12 @@ impl DocHost {
             let transfers: Vec<crate::uploads::AttachmentTransfer> = refs
                 .iter()
                 .filter_map(|r| crate::uploads::parse_pending_ref(r))
-                .map(|(upload_id, file_name)| crate::uploads::AttachmentTransfer {
-                    upload_id: upload_id.to_string(),
-                    file_name: file_name.to_string(),
-                })
+                .map(
+                    |(upload_id, file_name)| crate::uploads::AttachmentTransfer {
+                        upload_id: upload_id.to_string(),
+                        file_name: file_name.to_string(),
+                    },
+                )
                 .collect();
             self.spawn_command_delivery(chat_id, entry, transfers);
         }
@@ -2873,11 +2875,8 @@ impl DocHost {
                 let prompt = &self.resolve_prompt_attachments(prompt);
                 // Same send-time canonicalization as the Run arm.
                 if let Some(message_id) = message_id
-                    && let Err(err) = handle.write_user_message(
-                        message_id,
-                        prompt,
-                        entry.issued_at.min(now_ms()),
-                    )
+                    && let Err(err) =
+                        handle.write_user_message(message_id, prompt, entry.issued_at.min(now_ms()))
                 {
                     tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
                 }

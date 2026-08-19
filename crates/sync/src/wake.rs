@@ -16,8 +16,8 @@
 //! events — each subscriber treats ANY received event as "reconnect now",
 //! so a missed one is at worst covered by the next silence lease.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::broadcast;

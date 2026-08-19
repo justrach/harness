@@ -225,7 +225,9 @@ impl Uploads {
         // The id8 fragment becomes part of a file name — jail its charset the
         // same way staging does (a hostile ref must not traverse).
         let id8 = sanitize(&id8);
-        self.inner.dir.join(format!("{id8}-{}", sanitize(file_name)))
+        self.inner
+            .dir
+            .join(format!("{id8}-{}", sanitize(file_name)))
     }
 
     /// Resolve a `pending://` ref against this device's uploads dir.

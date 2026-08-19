@@ -1671,7 +1671,13 @@ impl Shell {
                 title,
                 frozen,
             } => {
-                self.add_subagent_surface(chat_id.clone(), doc_id.clone(), title.clone(), *frozen, cx);
+                self.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    *frozen,
+                    cx,
+                );
             }
         }
     }
@@ -3625,14 +3631,15 @@ impl Shell {
                     .when(
                         status == zeron_proto::ChatIndicator::Working && !queued && !undelivered,
                         |el| {
-                        el.child(div().flex_1())
-                            .child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                    }),
+                            el.child(div().flex_1())
+                                .child(loaders::mini_gradient_spinner(
+                                    format!("chat-working-{id}"),
+                                    2.0,
+                                    cx.entity_id(),
+                                    cx,
+                                ))
+                        },
+                    ),
             )
             .into_any_element()
     }
@@ -5104,12 +5111,7 @@ impl Shell {
                 .right(px(10.0))
                 .flex()
                 .justify_center()
-                .child(self.jump_pill(
-                    "jump-to-bottom",
-                    "jump-pill",
-                    self.transcript.clone(),
-                    cx,
-                ))
+                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
                 .into_any_element(),
         )
     }

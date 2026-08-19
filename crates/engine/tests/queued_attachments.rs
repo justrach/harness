@@ -208,7 +208,11 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
         .await
         .expect("upload commit");
 
-    wait_for(|| complete_assistant_count(&core) == 1, "deferred run to execute").await;
+    wait_for(
+        || complete_assistant_count(&core) == 1,
+        "deferred run to execute",
+    )
+    .await;
 
     // The persisted user entry carries the rewritten ABSOLUTE path (legacy
     // transcript shape — old clients render it as always), not the ref.

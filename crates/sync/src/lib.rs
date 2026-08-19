@@ -22,6 +22,8 @@ pub mod wake;
 pub use chat_client::{
     ChatClient, ChatDocSink, ChatEvent, ChatStatsSnapshot, ChatTuning, CheckpointFetcher,
 };
-pub use registry::{ReconnectState, RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning};
+pub use registry::{
+    ReconnectState, RegistryClient, RegistryEvent, RegistryTransport, RegistryTuning,
+};
 pub use store::{DocsStore, StoreError};
 pub use types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};

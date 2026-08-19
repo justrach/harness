@@ -884,7 +884,8 @@ impl Actor {
             let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
             let mut push_failed = false;
             for batch in &batches {
-                let body = serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
+                let body =
+                    serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
                 match transport.push(body).await {
                     Ok(ack) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ack) {

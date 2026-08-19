@@ -1019,7 +1019,10 @@ async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
         }
     });
     let (replayed, _keep_alive) = s2.await.unwrap();
-    assert_eq!(replayed, first_batch, "the SAME batch replays — no dupes, no loss");
+    assert_eq!(
+        replayed, first_batch,
+        "the SAME batch replays — no dupes, no loss"
+    );
 
     while client.stats().pending_pushes > 0 {
         if matches!(events.recv().await, Ok(ChatEvent::Disconnected)) {
@@ -1031,11 +1034,17 @@ async fn drops_and_refused_dials_deliver_the_push_exactly_once() {
             saw_disconnect = true;
         }
     }
-    assert!(saw_disconnect, "the outage must surface as a Disconnected event");
+    assert!(
+        saw_disconnect,
+        "the outage must surface as a Disconnected event"
+    );
     let stats = client.stats();
     assert_eq!(stats.cursor, 1, "exactly one ack advanced the cursor");
     assert_eq!(*lock(&sink.cursor_advances), vec![1]);
-    assert!(stats.disconnects >= 1, "disconnect counter recorded the drop");
+    assert!(
+        stats.disconnects >= 1,
+        "disconnect counter recorded the drop"
+    );
     assert_eq!(
         flaky.dial_times().len(),
         4,
@@ -1092,7 +1101,10 @@ async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it(
     // attempt hits the exhausted script and keeps failing — ignore it).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     while flaky.dial_times().len() < 6 {
-        assert!(tokio::time::Instant::now() < deadline, "dials never happened");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "dials never happened"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     server.await.unwrap();
@@ -1100,9 +1112,23 @@ async fn connect_and_die_sessions_grow_backoff_until_a_stable_session_resets_it(
     // Gaps between redials after unstable sessions must GROW (each joined
     // session died in ~0 virtual time, so the gap is ~the backoff).
     let gap = |i: usize| times[i + 1].duration_since(times[i]);
-    assert!(gap(1) >= Duration::from_millis(400), "second redial backed off: {:?}", gap(1));
-    assert!(gap(2) > gap(1), "backoff grows across unstable sessions: {:?} vs {:?}", gap(2), gap(1));
-    assert!(gap(3) > gap(2), "…and keeps growing: {:?} vs {:?}", gap(3), gap(2));
+    assert!(
+        gap(1) >= Duration::from_millis(400),
+        "second redial backed off: {:?}",
+        gap(1)
+    );
+    assert!(
+        gap(2) > gap(1),
+        "backoff grows across unstable sessions: {:?} vs {:?}",
+        gap(2),
+        gap(1)
+    );
+    assert!(
+        gap(3) > gap(2),
+        "…and keeps growing: {:?} vs {:?}",
+        gap(3),
+        gap(2)
+    );
     // The stable session (index 4→5 gap includes its >30s healthy lifetime):
     // after it died, the backoff was reset to base — the redial came within
     // ~base of the death, i.e. the whole gap is dominated by the 31s life.

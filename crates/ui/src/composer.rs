@@ -5532,9 +5532,9 @@ impl Render for Composer {
                 Some(id) => state.chat_delivery_degraded(id),
                 None => {
                     // New-chat canvas: judge by the picked target device.
-                    let remote_target = state.effective_device_id().is_some_and(|id| {
-                        state.local_device_id.as_deref() != Some(id.as_str())
-                    });
+                    let remote_target = state
+                        .effective_device_id()
+                        .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
                     remote_target
                         && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
                             || state
