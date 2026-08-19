@@ -50,7 +50,7 @@ use crate::state::{
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
-use crate::transcript::{self, Transcript};
+use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod spaces;
 mod tabs;
@@ -227,6 +227,9 @@ pub enum RightSurface {
     Picker,
     Diff(u64),
     Terminal(u64),
+    /// A subagent's transcript, read-only (per-subagent viz) — the handle
+    /// keys [`Shell::subagent_tabs`].
+    Subagent(u64),
 }
 
 /// Per-chat panel open flags (zeron parity: `sessionPanels` — the terminal and
@@ -763,6 +766,18 @@ struct OrgGateUi {
     _events: Subscription,
 }
 
+/// One right-pane subagent tab: the doc it shows, its strip title, and the
+/// read-only transcript entity whose drop tears the view down.
+struct SubagentTab {
+    doc_id: String,
+    title: SharedString,
+    transcript: Entity<Transcript>,
+    /// Keeps a frozen-blob fetch alive (it falls back to a live doc watch).
+    _fetch: Option<Task<()>>,
+    /// Spawn chips INSIDE the subagent transcript open their own tabs.
+    _events: Subscription,
+}
+
 pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
@@ -800,6 +815,10 @@ pub struct Shell {
     /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
     diff_subs: std::collections::HashMap<u64, Subscription>,
     diff_seq: u64,
+    /// Subagent transcript surfaces by id — each tab a read-only
+    /// [`Transcript`] pinned to its subagent doc.
+    subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
+    subagent_seq: u64,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -892,10 +911,11 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
-    /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`) — see
-    /// [`Shell::new`].
+    /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`,
+    /// `ZERON_DEMO_UPLOAD`) — see [`Shell::new`].
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
+    debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
     right_tween: Option<WidthTween>,
     /// Changes-panel takeover (the header's expand button): the panel fills
@@ -946,6 +966,8 @@ pub struct Shell {
     _ticker: Task<()>,
     _state_observation: Subscription,
     _composer_events: Subscription,
+    /// The primary transcript's spawn-chip events (subagent tabs).
+    _transcript_events: Subscription,
 }
 
 impl Shell {
@@ -971,6 +993,8 @@ impl Shell {
                 }
             }
         });
+        // Spawn chips open their subagent's transcript as a right-pane tab.
+        let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         // Working-indicator heartbeat: notify once a second while a session is
         // live so elapsed time and the flavour word stay fresh.
         let ticker = cx.spawn(async move |this, cx| {
@@ -1022,6 +1046,10 @@ impl Shell {
         // `ZERON_FORCE_GATE=signin|org|failed` renders that gate regardless of
         // real auth state (display-only — for styling passes).
         let debug_dialog = std::env::var("ZERON_OPEN_DIALOG").ok();
+        // `ZERON_DEMO_UPLOAD=<pct>:<image path>` fabricates an in-flight image
+        // send on the selected chat (echo bubble + frozen thumbnail progress
+        // ring) — display-only; a real upload can't be paused for a capture.
+        let debug_upload = std::env::var("ZERON_DEMO_UPLOAD").ok();
         let debug_gate = match std::env::var("ZERON_FORCE_GATE").ok().as_deref() {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
@@ -1051,6 +1079,8 @@ impl Shell {
             diffs: std::collections::HashMap::new(),
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
+            subagent_tabs: std::collections::HashMap::new(),
+            subagent_seq: 0,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -1103,6 +1133,7 @@ impl Shell {
             was_window_active: false,
             debug_dialog,
             debug_gate,
+            debug_upload,
             sidebar_tween: None,
             right_tween: None,
             right_pane_expanded: false,
@@ -1124,6 +1155,7 @@ impl Shell {
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
+            _transcript_events: transcript_events,
         }
     }
 
@@ -1173,6 +1205,64 @@ impl Shell {
                     self.delete_confirm = Some(first);
                 }
                 _ => {}
+            }
+        }
+        // Capture knob: `ZERON_DEMO_UPLOAD=<pct>:<image path>` — once a chat
+        // is selected, push a fake sending echo carrying that image as a
+        // pending attachment and freeze upload progress at <pct>, so the
+        // thumbnail progress ring can be styled/screenshotted (a real upload
+        // is too fast to pause).
+        if let Some(spec) = self.debug_upload.clone()
+            && let Some(chat_id) = state.read(cx).selected_chat.clone()
+        {
+            self.debug_upload = None;
+            if let Some((pct, img_path)) = spec.split_once(':')
+                && let Ok(pct) = pct.parse::<u64>()
+                && let Ok(att) =
+                    crate::attachments::stage_file(std::path::Path::new(img_path))
+            {
+                let pending_path = format!("pending/{}/{}", att.id, att.name);
+                let device_ids: Vec<String> = {
+                    let s = state.read(cx);
+                    s.selected_chat_row()
+                        .map(|c| c.device_id.clone())
+                        .into_iter()
+                        .chain(s.local_device_id.clone())
+                        .chain(Some("local".to_string()))
+                        .collect()
+                };
+                for device_id in &device_ids {
+                    crate::attachments::seed_attachment(
+                        device_id,
+                        &pending_path,
+                        &att.name,
+                        att.image.clone(),
+                    );
+                }
+                let text = crate::attachments::with_attachments(
+                    "Here is the screenshot of the bug.",
+                    std::slice::from_ref(&pending_path),
+                );
+                let echo = zeron_doc::SessionMessageEntry {
+                    id: "demo-upload-echo".into(),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "t0".into(),
+                        text,
+                    }],
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                    device_id: "local".into(),
+                    status: None,
+                    continuation_of: None,
+                };
+                state.update(cx, |s, cx| {
+                    s.push_echo(&chat_id, echo);
+                    s.begin_upload_progress(
+                        100,
+                        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(pct)),
+                    );
+                    cx.notify();
+                });
             }
         }
         // Session chimes (herdr semantics, `sound::sound_for_transition`): a
@@ -1482,6 +1572,10 @@ impl Shell {
                     .iter()
                     .find(|(k, _, _)| k == tab)
                     .map(|(_, title, _)| (*surface, title.clone())),
+                RightSurface::Subagent(id) => self
+                    .subagent_tabs
+                    .get(id)
+                    .map(|tab| (*surface, tab.title.clone())),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -1556,6 +1650,9 @@ impl Shell {
                     changes.update(cx, |changes, cx| changes.ensure_content(cx));
                 }
             }
+            // The tab's feed (watch or snapshot) runs from open to close —
+            // activation needs no revalidation.
+            RightSurface::Subagent(_) => {}
             RightSurface::Picker => {}
         }
         cx.notify();
@@ -1616,6 +1713,123 @@ impl Shell {
         }
     }
 
+    /// Spawn-chip events from the primary transcript AND from subagent-tab
+    /// transcripts (nested spawns open their own tabs).
+    fn on_transcript_event(
+        &mut self,
+        _: Entity<Transcript>,
+        event: &TranscriptEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TranscriptEvent::OpenSubagent {
+                chat_id,
+                doc_id,
+                title,
+                frozen,
+            } => {
+                self.add_subagent_surface(chat_id.clone(), doc_id.clone(), title.clone(), *frozen, cx);
+            }
+        }
+    }
+
+    /// A spawn chip's "Open subagent": focus the existing tab for that doc,
+    /// or open one. `frozen` (subagent done/failed) tries the uploaded
+    /// transcript blob first and falls back to the live doc watch; running
+    /// subagents watch the doc directly.
+    fn add_subagent_surface(
+        &mut self,
+        chat_id: String,
+        doc_id: String,
+        title: String,
+        frozen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // The chip lives in the conversation column — the pane it opens into
+        // may still be closed.
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        if let Some((&id, _)) = self
+            .subagent_tabs
+            .iter()
+            .find(|(_, tab)| tab.doc_id == doc_id)
+        {
+            self.set_right_active(RightSurface::Subagent(id), cx);
+            return;
+        }
+        self.subagent_seq += 1;
+        let id = self.subagent_seq;
+        // A live subagent follows its streaming end (main-transcript feel);
+        // a frozen one reads top-down.
+        let transcript =
+            cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
+        let events = cx.subscribe(&transcript, Self::on_transcript_event);
+        let fetch = if frozen {
+            self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
+        } else {
+            self.state
+                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.clone(), cx));
+            None
+        };
+        self.subagent_tabs.insert(
+            id,
+            SubagentTab {
+                doc_id,
+                title: title.into(),
+                transcript,
+                _fetch: fetch,
+                _events: events,
+            },
+        );
+        let key = self.panel_key(cx);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::Subagent(id));
+        self.set_right_active(RightSurface::Subagent(id), cx);
+    }
+
+    /// Fetch a finished subagent's frozen transcript blob
+    /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
+    /// — the blob upload is best-effort engine-side.
+    fn spawn_subagent_snapshot_fetch(
+        &self,
+        chat_id: &str,
+        doc_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.state
+                .update(cx, |s, cx| s.watch_subagent_doc(doc_id.to_string(), cx));
+            return None;
+        };
+        let blob_ref = format!("{chat_id}/{doc_id}");
+        let state = self.state.clone();
+        let doc_id = doc_id.to_string();
+        Some(cx.spawn(async move |_, cx| {
+            let reply = crate::attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::FETCH_TOOL_BLOB,
+                serde_json::json!({ "blobRef": blob_ref }),
+                Duration::from_secs(20),
+            )
+            .await;
+            let entries: Option<Vec<zeron_doc::SessionMessageEntry>> = reply.ok().and_then(|v| {
+                let text = v.get("text")?.as_str()?.to_owned();
+                serde_json::from_str(&text).ok()
+            });
+            state.update(cx, |s, cx| {
+                match entries {
+                    Some(entries) => s.set_subagent_snapshot(doc_id, entries),
+                    None => s.watch_subagent_doc(doc_id, cx),
+                }
+                cx.notify();
+            });
+        }))
+    }
+
     /// A surface tab's ✕. The active fallback happens naturally through
     /// [`Self::resolved_right_active`] on the next frame.
     fn close_right_surface(
@@ -1637,6 +1851,14 @@ impl Shell {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
+            }
+            RightSurface::Subagent(id) => {
+                // Unwatch drops the watch task — that cancels the engine-side
+                // watch and unpins the subagent doc from the engine LRU.
+                if let Some(tab) = self.subagent_tabs.remove(&id) {
+                    self.state
+                        .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
+                }
             }
             RightSurface::Picker => {}
         }
@@ -3168,6 +3390,7 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
+        change_request: Option<zeron_proto::ChangeRequestSummary>,
         harness: Option<zeron_proto::HarnessId>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -3392,8 +3615,8 @@ impl Shell {
                     .line_height(px(17.0))
                     .child(title),
             )
-            // Line 3 (always): harness brand mark; worktree sessions append
-            // the branch icon + name.
+            // Line 3 (always): harness brand mark, branch, optional PR badge,
+            // and the working spinner. Branch remains the only shrinking item.
             .child(
                 div()
                     .w_full()
@@ -3429,16 +3652,26 @@ impl Shell {
                                 .child(branch),
                         )
                     })
+                    // Stable invisible spring: keeps the optional spinner and
+                    // PR badge pinned right without changing no-PR paint.
+                    .child(div().flex_1().min_w_0())
                     // Working rows animate the spinner at the row's
                     // bottom-right (the status word keeps its dot up top).
                     .when(status == zeron_proto::ChatIndicator::Working, |el| {
-                        el.child(div().flex_1())
-                            .child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
+                        el.child(loaders::mini_gradient_spinner(
+                            format!("chat-working-{id}"),
+                            2.0,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                    })
+                    .when_some(change_request, |el, summary| {
+                        el.child(crate::change_requests::pull_request_badge(
+                            format!("chat-pr-{id}").into(),
+                            summary,
+                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            theme,
+                        ))
                     }),
             )
             .into_any_element()
@@ -4833,7 +5066,6 @@ impl Shell {
         if !self.transcript.read(cx).jump_button_shown() {
             return None;
         }
-        let theme = Theme::of(cx);
         Some(
             div()
                 .absolute()
@@ -4842,50 +5074,90 @@ impl Shell {
                 .right(px(10.0))
                 .flex()
                 .justify_center()
-                .child(motion::dialog_in(
+                .child(self.jump_pill(
                     "jump-to-bottom",
-                    div()
-                        .id("jump-to-bottom-btn")
-                        .h(px(30.0))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .pl(px(11.0))
-                        .pr(px(13.0))
-                        .cursor_pointer()
-                        // Hover must BRIGHTEN the opaque pill, never replace it
-                        // with a translucent wash (a 10%-alpha bg here made the
-                        // pill go see-through on hover — user-reported), and it
-                        // fades over the CSS transition-colors 150ms, not snaps.
-                        .bg(motion::hover_blend(
-                            "jump-pill",
-                            theme.surface_raised,
-                            theme.surface_raised_hover,
-                        ))
-                        .on_hover(motion::hover_listener("jump-pill"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.transcript
-                                .update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("↓")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .child(SharedString::from("Scroll to bottom")),
-                        ),
+                    "jump-pill",
+                    self.transcript.clone(),
+                    cx,
                 ))
                 .into_any_element(),
         )
+    }
+
+    /// The jump pill itself — shared between the conversation overlay and
+    /// the subagent pane so both read as one control. `anim_key`/`hover_key`
+    /// must be distinct per instance (they key global animation state).
+    ///
+    /// Glass-forward like the composer pill it floats near: a backdrop blur
+    /// under the floating-card tint ([`Theme::glass_overlay`]), hover
+    /// brightening via the standard glass wash painted OVER the tint —
+    /// mixing the tint TOWARD the wash would thin the pill on hover, the
+    /// exact see-through regression the old opaque pill's comment warned
+    /// about. Opaque appearances keep the raised-surface treatment
+    /// (`frosted` passes through there anyway).
+    fn jump_pill(
+        &self,
+        anim_key: &'static str,
+        hover_key: &'static str,
+        transcript: Entity<Transcript>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        let glass = theme.is_glass();
+        let base = if glass {
+            theme.glass_overlay()
+        } else {
+            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
+        };
+        let wash = if glass {
+            motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
+        } else {
+            gpui::transparent_black()
+        };
+        let pill = div()
+            .id(anim_key)
+            .h(px(30.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .cursor_pointer()
+            .bg(base)
+            .on_hover(motion::hover_listener(hover_key))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
+            }))
+            .child(
+                // The hover wash rides an inner full-height layer so it
+                // composites over the tint (a div has one bg).
+                div()
+                    .h_full()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(11.0))
+                    .pr(px(13.0))
+                    .bg(wash)
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("↓")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from("Scroll to bottom")),
+                    ),
+            );
+        // Frost OUTSIDE the entry animation (the composer pill's exact
+        // composition): one scene layer — blur, then the pill's quads, then
+        // glyphs — so the pill always composes over the transcript content
+        // scrolling under it, and never loses its washes to the kind-sorted
+        // draw order (frost.rs module docs).
+        crate::frost::frosted(15.0, 16.0, motion::dialog_in(anim_key, pill)).into_any_element()
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
@@ -5079,6 +5351,42 @@ impl Shell {
                     // the resolved surface (fallbacks can move it).
                     panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
                     panel.into_any_element()
+                }
+                RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
+                    let transcript = self
+                        .subagent_tabs
+                        .get(&id)
+                        .expect("checked")
+                        .transcript
+                        .clone();
+                    // The pane hosts its own jump pill: the conversation
+                    // overlay's is bound to the PRIMARY transcript, and this
+                    // one anchors to the pane (no composer stack to clear).
+                    let pill = transcript.read(cx).jump_button_shown().then(|| {
+                        div()
+                            .absolute()
+                            .bottom(px(16.0))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(self.jump_pill(
+                                "subagent-jump-to-bottom",
+                                "subagent-jump-pill",
+                                transcript.clone(),
+                                cx,
+                            ))
+                    });
+                    // Read-only surface: the transcript fills the pane — no
+                    // composer, no status strip.
+                    div()
+                        .size_full()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h_0().child(transcript))
+                        .children(pill)
+                        .into_any_element()
                 }
                 _ => self.render_surface_picker(cx),
             }
@@ -5403,7 +5711,22 @@ impl Shell {
             let is_active = surface == active;
             let icon_path = match surface {
                 RightSurface::Diff(_) => icons::GIT_BRANCH,
+                RightSurface::Subagent(_) => icons::BOT,
                 _ => icons::TERMINAL,
+            };
+            // A live subagent tab swaps its icon for the mini working
+            // spinner (the history fetch button's in-flight recipe) — the
+            // doc's streaming tail entry IS the run's liveness, so the swap
+            // settles by itself when the subagent finishes.
+            let subagent_running = match surface {
+                RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
+                    self.state
+                        .read(cx)
+                        .sub_transcript(&tab.doc_id)
+                        .last()
+                        .is_some_and(|e| e.status == Some(zeron_doc::MessageStatus::Streaming))
+                }),
+                _ => false,
             };
             // t3 tab hover: the surface icon swaps IN PLACE for the close ✕
             // (same slot, no width jump) — the ✕ only shows while the tab is
@@ -5484,11 +5807,24 @@ impl Shell {
                                 .items_center()
                                 .justify_center()
                                 .group_hover(group.clone(), |s| s.opacity(0.0))
-                                .child(icon(icon_path).size(px(12.0)).text_color(if is_active {
-                                    theme.text_muted
+                                .child(if subagent_running {
+                                    loaders::mini_gradient_spinner(
+                                        format!("subagent-tab-{ix}"),
+                                        2.0,
+                                        cx.entity_id(),
+                                        cx,
+                                    )
+                                    .into_any_element()
                                 } else {
-                                    theme.text_muted.opacity(0.7)
-                                })),
+                                    icon(icon_path)
+                                        .size(px(12.0))
+                                        .text_color(if is_active {
+                                            theme.text_muted
+                                        } else {
+                                            theme.text_muted.opacity(0.7)
+                                        })
+                                        .into_any_element()
+                                }),
                         )
                         .child(
                             div()
