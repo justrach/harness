@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use base64::Engine as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -60,6 +61,32 @@ const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;
 /// the doc is unwatched and unpinned — a concurrent eviction would orphan the
 /// watcher on a roomless doc that renders once and never updates again.
 const EVICT_MIN_IDLE_MS: i64 = 30_000;
+
+/// Queued-attachment transfer pacing: chunk pushes are bounded per call (a
+/// stalled-but-open relay link never fails on its own) and a timeout marks
+/// the link suspect; attempts retry on this backoff, cut short by the online
+/// bus / system wake.
+const TRANSFER_CHUNK_B64: usize = 60_000;
+const TRANSFER_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const TRANSFER_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const TRANSFER_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+const TRANSFER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+/// A command whose attachment bytes are still in transit waits at most this
+/// long before the drain rejects it loudly (and the transfer task gives up on
+/// the same clock) — a chat must never wedge behind bytes that aren't coming.
+const ATTACHMENT_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const ATTACHMENT_WAIT_MAX_MS: i64 = ATTACHMENT_WAIT_MAX.as_millis() as i64;
+/// Re-check cadence while a chat's queue is deferred on in-transit bytes
+/// (the happy path is event-driven — UploadCommit kicks the drain — this
+/// timer only covers the give-up transition and missed kicks).
+const ATTACHMENT_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Transfer attempt outcome: transient failures retry (the link may heal),
+/// permanent ones stop (the host actively refused, or the bytes are gone).
+enum TransferError {
+    Transient(String),
+    Permanent(String),
+}
 
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
 /// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
@@ -189,6 +216,16 @@ struct DocHostInner {
     /// on every registry change, and a long run would stack a tick loop per
     /// change without this.
     seed_waiting: Mutex<HashSet<String>>,
+    /// Attachment-wait re-drain timers armed (one per chat): a command
+    /// deferred on in-transit attachment bytes re-checks on a cadence, and
+    /// each deferral must not stack another timer.
+    drain_waiting: Mutex<HashSet<String>>,
+    /// Uploads store (engine assembly) — resolves `pending://` attachment
+    /// refs and jails transfer reads to the uploads dir.
+    uploads: OnceLock<crate::uploads::Uploads>,
+    /// Peer links (engine assembly, edge runtimes only) — the transport that
+    /// pushes queued attachment bytes to a remote host.
+    links: OnceLock<Arc<zeron_rpc::LinkCache>>,
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
@@ -395,6 +432,9 @@ impl DocHost {
                 handles: Mutex::new(HashMap::new()),
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
+                drain_waiting: Mutex::new(HashSet::new()),
+                uploads: OnceLock::new(),
+                links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
@@ -489,6 +529,31 @@ impl DocHost {
     /// Run commands carrying a [`zeron_proto::WorktreeSpec`].
     pub fn set_repos(&self, repos: crate::repos::Repos) {
         let _ = self.inner.repos.set(repos);
+    }
+
+    /// Wire the uploads store (engine assembly) — `pending://` ref resolution
+    /// and the transfer-read jail.
+    pub fn set_uploads(&self, uploads: crate::uploads::Uploads) {
+        let _ = self.inner.uploads.set(uploads);
+    }
+
+    /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
+    /// transport for queued attachment transfers to a remote host.
+    pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
+        let _ = self.inner.links.set(links);
+    }
+
+    /// Re-evaluate every open chat's command queue NOW. Called after an
+    /// upload commit lands bytes on this device: a Run deferred on those
+    /// bytes (`pending://` refs not yet on disk) becomes executable the
+    /// moment its transfer completes — event-driven, not timer luck.
+    pub fn kick_drains(&self) {
+        let handles: Vec<Arc<ChatDocHandle>> =
+            lock(&self.inner.handles).values().cloned().collect();
+        for handle in handles {
+            let host = self.clone();
+            self.spawn_worker(async move { host.drain_commands(&handle).await });
+        }
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -1751,6 +1816,21 @@ impl DocHost {
         chat_id: &str,
         payload: SessionCommandPayload,
     ) -> Result<String, EngineError> {
+        self.queue_command_with_transfers(chat_id, payload, Vec::new())
+    }
+
+    /// [`Self::queue_command`] plus queued-attachment transfers: the command's
+    /// `pending://` refs name bytes already committed to THIS device's uploads
+    /// dir; when another device hosts the chat, a background task pushes them
+    /// over the peer link (retry until they land) while the command is
+    /// already durably queued. The send is a local write — attachment bytes
+    /// chase it, never gate it (2026-08-19 incident).
+    pub fn queue_command_with_transfers(
+        &self,
+        chat_id: &str,
+        payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let now = now_ms();
@@ -1792,6 +1872,7 @@ impl DocHost {
         // the command is durable in the doc either way (a host that opens the chat
         // for any other reason still executes it).
         self.nudge_remote_host(chat_id);
+        self.spawn_attachment_transfers(chat_id, transfers);
         Ok(id)
     }
 
@@ -1847,6 +1928,160 @@ impl DocHost {
                 }
             }
         });
+    }
+
+    /// The chat's host device when it is NOT this engine (mirrors
+    /// `nudge_remote_host`'s ownership read).
+    fn remote_host_for(&self, chat_id: &str) -> Option<String> {
+        let workspace = self.workspace()?;
+        let host_device = match workspace.chat(chat_id) {
+            Ok(Some(chat)) => chat.device_id,
+            _ => return None,
+        };
+        (host_device != self.inner.config.device_id).then_some(host_device)
+    }
+
+    /// Push queued attachment bytes to the chat's host device, retrying on an
+    /// event-driven backoff (online bus / system wake) until they land or the
+    /// wait cap passes — the drain's own cap then rejects the command loudly
+    /// instead of running without its images. No-op for locally-hosted chats
+    /// (the bytes are already in this device's uploads dir).
+    fn spawn_attachment_transfers(
+        &self,
+        chat_id: &str,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) {
+        if transfers.is_empty() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return; // bare sync callers (unit tests) skip rather than panic
+        };
+        let host = self.clone();
+        let chat = chat_id.to_string();
+        self.spawn_worker_on(&runtime, async move {
+            let mut wake = zeron_sync::wake::subscribe();
+            let mut online = zeron_sync::wake::subscribe_online();
+            let mut backoff = TRANSFER_BACKOFF_BASE;
+            let deadline = tokio::time::Instant::now() + ATTACHMENT_WAIT_MAX;
+            loop {
+                let Some(target) = host.remote_host_for(&chat) else {
+                    return; // local host (or no row yet claimed remotely)
+                };
+                match host.push_attachments(&target, &transfers).await {
+                    Ok(()) => {
+                        tracing::info!(chat = %chat, device = %target,
+                            count = transfers.len(), "queued attachments delivered");
+                        // The bytes beat the drain's next look — kick it via
+                        // the durable nudge (the host's UploadCommit already
+                        // kicked its local drains too).
+                        host.nudge_remote_host(&chat);
+                        return;
+                    }
+                    Err(TransferError::Permanent(err)) => {
+                        tracing::warn!(chat = %chat, device = %target, error = %err,
+                            "queued attachment transfer failed permanently");
+                        return;
+                    }
+                    Err(TransferError::Transient(err)) => {
+                        tracing::warn!(chat = %chat, device = %target, error = %err,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "queued attachment transfer retrying");
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(chat = %chat, "queued attachment transfer gave up (wait cap)");
+                    return;
+                }
+                while wake.try_recv().is_ok() {}
+                while online.try_recv().is_ok() {}
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wake.recv() => {}
+                    _ = online.recv() => {}
+                }
+                backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
+            }
+        });
+    }
+
+    /// One transfer attempt: chunked `UploadChunk` + `UploadCommit` straight
+    /// over the peer link (same wire the UI's legacy path used, so old and
+    /// new engines interoperate). Timeouts mark the link suspect —
+    /// `invalidate` drops the cached socket so the retry dials fresh instead
+    /// of feeding a zombie pipe forever (2026-08-19 incident).
+    async fn push_attachments(
+        &self,
+        target: &str,
+        transfers: &[crate::uploads::AttachmentTransfer],
+    ) -> Result<(), TransferError> {
+        use TransferError::{Permanent, Transient};
+        let Some(links) = self.inner.links.get() else {
+            return Err(Permanent("peer links not wired".into()));
+        };
+        let Some(uploads) = self.inner.uploads.get() else {
+            return Err(Permanent("uploads not wired".into()));
+        };
+        let client = links
+            .client(target)
+            .await
+            .map_err(|e| Transient(format!("peer link: {e}")))?;
+        for transfer in transfers {
+            // Bytes come from the uploads jail only — a transfer names an
+            // upload identity, never an arbitrary path.
+            let source = uploads.pending_target(&transfer.upload_id, &transfer.file_name);
+            let bytes = tokio::fs::read(&source)
+                .await
+                .map_err(|e| Permanent(format!("staged attachment missing: {e}")))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let mut start = 0usize;
+            let mut seq = 0u64;
+            loop {
+                let end = (start + TRANSFER_CHUNK_B64).min(b64.len());
+                let params = serde_json::json!({
+                    "uploadId": transfer.upload_id, "seq": seq, "data": &b64[start..end],
+                });
+                let call = client.call(zeron_rpc::methods::UPLOAD_CHUNK, params);
+                match tokio::time::timeout(TRANSFER_CHUNK_TIMEOUT, call).await {
+                    Err(_) => {
+                        links.invalidate(target);
+                        return Err(Transient("chunk push timed out; peer link suspect".into()));
+                    }
+                    Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
+                        return Err(Permanent(format!("host refused chunk: {err}")));
+                    }
+                    Ok(Err(err)) => {
+                        links.invalidate(target);
+                        return Err(Transient(format!("chunk push failed: {err}")));
+                    }
+                    Ok(Ok(_)) => {}
+                }
+                start = end;
+                seq += 1;
+                if start >= b64.len() {
+                    break;
+                }
+            }
+            let params = serde_json::json!({
+                "uploadId": transfer.upload_id, "fileName": transfer.file_name,
+            });
+            let call = client.call(zeron_rpc::methods::UPLOAD_COMMIT, params);
+            match tokio::time::timeout(TRANSFER_COMMIT_TIMEOUT, call).await {
+                Err(_) => {
+                    links.invalidate(target);
+                    return Err(Transient("commit timed out; peer link suspect".into()));
+                }
+                Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
+                    return Err(Permanent(format!("host refused commit: {err}")));
+                }
+                Ok(Err(err)) => {
+                    links.invalidate(target);
+                    return Err(Transient(format!("commit failed: {err}")));
+                }
+                Ok(Ok(_)) => {}
+            }
+        }
+        Ok(())
     }
 
     /// Upload a tool result's full output/diff to the R2 sidecar
@@ -2031,6 +2266,36 @@ impl DocHost {
                     turn_is_past: &turn_is_past,
                 },
             );
+            // Queued-attachment gate (BEFORE the processed mark — a deferred
+            // command must stay eligible): a Run/Steer naming `pending://`
+            // refs whose bytes haven't landed on this device yet waits for
+            // the transfer instead of running without its images. The wait is
+            // bounded; past it the command fails loudly.
+            if matches!(disposition, CommandDisposition::Execute) {
+                let missing = self.missing_attachments(&entry);
+                if !missing.is_empty() {
+                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {
+                        tracing::info!(chat = %handle.chat_id, command = %entry.id,
+                            missing = missing.len(), "command deferred: attachment bytes in transit");
+                        self.arm_attachment_wait(handle);
+                        return; // preserve order; UploadCommit / the wait timer re-kick
+                    }
+                    if let Err(err) = self.inner.store.mark_processed(&entry.id) {
+                        tracing::error!(chat = %handle.chat_id, error = %err,
+                            "processed-ledger write failed; halting drain");
+                        return;
+                    }
+                    tracing::warn!(chat = %handle.chat_id, command = %entry.id,
+                        "command rejected: attachments never arrived");
+                    self.resolve_command(
+                        handle,
+                        &entry.id,
+                        SessionCommandStatus::Rejected,
+                        Some("attachments never arrived"),
+                    );
+                    continue;
+                }
+            }
             // Mark BEFORE executing: a crash mid-execution must never double-run a
             // command whose side effect may already have happened.
             if let Err(err) = self.inner.store.mark_processed(&entry.id) {
@@ -2056,6 +2321,100 @@ impl DocHost {
                 }
             }
         }
+    }
+
+    /// The command's `pending://` attachment refs whose bytes are NOT on this
+    /// device's disk yet. Empty when the command names none, when everything
+    /// has landed, or when no uploads store is wired (tests) — absence of the
+    /// subsystem must never wedge a queue.
+    fn missing_attachments(&self, entry: &SessionCommandEntry) -> Vec<String> {
+        let refs: Vec<String> = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => request
+                .attachments
+                .iter()
+                .filter(|p| crate::uploads::is_pending_ref(p))
+                .cloned()
+                .collect(),
+            SessionCommandPayload::Steer { prompt, .. } => crate::uploads::pending_refs_in(prompt),
+            _ => Vec::new(),
+        };
+        if refs.is_empty() {
+            return refs;
+        }
+        let Some(uploads) = self.inner.uploads.get() else {
+            return Vec::new();
+        };
+        refs.into_iter()
+            .filter(|r| uploads.resolve_pending(r).is_none())
+            .collect()
+    }
+
+    /// Arm (once per chat) the deferred-command re-check loop: while a
+    /// pending unprocessed command still waits on attachment bytes, re-drain
+    /// on a cadence so the bounded wait actually expires even if every
+    /// event-driven kick was missed.
+    fn arm_attachment_wait(&self, handle: &Arc<ChatDocHandle>) {
+        let chat = handle.chat_id.clone();
+        if !lock(&self.inner.drain_waiting).insert(chat.clone()) {
+            return;
+        }
+        let weak = Arc::downgrade(handle);
+        let host = self.clone();
+        self.spawn_worker(async move {
+            loop {
+                tokio::time::sleep(ATTACHMENT_WAIT_RECHECK).await;
+                let Some(handle) = weak.upgrade() else { break };
+                if !host.awaiting_attachments(&handle) {
+                    break;
+                }
+                host.drain_commands(&handle).await;
+                let Some(handle) = weak.upgrade() else { break };
+                if !host.awaiting_attachments(&handle) {
+                    break;
+                }
+            }
+            lock(&host.inner.drain_waiting).remove(&chat);
+        });
+    }
+
+    /// True while some pending, unprocessed command still waits on bytes.
+    fn awaiting_attachments(&self, handle: &Arc<ChatDocHandle>) -> bool {
+        let commands = handle.doc.read_commands().unwrap_or_default();
+        commands.iter().any(|c| {
+            c.status == SessionCommandStatus::Pending
+                && !self.inner.store.is_processed(&c.id).unwrap_or(false)
+                && !self.missing_attachments(c).is_empty()
+        })
+    }
+
+    /// Rewrite a request's landed `pending://` refs to this device's absolute
+    /// paths — in the attachments list AND the prompt text — so the harness
+    /// (and the persisted user entry) see ordinary local files, exactly like
+    /// the legacy pre-upload flow produced.
+    fn resolve_request_attachments(&self, request: &mut zeron_proto::RunRequest) {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return;
+        };
+        for path in request.attachments.iter_mut() {
+            if let Some(abs) = uploads.resolve_pending(path) {
+                request.prompt = request.prompt.replace(path.as_str(), &abs);
+                *path = abs;
+            }
+        }
+    }
+
+    /// [`Self::resolve_request_attachments`] for a bare prompt (Steer).
+    fn resolve_prompt_attachments(&self, prompt: &str) -> String {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return prompt.to_string();
+        };
+        let mut out = prompt.to_string();
+        for r in crate::uploads::pending_refs_in(prompt) {
+            if let Some(abs) = uploads.resolve_pending(&r) {
+                out = out.replace(&r, &abs);
+            }
+        }
+        out
     }
 
     /// Host-only outcome write (ledger rule 2).
@@ -2092,6 +2451,11 @@ impl DocHost {
                 message_id,
             } => {
                 let mut request = request.clone();
+                // Queued-attachment refs (`pending://`) resolve to this
+                // host's absolute paths before anything persists or
+                // dispatches — the drain already gated on the bytes being
+                // present, so every ref resolves here.
+                self.resolve_request_attachments(&mut request);
                 // Worktree directive (WorktreeSpec): materialize on THIS host at
                 // drain time — the durable command plane replaces the sender's
                 // old blocking CreateWorktree relay RPC, whose lost reply wedged
@@ -2150,6 +2514,8 @@ impl DocHost {
                 Ok((SessionCommandStatus::Applied, None))
             }
             SessionCommandPayload::Steer { prompt, message_id } => {
+                // Same `pending://` → absolute rewrite as the Run arm.
+                let prompt = &self.resolve_prompt_attachments(prompt);
                 match sessions.steer(chat_id, prompt, message_id.clone()).await? {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
                     SteerOutcome::NotSteerable => {

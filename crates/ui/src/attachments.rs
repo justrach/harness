@@ -296,15 +296,17 @@ pub(crate) async fn call_with_timeout(
 /// Chunked upload: base64 the bytes, `UploadChunk{uploadId,seq,data}` per 60KB
 /// slice (positional `seq` makes the cheap retry idempotent), then
 /// `UploadCommit{uploadId,fileName}` → the durable absolute path on the target
-/// device. Errors return the raw cause (the composer shows friendly copy).
+/// device. The caller mints `upload_id` — the queued-attachment flow derives
+/// its `pending://` refs from the same identity before the bytes move.
+/// Errors return the raw cause (the composer shows friendly copy).
 pub async fn upload_attachment(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
     target_device_id: Option<&str>,
+    upload_id: &str,
     attachment: &StagedAttachment,
 ) -> Result<String, String> {
     let b64 = BASE64.encode(attachment.bytes());
-    let upload_id = uuid::Uuid::new_v4().to_string();
     let mut start = 0usize;
     let mut seq = 0u64;
     loop {
@@ -335,7 +337,10 @@ pub async fn upload_attachment(
                 Ok(_) => break,
                 Err(err) if attempt < 2 => {
                     attempt += 1;
-                    tracing::debug!(error = %err, seq, "upload chunk retry");
+                    // warn, not debug: the 2026-08-19 incident ground through
+                    // silent 30s timeout/retry cycles for minutes with a
+                    // literally empty log — degraded uploads must narrate.
+                    tracing::warn!(error = %err, seq, attempt, "upload chunk retry");
                 }
                 Err(err) => return Err(err),
             }

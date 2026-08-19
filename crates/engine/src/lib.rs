@@ -244,6 +244,9 @@ impl EngineCore {
         {
             uploads.add_read_only_root(&root);
         }
+        // Queued-attachment support: the doc host resolves `pending://` refs
+        // against this store and pushes staged bytes to remote hosts.
+        doc_host.set_uploads(uploads.clone());
         let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
             local_import::LocalImporter::new(
                 data_dir,
@@ -322,8 +325,10 @@ impl EngineCore {
         .clone()
     }
 
-    /// Attach the peer link cache — enables `targetDeviceId` routing and [`Self::dial_device`].
+    /// Attach the peer link cache — enables `targetDeviceId` routing,
+    /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
+        self.doc_host.set_links(links.clone());
         *self
             .links
             .lock()

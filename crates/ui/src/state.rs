@@ -773,6 +773,19 @@ impl AppState {
         self.devices = devices;
     }
 
+    /// True when `device_id`'s engine (per its registry device row) is at
+    /// least `min`. Unknown devices and unstamped versions are conservatively
+    /// false — feature gates fall back to the legacy path rather than speak a
+    /// protocol the peer may not understand.
+    pub fn device_version_at_least(&self, device_id: &str, min: (u64, u64, u64)) -> bool {
+        self.devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .and_then(|d| d.version.as_deref())
+            .and_then(version_triple)
+            .is_some_and(|v| v >= min)
+    }
+
     /// First project on the composer's picked device (falling back through
     /// the local device, then any project at all — better a cross-device
     /// project than a surprise project-less canvas). Display order.
@@ -1433,6 +1446,23 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
             cx.background_executor().timer(RETRY_DELAY).await;
         }
     })
+}
+
+/// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)
+/// into a comparable triple. `None` for anything that doesn't lead with
+/// three dotted integers.
+pub fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.trim().splitn(3, '.');
+    let major: u64 = parts.next()?.parse().ok()?;
+    let minor: u64 = parts.next()?.parse().ok()?;
+    let patch = parts.next()?;
+    let patch: u64 = patch
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(patch)
+        .parse()
+        .ok()?;
+    Some((major, minor, patch))
 }
 
 fn spawn_watch<T: DeserializeOwned + 'static>(
