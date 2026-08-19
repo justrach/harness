@@ -2854,6 +2854,27 @@ impl Transcript {
         let (sending, elapsed_secs) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+                // Past the pending-send TTL with no ack, the Working overlay
+                // has lapsed but the queued command is still undelivered
+                // (edge link down). Silence here read as a hang (2026-08-19)
+                // — say what's actually happening. Static line, no spinner:
+                // nothing is progressing; the ack notify clears it.
+                if state.send_queued_unacked(&chat_id, now) {
+                    let theme = Theme::of(cx).clone();
+                    return Some(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .pt(px(10.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(
+                                "Queued — waiting for connection…",
+                            ))
+                            .into_any_element(),
+                    );
+                }
                 return None;
             }
             // During the send→turn window the session row's `started_at`

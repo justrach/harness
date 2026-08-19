@@ -965,6 +965,19 @@ impl AppState {
         Some(((done * 100) / progress.total).min(99) as u8)
     }
 
+    /// A send whose queued command is PAST the Working-overlay TTL and still
+    /// unacked — almost always undelivered (the edge link is down; the queue
+    /// write itself is local and instant). The overlay must stop faking
+    /// Working after the TTL (its contract), but the total silence that
+    /// followed read as a hang during a network flap (2026-08-19 user
+    /// report) — the trailer shows an honest "Queued" line instead. Cleared
+    /// the moment the host writes the message into the transcript.
+    pub fn send_queued_unacked(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.pending_sends.get(chat_id).is_some_and(|p| {
+            now.signed_duration_since(p.started).num_milliseconds() > PENDING_SEND_TTL_MS
+        })
+    }
+
     /// Is a send still in flight for this chat (unacked, inside the TTL)?
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
@@ -2314,6 +2327,24 @@ mod tests {
 
         state.apply_devices(vec![device("local", "José's MacBook Pro")]);
         assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
+    }
+
+    #[test]
+    fn queued_unacked_takes_over_after_the_ttl() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        assert!(!s.send_queued_unacked("c", now), "no send, no queued line");
+        s.begin_pending_send("c", "m1", now);
+        // Inside the TTL the Working overlay owns the surface.
+        assert!(s.send_pending("c", now));
+        assert!(!s.send_queued_unacked("c", now));
+        // Past it, the overlay lapses and the queued line takes over.
+        let later = now + TimeDelta::milliseconds(PENDING_SEND_TTL_MS + 1);
+        assert!(!s.send_pending("c", later));
+        assert!(s.send_queued_unacked("c", later));
+        // The host ack (or failure cleanup) clears it.
+        s.end_pending_send("c", "m1");
+        assert!(!s.send_queued_unacked("c", later));
     }
 
     #[test]

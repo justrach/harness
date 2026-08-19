@@ -4633,10 +4633,20 @@ impl Composer {
                             // know the spec degrades to the main checkout
                             // instead of failing the run.
                             chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
+                            if let Some(repo_path) = &space_path {
+                                // A remote repo's branch list loads over the
+                                // relay — on a bad link it may never arrive
+                                // and the picker has no base. That must NOT
+                                // silently drop the isolation the user picked
+                                // (2026-08-19: "New worktree" ran in the main
+                                // checkout): default to HEAD, which git — any
+                                // host version — resolves as the repo's
+                                // current checkout state.
+                                let base =
+                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
                                 run_worktree = Some(zeron_proto::WorktreeSpec {
                                     repo_path: repo_path.clone(),
-                                    base: base.clone(),
+                                    base,
                                 });
                             }
                         }
