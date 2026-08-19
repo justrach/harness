@@ -453,9 +453,24 @@ fn opencode_spec() -> AcpAgentSpec {
         },
         // No `_session/steering` extension (1.18.18): turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
-        // No `thought_level` config option over ACP today — effort stays
-        // with opencode's own per-model config; revisit when advertised.
-        reasoning_levels: &[],
+        // Effort rides opencode's model VARIANTS: when the session's current
+        // model has variants (models.dev metadata, or `variants` in
+        // opencode.json), the session advertises an `effort` config option
+        // (category thought_level) whose values mirror them — verified live
+        // (1.18.18) end to end: set_config_option effort=high applies the
+        // variant's options to the provider request. Variant-less models
+        // (the Zen frees today) advertise no option and the run-start set
+        // skips, falling to the agent default — so the blanket ladder here
+        // is safe (pi precedent). The option is per-model and reactive;
+        // exact per-model ladders would need the sidecar's provider.list
+        // (model.variants) — follow-up.
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
