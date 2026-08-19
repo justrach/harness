@@ -3678,7 +3678,16 @@ impl Composer {
                             }))
                             .child(
                                 img(att.image.clone())
-                                    .size_full()
+                                    // EXPLICIT dims, not size_full: img layout
+                                    // honors the image's intrinsic aspect
+                                    // ratio over a percent height (gpui
+                                    // f8d8a90 repoint), so size_full let a
+                                    // tall photo grow past the frame — the
+                                    // rectangular overflow clip then squared
+                                    // the bottom corners (2026-08-19 report).
+                                    // 56−2 = frame minus its 1px borders.
+                                    .w(px(STRIP_THUMB - 2.0))
+                                    .h(px(STRIP_THUMB - 2.0))
                                     // Own radii — the frame's rounding only
                                     // clips rectangularly (7 = 8 - border).
                                     .rounded(px(7.0))
@@ -4608,6 +4617,31 @@ impl Composer {
                 .collect()
         };
         let echo_text = attachments::with_attachments(&text, &echo_paths);
+        // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
+        // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
+        // path the sender can't predict, but whose id8 it minted. The alias
+        // keeps the thumbnail on the already-local bytes through that
+        // rewrite instead of blanking into a reload skeleton.
+        if queued_flow {
+            for (upload_id, att) in upload_ids.iter().zip(&staged) {
+                attachments::seed_attachment_alias(
+                    &device_id,
+                    upload_id,
+                    &att.name,
+                    att.image.clone(),
+                );
+                if let Some(local) = local_device_id.as_deref()
+                    && local != device_id
+                {
+                    attachments::seed_attachment_alias(
+                        local,
+                        upload_id,
+                        &att.name,
+                        att.image.clone(),
+                    );
+                }
+            }
+        }
         for (path, att) in echo_paths.iter().zip(&staged) {
             attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
             if let Some(local) = local_device_id.as_deref()
