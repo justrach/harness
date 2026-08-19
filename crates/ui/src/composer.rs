@@ -5522,6 +5522,34 @@ impl Render for Composer {
                 .as_ref()
                 .is_none_or(|key| *key == self.current_key)
         });
+        // Composer honesty: when the target's delivery path is degraded, say
+        // UP FRONT that a send will queue (a durable local write delivered on
+        // reconnect) instead of letting the button imply instant delivery.
+        let queue_notice: Option<SharedString> = {
+            use zeron_proto::ConnectivityState as S;
+            let state = self.state.read(cx);
+            let degraded = match state.selected_chat.as_deref() {
+                Some(id) => state.chat_delivery_degraded(id),
+                None => {
+                    // New-chat canvas: judge by the picked target device.
+                    let remote_target = state.effective_device_id().is_some_and(|id| {
+                        state.local_device_id.as_deref() != Some(id.as_str())
+                    });
+                    remote_target
+                        && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
+                            || state
+                                .effective_device_id()
+                                .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
+                }
+            };
+            degraded.then(|| {
+                if state.connectivity.state == S::Offline {
+                    "Offline — messages will queue and send automatically.".into()
+                } else {
+                    "Connection degraded — messages will queue and send automatically.".into()
+                }
+            })
+        };
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -5587,6 +5615,31 @@ impl Render for Composer {
                                 .text_color(text_c),
                         )
                         .child(div().min_w_0().child(message)),
+                )
+            })
+            .when_some(queue_notice, |el, notice| {
+                // Same Notice shape as above, amber, not dismissable — it
+                // clears itself the moment the path heals.
+                let amber = theme.warning;
+                let amber_200 = theme.warning_muted;
+                el.child(
+                    div()
+                        .id("composer-queue-notice")
+                        .mx(px(4.0))
+                        .mt(px(6.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(8.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(amber.opacity(0.16))
+                        .bg(amber.opacity(0.05))
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(px(12.0))
+                        .line_height(px(16.0))
+                        .text_color(amber_200.opacity(0.9))
+                        .child(div().min_w_0().child(notice)),
                 )
             });
 

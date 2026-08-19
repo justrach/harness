@@ -556,6 +556,20 @@ impl WorkspaceHost {
         lock(&self.inner.room).as_ref().map(|room| room.stats())
     }
 
+    /// The registry room's reconnect posture (next-dial deadline + sticky
+    /// last failure) for the connectivity stream. `None` = no room yet.
+    pub fn reconnect_state(&self) -> Option<zeron_sync::ReconnectState> {
+        lock(&self.inner.room)
+            .as_ref()
+            .map(|room| room.reconnect_state())
+    }
+
+    /// Whether this engine was configured with edge transports at all
+    /// (`false` = local profile: connectivity is `Disabled`, hide the pill).
+    pub fn edge_expected(&self) -> bool {
+        self.inner.config.edge.is_some()
+    }
+
     // ── registry access helpers ─────────────────────────────────────────────
 
     /// Run a mutation under the registry lock, then wake the publish/persist

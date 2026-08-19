@@ -50,6 +50,10 @@ pub mod methods {
     /// counters for the workspace room and every open chat doc. No params;
     /// IPC-only.
     pub const SYNC_STATUS: &str = "SyncStatus";
+    /// Pushed edge-connectivity posture (`zeron_proto::Connectivity`):
+    /// current value first, then every change — the connection pill /
+    /// composer-honesty / queued-badge feed. No params; IPC-only.
+    pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";

@@ -2820,7 +2820,7 @@ impl Transcript {
         }
         let chat_id = self.chat_id.clone()?;
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs) = {
+        let (sending, queued, elapsed_secs) = {
             let state = self.state.read(cx);
             if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                 return None;
@@ -2832,12 +2832,17 @@ impl Transcript {
             // timer instead; the word + timer start with the turn.
             let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
             let sending = sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
+            // Degraded delivery path: the send is a durable local write
+            // waiting on connectivity — say so instead of faking progress.
+            let queued = sending && state.chat_delivery_degraded(&chat_id);
             let elapsed = turn_started
                 .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                 .unwrap_or(0);
-            (sending, elapsed)
+            (sending, queued, elapsed)
         };
-        let word = if sending {
+        let word = if queued {
+            "Queued — will send automatically"
+        } else if sending {
             "Sending"
         } else {
             flavour_word(flavour_seed(&chat_id), elapsed_secs)
@@ -2861,8 +2866,16 @@ impl Transcript {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{word}…"))),
+                        .text_color(if queued {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(SharedString::from(if queued {
+                            word.to_string()
+                        } else {
+                            format!("{word}…")
+                        })),
                 )
                 .when(!sending, |el| {
                     el.child(

@@ -223,6 +223,10 @@ struct DocHostInner {
     /// Uploads store (engine assembly) — resolves `pending://` attachment
     /// refs and jails transfer reads to the uploads dir.
     uploads: OnceLock<crate::uploads::Uploads>,
+    /// Connectivity watch (`WatchConnectivity`): lazily-started monitor
+    /// publishes the edge posture on change (see `watch_connectivity`).
+    connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
+    connectivity_started: AtomicBool,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -434,6 +438,8 @@ impl DocHost {
                 seed_waiting: Mutex::new(HashSet::new()),
                 drain_waiting: Mutex::new(HashSet::new()),
                 uploads: OnceLock::new(),
+                connectivity: OnceLock::new(),
+                connectivity_started: AtomicBool::new(false),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
@@ -1777,6 +1783,94 @@ impl DocHost {
                 zeron_sync::wake::notify_online();
             }
         });
+    }
+
+    /// The connectivity stream: current posture first, then every change.
+    /// Lazily starts a monitor — a 1s recompute over in-memory stats
+    /// (atomics + small locks), published only when the value changes. The
+    /// retry countdown renders client-side from `retry_at_ms`, so quiet
+    /// periods emit nothing at all.
+    pub fn watch_connectivity(&self) -> watch::Receiver<zeron_proto::Connectivity> {
+        let tx = self
+            .inner
+            .connectivity
+            .get_or_init(|| watch::channel(self.compute_connectivity()).0);
+        let rx = tx.subscribe();
+        if !self.inner.connectivity_started.swap(true, Ordering::SeqCst)
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let host = self.clone();
+            self.spawn_worker(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let next = host.compute_connectivity();
+                    if let Some(tx) = host.inner.connectivity.get() {
+                        tx.send_if_modified(|cur| {
+                            if *cur == next {
+                                false
+                            } else {
+                                *cur = next;
+                                true
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        rx
+    }
+
+    /// One snapshot of the edge posture: OS path status beats registry-room
+    /// state beats per-chat rooms. `Disabled` (the default) = local profile.
+    fn compute_connectivity(&self) -> zeron_proto::Connectivity {
+        use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
+        let workspace = self.workspace();
+        let edge_expected = self.inner.config.edge.is_some()
+            || workspace.as_ref().is_some_and(|w| w.edge_expected());
+        if !edge_expected {
+            return Connectivity::default();
+        }
+        let chats = self
+            .sync_statuses()
+            .into_iter()
+            .map(|(chat_id, stats)| {
+                let stats = stats.unwrap_or_default();
+                ChatConnectivity {
+                    chat_id,
+                    connected: stats.connected,
+                    pending_pushes: stats.pending_pushes,
+                }
+            })
+            .collect();
+        let reconnect = workspace.as_ref().and_then(|w| w.reconnect_state());
+        let registry_connected = workspace
+            .as_ref()
+            .and_then(|w| w.sync_status())
+            .is_some_and(|s| s.connected);
+        let (state, retry_at_ms, last_failure) = if zeron_sync::wake::path_is_offline() {
+            (
+                ConnectivityState::Offline,
+                0,
+                reconnect.and_then(|r| r.last_failure),
+            )
+        } else if registry_connected {
+            (ConnectivityState::Connected, 0, None)
+        } else {
+            let reconnect = reconnect.unwrap_or_default();
+            (
+                ConnectivityState::Reconnecting,
+                reconnect.retry_at_ms,
+                reconnect.last_failure,
+            )
+        };
+        Connectivity {
+            state,
+            retry_at_ms,
+            last_failure,
+            chats,
+        }
     }
 
     /// Per-open-chat room introspection for SyncStatus / `zeron sync`.

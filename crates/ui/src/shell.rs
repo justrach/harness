@@ -1005,6 +1005,13 @@ impl Shell {
                         s.selected_chat
                             .as_deref()
                             .is_some_and(|id| s.indicator_for(id, Utc::now()) != Indicator::None)
+                            // The connection pill's retry countdown needs the
+                            // same per-second refresh while degraded.
+                            || matches!(
+                                s.connectivity.state,
+                                zeron_proto::ConnectivityState::Offline
+                                    | zeron_proto::ConnectivityState::Reconnecting
+                            )
                     };
                     if live {
                         cx.notify();
@@ -3340,13 +3347,24 @@ impl Shell {
         // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
         // accordion), t3code's settle-on-hover.
         let corner_hovered = self.chat_status_hover.as_deref() == Some(id.as_str());
-        let status_color = spaces::status_dot_color(status, theme);
-        let status_label: Option<&'static str> = match status {
-            zeron_proto::ChatIndicator::Working => Some("Working"),
-            zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-            zeron_proto::ChatIndicator::Errored => Some("Failed"),
-            zeron_proto::ChatIndicator::Completed => Some("Done"),
-            zeron_proto::ChatIndicator::Idle => None,
+        // A send whose delivery path is degraded is QUEUED, not Working —
+        // the pending pill tells the truth instead of faking a spinner.
+        let queued = self.state.read(cx).send_queued(&id, Utc::now());
+        let status_color = if queued {
+            theme.warning
+        } else {
+            spaces::status_dot_color(status, theme)
+        };
+        let status_label: Option<&'static str> = if queued {
+            Some("Queued")
+        } else {
+            match status {
+                zeron_proto::ChatIndicator::Working => Some("Working"),
+                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                zeron_proto::ChatIndicator::Errored => Some("Failed"),
+                zeron_proto::ChatIndicator::Completed => Some("Done"),
+                zeron_proto::ChatIndicator::Idle => None,
+            }
         };
         let corner_body: AnyElement = if corner_hovered {
             div()
@@ -3589,7 +3607,8 @@ impl Shell {
                     })
                     // Working rows animate the spinner at the row's
                     // bottom-right (the status word keeps its dot up top).
-                    .when(status == zeron_proto::ChatIndicator::Working, |el| {
+                    // Queued rows don't: a spinner would fake progress.
+                    .when(status == zeron_proto::ChatIndicator::Working && !queued, |el| {
                         el.child(div().flex_1())
                             .child(loaders::mini_gradient_spinner(
                                 format!("chat-working-{id}"),
@@ -3605,6 +3624,70 @@ impl Shell {
     /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
+    /// The global connection pill. `None` while healthy (`Connected`) or on
+    /// local profiles (`Disabled`). Degraded states render an amber strip:
+    /// Offline (OS says no path) or Reconnecting with a live retry countdown,
+    /// keeping the last failure visible through the next attempt — the pill
+    /// never flickers back to a bare "connecting…" mid-outage.
+    fn render_connection_pill(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        use zeron_proto::ConnectivityState as S;
+        let conn = self.state.read(cx).connectivity.clone();
+        let (label, detail): (SharedString, Option<SharedString>) = match conn.state {
+            S::Disabled | S::Connected => return None,
+            S::Offline => (
+                "Offline — sends will queue".into(),
+                conn.last_failure.clone().map(SharedString::from),
+            ),
+            S::Reconnecting => {
+                let now_ms = Utc::now().timestamp_millis();
+                let label: SharedString = if conn.retry_at_ms > now_ms {
+                    let secs = (conn.retry_at_ms - now_ms + 999) / 1000;
+                    format!("Reconnecting — retrying in {secs}s").into()
+                } else {
+                    "Reconnecting…".into()
+                };
+                (label, conn.last_failure.clone().map(SharedString::from))
+            }
+        };
+        Some(
+            div()
+                .id("connection-pill")
+                .mx(px(Theme::SPACE_SM))
+                .mb(px(Theme::SPACE_SM))
+                .px(px(Theme::SPACE_SM))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .border_1()
+                .border_color(theme.warning)
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.warning)
+                                .child(label),
+                        )
+                        .when_some(detail, |el, detail| {
+                            el.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.text_faint)
+                                    .truncate()
+                                    .child(detail),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (user, workspace_scope) = {
             let state = self.state.read(cx);
@@ -3762,6 +3845,12 @@ impl Shell {
                 )
                 .fade_overflow_y(&self.sidebar_scroll),
             )
+            // Global connection pill (durable-by-design UI truth): appears
+            // whenever the edge posture is degraded; hidden while healthy —
+            // appearing IS the signal.
+            .when_some(self.render_connection_pill(theme, cx), |el, pill| {
+                el.child(pill)
+            })
             // Update strip (above the user menu; below the lists).
             .when_some(self.render_update_strip(theme, cx), |el, strip| {
                 el.child(strip)

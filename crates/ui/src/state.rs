@@ -573,6 +573,9 @@ pub struct AppState {
     /// Auth stream value; `None` until the engine reports one (M4).
     pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
+    /// Live edge posture (WatchConnectivity): drives the connection pill,
+    /// composer honesty ("will queue"), and the Queued send badges.
+    pub connectivity: zeron_proto::Connectivity,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -644,6 +647,7 @@ impl AppState {
             workspace_scope: None,
             auth: None,
             devices: Vec::new(),
+            connectivity: zeron_proto::Connectivity::default(),
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
@@ -757,6 +761,49 @@ impl AppState {
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
+    }
+
+    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
+        self.connectivity = connectivity;
+    }
+
+    /// Is this chat's delivery path degraded — will a send QUEUE rather than
+    /// reach its executor promptly? Locally-hosted chats are never degraded
+    /// (a queued command executes on this device even fully offline). Remote
+    /// chats degrade when the OS says offline, when the chat's own edge room
+    /// is down, or when the host device has gone presence-dark.
+    pub fn chat_delivery_degraded(&self, chat_id: &str) -> bool {
+        use zeron_proto::ConnectivityState as S;
+        if self.connectivity.state == S::Disabled {
+            return false;
+        }
+        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
+            // Unknown chat (a just-minted canvas send): only the global
+            // state can speak.
+            return self.connectivity.state == S::Offline;
+        };
+        if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
+            return false;
+        }
+        if self.connectivity.state == S::Offline {
+            return true;
+        }
+        let room_down = match self
+            .connectivity
+            .chats
+            .iter()
+            .find(|c| c.chat_id == chat_id)
+        {
+            Some(net) => !net.connected,
+            None => self.connectivity.state != S::Connected,
+        };
+        room_down || !self.device_online(&chat.device_id, Utc::now())
+    }
+
+    /// A send is queued: in flight AND its delivery path is degraded — the
+    /// honest badge is "Queued", not a Working spinner.
+    pub fn send_queued(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
     }
 
     pub fn apply_devices(&mut self, mut devices: Vec<Device>) {
@@ -935,10 +982,15 @@ impl AppState {
         }
     }
 
-    /// Is a send still in flight for this chat (unacked, inside the TTL)?
+    /// Is a send still in flight for this chat (unacked)? Inside the TTL
+    /// normally; while the chat's delivery path is degraded the overlay
+    /// holds — the truth IS "Queued", and silently expiring back to Idle
+    /// left a queued send with no visible trace at all (the 30s→silence
+    /// hole, 2026-08-19).
     pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
             now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+                || self.chat_delivery_degraded(chat_id)
         })
     }
 
@@ -952,6 +1004,7 @@ impl AppState {
             .get(chat_id)
             .filter(|p| {
                 now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+                    || self.chat_delivery_degraded(chat_id)
             })
             .map(|p| p.started)
     }
@@ -1234,6 +1287,12 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_DEVICES,
                 AppState::apply_devices,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_CONNECTIVITY,
+                AppState::apply_connectivity,
             ),
             spawn_watch(
                 cx,
@@ -2868,5 +2927,98 @@ mod tests {
             1
         );
         assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
+    }
+
+    #[test]
+    fn version_triple_parses_and_gates_device_features() {
+        assert_eq!(version_triple("0.2.12"), Some((0, 2, 12)));
+        assert_eq!(version_triple("0.2.12-beta.1"), Some((0, 2, 12)));
+        assert_eq!(version_triple("1.0.0+build7"), Some((1, 0, 0)));
+        assert_eq!(version_triple("0.2"), None);
+        assert_eq!(version_triple("garbage"), None);
+
+        let mut s = AppState::default();
+        assert!(
+            !s.device_version_at_least("d1", (0, 2, 12)),
+            "unknown device conservatively fails the gate"
+        );
+        s.devices = vec![Device {
+            id: "d1".into(),
+            name: "laptop".into(),
+            platform: "macos".into(),
+            last_seen_at: None,
+            created_at: None,
+            version: Some("0.2.12".into()),
+        }];
+        assert!(s.device_version_at_least("d1", (0, 2, 12)));
+        assert!(!s.device_version_at_least("d1", (0, 2, 13)));
+        s.devices[0].version = None;
+        assert!(
+            !s.device_version_at_least("d1", (0, 2, 12)),
+            "unstamped version conservatively fails the gate"
+        );
+    }
+
+    #[test]
+    fn delivery_degradation_and_queued_sends_tell_the_truth() {
+        use zeron_proto::{ChatConnectivity, ConnectivityState};
+        let now = Utc::now();
+        let mut s = AppState::default();
+        s.local_device_id = Some("local".into());
+        let mut remote = chat("c-remote", 0, None);
+        remote.device_id = "remote".into();
+        let mut local = chat("c-local", 0, None);
+        local.device_id = "local".into();
+        s.chats = vec![remote, local];
+        s.devices = vec![Device {
+            id: "remote".into(),
+            name: "vps".into(),
+            platform: "linux".into(),
+            last_seen_at: Some(now),
+            created_at: None,
+            version: None,
+        }];
+        s.connectivity.state = ConnectivityState::Connected;
+        s.connectivity.chats = vec![ChatConnectivity {
+            chat_id: "c-remote".into(),
+            connected: true,
+            pending_pushes: 0,
+        }];
+
+        // Healthy: nothing degraded.
+        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert!(!s.chat_delivery_degraded("c-local"));
+
+        // The chat's own room down → degraded even while globally Connected.
+        s.connectivity.chats[0].connected = false;
+        assert!(s.chat_delivery_degraded("c-remote"));
+        s.connectivity.chats[0].connected = true;
+
+        // Host gone presence-dark → degraded (a send would queue at best).
+        s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
+        assert!(s.chat_delivery_degraded("c-remote"));
+        s.devices[0].last_seen_at = Some(now);
+
+        // OS offline: remote degrades; a locally-hosted chat NEVER does (the
+        // queued command executes on this device even fully offline).
+        s.connectivity.state = ConnectivityState::Offline;
+        assert!(s.chat_delivery_degraded("c-remote"));
+        assert!(!s.chat_delivery_degraded("c-local"));
+
+        // Local profile (Disabled): nothing degrades.
+        s.connectivity.state = ConnectivityState::Disabled;
+        assert!(!s.chat_delivery_degraded("c-remote"));
+
+        // Queued = pending send + degraded path — and degradation HOLDS the
+        // overlay past the 30s TTL instead of silently expiring (the
+        // no-trace hole).
+        s.connectivity.state = ConnectivityState::Offline;
+        s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(60));
+        assert!(s.send_pending("c-remote", now));
+        assert!(s.send_queued("c-remote", now));
+        // Path healed: the TTL applies again and the stale overlay expires.
+        s.connectivity.state = ConnectivityState::Connected;
+        assert!(!s.send_pending("c-remote", now));
+        assert!(!s.send_queued("c-remote", now));
     }
 }
