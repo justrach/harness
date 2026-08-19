@@ -13,6 +13,14 @@ use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_pa
 use gpui::FocusHandle;
 use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
 
+struct ActiveChatRow {
+    status: ChatIndicator,
+    chat: zeron_proto::Chat,
+    folder: String,
+    branch: Option<String>,
+    change_request: Option<zeron_proto::ChangeRequestSummary>,
+}
+
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
 /// recipe as the composer's ref picker: filter input on top
 /// (`PaletteSearch` context so ↑↓/⏎ bubble to the card), ranked substring
@@ -598,7 +606,7 @@ impl Shell {
     ) -> Vec<(String, f32, AnyElement)> {
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
-        let rows: Vec<(ChatIndicator, zeron_proto::Chat, String, Option<String>)> = {
+        let rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             state
                 .overview_chats(now)
@@ -628,13 +636,27 @@ impl Shell {
                         .map(str::trim)
                         .filter(|b| !b.is_empty())
                         .map(str::to_string);
-                    (status, chat.clone(), folder, branch)
+                    let change_request = state.change_request_for_chat(chat).cloned();
+                    ActiveChatRow {
+                        status,
+                        chat: chat.clone(),
+                        folder,
+                        branch,
+                        change_request,
+                    }
                 })
                 .collect()
         };
         let selected = self.state.read(cx).selected_chat.clone();
         rows.into_iter()
-            .map(|(status, chat, folder, branch)| {
+            .map(|row| {
+                let ActiveChatRow {
+                    status,
+                    chat,
+                    folder,
+                    branch,
+                    change_request,
+                } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
@@ -649,6 +671,7 @@ impl Shell {
                     time_ago,
                     folder.into(),
                     branch.map(SharedString::from),
+                    change_request,
                     harness,
                     status,
                     is_selected,
