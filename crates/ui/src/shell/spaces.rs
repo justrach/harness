@@ -277,6 +277,14 @@ pub(super) fn pinned_drag_snapshot_is_valid(
         && snapshot_ids.iter().all(|id| current_ids.contains(id))
 }
 
+struct ActiveChatRow {
+    status: ChatIndicator,
+    chat: zeron_proto::Chat,
+    folder: String,
+    branch: Option<String>,
+    change_request: Option<zeron_proto::ChangeRequestSummary>,
+}
+
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
 /// recipe as the composer's ref picker: filter input on top
 /// (`PaletteSearch` context so ↑↓/⏎ bubble to the card), ranked substring
@@ -1139,7 +1147,7 @@ impl Shell {
                 drag.filter == filter && profile_key.as_deref() == Some(&drag.profile_key)
             })
             .map(|drag| drag.visible_ids.clone());
-        let rows: Vec<(ChatIndicator, zeron_proto::Chat, String, Option<String>)> = {
+        let rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             state
                 .overview_chats(now)
@@ -1169,14 +1177,21 @@ impl Shell {
                         .map(str::trim)
                         .filter(|b| !b.is_empty())
                         .map(str::to_string);
-                    (status, chat.clone(), folder, branch)
+                    let change_request = state.change_request_for_chat(chat).cloned();
+                    ActiveChatRow {
+                        status,
+                        chat: chat.clone(),
+                        folder,
+                        branch,
+                        change_request,
+                    }
                 })
                 .collect()
         };
         let pinned_order = frozen_pinned
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
-        let recency_ids: Vec<String> = rows.iter().map(|(_, chat, _, _)| chat.id.clone()).collect();
+        let recency_ids: Vec<String> = rows.iter().map(|row| row.chat.id.clone()).collect();
         let ordered_ids = project_pinned_first(&recency_ids, pinned_order);
         let rank: std::collections::HashMap<&str, usize> = ordered_ids
             .iter()
@@ -1184,8 +1199,10 @@ impl Shell {
             .map(|(ix, id)| (id.as_str(), ix))
             .collect();
         let mut rows = rows;
-        rows.sort_by_key(|(_, chat, _, _)| {
-            rank.get(chat.id.as_str()).copied().unwrap_or(usize::MAX)
+        rows.sort_by_key(|row| {
+            rank.get(row.chat.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
         });
         let active: HashSet<&str> = recency_ids.iter().map(String::as_str).collect();
         let pinned_count = pinned_order
@@ -1196,14 +1213,21 @@ impl Shell {
         let visible_pinned_ids = std::sync::Arc::new(
             rows.iter()
                 .take(pinned_count)
-                .map(|(_, chat, _, _)| chat.id.clone())
+                .map(|row| row.chat.id.clone())
                 .collect::<Vec<_>>(),
         );
         let selected = self.state.read(cx).selected_chat.clone();
         let rows = rows
             .into_iter()
             .enumerate()
-            .map(|(ix, (status, chat, folder, branch))| {
+            .map(|(ix, row)| {
+                let ActiveChatRow {
+                    status,
+                    chat,
+                    folder,
+                    branch,
+                    change_request,
+                } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
@@ -1228,6 +1252,7 @@ impl Shell {
                     time_ago,
                     folder.into(),
                     branch.map(SharedString::from),
+                    change_request,
                     harness,
                     status,
                     is_selected,
