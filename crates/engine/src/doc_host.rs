@@ -2406,7 +2406,10 @@ impl DocHost {
                 continue;
             }
             let dead = match c.status {
-                SessionCommandStatus::Rejected => true,
+                // Rejected: execute failed or the sweep terminalized a crash
+                // window. Expired: the entry outlived its TTL undelivered —
+                // an explicit user retry is exactly the consent to re-send.
+                SessionCommandStatus::Rejected | SessionCommandStatus::Expired => true,
                 SessionCommandStatus::Pending => {
                     self.inner.store.is_processed(&c.id).unwrap_or(false)
                         && !lock(&self.inner.executing).contains(&c.id)
