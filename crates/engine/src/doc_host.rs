@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use base64::Engine as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -31,7 +32,7 @@ use zeron_doc::{
     join_continuation_entries,
 };
 use zeron_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
-use zeron_sync::{DocsStore, RoomClient};
+use zeron_sync::DocsStore;
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
@@ -60,6 +61,45 @@ const DOC_RESIDENT_FLOOR_BYTES: usize = 512 * 1024;
 /// the doc is unwatched and unpinned — a concurrent eviction would orphan the
 /// watcher on a roomless doc that renders once and never updates again.
 const EVICT_MIN_IDLE_MS: i64 = 30_000;
+
+/// Queued-attachment transfer pacing: chunk pushes are bounded per call (a
+/// stalled-but-open relay link never fails on its own) and a timeout marks
+/// the link suspect; attempts retry on this backoff, cut short by the online
+/// bus / system wake.
+const TRANSFER_CHUNK_B64: usize = 60_000;
+const TRANSFER_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const TRANSFER_COMMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const TRANSFER_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+const TRANSFER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+/// A command whose attachment bytes are still in transit waits at most this
+/// long before the drain rejects it loudly (and the transfer task gives up on
+/// the same clock) — a chat must never wedge behind bytes that aren't coming.
+const ATTACHMENT_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const ATTACHMENT_WAIT_MAX_MS: i64 = ATTACHMENT_WAIT_MAX.as_millis() as i64;
+/// Re-check cadence while a chat's queue is deferred on in-transit bytes
+/// (the happy path is event-driven — UploadCommit kicks the drain — this
+/// timer only covers the give-up transition and missed kicks).
+const ATTACHMENT_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Transfer attempt outcome: transient failures retry (the link may heal),
+/// permanent ones stop (the host actively refused, or the bytes are gone).
+enum TransferError {
+    Transient(String),
+    Permanent(String),
+}
+
+/// Peer-relay delivery fallback pacing (`spawn_command_delivery`): the grace
+/// the normal rows→edge path gets before the relay road opens, the poll while
+/// waiting, the relay retry curve, its per-call deadline, and the give-up cap
+/// (the command stays durably queued in the doc regardless).
+const ROWS_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+const ROWS_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+const RELAY_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(5);
+const RELAY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+const RELAY_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const RELAY_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Hosts below this stamped engine version don't serve `RelayCommand`.
+const RELAY_MIN_VERSION: (u64, u64, u64) = (0, 2, 12);
 
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
 /// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
@@ -172,6 +212,8 @@ struct DocHostInner {
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
     workspace: OnceLock<WorkspaceHost>,
+    /// Worktree materialization for Run commands (see `set_repos`).
+    repos: OnceLock<crate::repos::Repos>,
     /// Cancels every worker spawned through `spawn_worker` — the loops'
     /// own exit conditions (weak handle death, closed channels) don't cover
     /// runtime replacement, where Edge-capable tasks must stop doing
@@ -187,6 +229,21 @@ struct DocHostInner {
     /// on every registry change, and a long run would stack a tick loop per
     /// change without this.
     seed_waiting: Mutex<HashSet<String>>,
+    /// Attachment-wait re-drain timers armed (one per chat): a command
+    /// deferred on in-transit attachment bytes re-checks on a cadence, and
+    /// each deferral must not stack another timer.
+    drain_waiting: Mutex<HashSet<String>>,
+    /// Uploads store (engine assembly) — resolves `pending://` attachment
+    /// refs and jails transfer reads to the uploads dir.
+    uploads: OnceLock<crate::uploads::Uploads>,
+    /// Connectivity watch (`WatchConnectivity`): lazily-started monitor
+    /// publishes the edge posture on change (see `watch_connectivity`).
+    connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
+    connectivity_started: AtomicBool,
+    connectivity_grace: Mutex<DegradeGrace>,
+    /// Peer links (engine assembly, edge runtimes only) — the transport that
+    /// pushes queued attachment bytes to a remote host.
+    links: OnceLock<Arc<zeron_rpc::LinkCache>>,
     /// Shared client for sidecar blob PUT/GET (30s timeout, uploads.rs
     /// discipline — diff_sync's untimed client hung on dead links).
     http: reqwest::Client,
@@ -194,6 +251,64 @@ struct DocHostInner {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long raw degradation must persist before connectivity reports it.
+/// Room joins, idle-link wakes, and navigation dials resolve well under a
+/// second on healthy networks; real outages outlive this comfortably. Recovery
+/// is never delayed.
+const DEGRADE_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// One tracked degradation source in [`DegradeGrace`].
+enum GraceKey<'a> {
+    OsPath,
+    Registry,
+    Chat(&'a str),
+}
+
+/// Show-slow / hide-fast hysteresis over raw connectivity signals. Pure over
+/// injected `Instant`s so the grace window is unit-testable.
+#[derive(Default)]
+struct DegradeGrace {
+    os_path: Option<std::time::Instant>,
+    registry: Option<std::time::Instant>,
+    chats: HashMap<String, std::time::Instant>,
+}
+
+impl DegradeGrace {
+    /// Feed one raw sample; returns whether to REPORT the source as degraded.
+    /// Healthy clears the timer instantly; degraded reports only once it has
+    /// persisted for [`DEGRADE_GRACE`].
+    fn degraded(&mut self, key: GraceKey, raw: bool, now: std::time::Instant) -> bool {
+        let slot: &mut Option<std::time::Instant> = match key {
+            GraceKey::OsPath => &mut self.os_path,
+            GraceKey::Registry => &mut self.registry,
+            GraceKey::Chat(id) => {
+                if raw && !self.chats.contains_key(id) {
+                    self.chats.insert(id.to_string(), now);
+                }
+                match self.chats.get_mut(id) {
+                    Some(_) if !raw => {
+                        self.chats.remove(id);
+                        return false;
+                    }
+                    Some(since) => return now.duration_since(*since) >= DEGRADE_GRACE,
+                    None => return false,
+                }
+            }
+        };
+        if !raw {
+            *slot = None;
+            return false;
+        }
+        let since = *slot.get_or_insert(now);
+        now.duration_since(since) >= DEGRADE_GRACE
+    }
+
+    /// Drop timers for chats that no longer have open docs.
+    fn retain_chats(&mut self, keep: impl Fn(&str) -> bool) {
+        self.chats.retain(|id, _| keep(id));
+    }
 }
 
 #[derive(Clone)]
@@ -214,13 +329,14 @@ pub struct ChatDocHandle {
     last_access: AtomicI64,
     /// Last known snapshot blob size — the eviction budget estimate's input.
     snapshot_bytes: AtomicUsize,
-    room: Mutex<Option<RoomClient>>,
     /// The sync generation this handle was BUILT for (1 = legacy s2,
-    /// 2 = chat2). The staleness checks compare this against the registry —
-    /// inferring mode from `chat2_local_sub` misread edge-less chat2
-    /// handles (no subscription is ever installed offline) as stale s2 and
-    /// retired them on every open, dropping the doc out from under live
-    /// runs.
+    /// 2 = chat2). Gen-1 handles no longer join any room (the s2 client is
+    /// gone); they serve the local fat doc read-only until the host's seed
+    /// flips the chat to chat2. The staleness checks compare this against
+    /// the registry — inferring mode from `chat2_local_sub` misread
+    /// edge-less chat2 handles (no subscription is ever installed offline)
+    /// as stale s2 and retired them on every open, dropping the doc out
+    /// from under live runs.
     room_gen: u32,
     /// A threshold checkpoint POST is in flight (review H1: the quiesce
     /// tick must not stack concurrent full-snapshot uploads).
@@ -231,8 +347,8 @@ pub struct ChatDocHandle {
     /// thin lineage exists on disk at all; `save_snapshot` double-checks, so
     /// a doc that was never seeded can't lose its only copy).
     retired: AtomicBool,
-    /// chat2 relay client (docs/chat2-sync.md C3) — populated instead of
-    /// `room` when the registry names roomGen 2 for this chat.
+    /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
+    /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
     /// Local commits made before the relay connects (the dial can take up
     /// to a minute; offline, forever): buffered here by the subscription
@@ -269,9 +385,6 @@ impl ChatDocHandle {
         // (a doc-wedged DO keeps answering pings while delivering nothing,
         // and the background probe cadence can be hours out). Coalescing
         // no-op on a healthy or recently-active room.
-        if let Some(room) = lock(&self.room).as_ref() {
-            room.probe();
-        }
         if let Some(chat2) = lock(&self.chat2).as_ref() {
             chat2.probe();
         }
@@ -290,7 +403,7 @@ impl ChatDocHandle {
     }
 
     pub fn connected(&self) -> bool {
-        lock(&self.room).is_some()
+        lock(&self.chat2).is_some()
     }
 
     /// Write a complete user message entry, idempotent by id (the client-minted message
@@ -389,11 +502,18 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
+                repos: OnceLock::new(),
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
                 handles: Mutex::new(HashMap::new()),
                 seeding: Mutex::new(HashSet::new()),
                 seed_waiting: Mutex::new(HashSet::new()),
+                drain_waiting: Mutex::new(HashSet::new()),
+                uploads: OnceLock::new(),
+                connectivity: OnceLock::new(),
+                connectivity_started: AtomicBool::new(false),
+                connectivity_grace: Mutex::new(DegradeGrace::default()),
+                links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
@@ -482,6 +602,37 @@ impl DocHost {
     pub fn retirement_probe(&self) -> Box<dyn Fn() -> bool + Send + Sync> {
         let weak = Arc::downgrade(&self.inner);
         Box::new(move || weak.upgrade().is_none())
+    }
+
+    /// Wire the repos engine (engine assembly) — worktree materialization for
+    /// Run commands carrying a [`zeron_proto::WorktreeSpec`].
+    pub fn set_repos(&self, repos: crate::repos::Repos) {
+        let _ = self.inner.repos.set(repos);
+    }
+
+    /// Wire the uploads store (engine assembly) — `pending://` ref resolution
+    /// and the transfer-read jail.
+    pub fn set_uploads(&self, uploads: crate::uploads::Uploads) {
+        let _ = self.inner.uploads.set(uploads);
+    }
+
+    /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
+    /// transport for queued attachment transfers to a remote host.
+    pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
+        let _ = self.inner.links.set(links);
+    }
+
+    /// Re-evaluate every open chat's command queue NOW. Called after an
+    /// upload commit lands bytes on this device: a Run deferred on those
+    /// bytes (`pending://` refs not yet on disk) becomes executable the
+    /// moment its transfer completes — event-driven, not timer luck.
+    pub fn kick_drains(&self) {
+        let handles: Vec<Arc<ChatDocHandle>> =
+            lock(&self.inner.handles).values().cloned().collect();
+        for handle in handles {
+            let host = self.clone();
+            self.spawn_worker(async move { host.drain_commands(&handle).await });
+        }
     }
 
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
@@ -825,7 +976,6 @@ impl DocHost {
             mirror_dirty: AtomicBool::new(true),
             last_access: AtomicI64::new(now_ms()),
             snapshot_bytes: AtomicUsize::new(snapshot_len),
-            room: Mutex::new(None),
             room_gen,
             retired: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
@@ -842,7 +992,7 @@ impl DocHost {
             handles.insert(chat_id.to_string(), handle.clone());
         }
 
-        // Edge room join — offline-tolerant AND supervised. `RoomClient` only
+        // Edge room join — offline-tolerant AND supervised. `ChatClient` only
         // self-reconnects AFTER a first successful join; a one-shot attempt
         // here (the pre-LRU design) left the doc silently local-only until
         // app restart whenever the dial hit a transient gap — a post-wake
@@ -914,10 +1064,10 @@ impl DocHost {
                 }
                 self.spawn_chat2_join(edge.clone(), &handle, chat2_cursor);
             } else {
-                // Host-side lazy migration (M1/M2): seeding runs in the
-                // background; THIS open stays on s2. Once the seed flips the
-                // registry, the next open (every device) takes the chat2
-                // branch above — and pre-chat2 readers adopt.
+                // Straggler gen-1 chat (the s2 client is gone — post-cutover,
+                // no device reads or writes an s2 room). The local fat doc
+                // serves reads as-is; if we host the chat, seed it onto chat2
+                // in the background and the flip converges every device.
                 let is_host = chat_row
                     .as_ref()
                     .is_some_and(|c| c.device_id == self.inner.config.device_id);
@@ -925,17 +1075,8 @@ impl DocHost {
                     // Quiescent-only (review B1): a seed under a live run or
                     // watched transcript would strand everything written
                     // after the rebuild instant in a retired fat lineage.
-                    // Deferred until the s2 room has JOINED and the doc has
-                    // gone quiet: seeding straight from open() rebuilt from
-                    // the host's LOCAL doc before the room backfill landed —
-                    // rows contributed by other devices (a queued command, a
-                    // phone steer) forked away into the retired lineage, and
-                    // a nudge-triggered open seeded+dropped the handle out
-                    // from under the very command it was opened to execute
-                    // (e2e smoke, 2026-08-10).
                     self.spawn_chat2_seed_when_quiet(edge.clone(), chat_id, &handle);
                 }
-                self.spawn_s2_join(edge, chat_id, &doc, &handle);
             }
         }
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
@@ -943,109 +1084,10 @@ impl DocHost {
         Ok(handle)
     }
 
-    /// The legacy s2 loro-room join loop (extracted verbatim from `open`).
-    fn spawn_s2_join(
-        &self,
-        edge: &EdgeConfig,
-        chat_id: &str,
-        doc: &Arc<SessionDoc>,
-        handle: &Arc<ChatDocHandle>,
-    ) {
-        {
-            let url = edge.room_url(format!("/session/{chat_id}/ws"));
-            let room_doc = doc.doc().clone();
-            let chat = chat_id.to_string();
-            let weak = Arc::downgrade(handle);
-            let edge = edge.clone();
-            let mut token_changes = edge.token_changes();
-            self.spawn_worker(async move {
-                let mut wake = zeron_sync::wake::subscribe();
-                let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
-                loop {
-                    if weak.upgrade().is_none() {
-                        return; // evicted or purged while dialing
-                    }
-                    // Deadline on the WHOLE dial, including the token
-                    // provider: on 2026-08-10 an engine instance sat inside
-                    // a hung first dial for over an hour — no error, no
-                    // retry, no log line — while every transcript it was
-                    // asked to open rendered black. A hang must become a
-                    // logged, retried failure.
-                    let dial = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        RoomClient::connect_via(url.clone(), &chat, room_doc.clone()),
-                    )
-                    .await;
-                    match dial {
-                        Ok(Ok(client)) => {
-                            if edge.bearer().await.is_none() {
-                                return;
-                            }
-                            let mut events = client.events();
-                            let Some(handle) = weak.upgrade() else {
-                                return; // evicted mid-dial: drop leaves the room
-                            };
-                            *lock(&handle.room) = Some(client);
-                            tracing::info!(chat = %chat, "session room joined");
-                            drop(handle);
-                            if token_changes.is_none() {
-                                return;
-                            }
-                            loop {
-                                tokio::select! {
-                                    event = events.recv() => match event {
-                                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                                    },
-                                    _ = crate::workspace_host::token_changed(&mut token_changes) => {
-                                        if edge.bearer().await.is_none() {
-                                            if let Some(handle) = weak.upgrade() {
-                                                lock(&handle.room).take();
-                                            }
-                                            tracing::info!(chat = %chat,
-                                                "session credentials removed; leaving room");
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Ok(Err(err)) => {
-                            tracing::warn!(
-                                chat = %chat,
-                                error = %err,
-                                backoff_ms = backoff.as_millis() as u64,
-                                "session room join failed; retrying"
-                            );
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                chat = %chat,
-                                backoff_ms = backoff.as_millis() as u64,
-                                "session room join timed out (hung dial); retrying"
-                            );
-                        }
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()) => {
-                            backoff = (backoff * 2).min(crate::workspace_host::JOIN_RETRY_CAP);
-                        }
-                        _ = wake.recv() => {
-                            backoff = crate::workspace_host::JOIN_RETRY_BASE;
-                        }
-                        _ = crate::workspace_host::token_changed(&mut token_changes) => {
-                            backoff = crate::workspace_host::JOIN_RETRY_BASE;
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    /// chat2 relay join (docs/chat2-sync.md C3): supervised like the s2
-    /// loop — deadline on every dial, capped jittered backoff, wake redial —
-    /// but the client resolves only after full catch-up (checkpoint + rows),
-    /// so "joined" here means "transcript converged".
+    /// chat2 relay join (docs/chat2-sync.md C3): deadline on every dial,
+    /// capped jittered backoff, wake redial — and the client resolves only
+    /// after full catch-up (checkpoint + rows), so "joined" here means
+    /// "transcript converged".
     fn spawn_chat2_join(&self, edge: EdgeConfig, handle: &Arc<ChatDocHandle>, cursor: u64) {
         let chat = handle.chat_id.clone();
         let doc = handle.doc.clone();
@@ -1068,19 +1110,39 @@ impl DocHost {
             ));
             let url = edge.room_url(format!("/chat2/{chat}/ws"));
             let mut wake = zeron_sync::wake::subscribe();
+            // Sibling-dial successes end a backoff wait immediately, exactly
+            // like the joined clients' own reconnect loops (chat_client.rs).
+            // Without this, a NEW chat whose first joins hit a network blip
+            // waited out the full accumulated backoff (→30s) while every
+            // established room redialed instantly on recovery — fresh sends
+            // to new sessions stalled while other chats hummed (2026-08-19
+            // user report, reproduced on two networks).
+            let mut online = zeron_sync::wake::subscribe_online();
             let mut backoff = crate::workspace_host::JOIN_RETRY_BASE;
             loop {
                 if weak.upgrade().is_none() {
                     return; // evicted or purged while dialing
                 }
+                // Dual transport: WS dial + a plain-HTTPS pull/push seam
+                // (rows GET / POST on the same bearer auth as the checkpoint
+                // fetch) — bootstraps in ~1 RTT and keeps syncing at backoff
+                // cadence on networks that never pass the WS upgrade. With
+                // the transport, connect resolves immediately (local-first).
+                let transport = Arc::new(crate::chat2_host::EdgeChatTransport::new(
+                    host.inner.http.clone(),
+                    edge.clone(),
+                    chat.clone(),
+                    device.clone(),
+                ));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
-                    zeron_sync::ChatClient::connect_via(
+                    zeron_sync::ChatClient::connect_via_transport(
                         url.clone(),
                         sink.clone(),
                         fetcher.clone(),
                         &device,
                         cursor,
+                        transport,
                     ),
                 )
                 .await;
@@ -1123,11 +1185,26 @@ impl DocHost {
                             let host = host.clone();
                             let weak = weak.clone();
                             host.clone().spawn_worker(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                // With the pull-first transport the client
+                                // constructs before any state answer — wait
+                                // until the server's view is KNOWN (bounded)
+                                // or the all-zero placeholder stats would
+                                // misread as "no checkpoint" and upload a
+                                // spurious full-doc heal on a thin link.
+                                for _ in 0..40u32 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    let Some(handle) = weak.upgrade() else { return };
+                                    let known = lock(&handle.chat2)
+                                        .as_ref()
+                                        .is_some_and(|c| c.stats().server_known);
+                                    if known {
+                                        break;
+                                    }
+                                }
                                 let Some(handle) = weak.upgrade() else { return };
                                 let no_checkpoint = lock(&handle.chat2)
                                     .as_ref()
-                                    .is_some_and(|c| c.stats().checkpoint_size == 0);
+                                    .is_some_and(|c| c.stats().server_known && c.stats().checkpoint_size == 0);
                                 let has_content = handle
                                     .doc
                                     .read_entries()
@@ -1204,11 +1281,18 @@ impl DocHost {
                             "chat2 join timed out; retrying");
                     }
                 }
+                // Drain stale online events first: only successes DURING this
+                // wait count, or our own last dial would cut every wait to
+                // zero (same discipline as chat_client's wait_backoff).
+                while online.try_recv().is_ok() {}
                 tokio::select! {
                     _ = tokio::time::sleep(backoff + crate::workspace_host::join_retry_jitter()) => {
                         backoff = (backoff * 2).min(crate::workspace_host::JOIN_RETRY_CAP);
                     }
                     _ = wake.recv() => {
+                        backoff = crate::workspace_host::JOIN_RETRY_BASE;
+                    }
+                    _ = online.recv() => {
                         backoff = crate::workspace_host::JOIN_RETRY_BASE;
                     }
                     _ = crate::workspace_host::token_changed(&mut token_changes) => {
@@ -1236,7 +1320,6 @@ impl DocHost {
         handle: &Arc<ChatDocHandle>,
     ) {
         const TICK: std::time::Duration = std::time::Duration::from_millis(500);
-        const JOIN_WAIT_TICKS: u32 = 120; // ≤60s for the room; offline stays s2
         const QUIET_TICKS: u32 = 4; // 2s of frontier silence
         if !lock(&self.inner.seed_waiting).insert(chat_id.to_string()) {
             return; // a quiet-waiter is already armed for this chat
@@ -1246,24 +1329,11 @@ impl DocHost {
         let weak = Arc::downgrade(handle);
         self.spawn_worker(async move {
             async {
-                let mut ticks = 0u32;
-                loop {
-                    {
-                        let Some(handle) = weak.upgrade() else { return };
-                        if handle.retired.load(Ordering::Relaxed) {
-                            return; // another path already seeded
-                        }
-                        if lock(&handle.room).is_some() {
-                            break;
-                        }
-                    }
-                    ticks += 1;
-                    if ticks >= JOIN_WAIT_TICKS {
-                        tracing::debug!(chat = %chat, "chat2 seed skipped: s2 room never joined");
-                        return;
-                    }
-                    tokio::time::sleep(TICK).await;
-                }
+                // The old join-wait gate (seed only after the s2 room had
+                // backfilled) is gone with the s2 client: no device writes
+                // an s2 room anymore, so the host's local doc IS the
+                // authority for a straggler gen-1 chat. Only the quiet gate
+                // remains (no seed under a moving frontier).
                 let mut quiet = 0u32;
                 let mut last_vv: Option<Vec<u8>> = None;
                 loop {
@@ -1482,13 +1552,12 @@ impl DocHost {
         {
             return Ok(()); // transcript present — nothing lost
         }
-        // Fat source 1: the M3 adopt's rollback copy on disk.
+        // Fat source: the M3 adopt's rollback copy on disk. (The other
+        // source — the legacy s2 room — went away with the s2 client; any
+        // transcript that existed only there was salvaged by earlier
+        // releases or is reachable in the room's storage server-side.)
         let rollback_id = format!("{chat_id}.pre-chat2");
-        let mut fat_bytes = self.inner.store.load_snapshot(&rollback_id).ok().flatten();
-        // Fat source 2: the legacy s2 room.
-        if fat_bytes.is_none() {
-            fat_bytes = self.fetch_s2_room_doc(chat_id).await;
-        }
+        let fat_bytes = self.inner.store.load_snapshot(&rollback_id).ok().flatten();
         let Some(bytes) = fat_bytes else {
             return Ok(()); // no fat lineage anywhere — genuinely empty chat
         };
@@ -1525,43 +1594,6 @@ impl DocHost {
         tracing::info!(chat = %chat_id, entries = entries.len(),
             "transcript salvaged into chat2 lineage");
         Ok(())
-    }
-
-    /// Join the legacy s2 room with a throwaway doc, wait for the backfill to
-    /// quiesce, and export what it holds. `None` = no edge, unreachable, or
-    /// the room is empty.
-    async fn fetch_s2_room_doc(&self, chat_id: &str) -> Option<Vec<u8>> {
-        let edge = self.inner.config.edge.clone()?;
-        let url = edge.room_url(format!("/session/{chat_id}/ws"));
-        let doc = loro::LoroDoc::new();
-        let client = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            RoomClient::connect_via(url, chat_id, doc.clone()),
-        )
-        .await
-        .ok()?
-        .ok()?;
-        let mut last = doc.oplog_vv().encode();
-        let mut quiet = 0u32;
-        for _ in 0..30u32 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let vv = doc.oplog_vv().encode();
-            if vv == last {
-                quiet += 1;
-                if quiet >= 3 {
-                    break;
-                }
-            } else {
-                quiet = 0;
-                last = vv;
-            }
-        }
-        drop(client);
-        let fat = SessionDoc::from_doc(doc);
-        if fat.read_entries().ok()?.is_empty() {
-            return None; // empty or never-materialized room
-        }
-        fat.export_snapshot().ok()
     }
 
     /// chat2 host duties on the doc-quiesce tick (docs/chat2-sync.md C3):
@@ -1796,10 +1828,7 @@ impl DocHost {
         let handles: Vec<Arc<ChatDocHandle>> =
             lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
-            if let Some(room) = lock(&handle.room).as_ref() {
-                room.probe();
-            }
-            // chat2 rooms verify liveness on the same user signals — a
+            // chat2 rooms verify liveness on user signals — a
             // deaf-but-ponging DO otherwise freezes a watched transcript
             // for the whole background probe quiet window.
             if let Some(chat2) = lock(&handle.chat2).as_ref() {
@@ -1808,17 +1837,151 @@ impl DocHost {
         }
     }
 
+    /// Window-focus fast path: one cheap HTTP probe of the edge decides
+    /// whether to un-park every reconnect backoff NOW (success → online
+    /// event → immediate redials with fresh backoff) or to leave them
+    /// backing off (failure — a dial can't succeed either, so don't burn
+    /// the attempt). Recovery rides the "user looked at the app" event
+    /// instead of timer luck.
+    pub fn probe_edge_reachability(&self) {
+        let Some(edge) = self.inner.config.edge.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let url = format!("{}/health", edge.url.trim_end_matches('/'));
+        let http = self.inner.http.clone();
+        self.spawn_worker_on(&runtime, async move {
+            let res = http
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+            if let Ok(res) = res
+                && res.status().is_success()
+            {
+                zeron_sync::wake::notify_online();
+            }
+        });
+    }
+
+    /// The connectivity stream: current posture first, then every change.
+    /// Lazily starts a monitor — a 1s recompute over in-memory stats
+    /// (atomics + small locks), published only when the value changes. The
+    /// retry countdown renders client-side from `retry_at_ms`, so quiet
+    /// periods emit nothing at all.
+    pub fn watch_connectivity(&self) -> watch::Receiver<zeron_proto::Connectivity> {
+        let tx = self
+            .inner
+            .connectivity
+            .get_or_init(|| watch::channel(self.compute_connectivity()).0);
+        let rx = tx.subscribe();
+        if !self.inner.connectivity_started.swap(true, Ordering::SeqCst)
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            let host = self.clone();
+            self.spawn_worker(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let next = host.compute_connectivity();
+                    if let Some(tx) = host.inner.connectivity.get() {
+                        tx.send_if_modified(|cur| {
+                            if *cur == next {
+                                false
+                            } else {
+                                *cur = next;
+                                true
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        rx
+    }
+
+    /// One snapshot of the edge posture: OS path status beats registry-room
+    /// state beats per-chat rooms. `Disabled` (the default) = local profile.
+    ///
+    /// Degradation is HYSTERETIC (v0.2.12 feedback): a room mid-join, an
+    /// idle link waking for a send, or a navigation-triggered dial all read
+    /// "disconnected" for a few hundred ms on a healthy network — surfacing
+    /// those flashed amber warnings and "Queued" badges at every chat
+    /// switch. Raw degradation must persist [`DEGRADE_GRACE`] before it is
+    /// reported; recovery reports instantly.
+    fn compute_connectivity(&self) -> zeron_proto::Connectivity {
+        use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
+        let workspace = self.workspace();
+        let edge_expected = self.inner.config.edge.is_some()
+            || workspace.as_ref().is_some_and(|w| w.edge_expected());
+        if !edge_expected {
+            return Connectivity::default();
+        }
+        let now = std::time::Instant::now();
+        let mut grace = lock(&self.inner.connectivity_grace);
+        let statuses = self.sync_statuses();
+        grace.retain_chats(|id| statuses.iter().any(|(chat_id, _)| chat_id == id));
+        let chats = statuses
+            .into_iter()
+            .map(|(chat_id, stats)| {
+                let stats = stats.unwrap_or_default();
+                let connected = !grace.degraded(GraceKey::Chat(&chat_id), !stats.connected, now);
+                ChatConnectivity {
+                    chat_id,
+                    connected,
+                    pending_pushes: stats.pending_pushes,
+                }
+            })
+            .collect();
+        let reconnect = workspace.as_ref().and_then(|w| w.reconnect_state());
+        let registry_connected = workspace
+            .as_ref()
+            .and_then(|w| w.sync_status())
+            .is_some_and(|s| s.connected);
+        let path_offline = grace.degraded(
+            GraceKey::OsPath,
+            zeron_sync::wake::path_is_offline(),
+            now,
+        );
+        let registry_down = grace.degraded(GraceKey::Registry, !registry_connected, now);
+        let (state, retry_at_ms, last_failure) = if path_offline {
+            (
+                ConnectivityState::Offline,
+                0,
+                reconnect.and_then(|r| r.last_failure),
+            )
+        } else if !registry_down {
+            (ConnectivityState::Connected, 0, None)
+        } else {
+            let reconnect = reconnect.unwrap_or_default();
+            (
+                ConnectivityState::Reconnecting,
+                reconnect.retry_at_ms,
+                reconnect.last_failure,
+            )
+        };
+        Connectivity {
+            state,
+            retry_at_ms,
+            last_failure,
+            chats,
+        }
+    }
+
     /// Per-open-chat room introspection for SyncStatus / `zeron sync`.
     /// `None` room = still dialing (join retry loop) or edge-less.
-    pub fn sync_statuses(&self) -> Vec<(String, Option<zeron_sync::RoomStatsSnapshot>)> {
+    pub fn sync_statuses(&self) -> Vec<(String, Option<zeron_sync::ChatStatsSnapshot>)> {
         let handles: Vec<Arc<ChatDocHandle>> =
             lock(&self.inner.handles).values().cloned().collect();
-        let mut rows: Vec<(String, Option<zeron_sync::RoomStatsSnapshot>)> = handles
+        let mut rows: Vec<(String, Option<zeron_sync::ChatStatsSnapshot>)> = handles
             .iter()
             .map(|h| {
                 (
                     h.chat_id.clone(),
-                    lock(&h.room).as_ref().map(RoomClient::stats),
+                    lock(&h.chat2).as_ref().map(|client| client.stats()),
                 )
             })
             .collect();
@@ -1845,6 +2008,21 @@ impl DocHost {
         chat_id: &str,
         payload: SessionCommandPayload,
     ) -> Result<String, EngineError> {
+        self.queue_command_with_transfers(chat_id, payload, Vec::new())
+    }
+
+    /// [`Self::queue_command`] plus queued-attachment transfers: the command's
+    /// `pending://` refs name bytes already committed to THIS device's uploads
+    /// dir; when another device hosts the chat, a background task pushes them
+    /// over the peer link (retry until they land) while the command is
+    /// already durably queued. The send is a local write — attachment bytes
+    /// chase it, never gate it (2026-08-19 incident).
+    pub fn queue_command_with_transfers(
+        &self,
+        chat_id: &str,
+        payload: SessionCommandPayload,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
         let now = now_ms();
@@ -1856,7 +2034,7 @@ impl DocHost {
             payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
         );
-        handle.doc.queue_command(&SessionCommandEntry {
+        let entry = SessionCommandEntry {
             id: id.clone(),
             payload,
             issued_by: self.inner.config.device_id.clone(),
@@ -1865,7 +2043,8 @@ impl DocHost {
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
-        })?;
+        };
+        handle.doc.queue_command(&entry)?;
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
@@ -1886,6 +2065,7 @@ impl DocHost {
         // the command is durable in the doc either way (a host that opens the chat
         // for any other reason still executes it).
         self.nudge_remote_host(chat_id);
+        self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
     }
 
@@ -1941,6 +2121,396 @@ impl DocHost {
                 }
             }
         });
+    }
+
+    /// The chat's host device when it is NOT this engine (mirrors
+    /// `nudge_remote_host`'s ownership read).
+    fn remote_host_for(&self, chat_id: &str) -> Option<String> {
+        let workspace = self.workspace()?;
+        let host_device = match workspace.chat(chat_id) {
+            Ok(Some(chat)) => chat.device_id,
+            _ => return None,
+        };
+        (host_device != self.inner.config.device_id).then_some(host_device)
+    }
+
+    /// Durable-delivery escort for one queued command aimed at a REMOTE host:
+    ///
+    /// 1. push any queued attachment bytes over the peer link (retry until
+    ///    they land — the relayed command must never outrun its bytes);
+    /// 2. give the normal path (chat2 rows → edge → host's room) a short
+    ///    grace to ack;
+    /// 3. rows still not at the edge but the peer link alive → relay-forward
+    ///    the entry itself ([`zeron_rpc::methods::RELAY_COMMAND`]). The
+    ///    host's processed ledger claims the client-minted id, so the doc
+    ///    row arriving later dedupes to a no-op — exactly-once by
+    ///    construction (the 2026-08-18 03:45 incident shape: nudges flowed,
+    ///    rows didn't; there was no second road for the command).
+    ///
+    /// Stops the moment any path lands. No-op for locally-hosted chats.
+    fn spawn_command_delivery(
+        &self,
+        chat_id: &str,
+        entry: SessionCommandEntry,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+    ) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return; // bare sync callers (unit tests) skip rather than panic
+        };
+        let host = self.clone();
+        let chat = chat_id.to_string();
+        self.spawn_worker_on(&runtime, async move {
+            let Some(target) = host.remote_host_for(&chat) else {
+                return; // local host (or no row yet claimed remotely)
+            };
+            if !transfers.is_empty() && !host.deliver_attachments(&chat, &transfers).await {
+                return; // gave up; the drain's wait cap surfaces the failure
+            }
+            let mut wake = zeron_sync::wake::subscribe();
+            let mut online = zeron_sync::wake::subscribe_online();
+            let give_up = tokio::time::Instant::now() + RELAY_GIVE_UP;
+            let grace_end = tokio::time::Instant::now() + ROWS_GRACE;
+            while tokio::time::Instant::now() < grace_end {
+                if host.rows_flushed(&chat) {
+                    return; // rows on the edge — the normal path has it
+                }
+                tokio::time::sleep(ROWS_POLL).await;
+            }
+            let mut backoff = RELAY_BACKOFF_BASE;
+            loop {
+                if host.rows_flushed(&chat) {
+                    return; // the normal path won while we were retrying
+                }
+                match host.relay_command(&target, &chat, &entry).await {
+                    Ok(outcome) => {
+                        tracing::info!(chat = %chat, device = %target, command = %entry.id,
+                            outcome, "command delivered via peer relay");
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::warn!(chat = %chat, device = %target, error = %err,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "peer-relay delivery retrying");
+                    }
+                }
+                if tokio::time::Instant::now() >= give_up {
+                    tracing::warn!(chat = %chat, command = %entry.id,
+                        "peer-relay delivery gave up; command remains queued in the doc");
+                    return;
+                }
+                while wake.try_recv().is_ok() {}
+                while online.try_recv().is_ok() {}
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = wake.recv() => {}
+                    _ = online.recv() => {}
+                }
+                backoff = (backoff * 2).min(RELAY_BACKOFF_CAP);
+            }
+        });
+    }
+
+    /// Step 1 of the escort: push staged bytes until they land (event-driven
+    /// backoff), `true` on success. Re-resolves the host each attempt (a
+    /// claim can move the chat).
+    async fn deliver_attachments(
+        &self,
+        chat: &str,
+        transfers: &[crate::uploads::AttachmentTransfer],
+    ) -> bool {
+        let mut wake = zeron_sync::wake::subscribe();
+        let mut online = zeron_sync::wake::subscribe_online();
+        let mut backoff = TRANSFER_BACKOFF_BASE;
+        let deadline = tokio::time::Instant::now() + ATTACHMENT_WAIT_MAX;
+        loop {
+            let Some(target) = self.remote_host_for(chat) else {
+                return true; // became locally hosted: bytes already here
+            };
+            match self.push_attachments(&target, transfers).await {
+                Ok(()) => {
+                    tracing::info!(chat = %chat, device = %target,
+                        count = transfers.len(), "queued attachments delivered");
+                    // The bytes beat the drain's next look — kick it via the
+                    // durable nudge (the host's UploadCommit already kicked
+                    // its local drains too).
+                    self.nudge_remote_host(chat);
+                    return true;
+                }
+                Err(TransferError::Permanent(err)) => {
+                    tracing::warn!(chat = %chat, device = %target, error = %err,
+                        "queued attachment transfer failed permanently");
+                    return false;
+                }
+                Err(TransferError::Transient(err)) => {
+                    tracing::warn!(chat = %chat, device = %target, error = %err,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "queued attachment transfer retrying");
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(chat = %chat, "queued attachment transfer gave up (wait cap)");
+                return false;
+            }
+            while wake.try_recv().is_ok() {}
+            while online.try_recv().is_ok() {}
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = wake.recv() => {}
+                _ = online.recv() => {}
+            }
+            backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
+        }
+    }
+
+    /// Every local chat2 batch acked while connected — our rows are ON the
+    /// edge, and the host's own room connection will deliver them. (A room
+    /// that hasn't joined keeps pre-join updates in a local buffer, so
+    /// `connected` is load-bearing here, not just the empty queue.)
+    fn rows_flushed(&self, chat_id: &str) -> bool {
+        let handle = lock(&self.inner.handles).get(chat_id).cloned();
+        handle
+            .and_then(|h| lock(&h.chat2).as_ref().map(|c| c.stats()))
+            .is_some_and(|s| s.connected && s.pending_pushes == 0)
+    }
+
+    /// One relay attempt: version-gate the host, then forward the entry over
+    /// the peer link. Timeouts mark the link suspect (drop + redial next
+    /// attempt); a host-side refusal is permanent for THIS attempt but the
+    /// escort keeps retrying until the give-up cap (the refusal may be
+    /// "attachments not landed yet").
+    async fn relay_command(
+        &self,
+        target: &str,
+        chat_id: &str,
+        entry: &SessionCommandEntry,
+    ) -> Result<&'static str, String> {
+        let supported = self
+            .workspace()
+            .and_then(|ws| ws.read_devices().ok())
+            .into_iter()
+            .flatten()
+            .find(|d| d.id == target)
+            .and_then(|d| d.version.as_deref().and_then(zeron_proto::version_triple))
+            .is_some_and(|v| v >= RELAY_MIN_VERSION);
+        if !supported {
+            return Err("host does not support relay delivery (version gate)".into());
+        }
+        let links = self
+            .inner
+            .links
+            .get()
+            .ok_or_else(|| "peer links not wired".to_string())?;
+        let client = links
+            .client(target)
+            .await
+            .map_err(|e| format!("peer link: {e}"))?;
+        let params = serde_json::json!({ "chatId": chat_id, "entry": entry });
+        let call = client.call(zeron_rpc::methods::RELAY_COMMAND, params);
+        match tokio::time::timeout(RELAY_CALL_TIMEOUT, call).await {
+            Err(_) => {
+                links.invalidate(target);
+                Err("relay call timed out; peer link suspect".into())
+            }
+            Ok(Err(zeron_rpc::RpcError::Failed(err))) => Err(format!("host refused: {err}")),
+            Ok(Err(err)) => {
+                links.invalidate(target);
+                Err(format!("relay call failed: {err}"))
+            }
+            Ok(Ok(reply)) => Ok(match reply.get("outcome").and_then(|v| v.as_str()) {
+                Some("executed") => "executed",
+                Some("duplicate") => "duplicate",
+                Some("expired") => "expired",
+                Some("superseded") => "superseded",
+                _ => "accepted",
+            }),
+        }
+    }
+
+    /// User-driven retry (the failed-send affordance): re-kick every
+    /// delivery road for a chat whose queued sends haven't been adopted —
+    /// fresh chat2 socket (a zombie room is the usual suspect), host nudge,
+    /// a local drain pass, and a fresh delivery escort per still-pending
+    /// command with its attachment transfers re-derived from the entries'
+    /// `pending://` refs (idempotent: re-pushing landed bytes re-commits the
+    /// same file; the processed ledger keeps execution exactly-once).
+    pub fn retry_delivery(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        if let Some(chat2) = lock(&handle.chat2).as_ref() {
+            chat2.redial();
+        }
+        self.nudge_remote_host(chat_id);
+        let commands = handle.doc.read_commands()?;
+        let pending: Vec<SessionCommandEntry> = commands
+            .into_iter()
+            .filter(|c| {
+                c.status == SessionCommandStatus::Pending
+                    && !self.inner.store.is_processed(&c.id).unwrap_or(false)
+            })
+            .collect();
+        for entry in pending {
+            let refs: Vec<String> = match &entry.payload {
+                SessionCommandPayload::Run { request, .. } => request
+                    .attachments
+                    .iter()
+                    .filter(|p| crate::uploads::is_pending_ref(p))
+                    .cloned()
+                    .collect(),
+                SessionCommandPayload::Steer { prompt, .. } => {
+                    crate::uploads::pending_refs_in(prompt)
+                }
+                _ => Vec::new(),
+            };
+            let transfers: Vec<crate::uploads::AttachmentTransfer> = refs
+                .iter()
+                .filter_map(|r| crate::uploads::parse_pending_ref(r))
+                .map(
+                    |(upload_id, file_name)| crate::uploads::AttachmentTransfer {
+                        upload_id: upload_id.to_string(),
+                        file_name: file_name.to_string(),
+                    },
+                )
+                .collect();
+            self.spawn_command_delivery(chat_id, entry, transfers);
+        }
+        // Locally-hosted (or already-synced) commands: a drain pass is the
+        // whole retry.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let host = self.clone();
+            let handle = handle.clone();
+            self.spawn_worker(async move { host.drain_commands(&handle).await });
+        }
+        Ok(())
+    }
+
+    /// Host side of [`zeron_rpc::methods::RELAY_COMMAND`]: evaluate the
+    /// forwarded entry against OUR doc (dedupe/TTL/supersede rules apply
+    /// unchanged), claim its client-minted id in the processed ledger, then
+    /// execute. The claim is what makes the doc row arriving later — over
+    /// chat2 sync — a no-op in the drain: exactly-once across both roads.
+    pub async fn ingest_relayed_command(
+        &self,
+        chat_id: &str,
+        entry: SessionCommandEntry,
+    ) -> Result<&'static str, EngineError> {
+        let handle = self.open(chat_id)?;
+        // The sender sequences attachment transfers BEFORE the relay; refuse
+        // (retryably) rather than run without the images.
+        if !self.missing_attachments(&entry).is_empty() {
+            return Err(EngineError::Other("attachments not landed yet".into()));
+        }
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        let commands = handle.doc.read_commands()?;
+        let messages = handle.doc.read_entries().unwrap_or_default();
+        let current_turn_id = messages.last().map(|m| m.id.clone());
+        let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+        let disposition = evaluate_command(
+            &entry,
+            &EvaluationContext {
+                is_processed: &is_processed,
+                now_ms: now_ms(),
+                entries: &commands,
+                current_turn_id: current_turn_id.as_deref(),
+                turn_is_past: &turn_is_past,
+            },
+        );
+        if matches!(disposition, CommandDisposition::Skip) {
+            return Ok("duplicate");
+        }
+        // Claim BEFORE executing (the drain's own mark-before-execute rule).
+        if !self.inner.store.mark_processed(&entry.id)? {
+            return Ok("duplicate");
+        }
+        match disposition {
+            CommandDisposition::Skip => Ok("duplicate"),
+            CommandDisposition::Expired => Ok("expired"),
+            CommandDisposition::Superseded => Ok("superseded"),
+            CommandDisposition::Execute => {
+                self.execute(&sessions, &handle, &entry).await?;
+                Ok("executed")
+            }
+        }
+    }
+
+    /// One transfer attempt: chunked `UploadChunk` + `UploadCommit` straight
+    /// over the peer link (same wire the UI's legacy path used, so old and
+    /// new engines interoperate). Timeouts mark the link suspect —
+    /// `invalidate` drops the cached socket so the retry dials fresh instead
+    /// of feeding a zombie pipe forever (2026-08-19 incident).
+    async fn push_attachments(
+        &self,
+        target: &str,
+        transfers: &[crate::uploads::AttachmentTransfer],
+    ) -> Result<(), TransferError> {
+        use TransferError::{Permanent, Transient};
+        let Some(links) = self.inner.links.get() else {
+            return Err(Permanent("peer links not wired".into()));
+        };
+        let Some(uploads) = self.inner.uploads.get() else {
+            return Err(Permanent("uploads not wired".into()));
+        };
+        let client = links
+            .client(target)
+            .await
+            .map_err(|e| Transient(format!("peer link: {e}")))?;
+        for transfer in transfers {
+            // Bytes come from the uploads jail only — a transfer names an
+            // upload identity, never an arbitrary path.
+            let source = uploads.pending_target(&transfer.upload_id, &transfer.file_name);
+            let bytes = tokio::fs::read(&source)
+                .await
+                .map_err(|e| Permanent(format!("staged attachment missing: {e}")))?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let mut start = 0usize;
+            let mut seq = 0u64;
+            loop {
+                let end = (start + TRANSFER_CHUNK_B64).min(b64.len());
+                let params = serde_json::json!({
+                    "uploadId": transfer.upload_id, "seq": seq, "data": &b64[start..end],
+                });
+                let call = client.call(zeron_rpc::methods::UPLOAD_CHUNK, params);
+                match tokio::time::timeout(TRANSFER_CHUNK_TIMEOUT, call).await {
+                    Err(_) => {
+                        links.invalidate(target);
+                        return Err(Transient("chunk push timed out; peer link suspect".into()));
+                    }
+                    Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
+                        return Err(Permanent(format!("host refused chunk: {err}")));
+                    }
+                    Ok(Err(err)) => {
+                        links.invalidate(target);
+                        return Err(Transient(format!("chunk push failed: {err}")));
+                    }
+                    Ok(Ok(_)) => {}
+                }
+                start = end;
+                seq += 1;
+                if start >= b64.len() {
+                    break;
+                }
+            }
+            let params = serde_json::json!({
+                "uploadId": transfer.upload_id, "fileName": transfer.file_name,
+            });
+            let call = client.call(zeron_rpc::methods::UPLOAD_COMMIT, params);
+            match tokio::time::timeout(TRANSFER_COMMIT_TIMEOUT, call).await {
+                Err(_) => {
+                    links.invalidate(target);
+                    return Err(Transient("commit timed out; peer link suspect".into()));
+                }
+                Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
+                    return Err(Permanent(format!("host refused commit: {err}")));
+                }
+                Ok(Err(err)) => {
+                    links.invalidate(target);
+                    return Err(Transient(format!("commit failed: {err}")));
+                }
+                Ok(Ok(_)) => {}
+            }
+        }
+        Ok(())
     }
 
     /// Upload a tool result's full output/diff to the R2 sidecar
@@ -2125,6 +2695,36 @@ impl DocHost {
                     turn_is_past: &turn_is_past,
                 },
             );
+            // Queued-attachment gate (BEFORE the processed mark — a deferred
+            // command must stay eligible): a Run/Steer naming `pending://`
+            // refs whose bytes haven't landed on this device yet waits for
+            // the transfer instead of running without its images. The wait is
+            // bounded; past it the command fails loudly.
+            if matches!(disposition, CommandDisposition::Execute) {
+                let missing = self.missing_attachments(&entry);
+                if !missing.is_empty() {
+                    if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {
+                        tracing::info!(chat = %handle.chat_id, command = %entry.id,
+                            missing = missing.len(), "command deferred: attachment bytes in transit");
+                        self.arm_attachment_wait(handle);
+                        return; // preserve order; UploadCommit / the wait timer re-kick
+                    }
+                    if let Err(err) = self.inner.store.mark_processed(&entry.id) {
+                        tracing::error!(chat = %handle.chat_id, error = %err,
+                            "processed-ledger write failed; halting drain");
+                        return;
+                    }
+                    tracing::warn!(chat = %handle.chat_id, command = %entry.id,
+                        "command rejected: attachments never arrived");
+                    self.resolve_command(
+                        handle,
+                        &entry.id,
+                        SessionCommandStatus::Rejected,
+                        Some("attachments never arrived"),
+                    );
+                    continue;
+                }
+            }
             // Mark BEFORE executing: a crash mid-execution must never double-run a
             // command whose side effect may already have happened.
             if let Err(err) = self.inner.store.mark_processed(&entry.id) {
@@ -2150,6 +2750,100 @@ impl DocHost {
                 }
             }
         }
+    }
+
+    /// The command's `pending://` attachment refs whose bytes are NOT on this
+    /// device's disk yet. Empty when the command names none, when everything
+    /// has landed, or when no uploads store is wired (tests) — absence of the
+    /// subsystem must never wedge a queue.
+    fn missing_attachments(&self, entry: &SessionCommandEntry) -> Vec<String> {
+        let refs: Vec<String> = match &entry.payload {
+            SessionCommandPayload::Run { request, .. } => request
+                .attachments
+                .iter()
+                .filter(|p| crate::uploads::is_pending_ref(p))
+                .cloned()
+                .collect(),
+            SessionCommandPayload::Steer { prompt, .. } => crate::uploads::pending_refs_in(prompt),
+            _ => Vec::new(),
+        };
+        if refs.is_empty() {
+            return refs;
+        }
+        let Some(uploads) = self.inner.uploads.get() else {
+            return Vec::new();
+        };
+        refs.into_iter()
+            .filter(|r| uploads.resolve_pending(r).is_none())
+            .collect()
+    }
+
+    /// Arm (once per chat) the deferred-command re-check loop: while a
+    /// pending unprocessed command still waits on attachment bytes, re-drain
+    /// on a cadence so the bounded wait actually expires even if every
+    /// event-driven kick was missed.
+    fn arm_attachment_wait(&self, handle: &Arc<ChatDocHandle>) {
+        let chat = handle.chat_id.clone();
+        if !lock(&self.inner.drain_waiting).insert(chat.clone()) {
+            return;
+        }
+        let weak = Arc::downgrade(handle);
+        let host = self.clone();
+        self.spawn_worker(async move {
+            loop {
+                tokio::time::sleep(ATTACHMENT_WAIT_RECHECK).await;
+                let Some(handle) = weak.upgrade() else { break };
+                if !host.awaiting_attachments(&handle) {
+                    break;
+                }
+                host.drain_commands(&handle).await;
+                let Some(handle) = weak.upgrade() else { break };
+                if !host.awaiting_attachments(&handle) {
+                    break;
+                }
+            }
+            lock(&host.inner.drain_waiting).remove(&chat);
+        });
+    }
+
+    /// True while some pending, unprocessed command still waits on bytes.
+    fn awaiting_attachments(&self, handle: &Arc<ChatDocHandle>) -> bool {
+        let commands = handle.doc.read_commands().unwrap_or_default();
+        commands.iter().any(|c| {
+            c.status == SessionCommandStatus::Pending
+                && !self.inner.store.is_processed(&c.id).unwrap_or(false)
+                && !self.missing_attachments(c).is_empty()
+        })
+    }
+
+    /// Rewrite a request's landed `pending://` refs to this device's absolute
+    /// paths — in the attachments list AND the prompt text — so the harness
+    /// (and the persisted user entry) see ordinary local files, exactly like
+    /// the legacy pre-upload flow produced.
+    fn resolve_request_attachments(&self, request: &mut zeron_proto::RunRequest) {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return;
+        };
+        for path in request.attachments.iter_mut() {
+            if let Some(abs) = uploads.resolve_pending(path) {
+                request.prompt = request.prompt.replace(path.as_str(), &abs);
+                *path = abs;
+            }
+        }
+    }
+
+    /// [`Self::resolve_request_attachments`] for a bare prompt (Steer).
+    fn resolve_prompt_attachments(&self, prompt: &str) -> String {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return prompt.to_string();
+        };
+        let mut out = prompt.to_string();
+        for r in crate::uploads::pending_refs_in(prompt) {
+            if let Some(abs) = uploads.resolve_pending(&r) {
+                out = out.replace(&r, &abs);
+            }
+        }
+        out
     }
 
     /// Host-only outcome write (ledger rule 2).
@@ -2185,12 +2879,45 @@ impl DocHost {
                 request,
                 message_id,
             } => {
+                let mut request = request.clone();
+                // Queued-attachment refs (`pending://`) resolve to this
+                // host's absolute paths before anything persists or
+                // dispatches — the drain already gated on the bytes being
+                // present, so every ref resolves here.
+                self.resolve_request_attachments(&mut request);
+                // Worktree directive (WorktreeSpec): materialize on THIS host at
+                // drain time — the durable command plane replaces the sender's
+                // old blocking CreateWorktree relay RPC, whose lost reply wedged
+                // the composer on "Sending…" while the run proceeded anyway.
+                // `take()` resolves the request before dispatch, so the journal
+                // and steer→new-turn fallbacks reuse the created path instead of
+                // minting another checkout.
+                let fresh_worktree = match request.worktree.take() {
+                    Some(spec) => {
+                        let (cwd, fresh) = self.materialize_worktree(chat_id, &spec).await?;
+                        request.cwd = cwd;
+                        fresh
+                    }
+                    None => None,
+                };
                 // Claim-on-first-command: a run for a chat with no workspace row
                 // creates the row under our device id (we are about to host it).
                 if let Some(ws) = self.workspace() {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
+                    // A pre-existing row (the client's createChat raced ahead)
+                    // still carries the repo folder — repoint it at the fresh
+                    // worktree, and stamp the actual `zeron/<name>` branch so
+                    // the footer and the title-rename flow see it.
+                    if let Some(wt) = &fresh_worktree {
+                        if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
+                            tracing::warn!(chat = %chat_id, error = %err, "worktree cwd stamp failed");
+                        }
+                        if let Err(err) = ws.set_chat_branch(chat_id, &wt.branch) {
+                            tracing::warn!(chat = %chat_id, error = %err, "worktree branch stamp failed");
+                        }
+                    }
                 }
-                let harness = self.harness_for_request(chat_id, request);
+                let harness = self.harness_for_request(chat_id, &request);
                 // A row with no config renders no harness glyph (and every
                 // later dispatch falls back to the engine default), so stamp
                 // what this run actually executes with. Claimed rows and
@@ -2210,12 +2937,34 @@ impl DocHost {
                         tracing::warn!(chat = %chat_id, error = %err, "run-config backfill failed");
                     }
                 }
+                // Timestamp canonicalization: the user message lands in
+                // history at the moment the user SENT it (the entry's
+                // issued_at, clamped against clock skew) — not whenever this
+                // host got around to draining a queued command. Idempotent by
+                // id, so the dispatch path's own execution-time write dedupes
+                // to a no-op.
+                if let Err(err) = handle.write_user_message(
+                    message_id,
+                    &request.prompt,
+                    entry.issued_at.min(now_ms()),
+                ) {
+                    tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
+                }
                 sessions
-                    .dispatch(chat_id, harness, request.clone(), Some(message_id.clone()))
+                    .dispatch(chat_id, harness, request, Some(message_id.clone()))
                     .await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
             SessionCommandPayload::Steer { prompt, message_id } => {
+                // Same `pending://` → absolute rewrite as the Run arm.
+                let prompt = &self.resolve_prompt_attachments(prompt);
+                // Same send-time canonicalization as the Run arm.
+                if let Some(message_id) = message_id
+                    && let Err(err) =
+                        handle.write_user_message(message_id, prompt, entry.issued_at.min(now_ms()))
+                {
+                    tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
+                }
                 match sessions.steer(chat_id, prompt, message_id.clone()).await? {
                     SteerOutcome::Accepted => Ok((SessionCommandStatus::Applied, None)),
                     SteerOutcome::NotSteerable => {
@@ -2325,6 +3074,43 @@ impl DocHost {
         }
     }
 
+    /// Create (or reuse) the isolated worktree a Run's [`zeron_proto::WorktreeSpec`]
+    /// asks for, returning the resolved cwd plus the fresh worktree when one was
+    /// actually created. Reuse guard: a chat whose row already points inside a
+    /// linked worktree of the same repo keeps it — a duplicate Run (client retry
+    /// after a lost ack, ledger reset) must not mint a second checkout.
+    async fn materialize_worktree(
+        &self,
+        chat_id: &str,
+        spec: &zeron_proto::WorktreeSpec,
+    ) -> Result<(String, Option<zeron_proto::Worktree>), EngineError> {
+        if let Some(ws) = self.workspace()
+            && let Ok(Some(chat)) = ws.chat(chat_id)
+            && let Some(cwd) = chat.cwd
+            && cwd != spec.repo_path
+            && crate::workspace_host::linked_worktree_root(std::path::Path::new(&cwd)).as_deref()
+                == Some(spec.repo_path.as_str())
+        {
+            tracing::info!(chat = %chat_id, cwd = %cwd, "worktree spec: reusing the chat's existing worktree");
+            return Ok((cwd, None));
+        }
+        let repos = self
+            .inner
+            .repos
+            .get()
+            .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
+        let worktree = repos
+            .create_worktree(std::path::Path::new(&spec.repo_path), &spec.base)
+            .await?;
+        tracing::info!(
+            chat = %chat_id,
+            path = %worktree.path,
+            branch = %worktree.branch,
+            "worktree materialized for run"
+        );
+        Ok((worktree.path.clone(), Some(worktree)))
+    }
+
     /// A steer-turned-run with no in-process `last_request` (engine restarted
     /// since the last turn): rebuild the run config from the chat's workspace
     /// row — cwd from the row, model/reasoning/options/sandbox from its config
@@ -2361,6 +3147,7 @@ impl DocHost {
             auto_approve: false,
             attachments: Vec::new(),
             resume: None,
+            worktree: None,
         })
     }
 
@@ -2406,7 +3193,6 @@ impl DocHost {
     pub fn disconnect_edge(&self) {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
         for handle in handles {
-            lock(&handle.room).take();
             lock(&handle.chat2).take();
             lock(&handle.chat2_local_sub).take();
         }
@@ -2451,6 +3237,49 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod degrade_grace_tests {
+    use super::{DEGRADE_GRACE, DegradeGrace, GraceKey};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn blips_shorter_than_the_grace_never_report() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        // A 300ms room join: degraded at t0, healthy again shortly after.
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0));
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0 + Duration::from_millis(300)));
+        assert!(!g.degraded(GraceKey::Chat("c1"), false, t0 + Duration::from_millis(600)));
+        // The recovery cleared the timer — a fresh blip starts from zero.
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn persistent_degradation_reports_after_the_grace_and_clears_instantly() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        assert!(!g.degraded(GraceKey::Registry, true, t0));
+        assert!(!g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE / 2));
+        assert!(g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE));
+        assert!(g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE * 3));
+        // Hide-fast: one healthy sample reports Connected immediately.
+        assert!(!g.degraded(GraceKey::Registry, false, t0 + DEGRADE_GRACE * 4));
+    }
+
+    #[test]
+    fn sources_are_independent_and_closed_chats_are_dropped() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        assert!(!g.degraded(GraceKey::Chat("gone"), true, t0));
+        assert!(!g.degraded(GraceKey::OsPath, true, t0));
+        // The chat's doc closes; its timer must not leak.
+        g.retain_chats(|id| id != "gone");
+        assert!(g.chats.is_empty());
+        // OsPath kept its own timer through the retain.
+        assert!(g.degraded(GraceKey::OsPath, true, t0 + DEGRADE_GRACE));
+    }
 }
 
 #[cfg(test)]

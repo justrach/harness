@@ -210,6 +210,13 @@ pub fn attachment_strip_height(count: usize, inner_width: f32) -> f32 {
     STRIP_PAD_TOP + rows as f32 * STRIP_THUMB + (rows - 1) as f32 * STRIP_GAP
 }
 
+pub fn comment_strip_height(count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    STRIP_PAD_TOP + crate::badges::BADGE_HEIGHT
+}
+
 /// Compact↔expanded flip morph (round 9): the flip used to snap between the
 /// two pill layouts. The original has no height transition (its shell carries
 /// only `transition-colors`), so this is a native nicety: ONE committed flip
@@ -359,6 +366,12 @@ pub fn flip_morph_step(
     })
 }
 
+/// Engines at or above this version understand `pending://` attachment refs
+/// and QueueCommand `transfers` (send-is-a-local-write attachments). Gated on
+/// BOTH the local engine (an IPC daemon may be older than this UI) and, for
+/// remotely-hosted chats, the host device's stamped registry version.
+const QUEUED_ATTACHMENTS_MIN: (u64, u64, u64) = (0, 2, 12);
+
 /// What the send button is right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendButtonMode {
@@ -368,6 +381,13 @@ pub enum SendButtonMode {
     Steer,
     /// Live run, nothing typed: red stop square.
     Stop,
+}
+
+/// What the composer holds that a send could carry. A staged image or diff
+/// comment counts: both synthesize their own prompt body, so either alone is
+/// a legal send — and during a live run has to read as Steer, not Stop.
+pub fn composer_has_content(text: &str, attachments: usize, comments: usize) -> bool {
+    !text.trim().is_empty() || attachments > 0 || comments > 0
 }
 
 pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
@@ -2376,14 +2396,22 @@ impl ComposerInput {
         let Some(bounds) = self.last_bounds else {
             return;
         };
+        let viewport_height = f32::from(bounds.size.height);
         let delta_y = f32::from(event.delta.pixel_delta(self.line_height).y);
         let next = input_scroll_offset(
             self.scroll_top,
             delta_y,
             self.content_height,
-            f32::from(bounds.size.height),
+            viewport_height,
         );
         if next == self.scroll_top {
+            // Overscroll guard: when the input itself is scrollable (content
+            // taller than the viewport), swallow the wheel event even at the
+            // scroll boundary so it never chains into the outer transcript
+            // list (the native equivalent of `overscroll-behavior: contain`).
+            if delta_y != 0.0 && input_max_scroll(self.content_height, viewport_height) > 0.0 {
+                cx.stop_propagation();
+            }
             return;
         }
         self.invalidate_mention_tooltip();
@@ -3315,6 +3343,11 @@ pub struct Composer {
     current_key: String,
     sending: bool,
     failure: Option<SharedString>,
+    /// The chat key `failure` belongs to (`None` = global, e.g. "Engine not
+    /// connected"). Chat-scoped failures survive navigation and render only
+    /// under their own chat — a blanket clear-on-switch erased the one
+    /// visible trace of a failed send (2026-08-19).
+    failure_key: Option<String>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
@@ -3322,6 +3355,11 @@ pub struct Composer {
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
+    /// Interrupt/answer commands get their own slot: assigning `send_task`
+    /// DROPPED an in-flight send future mid-upload — no banner, no cleanup,
+    /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
+    /// a send grinds" shape).
+    action_task: Option<Task<()>>,
     // -- compact/expanded flip state (hysteresis; see `composer_flip`) --
     /// Current layout mode (persisted across frames — never derived fresh).
     expanded_mode: bool,
@@ -3437,6 +3475,8 @@ impl Composer {
             wizard: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
+            failure_key: None,
+            action_task: None,
             advance_task: None,
             send_task: None,
             expanded_mode: false,
@@ -3536,6 +3576,7 @@ impl Composer {
                 Ok(att) => staged.push(att),
                 Err(message) => {
                     self.failure = Some(message.into());
+                    self.failure_key = Some(self.current_key.clone());
                     cx.notify();
                 }
             }
@@ -3555,8 +3596,44 @@ impl Composer {
 
     /// Drop a deleted chat's per-chat composer state — staged attachments hold
     /// raw image bytes, and a deleted chat's stage could never be sent again.
-    pub fn purge_chat(&mut self, chat_id: &str) {
+    pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
+        self.state.update(cx, |state, _| {
+            state.purge_diff_comments(chat_id);
+        });
+    }
+
+    /// Staged in `AppState` because the changes pane writes them.
+    fn staged_comments(&self, cx: &App) -> Vec<crate::comments::DiffComment> {
+        self.state
+            .read(cx)
+            .diff_comments(&self.current_key)
+            .to_vec()
+    }
+
+    fn render_comments_chip(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
+        let count = self.staged_comments(cx).len();
+        if count == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .px(px(STRIP_PAD_X))
+                .pt(px(STRIP_PAD_TOP))
+                .child(crate::badges::render(
+                    "composer-comments",
+                    &crate::badges::MessageBadge {
+                        icon: crate::icons::CHAT_ROUND_LINE,
+                        label: crate::comments::chip_label(count).into(),
+                        // The staged set is already on screen in the changes
+                        // pane, so a hover card would only repeat it.
+                        details: Vec::new(),
+                    },
+                    theme,
+                )),
+        )
     }
 
     /// The staged-thumbnail strip (attachment-ui.tsx AttachmentStrip):
@@ -4279,7 +4356,10 @@ impl Composer {
             }
             let draft = self.drafts.get(&key).cloned().unwrap_or_default();
             self.current_key = key;
-            self.failure = None;
+            // `failure` deliberately survives navigation: chat-scoped
+            // failures render only under their own chat (see `failure_key`),
+            // so switching away and back must not erase the one visible
+            // trace of a failed send.
             self.wizard = None;
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
@@ -4362,9 +4442,11 @@ impl Composer {
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
-        // A staged image counts as content: image-only sends are legal
-        // (the prompt body becomes "See the attached image(s).").
-        let has_text = !self.input.read(cx).text().trim().is_empty() || !self.staged().is_empty();
+        let has_text = composer_has_content(
+            self.input.read(cx).text(),
+            self.staged().len(),
+            self.staged_comments(cx).len(),
+        );
         send_button_mode(self.run_live(cx), has_text)
     }
 
@@ -4379,9 +4461,11 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
+        let no_content =
+            !composer_has_content(&text, self.staged().len(), self.staged_comments(cx).len());
         match self.button_mode(cx) {
             SendButtonMode::Stop => self.interrupt(cx),
-            _ if text.is_empty() && self.staged().is_empty() => {}
+            _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
             SendButtonMode::Steer => self.send(text, true, cx),
@@ -4395,6 +4479,7 @@ impl Composer {
     fn send(&mut self, text: String, steer: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
+            self.failure_key = None; // global — meaningful on every chat
             cx.notify();
             return;
         };
@@ -4449,9 +4534,6 @@ impl Composer {
         };
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
-        let space_remote = space
-            .as_ref()
-            .is_some_and(|s| local_device_id.as_deref() != Some(s.device_id.as_str()));
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
         // strip empties the instant you hit send; a failure hands the files
         // back into the chat's stash.
@@ -4459,21 +4541,72 @@ impl Composer {
             .attachments
             .remove(&self.current_key)
             .unwrap_or_default();
+        // `typed` keeps the user's own words for the failure hand-back below:
+        // restoring the folded prompt would paste the comment block into the
+        // input as literal text.
+        let key = self.current_key.clone();
+        let comments = self.state.update(cx, |state, cx| {
+            let taken = state.take_diff_comments(&key);
+            if !taken.is_empty() {
+                cx.notify();
+            }
+            taken
+        });
+        let typed = text.clone();
+        let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
 
-        // The echo carries synthetic attachment refs from the first frame, so
-        // photos render while the send is still pending instead of waiting for
-        // the upload to finish (real paths replace them in the post-upload
-        // refresh). The refs resolve instantly: the staged bytes are seeded
-        // into the transcript cache under every device key the transcript
-        // consults, and the synthetic paths never persist — the queued command
-        // and the doc entry are built from `with_attachments` on real paths.
-        let echo_paths: Vec<String> = staged
+        // Queued-attachment flow (durable-by-design): stage the bytes on the
+        // LOCAL engine, queue the command immediately with `pending://` refs,
+        // and let the engine push the bytes to a remote host afterwards —
+        // staging must never gate the queue (2026-08-19 incident: a send
+        // died with a zombie peer link because the upload sat in front of
+        // QueueCommand). Requires every engine involved to understand the
+        // ref scheme — the local engine (an IPC daemon may be older than
+        // this UI) and, for remotely-hosted chats, the host; anything older
+        // keeps the legacy blocking upload.
+        let host_is_remote = host_device_id
+            .as_deref()
+            .is_some_and(|id| local_device_id.as_deref() != Some(id));
+        let queued_flow = !staged.is_empty() && {
+            let state = self.state.read(cx);
+            let local_ok = local_device_id
+                .as_deref()
+                .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+            let host_ok = !host_is_remote
+                || host_device_id
+                    .as_deref()
+                    .is_some_and(|id| state.device_version_at_least(id, QUEUED_ATTACHMENTS_MIN));
+            local_ok && host_ok
+        };
+        // Upload identities minted NOW: in the queued flow the `pending://`
+        // ref IS the persisted transport until the host rewrites it, so the
+        // id must exist before any bytes move.
+        let upload_ids: Vec<String> = staged
             .iter()
-            .map(|att| format!("pending/{}/{}", att.id, att.name))
+            .map(|_| uuid::Uuid::new_v4().to_string())
             .collect();
+        // The echo carries attachment refs from the first frame, so photos
+        // render while the send is still pending. Queued flow: the refs are
+        // the real `pending://` identities (stable — no post-upload refresh).
+        // Legacy flow: synthetic `pending/…` paths that the post-upload
+        // refresh replaces with the host's absolute paths. Either way the
+        // staged bytes are seeded into the transcript cache under every
+        // device key the transcript consults.
+        let echo_paths: Vec<String> = if queued_flow {
+            staged
+                .iter()
+                .zip(&upload_ids)
+                .map(|(att, id)| format!("pending://{id}/{}", att.name))
+                .collect()
+        } else {
+            staged
+                .iter()
+                .map(|att| format!("pending/{}/{}", att.id, att.name))
+                .collect()
+        };
         let echo_text = attachments::with_attachments(&text, &echo_paths);
         for (path, att) in echo_paths.iter().zip(&staged) {
             attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
@@ -4521,133 +4654,87 @@ impl Composer {
         cx.notify();
 
         let steer_cmd = steer && !is_new;
-        let restore_text = text.clone();
+        let restore_text = typed;
         let err_chat_id = chat_id.clone();
         let err_message_id = message_id.clone();
         self.send_task = Some(cx.spawn(async move |this, cx| {
             let result: Result<(), String> = async {
-                // Resolve the working directory: existing chats keep theirs;
-                // new chats run per the checkout plan (t3code env-mode): the
-                // space's folder as-is, an EXISTING worktree of the picked ref
-                // (a plain cwd override — multiple sessions share one
-                // worktree), or a fresh isolated worktree created off the
-                // picked base ref (CreateWorktree on send, targeted at the
-                // space's device; the RPC relay-forwards).
-                let mut cwd = if is_new {
-                    // Project-less sessions run from the host's home dir —
-                    // "~" is expanded on the host when the run spawns.
-                    space_path.clone().or_else(|| Some("~".to_string()))
-                } else {
-                    existing_cwd
-                }
-                .unwrap_or_else(|| ".".to_string());
-                let mut worktree_cwd: Option<String> = None;
-                // The picked ref rides createChat so the session footer names
-                // it from the first frame (it read "Select ref" until the
-                // host's diff reconciler got around to stamping the branch).
-                let mut chat_branch: Option<String> = None;
-                if is_new {
-                    match &plan {
-                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
-                            chat_branch = branch.clone();
-                        }
-                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
-                            cwd = path.clone();
-                            worktree_cwd = Some(path.clone());
-                            chat_branch = Some(branch.clone());
-                        }
-                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
-                            chat_branch = base.clone();
-                            if let (Some(repo_path), Some(base)) = (&space_path, base) {
-                                let mut params = serde_json::json!({
-                                    "repoPath": repo_path,
-                                    "branch": base,
-                                });
-                                if space_remote
-                                    && let Some(object) = params.as_object_mut()
-                                {
-                                    object.insert(
-                                        "targetDeviceId".into(),
-                                        serde_json::Value::String(device_id.clone()),
-                                    );
-                                }
-                                let value = engine
-                                    .client()
-                                    .call(methods::CREATE_WORKTREE, params)
-                                    .await
-                                    .map_err(|e| format!("Worktree failed: {e}"))?;
-                                let worktree: zeron_proto::Worktree = serde_json::from_value(value)
-                                    .map_err(|e| format!("Worktree reply malformed: {e}"))?;
-                                cwd = worktree.path.clone();
-                                worktree_cwd = Some(worktree.path);
-                            }
-                        }
-                    }
-                }
-
-                // Best-effort Mutate createChat with the picked config: the
-                // engine resolves device + cwd from the PROJECT row when one
-                // is picked; project-less chats name the host device outright
-                // (idempotent; the doc host would materialize the chat on
-                // first command anyway, so failures are non-fatal).
-                if is_new {
-                    let mut mutate = serde_json::json!({
-                        "op": "createChat",
-                        "chatId": chat_id,
-                    });
-                    if let Some(object) = mutate.as_object_mut() {
-                        match &space_id {
-                            Some(space_id) => {
-                                object.insert(
-                                    "spaceId".into(),
-                                    serde_json::Value::String(space_id.clone()),
-                                );
-                            }
-                            None => {
-                                object.insert(
-                                    "deviceId".into(),
-                                    serde_json::Value::String(device_id.clone()),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(object) = mutate.as_object_mut() {
-                        if let Some(worktree_cwd) = &worktree_cwd {
-                            object.insert(
-                                "cwd".into(),
-                                serde_json::Value::String(worktree_cwd.clone()),
-                            );
-                        }
-                        if let Some(branch) = &chat_branch {
-                            object.insert(
-                                "branch".into(),
-                                serde_json::Value::String(branch.clone()),
-                            );
-                        }
-                        if let Some(config) = resolved.chat_config()
-                            && let Ok(config) = serde_json::to_value(&config)
-                        {
-                            object.insert("config".into(), config);
-                        }
-                    }
-                    if let Err(err) = engine.client().call(methods::MUTATE, mutate).await {
-                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
-                    }
-                }
-
-                // Stage every attachment on the host device (sequential — the
-                // chunks share one channel), then thread the refs into the
-                // prompt text (`with_attachments`, the persisted transport)
-                // and the paths onto the Run request (inline image blocks).
+                // Attachments stage FIRST — before the chat row or anything
+                // else exists. Staging is chat-independent (keyed by
+                // uploadId), and ordering it first makes a new-chat send
+                // atomic: a staging failure aborts with NOTHING created,
+                // instead of stranding a just-minted empty chat (v0.2.12
+                // "failed to stage → empty transcript" report).
+                //
+                // Queued flow: commit the bytes to the LOCAL engine's uploads
+                // dir (fast, offline-safe) — the queued command carries the
+                // `pending://` refs and the engine delivers the bytes to a
+                // remote host afterwards, retrying until they land. Legacy
+                // flow (old engines): stage on the host device up front,
+                // bounded by a total budget so a degraded link fails the send
+                // loudly instead of grinding through silent per-chunk retries
+                // for minutes.
                 let mut content = text.clone();
                 let mut attachment_paths: Vec<String> = Vec::new();
-                if !staged.is_empty() {
-                    for att in &staged {
+                let mut transfers: Vec<serde_json::Value> = Vec::new();
+                if !staged.is_empty() && queued_flow {
+                    // Local staging is disk-speed; publish progress anyway so
+                    // huge files still narrate.
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
+                        if let Err(err) = attachments::upload_attachment(
+                            &engine,
+                            cx.background_executor(),
+                            None,
+                            upload_id,
+                            att,
+                            Some(progress.clone()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(name = %att.name, error = %err, "local attachment stage failed");
+                            return Err("Couldn't stage the attachment locally.".to_string());
+                        }
+                        transfers.push(serde_json::json!({
+                            "uploadId": upload_id,
+                            "fileName": att.name,
+                        }));
+                    }
+                    // The echo refs ARE the persisted refs — no refresh pass.
+                    attachment_paths = echo_paths.clone();
+                    content = echo_text.clone();
+                } else if !staged.is_empty() {
+                    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let total: u64 = staged.iter().map(|a| a.bytes().len() as u64).sum();
+                    {
+                        let progress = progress.clone();
+                        this.update(cx, |composer, cx| {
+                            composer.state.update(cx, |s, cx| {
+                                s.begin_upload_progress(total, progress);
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+                    }
+                    for (att, upload_id) in staged.iter().zip(&upload_ids) {
                         match attachments::upload_attachment(
                             &engine,
                             cx.background_executor(),
                             host_device_id.as_deref(),
+                            upload_id,
                             att,
+                            Some(progress.clone()),
                         )
                         .await
                         {
@@ -4698,6 +4785,127 @@ impl Composer {
                     .ok();
                 }
 
+                // Resolve the working directory: existing chats keep theirs;
+                // new chats run per the checkout plan (t3code env-mode): the
+                // space's folder as-is, an EXISTING worktree of the picked ref
+                // (a plain cwd override — multiple sessions share one
+                // worktree), or a fresh isolated worktree created off the
+                // picked base ref (CreateWorktree on send, targeted at the
+                // space's device; the RPC relay-forwards).
+                let mut cwd = if is_new {
+                    // Project-less sessions run from the host's home dir —
+                    // "~" is expanded on the host when the run spawns.
+                    space_path.clone().or_else(|| Some("~".to_string()))
+                } else {
+                    existing_cwd
+                }
+                .unwrap_or_else(|| ".".to_string());
+                let mut worktree_cwd: Option<String> = None;
+                // Fresh-worktree plans ride the QUEUED Run command (a
+                // WorktreeSpec the HOST materializes at drain time) instead of
+                // a blocking CreateWorktree relay RPC here: the RPC had no
+                // timeout, so a lost relay frame wedged the send on "Sending…"
+                // forever while the session ran remotely anyway (2026-08-18).
+                let mut run_worktree: Option<zeron_proto::WorktreeSpec> = None;
+                // The picked ref rides createChat so the session footer names
+                // it from the first frame (it read "Select ref" until the
+                // host's diff reconciler got around to stamping the branch).
+                let mut chat_branch: Option<String> = None;
+                if is_new {
+                    match &plan {
+                        crate::pickers::CheckoutPlan::CurrentCheckout { branch } => {
+                            chat_branch = branch.clone();
+                        }
+                        crate::pickers::CheckoutPlan::ReuseWorktree { path, branch } => {
+                            cwd = path.clone();
+                            worktree_cwd = Some(path.clone());
+                            chat_branch = Some(branch.clone());
+                        }
+                        crate::pickers::CheckoutPlan::NewWorktree { base } => {
+                            // Footer shows the base until the host stamps the
+                            // actual zeron/<name> branch post-creation. cwd
+                            // stays the repo folder — an old host that doesn't
+                            // know the spec degrades to the main checkout
+                            // instead of failing the run.
+                            chat_branch = base.clone();
+                            if let Some(repo_path) = &space_path {
+                                // A remote repo's branch list loads over the
+                                // relay — on a bad link it may never arrive
+                                // and the picker has no base. That must NOT
+                                // silently drop the isolation the user picked
+                                // (2026-08-19: "New worktree" ran in the main
+                                // checkout): default to HEAD, which git — any
+                                // host version — resolves as the repo's
+                                // current checkout state.
+                                let base =
+                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
+                                run_worktree = Some(zeron_proto::WorktreeSpec {
+                                    repo_path: repo_path.clone(),
+                                    base,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Best-effort Mutate createChat with the picked config: the
+                // engine resolves device + cwd from the PROJECT row when one
+                // is picked; project-less chats name the host device outright
+                // (idempotent; the doc host would materialize the chat on
+                // first command anyway, so failures are non-fatal).
+                if is_new {
+                    let mut mutate = serde_json::json!({
+                        "op": "createChat",
+                        "chatId": chat_id,
+                    });
+                    if let Some(object) = mutate.as_object_mut() {
+                        match &space_id {
+                            Some(space_id) => {
+                                object.insert(
+                                    "spaceId".into(),
+                                    serde_json::Value::String(space_id.clone()),
+                                );
+                            }
+                            None => {
+                                object.insert(
+                                    "deviceId".into(),
+                                    serde_json::Value::String(device_id.clone()),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(object) = mutate.as_object_mut() {
+                        if let Some(worktree_cwd) = &worktree_cwd {
+                            object.insert(
+                                "cwd".into(),
+                                serde_json::Value::String(worktree_cwd.clone()),
+                            );
+                        }
+                        if let Some(branch) = &chat_branch {
+                            object.insert(
+                                "branch".into(),
+                                serde_json::Value::String(branch.clone()),
+                            );
+                        }
+                        if let Some(config) = resolved.chat_config()
+                            && let Ok(config) = serde_json::to_value(&config)
+                        {
+                            object.insert("config".into(), config);
+                        }
+                    }
+                    if let Err(err) = attachments::call_with_timeout(
+                        &engine,
+                        cx.background_executor(),
+                        methods::MUTATE,
+                        mutate,
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err, "CreateChat mutate unavailable; doc host will materialize the chat");
+                    }
+                }
+
                 let command = if steer_cmd {
                     SessionCommandPayload::Steer {
                         prompt: content.clone(),
@@ -4716,43 +4924,108 @@ impl Composer {
                             auto_approve: false,
                             resume: None,
                             attachments: attachment_paths,
+                            worktree: run_worktree,
                         },
                         message_id: message_id.clone(),
                     }
                 };
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;
-                let params = serde_json::json!({ "chatId": chat_id, "command": command });
-                engine
-                    .client()
-                    .call(methods::QUEUE_COMMAND, params)
-                    .await
-                    .map_err(|e| format!("Send failed: {e}"))?;
+                let mut params = serde_json::json!({ "chatId": chat_id, "command": command });
+                if !transfers.is_empty() {
+                    params["transfers"] = serde_json::Value::Array(transfers);
+                }
+                // Deadline-bounded: QueueCommand is a local write (in-process
+                // or IPC), but a deferred engine handle can park forever —
+                // the send task must never grind silently (2026-08-19).
+                attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::QUEUE_COMMAND,
+                    params,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                .map_err(|e| format!("Send failed: {e}"))?;
                 Ok(())
             }
             .await;
+            if result.is_err() && is_new {
+                // A failed new-chat send must not strand a just-minted empty
+                // chat in the sidebar (v0.2.12 "empty transcript" report).
+                // Staging now runs before CreateChat, so usually nothing was
+                // created — but a post-mutate failure (QueueCommand) still
+                // leaves a row. Best-effort delete; a no-op if the chat was
+                // never materialized.
+                let _ = attachments::call_with_timeout(
+                    &engine,
+                    cx.background_executor(),
+                    methods::MUTATE,
+                    serde_json::json!({ "op": "deleteChat", "chatId": err_chat_id }),
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+            }
             this.update(cx, |composer, cx| {
                 composer.sending = false;
+                composer
+                    .state
+                    .update(cx, |s, _| s.end_upload_progress());
                 if let Err(message) = result {
                     // Failure: red banner, echo removed, prompt back in the
-                    // draft, staged files back in the chat's stash.
+                    // draft, staged files back in the stash. A failed NEW
+                    // chat restores to the CANVAS (key "") and navigates back
+                    // there — the minted chat is gone (deleted above), so
+                    // nothing may restore under its key.
+                    let restore_key = if is_new {
+                        String::new()
+                    } else {
+                        err_chat_id.clone()
+                    };
                     composer.failure = Some(message.into());
+                    composer.failure_key = Some(restore_key.clone());
                     composer.state.update(cx, |s, cx| {
                         s.remove_echo(&err_chat_id, &err_message_id);
                         s.end_pending_send(&err_chat_id, &err_message_id);
+                        if is_new && s.selected_chat.as_deref() == Some(err_chat_id.as_str()) {
+                            // Back to the canvas; the navigation draft-swap
+                            // loads the restored draft below.
+                            s.select_chat(None, cx);
+                        }
+                        for comment in &comments {
+                            s.add_diff_comment(&restore_key, comment.clone());
+                        }
                         cx.notify();
                     });
-                    composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    if is_new && composer.current_key != restore_key {
+                        // A re-key swap to the canvas is pending (the
+                        // select_chat(None) above); it loads this draft into
+                        // the input on flush — setting the input directly
+                        // here would be clobbered by that same swap.
+                        composer.drafts.insert(restore_key.clone(), restore_text.clone());
+                    } else {
+                        // Already keyed to the restore target (either an
+                        // existing chat, or the deleted row's watch event
+                        // re-keyed to the canvas before this handler ran —
+                        // no further swap will fire). Set the input directly.
+                        composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
+                    }
                     if !staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
-                        // while the send was in flight survive the hand-back.
-                        let slot = composer.attachments.entry(err_chat_id.clone()).or_default();
+                        // while the send was in flight survive the hand-back —
+                        // draining the minted chat's slot too when the restore
+                        // target is the canvas.
                         let mut merged = staged.clone();
-                        merged.extend(
-                            slot.drain(..)
-                                .filter(|e| !staged.iter().any(|f| f.id == e.id)),
-                        );
-                        *slot = merged;
+                        for key in [err_chat_id.clone(), restore_key.clone()] {
+                            if let Some(slot) = composer.attachments.get_mut(&key) {
+                                let fresh: Vec<_> = slot
+                                    .drain(..)
+                                    .filter(|e| !merged.iter().any(|f| f.id == e.id))
+                                    .collect();
+                                merged.extend(fresh);
+                            }
+                        }
+                        composer.attachments.insert(restore_key, merged);
                     }
                 }
                 cx.notify();
@@ -4768,15 +5041,19 @@ impl Composer {
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return;
         };
+        let failure_chat = chat_id.clone();
         let params = serde_json::json!({
             "chatId": chat_id,
             "command": { "kind": "interrupt" },
         });
-        self.send_task = Some(cx.spawn(async move |this, cx| {
+        // `action_task`, NOT `send_task`: a Stop pressed while a send is in
+        // flight must not drop the send future on the floor.
+        self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.failure = Some(format!("Stop failed: {err}").into());
+                    composer.failure_key = Some(failure_chat);
                     cx.notify();
                 })
                 .ok();
@@ -4864,15 +5141,18 @@ impl Composer {
             request_id: request_id.clone(),
             answers,
         };
+        let failure_chat = chat_id.clone();
         let params = match serde_json::to_value(&command) {
             Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
             Err(_) => return,
         };
-        self.send_task = Some(cx.spawn(async move |this, cx| {
+        // `action_task`, NOT `send_task` — see `interrupt`.
+        self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
                     composer.failure = Some(format!("Answer failed: {err}").into());
+                    composer.failure_key = Some(failure_chat);
                     // The answer never left this device — put the panel back.
                     composer.answered_requests.remove(&request_id);
                     cx.notify();
@@ -5029,7 +5309,7 @@ impl Composer {
             .border_1()
             .border_color(theme.border)
             .bg(theme.input_glass_bg())
-            .when(!theme.is_glass(), |el| el.shadow_lg())
+            .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
             .child(
@@ -5313,7 +5593,43 @@ impl Render for Composer {
         );
         let expanded = self.expanded_mode;
 
-        let failure = self.failure.clone();
+        // Chat-scoped failures render only under their own chat; a global
+        // failure (no key) renders everywhere.
+        let failure = self.failure.clone().filter(|_| {
+            self.failure_key
+                .as_ref()
+                .is_none_or(|key| *key == self.current_key)
+        });
+        // Composer honesty: when the target's delivery path is degraded, say
+        // UP FRONT that a send will queue (a durable local write delivered on
+        // reconnect) instead of letting the button imply instant delivery.
+        let queue_notice: Option<(SharedString, bool)> = {
+            use zeron_proto::ConnectivityState as S;
+            let state = self.state.read(cx);
+            let degraded = match state.selected_chat.as_deref() {
+                Some(id) => state.chat_delivery_degraded(id),
+                None => {
+                    // New-chat canvas: judge by the picked target device.
+                    let remote_target = state
+                        .effective_device_id()
+                        .is_some_and(|id| state.local_device_id.as_deref() != Some(id.as_str()));
+                    remote_target
+                        && (matches!(state.connectivity.state, S::Offline | S::Reconnecting)
+                            || state
+                                .effective_device_id()
+                                .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
+                }
+            };
+            let offline = state.connectivity.state == S::Offline;
+            degraded.then(|| {
+                let text: SharedString = if offline {
+                    "Offline — messages will send when you're back online.".into()
+                } else {
+                    "Messages will send once the connection recovers.".into()
+                };
+                (text, offline)
+            })
+        };
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
         let container = div()
             .w_full()
@@ -5369,6 +5685,7 @@ impl Render for Composer {
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.failure = None;
+                            this.failure_key = None;
                             cx.notify();
                         }))
                         .child(
@@ -5379,6 +5696,32 @@ impl Render for Composer {
                         )
                         .child(div().min_w_0().child(message)),
                 )
+            })
+            .when_some(queue_notice, |el, (notice, offline)| {
+                // Not a warning box (v0.2.12 feedback: the amber Notice read
+                // as an error and flashed on every blip — pre-grace). One
+                // quiet caption line, amber dot only for hard offline; it
+                // clears itself the moment the path heals.
+                let dot = if offline {
+                    theme.warning
+                } else {
+                    theme.text_faint
+                };
+                el.child(crate::motion::fade_in(
+                    "composer-queue-notice",
+                    div()
+                        .id("composer-queue-notice")
+                        .mx(px(8.0))
+                        .mt(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_faint)
+                        .child(div().size(px(5.0)).rounded_full().bg(dot))
+                        .child(div().min_w_0().truncate().child(notice)),
+                ))
             });
 
         // Turn-boundary steering notice: for agents without mid-turn
@@ -5419,12 +5762,13 @@ impl Render for Composer {
         let staged_count = self.staged().len();
         let strip_width_hint = if last_width > 0.0 { last_width } else { 720.0 };
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
+        let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if expanded {
             composer_total_height(content_height)
         } else {
             COMPACT_TOTAL_HEIGHT
         };
-        let target_height = base_height + strip_h;
+        let target_height = base_height + strip_h + comment_strip_h;
         let (pill_height, morph_t, morphing) = match self.flip_morph {
             Some(m) if !m.done(now_ms) => {
                 (m.height(target_height, now_ms), m.progress(now_ms), true)
@@ -5470,6 +5814,7 @@ impl Render for Composer {
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
+        let comments_chip = self.render_comments_chip(&theme, cx);
 
         // The pill chrome (zeron composer.tsx): `rounded-[26px] border
         // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
@@ -5484,7 +5829,7 @@ impl Render for Composer {
             .bg(pill_bg)
             .border_1()
             .border_color(theme.border)
-            .when(!theme.is_glass(), |el| el.shadow_lg());
+            .when(!theme.is_frost(), |el| el.shadow_lg());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -5507,6 +5852,7 @@ impl Render for Composer {
                 .relative()
                 .flex()
                 .flex_col()
+                .children(comments_chip)
                 .children(strip)
                 .child(
                     div()
@@ -5559,6 +5905,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .justify_end()
+                .children(comments_chip)
                 .children(strip)
                 .child(
                     div()
@@ -6226,6 +6573,30 @@ mod tests {
         assert_eq!(m.progress(180.0), 1.0);
         let mid = m.progress(90.0);
         assert!(mid > 0.0 && mid < 1.0);
+    }
+
+    #[test]
+    fn staged_comments_alone_are_content() {
+        assert!(!composer_has_content("   ", 0, 0));
+        assert!(composer_has_content("hi", 0, 0));
+        assert!(composer_has_content("", 1, 0));
+        assert!(composer_has_content("", 0, 1));
+    }
+
+    #[test]
+    fn a_comment_only_stage_steers_a_live_run_instead_of_stopping_it() {
+        let live = true;
+        let comment_only = composer_has_content("", 0, 2);
+        assert_eq!(
+            send_button_mode(live, comment_only),
+            SendButtonMode::Steer,
+            "comment-only submit must steer, not interrupt the run"
+        );
+        // Nothing staged at all is still the stop square.
+        assert_eq!(
+            send_button_mode(live, composer_has_content("", 0, 0)),
+            SendButtonMode::Stop
+        );
     }
 
     #[test]
