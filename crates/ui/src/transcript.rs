@@ -2840,9 +2840,37 @@ impl Transcript {
     /// — user request), so it reads as part of the streaming reply and
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
+    /// The failed-send retry (trailer affordance): re-kick every delivery
+    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
+    /// and restart the grace clock so the trailer returns to Sending/Queued
+    /// while the retry runs.
+    fn retry_send(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let engine = self.state.read(cx).engine().cloned();
+        self.state.update(cx, |s, cx| {
+            s.retry_pending_send(&chat_id, chrono::Utc::now());
+            cx.notify();
+        });
+        if let Some(engine) = engine {
+            cx.spawn(async move |_, _| {
+                let params = serde_json::json!({ "chatId": chat_id });
+                if let Err(err) = engine
+                    .client()
+                    .call(zeron_rpc::methods::RETRY_DELIVERY, params)
+                    .await
+                {
+                    tracing::warn!(error = %err, "delivery retry RPC failed");
+                }
+            })
+            .detach();
+        }
+    }
+
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
+        let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
             // doc itself instead: the sink's assistant entry streams until
@@ -2860,32 +2888,32 @@ impl Transcript {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, elapsed, flavour_seed(doc_id))
+            (false, false, elapsed, flavour_seed(doc_id))
         } else {
             let chat_id = self.chat_id.clone()?;
-            let (sending, elapsed) = {
+            // Failed-send state first: past the grace window the trailer IS
+            // the retry affordance, whatever the indicator fell back to.
+            if self.state.read(cx).send_undelivered(&chat_id, now) {
+                let theme = Theme::of(cx).clone();
+                return Some(
+                    div()
+                        .id("undelivered-retry")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .pt(px(10.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                        .child(SharedString::from("Not delivered — click to retry"))
+                        .into_any_element(),
+                );
+            }
+            let (sending, queued, elapsed) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                    // Past the pending-send TTL with no ack, the Working
-                    // overlay has lapsed but the queued command is still
-                    // undelivered (edge link down). Silence here read as a
-                    // hang (2026-08-19) — say what's actually happening.
-                    // Static line, no spinner: nothing is progressing; the
-                    // ack notify clears it.
-                    if state.send_queued_unacked(&chat_id, now) {
-                        let theme = Theme::of(cx).clone();
-                        return Some(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .pt(px(10.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from("Queued — waiting for connection…"))
-                                .into_any_element(),
-                        );
-                    }
                     return None;
                 }
                 // During the send→turn window the session row's `started_at`
@@ -2897,14 +2925,21 @@ impl Transcript {
                 let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
                 let sending =
                     sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
+                // Degraded delivery path: the send is a durable local write
+                // waiting on connectivity — say so instead of faking
+                // progress. (The overlay holds while degraded, so this line
+                // owns the surface until the ack or the failed state.)
+                let queued = sending && state.chat_delivery_degraded(&chat_id);
                 let elapsed = turn_started
                     .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                     .unwrap_or(0);
-                (sending, elapsed)
+                (sending, queued, elapsed)
             };
-            (sending, elapsed, flavour_seed(&chat_id))
+            (sending, queued, elapsed, flavour_seed(&chat_id))
         };
-        let word = if sending {
+        let word = if queued {
+            "Queued — will send automatically"
+        } else if sending {
             "Sending"
         } else {
             flavour_word(seed, elapsed_secs)
@@ -2928,8 +2963,16 @@ impl Transcript {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{word}…"))),
+                        .text_color(if queued {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(SharedString::from(if queued {
+                            word.to_string()
+                        } else {
+                            format!("{word}…")
+                        })),
                 )
                 .when(!sending, |el| {
                     el.child(
