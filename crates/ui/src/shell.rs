@@ -3723,66 +3723,46 @@ impl Shell {
     /// section (folder + device rows, add-space), the global Active sessions
     /// list, the notice strip, and the UserMenu (§1.6).
     /// The global connection pill. `None` while healthy (`Connected`) or on
-    /// local profiles (`Disabled`). Degraded states render an amber strip:
-    /// Offline (OS says no path) or Reconnecting with a live retry countdown,
-    /// keeping the last failure visible through the next attempt — the pill
-    /// never flickers back to a bare "connecting…" mid-outage.
+    /// local profiles (`Disabled`) — and the engine's degrade grace means it
+    /// only exists during REAL outages, never join/wake blips. Quiet by
+    /// design (v0.2.12 feedback): one soft-frost line, a status dot (amber
+    /// only when the OS says offline), no failure dump — the transport error
+    /// belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         use zeron_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
-        let (label, detail): (SharedString, Option<SharedString>) = match conn.state {
+        let (label, dot): (SharedString, gpui::Hsla) = match conn.state {
             S::Disabled | S::Connected => return None,
-            S::Offline => (
-                "Offline — sends will queue".into(),
-                conn.last_failure.clone().map(SharedString::from),
-            ),
-            S::Reconnecting => {
-                let now_ms = Utc::now().timestamp_millis();
-                let label: SharedString = if conn.retry_at_ms > now_ms {
-                    let secs = (conn.retry_at_ms - now_ms + 999) / 1000;
-                    format!("Reconnecting — retrying in {secs}s").into()
-                } else {
-                    "Reconnecting…".into()
-                };
-                (label, conn.last_failure.clone().map(SharedString::from))
-            }
+            S::Offline => ("Offline — sends are saved".into(), theme.warning),
+            S::Reconnecting => ("Reconnecting…".into(), theme.text_faint),
         };
         Some(
-            div()
-                .id("connection-pill")
-                .mx(px(Theme::SPACE_SM))
-                .mb(px(Theme::SPACE_SM))
-                .px(px(Theme::SPACE_SM))
-                .py(px(4.0))
-                .rounded(px(Theme::CONTROL_RADIUS))
-                .border_1()
-                .border_color(theme.warning)
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.warning)
-                                .child(label),
-                        )
-                        .when_some(detail, |el, detail| {
-                            el.child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.text_faint)
-                                    .truncate()
-                                    .child(detail),
-                            )
-                        }),
-                )
-                .into_any_element(),
+            crate::motion::fade_in(
+                "connection-pill",
+                div()
+                    .id("connection-pill")
+                    .mx(px(Theme::SPACE_SM))
+                    .mb(px(Theme::SPACE_SM))
+                    .px(px(Theme::SPACE_SM))
+                    .py(px(4.0))
+                    .rounded_full()
+                    .bg(theme.surface_raised)
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().size(px(5.0)).rounded_full().bg(dot))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(label),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 

@@ -5551,7 +5551,7 @@ impl Render for Composer {
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
-        let queue_notice: Option<SharedString> = {
+        let queue_notice: Option<(SharedString, bool)> = {
             use zeron_proto::ConnectivityState as S;
             let state = self.state.read(cx);
             let degraded = match state.selected_chat.as_deref() {
@@ -5568,12 +5568,14 @@ impl Render for Composer {
                                 .is_some_and(|id| !state.device_online(&id, chrono::Utc::now())))
                 }
             };
+            let offline = state.connectivity.state == S::Offline;
             degraded.then(|| {
-                if state.connectivity.state == S::Offline {
-                    "Offline — messages will queue and send automatically.".into()
+                let text: SharedString = if offline {
+                    "Offline — messages will send when you're back online.".into()
                 } else {
-                    "Connection degraded — messages will queue and send automatically.".into()
-                }
+                    "Messages will send once the connection recovers.".into()
+                };
+                (text, offline)
             })
         };
         // Centered composer column (zeron `mx-auto w-full max-w-3xl`).
@@ -5643,30 +5645,31 @@ impl Render for Composer {
                         .child(div().min_w_0().child(message)),
                 )
             })
-            .when_some(queue_notice, |el, notice| {
-                // Same Notice shape as above, amber, not dismissable — it
+            .when_some(queue_notice, |el, (notice, offline)| {
+                // Not a warning box (v0.2.12 feedback: the amber Notice read
+                // as an error and flashed on every blip — pre-grace). One
+                // quiet caption line, amber dot only for hard offline; it
                 // clears itself the moment the path heals.
-                let amber = theme.warning;
-                let amber_200 = theme.warning_muted;
-                el.child(
+                let dot = if offline {
+                    theme.warning
+                } else {
+                    theme.text_faint
+                };
+                el.child(crate::motion::fade_in(
+                    "composer-queue-notice",
                     div()
                         .id("composer-queue-notice")
-                        .mx(px(4.0))
+                        .mx(px(8.0))
                         .mt(px(6.0))
                         .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(amber.opacity(0.16))
-                        .bg(amber.opacity(0.05))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(amber_200.opacity(0.9))
-                        .child(div().min_w_0().child(notice)),
-                )
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(theme.text_faint)
+                        .child(div().size(px(5.0)).rounded_full().bg(dot))
+                        .child(div().min_w_0().truncate().child(notice)),
+                ))
             });
 
         // Turn-boundary steering notice: for agents without mid-turn

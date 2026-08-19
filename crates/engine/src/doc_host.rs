@@ -240,6 +240,7 @@ struct DocHostInner {
     /// publishes the edge posture on change (see `watch_connectivity`).
     connectivity: OnceLock<watch::Sender<zeron_proto::Connectivity>>,
     connectivity_started: AtomicBool,
+    connectivity_grace: Mutex<DegradeGrace>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -250,6 +251,64 @@ struct DocHostInner {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long raw degradation must persist before connectivity reports it.
+/// Room joins, idle-link wakes, and navigation dials resolve well under a
+/// second on healthy networks; real outages outlive this comfortably. Recovery
+/// is never delayed.
+const DEGRADE_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// One tracked degradation source in [`DegradeGrace`].
+enum GraceKey<'a> {
+    OsPath,
+    Registry,
+    Chat(&'a str),
+}
+
+/// Show-slow / hide-fast hysteresis over raw connectivity signals. Pure over
+/// injected `Instant`s so the grace window is unit-testable.
+#[derive(Default)]
+struct DegradeGrace {
+    os_path: Option<std::time::Instant>,
+    registry: Option<std::time::Instant>,
+    chats: HashMap<String, std::time::Instant>,
+}
+
+impl DegradeGrace {
+    /// Feed one raw sample; returns whether to REPORT the source as degraded.
+    /// Healthy clears the timer instantly; degraded reports only once it has
+    /// persisted for [`DEGRADE_GRACE`].
+    fn degraded(&mut self, key: GraceKey, raw: bool, now: std::time::Instant) -> bool {
+        let slot: &mut Option<std::time::Instant> = match key {
+            GraceKey::OsPath => &mut self.os_path,
+            GraceKey::Registry => &mut self.registry,
+            GraceKey::Chat(id) => {
+                if raw && !self.chats.contains_key(id) {
+                    self.chats.insert(id.to_string(), now);
+                }
+                match self.chats.get_mut(id) {
+                    Some(_) if !raw => {
+                        self.chats.remove(id);
+                        return false;
+                    }
+                    Some(since) => return now.duration_since(*since) >= DEGRADE_GRACE,
+                    None => return false,
+                }
+            }
+        };
+        if !raw {
+            *slot = None;
+            return false;
+        }
+        let since = *slot.get_or_insert(now);
+        now.duration_since(since) >= DEGRADE_GRACE
+    }
+
+    /// Drop timers for chats that no longer have open docs.
+    fn retain_chats(&mut self, keep: impl Fn(&str) -> bool) {
+        self.chats.retain(|id, _| keep(id));
+    }
 }
 
 #[derive(Clone)]
@@ -453,6 +512,7 @@ impl DocHost {
                 uploads: OnceLock::new(),
                 connectivity: OnceLock::new(),
                 connectivity_started: AtomicBool::new(false),
+                connectivity_grace: Mutex::new(DegradeGrace::default()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
@@ -1845,6 +1905,13 @@ impl DocHost {
 
     /// One snapshot of the edge posture: OS path status beats registry-room
     /// state beats per-chat rooms. `Disabled` (the default) = local profile.
+    ///
+    /// Degradation is HYSTERETIC (v0.2.12 feedback): a room mid-join, an
+    /// idle link waking for a send, or a navigation-triggered dial all read
+    /// "disconnected" for a few hundred ms on a healthy network — surfacing
+    /// those flashed amber warnings and "Queued" badges at every chat
+    /// switch. Raw degradation must persist [`DEGRADE_GRACE`] before it is
+    /// reported; recovery reports instantly.
     fn compute_connectivity(&self) -> zeron_proto::Connectivity {
         use zeron_proto::{ChatConnectivity, Connectivity, ConnectivityState};
         let workspace = self.workspace();
@@ -1853,14 +1920,18 @@ impl DocHost {
         if !edge_expected {
             return Connectivity::default();
         }
-        let chats = self
-            .sync_statuses()
+        let now = std::time::Instant::now();
+        let mut grace = lock(&self.inner.connectivity_grace);
+        let statuses = self.sync_statuses();
+        grace.retain_chats(|id| statuses.iter().any(|(chat_id, _)| chat_id == id));
+        let chats = statuses
             .into_iter()
             .map(|(chat_id, stats)| {
                 let stats = stats.unwrap_or_default();
+                let connected = !grace.degraded(GraceKey::Chat(&chat_id), !stats.connected, now);
                 ChatConnectivity {
                     chat_id,
-                    connected: stats.connected,
+                    connected,
                     pending_pushes: stats.pending_pushes,
                 }
             })
@@ -1870,13 +1941,19 @@ impl DocHost {
             .as_ref()
             .and_then(|w| w.sync_status())
             .is_some_and(|s| s.connected);
-        let (state, retry_at_ms, last_failure) = if zeron_sync::wake::path_is_offline() {
+        let path_offline = grace.degraded(
+            GraceKey::OsPath,
+            zeron_sync::wake::path_is_offline(),
+            now,
+        );
+        let registry_down = grace.degraded(GraceKey::Registry, !registry_connected, now);
+        let (state, retry_at_ms, last_failure) = if path_offline {
             (
                 ConnectivityState::Offline,
                 0,
                 reconnect.and_then(|r| r.last_failure),
             )
-        } else if registry_connected {
+        } else if !registry_down {
             (ConnectivityState::Connected, 0, None)
         } else {
             let reconnect = reconnect.unwrap_or_default();
@@ -3160,6 +3237,49 @@ fn encode_part_segment(part_id: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod degrade_grace_tests {
+    use super::{DEGRADE_GRACE, DegradeGrace, GraceKey};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn blips_shorter_than_the_grace_never_report() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        // A 300ms room join: degraded at t0, healthy again shortly after.
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0));
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0 + Duration::from_millis(300)));
+        assert!(!g.degraded(GraceKey::Chat("c1"), false, t0 + Duration::from_millis(600)));
+        // The recovery cleared the timer — a fresh blip starts from zero.
+        assert!(!g.degraded(GraceKey::Chat("c1"), true, t0 + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn persistent_degradation_reports_after_the_grace_and_clears_instantly() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        assert!(!g.degraded(GraceKey::Registry, true, t0));
+        assert!(!g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE / 2));
+        assert!(g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE));
+        assert!(g.degraded(GraceKey::Registry, true, t0 + DEGRADE_GRACE * 3));
+        // Hide-fast: one healthy sample reports Connected immediately.
+        assert!(!g.degraded(GraceKey::Registry, false, t0 + DEGRADE_GRACE * 4));
+    }
+
+    #[test]
+    fn sources_are_independent_and_closed_chats_are_dropped() {
+        let mut g = DegradeGrace::default();
+        let t0 = Instant::now();
+        assert!(!g.degraded(GraceKey::Chat("gone"), true, t0));
+        assert!(!g.degraded(GraceKey::OsPath, true, t0));
+        // The chat's doc closes; its timer must not leak.
+        g.retain_chats(|id| id != "gone");
+        assert!(g.chats.is_empty());
+        // OsPath kept its own timer through the retain.
+        assert!(g.degraded(GraceKey::OsPath, true, t0 + DEGRADE_GRACE));
+    }
 }
 
 #[cfg(test)]
