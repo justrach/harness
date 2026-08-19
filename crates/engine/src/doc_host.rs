@@ -88,6 +88,19 @@ enum TransferError {
     Permanent(String),
 }
 
+/// Peer-relay delivery fallback pacing (`spawn_command_delivery`): the grace
+/// the normal rows→edge path gets before the relay road opens, the poll while
+/// waiting, the relay retry curve, its per-call deadline, and the give-up cap
+/// (the command stays durably queued in the doc regardless).
+const ROWS_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+const ROWS_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+const RELAY_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(5);
+const RELAY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+const RELAY_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const RELAY_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Hosts below this stamped engine version don't serve `RelayCommand`.
+const RELAY_MIN_VERSION: (u64, u64, u64) = (0, 2, 12);
+
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
 /// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
 /// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
@@ -1936,7 +1949,7 @@ impl DocHost {
             payload,
             SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
         );
-        handle.doc.queue_command(&SessionCommandEntry {
+        let entry = SessionCommandEntry {
             id: id.clone(),
             payload,
             issued_by: self.inner.config.device_id.clone(),
@@ -1945,7 +1958,8 @@ impl DocHost {
             expires_at: Some(now + COMMAND_DEFAULT_TTL_MS),
             status: SessionCommandStatus::Pending,
             resolution: None,
-        })?;
+        };
+        handle.doc.queue_command(&entry)?;
         // Sending a message revives an archived chat: the user is acting in it
         // again, so the LWW row flips back to active on every device. Best-
         // effort — the command itself is durable regardless.
@@ -1966,7 +1980,7 @@ impl DocHost {
         // the command is durable in the doc either way (a host that opens the chat
         // for any other reason still executes it).
         self.nudge_remote_host(chat_id);
-        self.spawn_attachment_transfers(chat_id, transfers);
+        self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
     }
 
@@ -2035,56 +2049,68 @@ impl DocHost {
         (host_device != self.inner.config.device_id).then_some(host_device)
     }
 
-    /// Push queued attachment bytes to the chat's host device, retrying on an
-    /// event-driven backoff (online bus / system wake) until they land or the
-    /// wait cap passes — the drain's own cap then rejects the command loudly
-    /// instead of running without its images. No-op for locally-hosted chats
-    /// (the bytes are already in this device's uploads dir).
-    fn spawn_attachment_transfers(
+    /// Durable-delivery escort for one queued command aimed at a REMOTE host:
+    ///
+    /// 1. push any queued attachment bytes over the peer link (retry until
+    ///    they land — the relayed command must never outrun its bytes);
+    /// 2. give the normal path (chat2 rows → edge → host's room) a short
+    ///    grace to ack;
+    /// 3. rows still not at the edge but the peer link alive → relay-forward
+    ///    the entry itself ([`zeron_rpc::methods::RELAY_COMMAND`]). The
+    ///    host's processed ledger claims the client-minted id, so the doc
+    ///    row arriving later dedupes to a no-op — exactly-once by
+    ///    construction (the 2026-08-18 03:45 incident shape: nudges flowed,
+    ///    rows didn't; there was no second road for the command).
+    ///
+    /// Stops the moment any path lands. No-op for locally-hosted chats.
+    fn spawn_command_delivery(
         &self,
         chat_id: &str,
+        entry: SessionCommandEntry,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) {
-        if transfers.is_empty() {
-            return;
-        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return; // bare sync callers (unit tests) skip rather than panic
         };
         let host = self.clone();
         let chat = chat_id.to_string();
         self.spawn_worker_on(&runtime, async move {
+            let Some(target) = host.remote_host_for(&chat) else {
+                return; // local host (or no row yet claimed remotely)
+            };
+            if !transfers.is_empty() && !host.deliver_attachments(&chat, &transfers).await {
+                return; // gave up; the drain's wait cap surfaces the failure
+            }
             let mut wake = zeron_sync::wake::subscribe();
             let mut online = zeron_sync::wake::subscribe_online();
-            let mut backoff = TRANSFER_BACKOFF_BASE;
-            let deadline = tokio::time::Instant::now() + ATTACHMENT_WAIT_MAX;
+            let give_up = tokio::time::Instant::now() + RELAY_GIVE_UP;
+            let grace_end = tokio::time::Instant::now() + ROWS_GRACE;
+            while tokio::time::Instant::now() < grace_end {
+                if host.rows_flushed(&chat) {
+                    return; // rows on the edge — the normal path has it
+                }
+                tokio::time::sleep(ROWS_POLL).await;
+            }
+            let mut backoff = RELAY_BACKOFF_BASE;
             loop {
-                let Some(target) = host.remote_host_for(&chat) else {
-                    return; // local host (or no row yet claimed remotely)
-                };
-                match host.push_attachments(&target, &transfers).await {
-                    Ok(()) => {
-                        tracing::info!(chat = %chat, device = %target,
-                            count = transfers.len(), "queued attachments delivered");
-                        // The bytes beat the drain's next look — kick it via
-                        // the durable nudge (the host's UploadCommit already
-                        // kicked its local drains too).
-                        host.nudge_remote_host(&chat);
+                if host.rows_flushed(&chat) {
+                    return; // the normal path won while we were retrying
+                }
+                match host.relay_command(&target, &chat, &entry).await {
+                    Ok(outcome) => {
+                        tracing::info!(chat = %chat, device = %target, command = %entry.id,
+                            outcome, "command delivered via peer relay");
                         return;
                     }
-                    Err(TransferError::Permanent(err)) => {
-                        tracing::warn!(chat = %chat, device = %target, error = %err,
-                            "queued attachment transfer failed permanently");
-                        return;
-                    }
-                    Err(TransferError::Transient(err)) => {
+                    Err(err) => {
                         tracing::warn!(chat = %chat, device = %target, error = %err,
                             backoff_ms = backoff.as_millis() as u64,
-                            "queued attachment transfer retrying");
+                            "peer-relay delivery retrying");
                     }
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    tracing::warn!(chat = %chat, "queued attachment transfer gave up (wait cap)");
+                if tokio::time::Instant::now() >= give_up {
+                    tracing::warn!(chat = %chat, command = %entry.id,
+                        "peer-relay delivery gave up; command remains queued in the doc");
                     return;
                 }
                 while wake.try_recv().is_ok() {}
@@ -2094,9 +2120,177 @@ impl DocHost {
                     _ = wake.recv() => {}
                     _ = online.recv() => {}
                 }
-                backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
+                backoff = (backoff * 2).min(RELAY_BACKOFF_CAP);
             }
         });
+    }
+
+    /// Step 1 of the escort: push staged bytes until they land (event-driven
+    /// backoff), `true` on success. Re-resolves the host each attempt (a
+    /// claim can move the chat).
+    async fn deliver_attachments(
+        &self,
+        chat: &str,
+        transfers: &[crate::uploads::AttachmentTransfer],
+    ) -> bool {
+        let mut wake = zeron_sync::wake::subscribe();
+        let mut online = zeron_sync::wake::subscribe_online();
+        let mut backoff = TRANSFER_BACKOFF_BASE;
+        let deadline = tokio::time::Instant::now() + ATTACHMENT_WAIT_MAX;
+        loop {
+            let Some(target) = self.remote_host_for(chat) else {
+                return true; // became locally hosted: bytes already here
+            };
+            match self.push_attachments(&target, transfers).await {
+                Ok(()) => {
+                    tracing::info!(chat = %chat, device = %target,
+                        count = transfers.len(), "queued attachments delivered");
+                    // The bytes beat the drain's next look — kick it via the
+                    // durable nudge (the host's UploadCommit already kicked
+                    // its local drains too).
+                    self.nudge_remote_host(chat);
+                    return true;
+                }
+                Err(TransferError::Permanent(err)) => {
+                    tracing::warn!(chat = %chat, device = %target, error = %err,
+                        "queued attachment transfer failed permanently");
+                    return false;
+                }
+                Err(TransferError::Transient(err)) => {
+                    tracing::warn!(chat = %chat, device = %target, error = %err,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "queued attachment transfer retrying");
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(chat = %chat, "queued attachment transfer gave up (wait cap)");
+                return false;
+            }
+            while wake.try_recv().is_ok() {}
+            while online.try_recv().is_ok() {}
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = wake.recv() => {}
+                _ = online.recv() => {}
+            }
+            backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
+        }
+    }
+
+    /// Every local chat2 batch acked while connected — our rows are ON the
+    /// edge, and the host's own room connection will deliver them. (A room
+    /// that hasn't joined keeps pre-join updates in a local buffer, so
+    /// `connected` is load-bearing here, not just the empty queue.)
+    fn rows_flushed(&self, chat_id: &str) -> bool {
+        let handle = lock(&self.inner.handles).get(chat_id).cloned();
+        handle
+            .and_then(|h| lock(&h.chat2).as_ref().map(|c| c.stats()))
+            .is_some_and(|s| s.connected && s.pending_pushes == 0)
+    }
+
+    /// One relay attempt: version-gate the host, then forward the entry over
+    /// the peer link. Timeouts mark the link suspect (drop + redial next
+    /// attempt); a host-side refusal is permanent for THIS attempt but the
+    /// escort keeps retrying until the give-up cap (the refusal may be
+    /// "attachments not landed yet").
+    async fn relay_command(
+        &self,
+        target: &str,
+        chat_id: &str,
+        entry: &SessionCommandEntry,
+    ) -> Result<&'static str, String> {
+        let supported = self
+            .workspace()
+            .and_then(|ws| ws.read_devices().ok())
+            .into_iter()
+            .flatten()
+            .find(|d| d.id == target)
+            .and_then(|d| d.version.as_deref().and_then(zeron_proto::version_triple))
+            .is_some_and(|v| v >= RELAY_MIN_VERSION);
+        if !supported {
+            return Err("host does not support relay delivery (version gate)".into());
+        }
+        let links = self
+            .inner
+            .links
+            .get()
+            .ok_or_else(|| "peer links not wired".to_string())?;
+        let client = links
+            .client(target)
+            .await
+            .map_err(|e| format!("peer link: {e}"))?;
+        let params = serde_json::json!({ "chatId": chat_id, "entry": entry });
+        let call = client.call(zeron_rpc::methods::RELAY_COMMAND, params);
+        match tokio::time::timeout(RELAY_CALL_TIMEOUT, call).await {
+            Err(_) => {
+                links.invalidate(target);
+                Err("relay call timed out; peer link suspect".into())
+            }
+            Ok(Err(zeron_rpc::RpcError::Failed(err))) => Err(format!("host refused: {err}")),
+            Ok(Err(err)) => {
+                links.invalidate(target);
+                Err(format!("relay call failed: {err}"))
+            }
+            Ok(Ok(reply)) => Ok(match reply.get("outcome").and_then(|v| v.as_str()) {
+                Some("executed") => "executed",
+                Some("duplicate") => "duplicate",
+                Some("expired") => "expired",
+                Some("superseded") => "superseded",
+                _ => "accepted",
+            }),
+        }
+    }
+
+    /// Host side of [`zeron_rpc::methods::RELAY_COMMAND`]: evaluate the
+    /// forwarded entry against OUR doc (dedupe/TTL/supersede rules apply
+    /// unchanged), claim its client-minted id in the processed ledger, then
+    /// execute. The claim is what makes the doc row arriving later — over
+    /// chat2 sync — a no-op in the drain: exactly-once across both roads.
+    pub async fn ingest_relayed_command(
+        &self,
+        chat_id: &str,
+        entry: SessionCommandEntry,
+    ) -> Result<&'static str, EngineError> {
+        let handle = self.open(chat_id)?;
+        // The sender sequences attachment transfers BEFORE the relay; refuse
+        // (retryably) rather than run without the images.
+        if !self.missing_attachments(&entry).is_empty() {
+            return Err(EngineError::Other("attachments not landed yet".into()));
+        }
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| EngineError::Other("executor unavailable".into()))?;
+        let commands = handle.doc.read_commands()?;
+        let messages = handle.doc.read_entries().unwrap_or_default();
+        let current_turn_id = messages.last().map(|m| m.id.clone());
+        let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
+        let disposition = evaluate_command(
+            &entry,
+            &EvaluationContext {
+                is_processed: &is_processed,
+                now_ms: now_ms(),
+                entries: &commands,
+                current_turn_id: current_turn_id.as_deref(),
+                turn_is_past: &turn_is_past,
+            },
+        );
+        if matches!(disposition, CommandDisposition::Skip) {
+            return Ok("duplicate");
+        }
+        // Claim BEFORE executing (the drain's own mark-before-execute rule).
+        if !self.inner.store.mark_processed(&entry.id)? {
+            return Ok("duplicate");
+        }
+        match disposition {
+            CommandDisposition::Skip => Ok("duplicate"),
+            CommandDisposition::Expired => Ok("expired"),
+            CommandDisposition::Superseded => Ok("superseded"),
+            CommandDisposition::Execute => {
+                self.execute(&sessions, &handle, &entry).await?;
+                Ok("executed")
+            }
+        }
     }
 
     /// One transfer attempt: chunked `UploadChunk` + `UploadCommit` straight

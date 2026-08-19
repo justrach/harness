@@ -471,6 +471,15 @@ impl WorkspaceHost {
         *lock(&self.inner.peer_alive) = Some(hook);
     }
 
+    /// Test seam: write a foreign device row (the relay version gate and the
+    /// dial gate read these; production rows arrive via registry sync).
+    #[doc(hidden)]
+    pub fn upsert_device_row(&self, device: &Device) {
+        if let Err(err) = self.mutate(|doc| doc.upsert_device(device)) {
+            tracing::warn!(error = %err, "device row upsert failed");
+        }
+    }
+
     /// Dial-gate verdict for `LinkCache` (park dials to registry-dark peers).
     /// `Dark` requires positive evidence; every ambiguous state — registry
     /// room down or still in its warm-up window, unknown device, heartbeat in

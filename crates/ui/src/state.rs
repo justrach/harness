@@ -1507,22 +1507,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
     })
 }
 
-/// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)
-/// into a comparable triple. `None` for anything that doesn't lead with
-/// three dotted integers.
-pub fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.trim().splitn(3, '.');
-    let major: u64 = parts.next()?.parse().ok()?;
-    let minor: u64 = parts.next()?.parse().ok()?;
-    let patch = parts.next()?;
-    let patch: u64 = patch
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(patch)
-        .parse()
-        .ok()?;
-    Some((major, minor, patch))
-}
+pub use zeron_proto::version_triple;
 
 fn spawn_watch<T: DeserializeOwned + 'static>(
     cx: &mut Context<AppState>,
