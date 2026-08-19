@@ -3390,6 +3390,7 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
+        change_request: Option<zeron_proto::ChangeRequestSummary>,
         harness: Option<zeron_proto::HarnessId>,
         status: zeron_proto::ChatIndicator,
         selected: bool,
@@ -3614,8 +3615,8 @@ impl Shell {
                     .line_height(px(17.0))
                     .child(title),
             )
-            // Line 3 (always): harness brand mark; worktree sessions append
-            // the branch icon + name.
+            // Line 3 (always): harness brand mark, branch, optional PR badge,
+            // and the working spinner. Branch remains the only shrinking item.
             .child(
                 div()
                     .w_full()
@@ -3651,16 +3652,26 @@ impl Shell {
                                 .child(branch),
                         )
                     })
+                    // Stable invisible spring: keeps the optional spinner and
+                    // PR badge pinned right without changing no-PR paint.
+                    .child(div().flex_1().min_w_0())
                     // Working rows animate the spinner at the row's
                     // bottom-right (the status word keeps its dot up top).
                     .when(status == zeron_proto::ChatIndicator::Working, |el| {
-                        el.child(div().flex_1())
-                            .child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
+                        el.child(loaders::mini_gradient_spinner(
+                            format!("chat-working-{id}"),
+                            2.0,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                    })
+                    .when_some(change_request, |el, summary| {
+                        el.child(crate::change_requests::pull_request_badge(
+                            format!("chat-pr-{id}").into(),
+                            summary,
+                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                            theme,
+                        ))
                     }),
             )
             .into_any_element()
