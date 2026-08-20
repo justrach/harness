@@ -22,6 +22,7 @@ final class WorkspaceStore {
     private(set) var chats: [Chat] = []
     private(set) var sessions: [String: SessionRow] = [:]
     private(set) var presence: [String: Int64] = [:]  // deviceId → last beat ms
+    private(set) var changeRequestSnapshots: [ChangeRequestWatchKey: CheckoutChangeRequestStatus] = [:]
     private(set) var connected = false
     /// True once ANY transport delivered server state this session (socket
     /// state frame or HTTPS pull). Drives the "connecting" spinner: with the
@@ -34,11 +35,19 @@ final class WorkspaceStore {
     /// client's 30s TTL, measured from RECEIPT — beats carry the sender's
     /// wall clock, which we never trust for freshness).
     static let presenceTtlMs: Int64 = 30_000
+    /// Dial-gate thresholds (workspace_host.rs PRESENCE_FRESH_MS /
+    /// DIAL_GATE_DARK_MS / DIAL_GATE_WARMUP_MS, PR #168).
+    static let presenceLiveFreshMs: Int64 = 45_000
+    static let dialGateDarkMs: Int64 = 5 * 60_000
+    static let dialGateWarmupMs: Int64 = 60_000
 
     @ObservationIgnored private var doc: RegistryDoc
     @ObservationIgnored private var client: RegistryClient?
     @ObservationIgnored private var saver: RegistrySaver?
     @ObservationIgnored private var presenceReceivedAt: [String: Int64] = [:]
+    /// When the registry room (re)joined — the dial-gate warm-up clock
+    /// restarts on every rejoin.
+    @ObservationIgnored private var registryJoinedAt: Int64?
     private let config: AppConfig
 
     init(config: AppConfig) {
@@ -166,8 +175,10 @@ final class WorkspaceStore {
     /// Foreground hook: revive the room after a suspension (see
     /// RegistryClient.kick).
     func kickRoom() {
-        guard let client else { return }
-        Task { await client.kick() }
+        if let client {
+            Task { await client.kick() }
+        }
+        restartChangeRequestStreams(resetUnsupported: true)
     }
 
     func stop() {
@@ -178,6 +189,12 @@ final class WorkspaceStore {
             Task { await client.stop() }
         }
         client = nil
+        stopChangeRequestStreams()
+        let relays = Array(relayClients.values)
+        relayClients.removeAll()
+        for relay in relays {
+            Task { await relay.close() }
+        }
         connected = false
     }
 
@@ -203,7 +220,12 @@ final class WorkspaceStore {
             saver?.poke()
             synced = true
         case .connected:
+            let reconnected = !connected
             connected = true
+            registryJoinedAt = nowMs()
+            if reconnected {
+                restartChangeRequestStreams(resetUnsupported: true)
+            }
         case .rows(let seq, let rows):
             doc.applyRows(seq: seq, rows: rows)
             project()
@@ -220,6 +242,7 @@ final class WorkspaceStore {
             presenceReceivedAt[device] = nowMs()
         case .disconnected:
             connected = false
+            registryJoinedAt = nil
             doc.markDisconnected()
         }
     }
@@ -246,6 +269,37 @@ final class WorkspaceStore {
         return nowMs() - received < Self.presenceTtlMs
     }
 
+    /// Dial-gate verdict (workspace_host.rs peer_liveness): `dark` requires
+    /// POSITIVE evidence of absence — a joined, warmed-up registry room and a
+    /// freshest heartbeat older than 5 minutes. Registry-down and every
+    /// ambiguity stay `unknown`, so a rows-down/relay-up incident shape can
+    /// never park the relay.
+    func peerLiveness(_ deviceId: String) -> PeerLiveness {
+        guard connected, let joinedAt = registryJoinedAt else { return .unknown }
+        let now = nowMs()
+        if let received = presenceReceivedAt[deviceId] {
+            if now - received < Self.presenceLiveFreshMs { return .live }
+            if now - received >= Self.dialGateDarkMs { return .dark }
+            return .unknown
+        }
+        // Never heard this session: only a warmed-up room may consult the
+        // durable device row's own stamp.
+        guard now - joinedAt >= Self.dialGateWarmupMs else { return .unknown }
+        if let seen = devices.first(where: { $0.id == deviceId })?.lastSeenAt,
+           now - seen >= Self.dialGateDarkMs {
+            return .dark
+        }
+        return .unknown
+    }
+
+    /// Version gates (state.rs device_version_at_least): unknown device or an
+    /// unparsable/unstamped version reads as "too old" → legacy behavior.
+    func deviceVersionAtLeast(_ deviceId: String, _ min: (Int, Int, Int)) -> Bool {
+        guard let raw = devices.first(where: { $0.id == deviceId })?.version,
+              let v = versionTriple(raw) else { return false }
+        return v >= min
+    }
+
     // MARK: Projection (rows → typed entities)
 
     private func project() {
@@ -256,7 +310,8 @@ final class WorkspaceStore {
                              name: f["name"]?.stringValue ?? id,
                              platform: f["platform"]?.stringValue ?? "",
                              lastSeenAt: f["lastSeenAt"]?.int64Value,
-                             createdAt: f["createdAt"]?.int64Value)
+                             createdAt: f["createdAt"]?.int64Value,
+                             version: f["version"]?.stringValue)
         }.sorted { $0.name < $1.name }
 
         spaces = doc.overlayRows(kind: "spaces").compactMap { row in
@@ -309,6 +364,7 @@ final class WorkspaceStore {
                                       updatedAt: f["updatedAt"]?.int64Value ?? 0)
         }
         sessions = rows
+        reconcileChangeRequestStreams()
     }
 
     // MARK: Derived views
@@ -343,6 +399,10 @@ final class WorkspaceStore {
         chatIndicator(chat: chat, live: effectiveStatus(sessions[chat.id], now: nowMs()))
     }
 
+    func changeRequest(for chat: Chat) -> ChangeRequestSummary? {
+        resolvedChangeRequest(for: chat, spaces: spaces, snapshots: changeRequestSnapshots)
+    }
+
     /// Aggregate most-urgent member status for a space's leading dot.
     func spaceIndicator(_ spaceId: String) -> ChatIndicator? {
         let members = chats(in: spaceId).map { indicator(for: $0) }
@@ -352,12 +412,104 @@ final class WorkspaceStore {
     // MARK: Device relay (folder browsing / direct host RPCs)
 
     @ObservationIgnored private var relayClients: [String: DeviceRelayClient] = [:]
+    @ObservationIgnored private var changeRequestTasks: [ChangeRequestWatchKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var unsupportedChangeRequestDevices: Set<String> = []
 
     private func relay(for deviceId: String) -> DeviceRelayClient {
         if let existing = relayClients[deviceId] { return existing }
-        let client = DeviceRelayClient(deviceId: deviceId, config: config)
+        let client = DeviceRelayClient(deviceId: deviceId, config: config,
+                                       liveness: { [weak self] in
+                                           self?.peerLiveness(deviceId) ?? .unknown
+                                       })
         relayClients[deviceId] = client
         return client
+    }
+
+    /// Chunked upload straight to a device (the legacy host-staged path for
+    /// hosts that predate queued attachments) — used by the new-session
+    /// canvas, where no SessionStore exists yet.
+    func uploadAttachment(deviceId: String, name: String, data: Data,
+                          uploadId: String,
+                          progress: (@MainActor @Sendable (Double) -> Void)? = nil) async throws -> String {
+        try await uploadAttachmentChunked(relay: relay(for: deviceId), name: name,
+                                          data: data, uploadId: uploadId,
+                                          progress: progress)
+    }
+
+    private func reconcileChangeRequestStreams() {
+        let targets = desiredChangeRequestTargets(
+            chats: chats,
+            spaces: spaces,
+            unsupportedDevices: unsupportedChangeRequestDevices
+        )
+
+        for target in Array(changeRequestTasks.keys) where !targets.contains(target) {
+            changeRequestTasks.removeValue(forKey: target)?.cancel()
+        }
+        changeRequestSnapshots = changeRequestSnapshots.filter { targets.contains($0.key) }
+
+        for target in targets where changeRequestTasks[target] == nil {
+            let client = relay(for: target.deviceId)
+            changeRequestTasks[target] = Task { [weak self] in
+                guard let self else { return }
+                await self.watchChangeRequest(target, through: client)
+            }
+        }
+    }
+
+    private func watchChangeRequest(
+        _ target: ChangeRequestWatchKey,
+        through client: DeviceRelayClient
+    ) async {
+        var retryNanoseconds: UInt64 = 500_000_000
+        while !Task.isCancelled {
+            do {
+                let stream: AsyncThrowingStream<CheckoutChangeRequestStatus, Error> = try await client.stream(
+                    method: "WatchCheckoutChangeRequest",
+                    params: ["cwd": target.cwd]
+                )
+                for try await snapshot in stream {
+                    guard !Task.isCancelled else { return }
+                    // Never expose a misrouted frame under another host/path.
+                    guard snapshot.deviceId == target.deviceId,
+                          snapshot.cwd == target.cwd else { continue }
+                    changeRequestSnapshots[target] = snapshot
+                    retryNanoseconds = 500_000_000
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                if isUnknownChangeRequestMethod(error) {
+                    markChangeRequestsUnsupported(on: target.deviceId)
+                    return
+                }
+            }
+
+            // Preserve the latest successful snapshot through transport gaps.
+            try? await Task.sleep(nanoseconds: retryNanoseconds)
+            retryNanoseconds = min(retryNanoseconds * 2, 5_000_000_000)
+        }
+    }
+
+    private func markChangeRequestsUnsupported(on deviceId: String) {
+        unsupportedChangeRequestDevices.insert(deviceId)
+        for target in Array(changeRequestTasks.keys) where target.deviceId == deviceId {
+            changeRequestTasks.removeValue(forKey: target)?.cancel()
+        }
+        changeRequestSnapshots = changeRequestSnapshots.filter { $0.key.deviceId != deviceId }
+    }
+
+    private func restartChangeRequestStreams(resetUnsupported: Bool) {
+        for task in changeRequestTasks.values { task.cancel() }
+        changeRequestTasks.removeAll()
+        if resetUnsupported { unsupportedChangeRequestDevices.removeAll() }
+        reconcileChangeRequestStreams()
+    }
+
+    private func stopChangeRequestStreams() {
+        for task in changeRequestTasks.values { task.cancel() }
+        changeRequestTasks.removeAll()
+        unsupportedChangeRequestDevices.removeAll()
+        changeRequestSnapshots.removeAll()
     }
 
     /// The last relay failure, for surfacing in UI/diagnostics.

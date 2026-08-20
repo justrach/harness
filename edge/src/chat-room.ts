@@ -136,9 +136,13 @@ export class ChatRoom implements DurableObject {
       return json({ ok: true, seqFloor: outcome.seqFloor, pruned: outcome.pruned });
     }
 
-    // Everything below reads a claimed room.
-    if (!owner) return json({ error: "not_found" }, 404);
-    if (owner !== userId) return json({ error: "forbidden" }, 403);
+    // Claim-on-first-contact for the HTTP surface too — same client-minted-id
+    // discipline as /ws. The /rows twins predate the pull-first HTTPS
+    // transport and 404'd an unclaimed room, which deadlocked a brand-new
+    // chat on WS-hostile networks: the sender's push 404s, the host's pull
+    // 404s, and the only claimants (WS join, checkpoint heal) never run.
+    if (!owner) setMeta(sql, "owner", userId);
+    else if (owner !== userId) return json({ error: "forbidden" }, 403);
 
     if (url.pathname === "/checkpoint" && request.method === "GET") {
       const bytes = this.blobs.get(CHECKPOINT_BLOB);
@@ -196,16 +200,29 @@ export class ChatRoom implements DurableObject {
           frontier
         )
       ];
+      // Response cap: the WS path streams; this buffers, so bound the body.
+      // Past the cap the response ends WITHOUT rowsDone — clients apply what
+      // arrived, their cursor advances per row, and the next pull resumes
+      // from there (pagination by truncation).
+      const ROWS_BODY_CAP = 4 * 1024 * 1024;
+      let bodyBytes = 0;
+      let truncated = false;
       for (const row of rowsAfter(sql, after, exclude)) {
-        frames.push(
-          encodeFrame(
-            FRAME.row,
-            { seq: row.seq, device: row.device, batchId: row.batchId },
-            row.bytes
-          )
+        const frame = encodeFrame(
+          FRAME.row,
+          { seq: row.seq, device: row.device, batchId: row.batchId },
+          row.bytes
         );
+        bodyBytes += 4 + frame.length;
+        if (bodyBytes > ROWS_BODY_CAP) {
+          truncated = true;
+          break;
+        }
+        frames.push(frame);
       }
-      frames.push(encodeFrame(FRAME.rowsDone, { headSeq: headSeq(sql) }));
+      if (!truncated) {
+        frames.push(encodeFrame(FRAME.rowsDone, { headSeq: headSeq(sql) }));
+      }
       const total = frames.reduce((n, f) => n + 4 + f.length, 0);
       const body = new Uint8Array(total);
       const view = new DataView(body.buffer);
@@ -229,6 +246,13 @@ export class ChatRoom implements DurableObject {
       if (batchId === "" || batchId.length > 128) {
         this.recordPush(device, false);
         return json({ error: "bad_push" }, 400);
+      }
+      // Pre-read cap (the WS runtime closes 1 MiB messages before the DO
+      // runs; HTTP needs the explicit twin). appendRow re-checks post-read.
+      const declared = Number(request.headers.get("content-length") ?? "0");
+      if (declared > MAX_ROW_BYTES + 4096) {
+        this.recordPush(device, false);
+        return json({ error: "too_large" }, 413);
       }
       const payload = new Uint8Array(await request.arrayBuffer());
       if (!this.admitQuota(device, payload.byteLength)) {

@@ -314,7 +314,7 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .overflow_hidden()
         .text_size(px(13.0))
         .text_color(theme.text);
-    if theme.is_glass() {
+    if theme.is_frost() {
         // Translucent tint — the backdrop blur beneath it comes from the
         // [`crate::frost::frosted`] wrapper at the mount helpers below.
         card.bg(theme.glass_overlay())
@@ -501,6 +501,29 @@ pub fn anchored_menu_above_at(
         .top(position.y)
         .size_0()
         .child(anchored_menu_above(id, content, closing))
+        .into_any_element()
+}
+
+pub fn full_width_menu_above(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    let content = frosted_menu(exit, content);
+    div()
+        .absolute()
+        .bottom_full()
+        .left_0()
+        .right_0()
+        .child(
+            gpui::deferred(menu_motion(
+                id.into(),
+                exit,
+                div().occlude().pb(px(6.0)).child(content),
+            ))
+            .priority(1),
+        )
         .into_any_element()
 }
 
