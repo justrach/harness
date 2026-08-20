@@ -49,7 +49,6 @@ pub struct GridSize {
     pub cols: u16,
     pub rows: u16,
 }
-
 impl GridSize {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
