@@ -219,6 +219,8 @@ pub struct UiSettings {
     pub git_history_column_order: GitHistoryColumnOrder,
     /// How authors are represented in Git History rows.
     pub git_history_author_display: GitHistoryAuthorDisplay,
+    /// Changes pane: side-by-side diffs instead of the unified stack.
+    pub diff_split: bool,
 }
 
 impl Default for UiSettings {
@@ -245,6 +247,7 @@ impl Default for UiSettings {
             git_history_column_widths: GitHistoryColumnWidths::default(),
             git_history_column_order: GitHistoryColumnOrder::default(),
             git_history_author_display: GitHistoryAuthorDisplay::default(),
+            diff_split: false,
         }
     }
 }
@@ -539,6 +542,7 @@ mod tests {
                 GitHistoryColumn::Date,
             ]),
             git_history_author_display: GitHistoryAuthorDisplay::Name,
+            diff_split: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
