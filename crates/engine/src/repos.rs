@@ -1589,27 +1589,99 @@ fn compact_history_commits(
         .iter()
         .map(|commit| (commit.sha.as_str(), commit))
         .collect();
+
+    /// Resolve a hidden commit to its nearest visible ancestors without using
+    /// the call stack. Completed nodes are cached across visible commits so a
+    /// shared hidden branch is contracted only once.
     fn nearest_visible_parents(
         sha: &str,
         visible: &HashSet<String>,
         by_sha: &HashMap<&str, &GitHistoryCommit>,
-        visiting: &mut HashSet<String>,
+        memo: &mut HashMap<String, Vec<String>>,
     ) -> Vec<String> {
         if visible.contains(sha) || !by_sha.contains_key(sha) {
             return vec![sha.to_string()];
         }
-        if !visiting.insert(sha.to_string()) {
-            return Vec::new();
+        if let Some(cached) = memo.get(sha) {
+            return cached.clone();
         }
-        let parents = by_sha[sha]
-            .parent_shas
-            .iter()
-            .flat_map(|parent| nearest_visible_parents(parent, visible, by_sha, visiting))
-            .collect();
-        visiting.remove(sha);
-        parents
+
+        struct Frame {
+            sha: String,
+            next_parent: usize,
+            resolved: Vec<String>,
+            seen: HashSet<String>,
+        }
+
+        impl Frame {
+            fn new(sha: String) -> Self {
+                Self {
+                    sha,
+                    next_parent: 0,
+                    resolved: Vec::new(),
+                    seen: HashSet::new(),
+                }
+            }
+
+            fn extend(&mut self, parents: &[String]) {
+                for parent in parents {
+                    if self.seen.insert(parent.clone()) {
+                        self.resolved.push(parent.clone());
+                    }
+                }
+            }
+        }
+
+        let mut visiting = HashSet::from([sha.to_string()]);
+        let mut stack = vec![Frame::new(sha.to_string())];
+        loop {
+            let next_parent = {
+                let frame = stack.last_mut().expect("history traversal frame");
+                let parents = &by_sha[frame.sha.as_str()].parent_shas;
+                (frame.next_parent < parents.len()).then(|| {
+                    let parent = parents[frame.next_parent].clone();
+                    frame.next_parent += 1;
+                    parent
+                })
+            };
+
+            let Some(parent) = next_parent else {
+                let frame = stack.pop().expect("history traversal frame");
+                visiting.remove(&frame.sha);
+                let resolved = frame.resolved;
+                memo.insert(frame.sha, resolved.clone());
+                if let Some(caller) = stack.last_mut() {
+                    caller.extend(&resolved);
+                    continue;
+                }
+                return resolved;
+            };
+
+            let resolved = if visible.contains(&parent) || !by_sha.contains_key(parent.as_str()) {
+                Some(vec![parent.clone()])
+            } else if let Some(cached) = memo.get(&parent) {
+                Some(cached.clone())
+            } else if visiting.contains(&parent) {
+                // Git commit graphs are acyclic, but keep malformed input from
+                // looping forever just as the previous `visiting` guard did.
+                Some(Vec::new())
+            } else {
+                None
+            };
+
+            if let Some(resolved) = resolved {
+                stack
+                    .last_mut()
+                    .expect("history traversal frame")
+                    .extend(&resolved);
+            } else {
+                visiting.insert(parent.clone());
+                stack.push(Frame::new(parent));
+            }
+        }
     }
 
+    let mut memo = HashMap::new();
     commits
         .iter()
         .filter(|commit| visible.contains(&commit.sha))
@@ -1619,9 +1691,7 @@ fn compact_history_commits(
             commit.parent_shas = commit
                 .parent_shas
                 .iter()
-                .flat_map(|parent| {
-                    nearest_visible_parents(parent, visible, &by_sha, &mut HashSet::new())
-                })
+                .flat_map(|parent| nearest_visible_parents(parent, visible, &by_sha, &mut memo))
                 .filter(|parent| seen.insert(parent.clone()))
                 .collect();
             commit
@@ -2056,6 +2126,18 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn history_commit(sha: String, parent_sha: Option<String>) -> GitHistoryCommit {
+        GitHistoryCommit {
+            subject: sha.clone(),
+            sha,
+            parent_shas: parent_sha.into_iter().collect(),
+            author_name: "Test".into(),
+            author_email: "test@example.com".into(),
+            authored_at: "2026-08-20T12:00:00Z".into(),
+            refs: Vec::new(),
+        }
+    }
+
     fn score(query: &str, candidate: &str) -> Option<u32> {
         let mut matcher = nucleo_matcher::Matcher::new({
             let mut config = nucleo_matcher::Config::DEFAULT;
@@ -2214,6 +2296,31 @@ tmpfs /run tmpfs rw 0 0
         assert!(score("cmp rs", "crates/ui/src/composer.rs").is_some());
         assert!(score("composer crates", "crates/ui/src/composer.rs").is_some());
         assert!(score("xyzq", "crates/ui/src/composer.rs").is_none());
+    }
+
+    #[test]
+    fn history_compaction_handles_a_twenty_thousand_commit_gap() {
+        const DEPTH: usize = 20_000;
+        let commits = (0..DEPTH)
+            .rev()
+            .map(|index| {
+                history_commit(
+                    format!("c{index:05}"),
+                    (index > 0).then(|| format!("c{:05}", index - 1)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let newest = format!("c{:05}", DEPTH - 1);
+        let oldest = "c00000".to_string();
+        let visible = HashSet::from([newest.clone(), oldest.clone()]);
+
+        let compact = compact_history_commits(&commits, &visible);
+
+        assert_eq!(compact.len(), 2);
+        assert_eq!(compact[0].sha, newest);
+        assert_eq!(compact[0].parent_shas, vec![oldest.clone()]);
+        assert_eq!(compact[1].sha, oldest);
+        assert!(compact[1].parent_shas.is_empty());
     }
 
     #[test]

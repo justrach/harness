@@ -830,27 +830,94 @@ fn compact_commits_to_visible(
         .iter()
         .map(|commit| (commit.sha.as_str(), commit))
         .collect();
+
     fn nearest_visible_parents(
         sha: &str,
         visible: &HashSet<String>,
         by_sha: &HashMap<&str, &GitHistoryCommit>,
-        visiting: &mut HashSet<String>,
+        memo: &mut HashMap<String, Vec<String>>,
     ) -> Vec<String> {
         if visible.contains(sha) || !by_sha.contains_key(sha) {
             return vec![sha.to_string()];
         }
-        if !visiting.insert(sha.to_string()) {
-            return Vec::new();
+        if let Some(cached) = memo.get(sha) {
+            return cached.clone();
         }
-        let parents = by_sha[sha]
-            .parent_shas
-            .iter()
-            .flat_map(|parent| nearest_visible_parents(parent, visible, by_sha, visiting))
-            .collect::<Vec<_>>();
-        visiting.remove(sha);
-        parents
+
+        struct Frame {
+            sha: String,
+            next_parent: usize,
+            resolved: Vec<String>,
+            seen: HashSet<String>,
+        }
+
+        impl Frame {
+            fn new(sha: String) -> Self {
+                Self {
+                    sha,
+                    next_parent: 0,
+                    resolved: Vec::new(),
+                    seen: HashSet::new(),
+                }
+            }
+
+            fn extend(&mut self, parents: &[String]) {
+                for parent in parents {
+                    if self.seen.insert(parent.clone()) {
+                        self.resolved.push(parent.clone());
+                    }
+                }
+            }
+        }
+
+        let mut visiting = HashSet::from([sha.to_string()]);
+        let mut stack = vec![Frame::new(sha.to_string())];
+        loop {
+            let next_parent = {
+                let frame = stack.last_mut().expect("history traversal frame");
+                let parents = &by_sha[frame.sha.as_str()].parent_shas;
+                (frame.next_parent < parents.len()).then(|| {
+                    let parent = parents[frame.next_parent].clone();
+                    frame.next_parent += 1;
+                    parent
+                })
+            };
+
+            let Some(parent) = next_parent else {
+                let frame = stack.pop().expect("history traversal frame");
+                visiting.remove(&frame.sha);
+                let resolved = frame.resolved;
+                memo.insert(frame.sha, resolved.clone());
+                if let Some(caller) = stack.last_mut() {
+                    caller.extend(&resolved);
+                    continue;
+                }
+                return resolved;
+            };
+
+            let resolved = if visible.contains(&parent) || !by_sha.contains_key(parent.as_str()) {
+                Some(vec![parent.clone()])
+            } else if let Some(cached) = memo.get(&parent) {
+                Some(cached.clone())
+            } else if visiting.contains(&parent) {
+                Some(Vec::new())
+            } else {
+                None
+            };
+
+            if let Some(resolved) = resolved {
+                stack
+                    .last_mut()
+                    .expect("history traversal frame")
+                    .extend(&resolved);
+            } else {
+                visiting.insert(parent.clone());
+                stack.push(Frame::new(parent));
+            }
+        }
     }
 
+    let mut memo = HashMap::new();
     commits
         .iter()
         .filter(|commit| visible.contains(&commit.sha))
@@ -860,9 +927,7 @@ fn compact_commits_to_visible(
             commit.parent_shas = commit
                 .parent_shas
                 .iter()
-                .flat_map(|parent| {
-                    nearest_visible_parents(parent, &visible, &by_sha, &mut HashSet::new())
-                })
+                .flat_map(|parent| nearest_visible_parents(parent, visible, &by_sha, &mut memo))
                 .filter(|parent| seen.insert(parent.clone()))
                 .collect();
             commit
@@ -4616,6 +4681,34 @@ mod tests {
             vec!["tip", "base"]
         );
         assert_eq!(compact[0].parent_shas, vec!["base"]);
+        assert!(compact[1].parent_shas.is_empty());
+    }
+
+    #[test]
+    fn search_compaction_handles_a_twenty_thousand_commit_gap() {
+        const DEPTH: usize = 20_000;
+        let commits = (0..DEPTH)
+            .rev()
+            .map(|index| {
+                let sha = format!("c{index:05}");
+                if index == 0 {
+                    commit(&sha, &[])
+                } else {
+                    let parent = format!("c{:05}", index - 1);
+                    commit(&sha, &[parent.as_str()])
+                }
+            })
+            .collect::<Vec<_>>();
+        let newest = format!("c{:05}", DEPTH - 1);
+        let oldest = "c00000".to_string();
+        let visible = HashSet::from([newest.clone(), oldest.clone()]);
+
+        let compact = compact_commits_to_visible(&commits, &visible);
+
+        assert_eq!(compact.len(), 2);
+        assert_eq!(compact[0].sha, newest);
+        assert_eq!(compact[0].parent_shas, vec![oldest.clone()]);
+        assert_eq!(compact[1].sha, oldest);
         assert!(compact[1].parent_shas.is_empty());
     }
 
