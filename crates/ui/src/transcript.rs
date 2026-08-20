@@ -292,20 +292,12 @@ pub struct ToolItem {
     pub subagent_tail: Option<SharedString>,
 }
 
-/// Subagent spawn chips — the "Agent[: <description>]" Unknown convention
-/// every native driver uses, or any tool the engine has already bound to a
-/// subagent doc. These stay out of the collapsible "Called N tools" wrap so
-/// a running subagent is visible without opening the fold.
-fn is_agent_name(name: &str) -> bool {
-    name == "Agent" || name.starts_with("Agent: ")
-}
-
+/// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
+/// every driver decodes its spawn tool into. These stay out of the
+/// collapsible "Called N tools" wrap so a running subagent is visible
+/// without opening the fold.
 fn is_agent_call(call: &ToolCall) -> bool {
-    match call {
-        ToolCall::Unknown { name, .. } => is_agent_name(name),
-        ToolCall::Mcp { tool, .. } => is_agent_name(tool),
-        _ => false,
-    }
+    call.is_subagent_spawn()
 }
 
 /// The chip's GENUS is the call itself, never the ref: docs written before

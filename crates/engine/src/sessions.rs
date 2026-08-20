@@ -1596,9 +1596,17 @@ async fn drive_run(
                 if !sink_known && !done_only {
                     for p in folded.iter_mut() {
                         if let MessagePart::Tool {
-                            id, subagent_ref, ..
+                            id,
+                            call,
+                            subagent_ref,
+                            ..
                         } = p
                             && id == parent_tool_use_id
+                            // Genus gate: a subagent ref may only ever bind
+                            // to a SPAWN call — mis-keyed tagged traffic
+                            // must not turn an ordinary chip into a spawn
+                            // link (empty tab on click).
+                            && call.is_subagent_spawn()
                         {
                             *subagent_ref = Some(sub_id.clone());
                         }
