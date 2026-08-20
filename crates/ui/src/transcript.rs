@@ -2875,16 +2875,29 @@ impl Transcript {
             // crossing": the queued flow's `pending://` (bytes ship
             // engine-side after the send; the host rewrites the ref to an
             // absolute path once they land and the run starts) and the
-            // legacy echo's synthetic `pending/`. The v0.2.12 queued cutover
-            // only matched the legacy shape, so the indicator vanished
-            // (2026-08-19 report). Percent exists only while the UI itself
-            // uploads (legacy / local staging); the engine-side relay leg
-            // has no percent — indeterminate spinner instead.
+            // legacy echo's synthetic `pending/`. Percent sources, in order:
+            // this attachment's own relay transfer (`WatchTransfers`, by the
+            // uploadId its ref names — the leg that actually takes time),
+            // else the send-wide staging/legacy upload percent. Neither → the
+            // indeterminate spinner (staged-but-waiting, retry backoff, or
+            // committed-awaiting-rewrite), so the ring never shows a number
+            // that isn't a real transfer position (2026-08-20 report: the
+            // staging-only percent blinked out in ~100ms and lied about the
+            // slow part).
             let sending =
                 att.path.starts_with("pending://") || att.path.starts_with("pending/");
-            let uploading = sending
-                .then(|| self.state.read(cx).upload_progress_percent())
-                .flatten();
+            let upload_id = att
+                .path
+                .strip_prefix("pending://")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(id, _)| id);
+            let uploading = upload_id
+                .and_then(|id| self.state.read(cx).transfer_percent(id))
+                .or_else(|| {
+                    sending
+                        .then(|| self.state.read(cx).upload_progress_percent())
+                        .flatten()
+                });
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
