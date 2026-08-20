@@ -80,6 +80,11 @@ pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 pub const CHIP_HEIGHT: f32 = 38.0;
 pub const CHIP_GAP: f32 = 0.0;
 pub const CHIP_CARD_HEIGHT: f32 = 30.0;
+/// Inner height of the chip header: [`CHIP_CARD_HEIGHT`] is the card's
+/// border-box (explicit `h` in gpui includes the 1px border), so a 30px
+/// header inside a 30px bordered card clips 2px off the bottom and every
+/// glyph/icon reads high (user report).
+const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
 
 /// Signed list scroll step for a pointer near a viewport edge.
 ///
@@ -3756,6 +3761,7 @@ impl Transcript {
             .h(px(26.0))
             .cursor_pointer()
             .text_size(px(12.0))
+            .line_height(px(18.0))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
@@ -3783,6 +3789,9 @@ impl Transcript {
             .child(
                 div()
                     .min_w_0()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
                     .truncate()
                     .child(SharedString::from(summary)),
             );
@@ -3873,6 +3882,10 @@ impl Transcript {
                     .child(
                         div()
                             .id(key.clone())
+                            .h(px(CHIP_HEADER_HEIGHT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let entry =
@@ -4386,7 +4399,7 @@ fn chip_header_row(
         theme.text_muted
     };
     div()
-        .h(px(CHIP_CARD_HEIGHT))
+        .h(px(CHIP_HEADER_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -4395,6 +4408,7 @@ fn chip_header_row(
         .gap(px(8.0))
         .px(px(8.0))
         .text_size(px(12.0))
+        .line_height(px(18.0))
         .child(
             // Icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
             // icon size-3).
@@ -4415,6 +4429,9 @@ fn chip_header_row(
         .child(
             div()
                 .flex_none()
+                .h(px(18.0))
+                .flex()
+                .items_center()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(tint)
                 .child(SharedString::from(label)),
@@ -4423,6 +4440,9 @@ fn chip_header_row(
             div()
                 .flex_1()
                 .min_w_0()
+                .h(px(18.0))
+                .flex()
+                .items_center()
                 .truncate()
                 .text_color(if failed {
                     theme.danger
@@ -4577,6 +4597,8 @@ fn tool_chip(
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
@@ -4625,6 +4647,8 @@ fn subagent_chip(
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
