@@ -165,11 +165,14 @@ final class AppConfig: @unchecked Sendable {
         guard let token = await currentToken() else { return nil }
         var url = edgeURL.appending(path: "registry/\(orgId)/rows")
         var items = [URLQueryItem(name: "device", value: deviceId),
-                     URLQueryItem(name: "beat", value: "1"),
-                     URLQueryItem(name: "token", value: token)]
+                     URLQueryItem(name: "beat", value: "1")]
         if let since { items.append(URLQueryItem(name: "since", value: String(since))) }
         url.append(queryItems: items)
-        return URLRequest(url: url)
+        // Bearer header, never ?token=: HTTP supports headers (unlike WS
+        // upgrades), and query strings can reach request logs.
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
     }
 
     /// POST /registry/{orgId}/push — one op batch over plain HTTPS (LWW
