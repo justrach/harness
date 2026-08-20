@@ -821,6 +821,16 @@ impl Pickers {
             .map(|d| d.steering_mode)
     }
 
+    /// The catalog is loaded and offers nothing runnable — the no-agents
+    /// state (every enabled harness is missing its CLI, or nothing is
+    /// enabled). False while the catalog is still loading or failed
+    /// (nothing to conclude yet; offline sends must not be blocked on it).
+    pub fn no_agents_available(&self) -> bool {
+        self.harnesses
+            .ready()
+            .is_some_and(|list| offered_harnesses(list).is_empty())
+    }
+
     pub fn resolved(&self, cx: &App) -> ResolvedRunConfig {
         ResolvedRunConfig {
             harness: self.effective_harness(cx),
@@ -3062,6 +3072,40 @@ impl Pickers {
         let searching = !query.is_empty();
         let favorites_view = !searching && self.model_rail == ModelRail::Favorites;
         let descriptors = self.rail_descriptors(cx);
+        // No-agents empty state: the catalog loaded but offers nothing
+        // runnable (every enabled harness is missing its CLI, or nothing is
+        // enabled) and there's no committed chat harness to force-include —
+        // guidance instead of an empty rail.
+        if descriptors.is_empty() {
+            return div()
+                .p(px(16.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    crate::icons::icon(crate::icons::TERMINAL)
+                        .size(px(20.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme.text)
+                        .child(SharedString::from("No agents available")),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .text_center()
+                        .child(SharedString::from(
+                            "Enable an installed agent in Settings → Agents, \
+                             or install an agent CLI.",
+                        )),
+                )
+                .into_any_element();
+        }
         let rows = self.visible_model_rows(cx);
         let active = self.active;
         let selected_id = self.selected_model(cx).map(|m| m.id.clone());
@@ -3696,26 +3740,29 @@ fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
 }
 
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
-/// catalog device's enabled set (Settings → Agents — per-device state, so a
-/// space on another device follows THAT device's toggles). The dev-rig mock
-/// opt-in survives the filter, and a catalog where nothing is enabled (or
-/// that predates the flag entirely and defaults empty) falls back to
-/// everything visible rather than an empty rail.
+/// catalog device's enabled set AND installed CLIs (Settings → Agents is
+/// per-device state, so a space on another device follows THAT device's
+/// toggles; a default-enabled agent whose CLI is missing would only
+/// manufacture NotInstalled errors at send). The dev-rig mock opt-in
+/// survives the filter. There is NO fallback: a catalog where nothing is
+/// both enabled and installed offers nothing, and the composer surfaces the
+/// no-agents empty state + blocks new sends — resurrecting descriptors that
+/// can only fail with NotInstalled is the #128 bug.
 pub fn offered_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     offered_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
-    let visible = visible_harnesses_impl(list, allow_mock);
-    let offered: Vec<HarnessDescriptor> = visible
-        .iter()
+    visible_harnesses_impl(list, allow_mock)
+        .into_iter()
         .filter(|d| {
-            zeron_engine::registry::descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock)
+            d.installed
+                && (zeron_engine::registry::descriptor_enabled(d)
+                    || (allow_mock && d.id == HarnessId::Mock))
         })
-        .cloned()
-        .collect();
-    if offered.is_empty() { visible } else { offered }
+        .collect()
 }
+
 
 /// Attach the (single) open popover overlay to its trigger chip.
 fn attach_overlay(
@@ -3817,7 +3864,13 @@ impl Render for Pickers {
         // harness reads from the brand mark beside it. Never "Default model":
         // before the catalog lands the remembered label (or the configured id)
         // names the pick; the loaded list then resolves it to a concrete row.
-        let model_label: SharedString = {
+        // No-agents state: nothing runnable resolved (and the catalog is
+        // loaded, so that's a conclusion, not a loading gap) — the chip says
+        // so instead of wearing a brand mark for an agent that can't run.
+        let no_agents = self.no_agents_available() && self.effective_harness(cx).is_none();
+        let model_label: SharedString = if no_agents {
+            SharedString::from("No agents available")
+        } else {
             let loaded = self.selected_model(cx).map(|m| m.label.clone());
             let label = loaded.or_else(|| {
                 let remembered = self
@@ -3836,13 +3889,14 @@ impl Render for Pickers {
             });
             label.map(SharedString::from).unwrap_or_default()
         };
-        let harness_icon: (&'static str, Option<gpui::Hsla>) = self
-            .effective_harness(cx)
-            .map(harness_brand_icon)
-            .unwrap_or((
+        let harness_icon: (&'static str, Option<gpui::Hsla>) = match self.effective_harness(cx) {
+            Some(harness) => harness_brand_icon(harness),
+            None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
+            None => (
                 crate::icons::CLAUDE_MARK,
                 Some(crate::icons::claude_brand()),
-            ));
+            ),
+        };
         let explicit_options = self.explicit_options(cx);
         let traits_set = traits_summary(
             self.selected_model(cx),
@@ -4422,9 +4476,49 @@ mod tests {
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
             vec![HarnessId::Mock, HarnessId::ClaudeCode]
         );
-        // Nothing enabled falls back to the visible list, not an empty rail.
+        // Nothing enabled offers nothing — the composer renders the
+        // no-agents empty state instead of resurrecting disabled agents.
         let offered =
             offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
-        assert_eq!(offered.len(), 3);
+        assert!(offered.is_empty());
+    }
+
+    #[test]
+    fn offered_harnesses_require_an_installed_cli() {
+        let descriptor =
+            |id: HarnessId, name: &str, enabled: Option<bool>, installed: bool| HarnessDescriptor {
+                id,
+                name: name.into(),
+                supports_steering: true,
+                steering_mode: zeron_proto::SteeringMode::StepBoundary,
+                reasoning_levels: vec![],
+                installed,
+                enabled,
+            };
+        // Enabled-but-missing-CLI agents stay out of the rail; an installed
+        // enabled one rides along (the default-enabled, CLI-less Claude/Codex
+        // machine — Settings → Agents lets the user turn them off too).
+        let catalog = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
+            descriptor(HarnessId::Codex, "Codex", Some(true), false),
+            descriptor(HarnessId::Grok, "Grok", Some(true), true),
+        ];
+        let offered = offered_harnesses_impl(&catalog, false);
+        assert_eq!(
+            offered.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![HarnessId::Grok]
+        );
+        // Nothing enabled AND installed: an empty offered set — the fresh
+        // machine where the default-enabled Claude/Codex have no CLIs (#128).
+        // No fallback: offering them again would only manufacture
+        // NotInstalled errors at send; the composer shows the no-agents
+        // state and blocks new sends instead.
+        let catalog = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
+            descriptor(HarnessId::Codex, "Codex", Some(false), false),
+            descriptor(HarnessId::Grok, "Grok", Some(false), true),
+        ];
+        let offered = offered_harnesses_impl(&catalog, false);
+        assert!(offered.is_empty());
     }
 }

@@ -224,7 +224,17 @@ impl LoginFlow {
 // ── service ─────────────────────────────────────────────────────────────────
 
 /// Cached usage probe result: the windows (or a remembered miss) + fetch time.
-type CachedUsage = (Option<Vec<AgentUsageWindow>>, Instant);
+type CachedUsage = (Option<UsageSnapshot>, Instant);
+
+/// One live usage probe: rate-limit windows plus the plan label the provider
+/// reported alongside them (Codex's usage endpoint carries a live `plan_type`,
+/// which supersedes the login-time JWT claim — plan changes show up here
+/// without a re-login). Claude's usage endpoint has no plan field.
+#[derive(Clone, Default)]
+struct UsageSnapshot {
+    windows: Vec<AgentUsageWindow>,
+    plan_label: Option<String>,
+}
 
 struct Inner {
     config: AgentAccountsConfig,
@@ -332,9 +342,15 @@ impl AgentAccounts {
                     id: slot.id.clone(),
                     harness,
                     email: Some(slot.profile.email.clone()),
-                    plan_label: slot.profile.plan.clone(),
+                    // A live plan from the usage probe (Codex `plan_type`)
+                    // supersedes the login-time snapshot; fall back to the
+                    // snapshot when the probe wasn't forced or failed.
+                    plan_label: usage
+                        .as_ref()
+                        .and_then(|usage| usage.plan_label.clone())
+                        .or_else(|| slot.profile.plan.clone()),
                     active,
-                    usage_windows: usage.unwrap_or_default(),
+                    usage_windows: usage.map(|usage| usage.windows).unwrap_or_default(),
                     display_name: slot.profile.display_name.clone(),
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
@@ -568,14 +584,24 @@ impl AgentAccounts {
             .root_dir()
             .join(format!(".login-{login_id}"));
         std::fs::create_dir_all(&home)?;
-        let child = match tokio::process::Command::new("codex")
+        let mut command = tokio::process::Command::new("codex");
+        command
             .arg("login")
             .env("CODEX_HOME", &home)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stderr(std::process::Stdio::piped());
+        // The CLI opens the authorization tab itself (via the `webbrowser`
+        // crate) AND the app opens the page when this start reply lands —
+        // users got TWO identical auth.openai.com tabs. `webbrowser` prefers
+        // $BROWSER over xdg-open, so a no-op script there keeps the CLI's
+        // open quiet; a failed open is advisory to `codex login` (it prints
+        // the URL and keeps serving the loopback callback either way).
+        #[cfg(unix)]
+        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
+            command.env("BROWSER", noop_browser);
+        }
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
                 let _ = std::fs::remove_dir_all(&home);
@@ -590,8 +616,8 @@ impl AgentAccounts {
         };
 
         // codex prints the authorize URL (to stderr as of 0.142 — scan both
-        // streams) and usually opens the browser itself; grab it so the app can
-        // open it too.
+        // streams); grab it so the app can open the single authorization tab
+        // (the CLI's own browser-open is suppressed via BROWSER above).
         let (child, output, exit) = wire_login_child(child);
         lock(&self.inner.flows).insert(
             login_id.clone(),
@@ -1134,7 +1160,7 @@ impl AgentAccounts {
         slot: &Slot,
         is_active: bool,
         force: bool,
-    ) -> Option<Vec<AgentUsageWindow>> {
+    ) -> Option<UsageSnapshot> {
         let key = format!("{}:{}", harness_slug(harness), slot.account_key);
         if let Some((usage, at)) = lock(&self.inner.usage_cache).get(&key)
             && at.elapsed() < USAGE_TTL
@@ -1154,7 +1180,11 @@ impl AgentAccounts {
         usage
     }
 
-    async fn claude_usage(&self, slot: &Slot, is_active: bool) -> Option<Vec<AgentUsageWindow>> {
+    async fn claude_usage(
+        &self,
+        slot: &Slot,
+        is_active: bool,
+    ) -> Option<UsageSnapshot> {
         let oauth = slot.credentials.get("claudeAiOauth")?;
         let mut access_token = str_field(oauth, "accessToken")?;
         let expires_at = oauth.get("expiresAt").and_then(|v| v.as_i64());
@@ -1194,10 +1224,13 @@ impl AgentAccounts {
                 });
             }
         }
-        (!windows.is_empty()).then_some(windows)
+        (!windows.is_empty()).then_some(UsageSnapshot {
+            windows,
+            plan_label: None,
+        })
     }
 
-    async fn codex_usage(&self, slot: &Slot) -> Option<Vec<AgentUsageWindow>> {
+    async fn codex_usage(&self, slot: &Slot) -> Option<UsageSnapshot> {
         let tokens = slot.credentials.get("tokens")?;
         // api-key mode has no ChatGPT rate windows.
         let access_token = str_field(tokens, "access_token")?;
@@ -1229,13 +1262,20 @@ impl AgentAccounts {
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 windows.push(AgentUsageWindow {
-                    label: if span > 86_400 { "Week" } else { "Session" }.to_string(),
+                    label: codex_window_label(span).to_string(),
                     used_fraction: (used / 100.0) as f32,
                     resets_at: parse_when(w.get("reset_at")),
                 });
             }
         }
-        (!windows.is_empty()).then_some(windows)
+        if windows.is_empty() {
+            return None;
+        }
+        // Live plan ("free"/"plus"/"pro"…) — beats the login-time JWT claim,
+        // so a plan change shows up on the next forced refresh without a
+        // re-login.
+        let plan_label = codex_plan(str_field(&body, "plan_type").as_deref());
+        Some(UsageSnapshot { windows, plan_label })
     }
 
     /// Refresh a saved Claude slot's expired access token so its usage stays
@@ -1482,6 +1522,22 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
     ))
 }
 
+/// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
+/// the free tier's window is a 30-day month (2_592_000s), Plus runs a 5-hour
+/// primary (~18_000s) with a weekly secondary (604_800s). A bare "> 1 day =
+/// week" rule mislabeled the monthly window "Week"; thresholds in seconds
+/// leave the middle gaps to the nearest label rather than guessing a plan.
+fn codex_window_label(span_seconds: i64) -> &'static str {
+    const DAY: i64 = 86_400;
+    if span_seconds >= 28 * DAY {
+        "Month"
+    } else if span_seconds >= 5 * DAY {
+        "Week"
+    } else {
+        "Session"
+    }
+}
+
 /// Compose a target Claude login with the machine's current shared fields.
 ///
 /// `claudeAiOauth` (and any other slot-owned sibling, including
@@ -1663,6 +1719,22 @@ fn scan_openai_url(output: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Path of the no-op "browser" script `start_codex_login` hands the CLI via
+/// `BROWSER` so `codex login` doesn't open a second authorization tab (the
+/// app opens the one tab). Unix only — `webbrowser` only consults `BROWSER`
+/// on unix; elsewhere the CLI's own open is left as-is.
+#[cfg(unix)]
+fn ensure_noop_browser(root: &Path) -> Option<PathBuf> {
+    const SCRIPT: &str = "#!/bin/sh\nexit 0\n";
+    let path = root.join(".noop-browser");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::write(&path, SCRIPT).ok()?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(path)
+}
+
 /// First JSONL frame with the given `ev` in a cursor-shim output accumulator.
 fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
     output.lines().find_map(|line| {
@@ -1833,7 +1905,20 @@ mod tests {
         );
         assert_eq!(claude_plan(Some("free"), None), None);
         assert_eq!(codex_plan(Some("plus")).as_deref(), Some("ChatGPT Plus"));
+        assert_eq!(codex_plan(Some("free")).as_deref(), Some("ChatGPT Free"));
         assert_eq!(codex_plan(None), None);
+    }
+
+    #[test]
+    fn codex_window_labels_track_the_window_span() {
+        // Codex free tier: one 30-day window (observed live:
+        // limit_window_seconds = 2_592_000) — NOT a week.
+        assert_eq!(codex_window_label(2_592_000), "Month");
+        // Plus: 5-hour primary + weekly secondary.
+        assert_eq!(codex_window_label(18_000), "Session");
+        assert_eq!(codex_window_label(604_800), "Week");
+        // Unknown/absent span falls back to the shortest label.
+        assert_eq!(codex_window_label(0), "Session");
     }
 
     #[test]
@@ -1903,6 +1988,24 @@ mod tests {
             Some("https://auth.openai.com/authorize?x=1")
         );
         assert_eq!(scan_openai_url("nothing here"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noop_browser_script_is_stable_and_executable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = ensure_noop_browser(root.path()).expect("script");
+        assert!(path.ends_with(".noop-browser"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(path.metadata().unwrap().permissions().mode() & 0o111 != 0);
+        }
+        // A second ensure is idempotent (same path, same content).
+        assert_eq!(ensure_noop_browser(root.path()), Some(path));
     }
 
     #[test]
