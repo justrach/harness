@@ -826,21 +826,28 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
     })
 }
 
-/// Resolve the anchor + head into document-ordered spans over the frame's
-/// registry and store them; true if the selection changed.
-fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> bool {
+/// Resolve the drag head into document-ordered spans over the frame's registry
+/// and store them; true if the selection changed. The selection model retains
+/// spans across overlapping virtualized frames once its anchor scrolls away.
+fn resolve_drag(head: (usize, usize)) -> bool {
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        let Some(anchor_ei) = reg.iter().position(|e| e.key.as_ref() == anchor_key) else {
-            return false; // anchor scrolled out of the frame — keep spans
-        };
         let elements: Vec<(&str, &str)> = reg
             .iter()
             .map(|e| (e.key.as_ref(), e.text.as_ref()))
             .collect();
-        let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
-        super::selection::update_spans(spans)
+        super::selection::update_drag(&elements, head)
     })
+}
+
+/// Continue the active drag at a window position. The transcript's edge-scroll
+/// driver calls this between scroll steps, so a stationary pointer keeps
+/// extending through newly painted rows.
+pub(crate) fn update_drag_at(position: gpui::Point<gpui::Pixels>) -> bool {
+    let Some(head) = registry_point(position) else {
+        return false;
+    };
+    resolve_drag(head)
 }
 
 /// Register this frame's window-level mouse listeners for one text element's
@@ -886,13 +893,10 @@ fn register_selection_listeners(
                 return;
             }
             // Only the anchor element's listener drives the drag.
-            let Some(anchor_ix) = super::selection::drag_anchor(&key) else {
+            if super::selection::drag_anchor(&key).is_none() {
                 return;
-            };
-            let Some(head) = registry_point(e.position) else {
-                return;
-            };
-            if resolve_drag(&key, anchor_ix, head) {
+            }
+            if update_drag_at(e.position) {
                 window.refresh();
             }
         });
