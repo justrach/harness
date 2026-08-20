@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, App, Context, Empty, Entity, Focusable as _, IntoElement, KeyBinding, Keystroke,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Subscription,
-    Task, Window, WindowControlArea, actions, div, prelude::*, px,
+    AnyElement, App, Context, Empty, Entity, FocusHandle, Focusable as _, IntoElement, KeyBinding,
+    Keystroke, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, SharedString,
+    Subscription, Task, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
@@ -61,6 +61,22 @@ actions!(
     shell,
     [ToggleSidebar, ToggleChanges, AddSpacePalette, NewSession]
 );
+
+/// Restore a default focus only after an in-flight handoff has had a frame to
+/// claim the window. A synchronous focus-lost fallback can otherwise steal
+/// focus from controls that are mounting in response to the same input event.
+pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
+    focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    window.on_next_frame(move |window, cx| {
+        if window.focused(cx).is_none() {
+            window.focus(&focus, cx);
+        }
+    });
+    cx.notify();
+}
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -6893,11 +6909,16 @@ impl Render for Shell {
         // Keyboard shortcuts (mod-s/b/j) dispatch through the window focus
         // chain — with nothing focused they go dead. Land initial focus on the
         // composer, and whenever focus is lost with no successor (e.g. the
-        // focused element unmounted), route it back there.
+        // focused element unmounted), route it back there after allowing any
+        // in-flight focus handoff to settle.
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 match this.route {
-                    Route::Chat => window.focus(&this.composer.focus_handle(cx), cx),
+                    Route::Chat => restore_focus_if_empty_on_next_frame(
+                        this.composer.focus_handle(cx),
+                        window,
+                        cx,
+                    ),
                     // No composer here — clear the stale handle so `focused()`
                     // reads None (the render hook below re-lands focus when the
                     // route returns to Chat; a lingering unmounted handle would

@@ -1454,9 +1454,24 @@ impl GitHistorySearchControl {
         self.transition_epoch = self.transition_epoch.wrapping_add(1);
         self.transition_task = None;
         self.mode = GitHistorySearchMode::Expanded;
-        let focus = self.input.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
-        self.schedule_idle_dismiss(cx);
+        // The collapsed render does not mount `input`. Focusing its handle in
+        // this click cycle leaves the next focus path empty, so Shell's
+        // focus-lost fallback legitimately restores the composer. Wait until
+        // the expanded state has driven a frame, then complete the handoff.
+        let control = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            control
+                .update(cx, |control, cx| {
+                    if control.mode != GitHistorySearchMode::Expanded {
+                        return;
+                    }
+                    let focus = control.input.read(cx).focus_handle(cx);
+                    window.focus(&focus, cx);
+                    control.schedule_idle_dismiss(cx);
+                    cx.notify();
+                })
+                .ok();
+        });
         cx.notify();
     }
 
@@ -4450,6 +4465,44 @@ impl Render for GitHistory {
 mod tests {
     use super::*;
 
+    struct HistorySearchFocusHarness {
+        composer: Entity<ComposerInput>,
+        search: Entity<GitHistorySearchControl>,
+        _focus_lost: Subscription,
+    }
+
+    impl HistorySearchFocusHarness {
+        fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let state = cx.new(|_| AppState::new());
+            let history = cx.new(|cx| GitHistory::new(state, cx));
+            let search = cx.new(|cx| GitHistorySearchControl::new(history, cx));
+            let composer = cx.new(|cx| ComposerInput::new("Message", cx));
+            let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+                crate::shell::restore_focus_if_empty_on_next_frame(
+                    this.composer.read(cx).focus_handle(cx),
+                    window,
+                    cx,
+                );
+            });
+            Self {
+                composer,
+                search,
+                _focus_lost: focus_lost,
+            }
+        }
+    }
+
+    impl Render for HistorySearchFocusHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().h(px(40.0)).child(self.composer.clone()))
+                .child(self.search.clone())
+        }
+    }
+
     fn commit(sha: &str, parents: &[&str]) -> GitHistoryCommit {
         GitHistoryCommit {
             sha: sha.into(),
@@ -4482,6 +4535,66 @@ mod tests {
         assert!(history_search_matches(&candidate, "plsh grph"));
         assert!(history_search_matches(&candidate, "A1B2"));
         assert!(!history_search_matches(&candidate, "terminal"));
+    }
+
+    #[test]
+    fn history_search_focus_survives_the_composer_fallback() {
+        let mut app = gpui::TestApp::new();
+        app.update(|cx| {
+            Theme::install(crate::theme::Appearance::Dark, cx);
+            crate::composer::init(cx);
+        });
+        let mut window = app.open_window(HistorySearchFocusHarness::new);
+        window.draw();
+
+        window.update(|harness, window, cx| {
+            window.focus(&harness.composer.read(cx).focus_handle(cx), cx);
+        });
+        window.draw();
+        window.update(|harness, window, cx| {
+            assert!(
+                harness
+                    .composer
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            harness
+                .search
+                .update(cx, |search, cx| search.expand(window, cx));
+        });
+
+        // TestApp has no platform frame loop, so deliver the callback that a
+        // headed window runs immediately before painting the expanded input.
+        window.update(|_, window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        window.draw();
+        window.update(|harness, window, cx| {
+            let search = harness.search.read(cx);
+            assert!(search.input.read(cx).focus_handle(cx).is_focused(window));
+            assert!(
+                !harness
+                    .composer
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+
+        window.simulate_input("fix");
+        window.read(|harness, cx| {
+            let search = harness.search.read(cx);
+            assert_eq!(search.input.read(cx).text(), "fix");
+            assert_eq!(search.history.read(cx).search_query, "fix");
+            assert!(search.mode == GitHistorySearchMode::Expanded);
+        });
+
+        app.advance_clock(HISTORY_SEARCH_IDLE_DISMISS + Duration::from_millis(1));
+        app.run_until_parked();
+        window.read(|harness, cx| {
+            assert!(harness.search.read(cx).mode == GitHistorySearchMode::Expanded);
+        });
     }
 
     #[test]
