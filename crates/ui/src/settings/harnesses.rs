@@ -7,16 +7,17 @@
 //! `ListHarnesses` probe and the `SetHarnessEnabled` writes at any registered
 //! device over the relay-forwarded RPCs.
 //!
-//! Only Claude Code and Codex ship enabled; the rest are opt-in. A harness
-//! whose CLI is missing on the target device renders dimmed with an install
-//! hint. Turning one ON still requires the CLI there (enabling an agent that
-//! can't run would only manufacture NotInstalled errors at send time), but an
-//! ENABLED agent can always be turned OFF — a default-on agent the user never
-//! intends to use must not be stuck on just because its CLI is missing. The
-//! engine enforces the same gates (plus "can't disable the last enabled
-//! harness", which only protects a harness whose CLI is actually installed —
-//! an unrunnable one is always dismissable) where the state lives, so a
-//! raced or stale toggle self-corrects from the RPC reply.
+//! Enablement follows DETECTION: every harness whose CLI probe passes is on
+//! unless the user switched it off, so installing an agent is all it takes
+//! for it to appear here and in the composer. A harness whose CLI is missing
+//! on the target device renders dimmed with an install hint and is never
+//! enabled (enabling an agent that can't run would only manufacture
+//! NotInstalled errors at send time); an ENABLED agent can always be turned
+//! OFF except the last one standing — the composer needs something to run.
+//! Catalogs from engines predating the detection model can still stamp
+//! enabled-but-uninstalled rows; the hint covers that too. The engine
+//! enforces the same gates where the state lives, so a raced or stale toggle
+//! self-corrects from the RPC reply.
 
 use gpui::{
     AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,

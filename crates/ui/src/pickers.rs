@@ -4457,12 +4457,12 @@ mod tests {
                 descriptor(HarnessId::Grok, "Grok", grok),
             ]
         };
-        // A catalog from an engine predating the flag (all None) falls back
-        // to default-set membership: Claude Code + Codex only.
+        // A catalog from an engine predating the flag (all None) follows its
+        // installed probes, so every detected real harness is offered.
         let offered = offered_harnesses_impl(&catalog(None, None, None), false);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Codex]
+            vec![HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Grok]
         );
         // The device's flags win: Grok on, Codex off; catalog order holds.
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), Some(true)), false);
@@ -4470,17 +4470,23 @@ mod tests {
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
             vec![HarnessId::ClaudeCode, HarnessId::Grok]
         );
-        // The dev-rig mock opt-in survives the enabled filter.
+        // The dev-rig mock opt-in survives the enabled filter (and Grok's
+        // unknown flag still resolves through its installed probe).
         let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), None), true);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::Mock, HarnessId::ClaudeCode]
+            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Grok]
         );
         // Nothing enabled offers nothing — the composer renders the
         // no-agents empty state instead of resurrecting disabled agents.
         let offered =
             offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
         assert!(offered.is_empty());
+        // So does a legacy catalog whose installed probes all failed: never
+        // resurface unrunnable agents just to avoid an empty picker.
+        let mut missing = catalog(None, None, None);
+        missing.iter_mut().for_each(|d| d.installed = false);
+        assert!(offered_harnesses_impl(&missing, false).is_empty());
     }
 
     #[test]
@@ -4496,8 +4502,9 @@ mod tests {
                 enabled,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
-        // enabled one rides along (the default-enabled, CLI-less Claude/Codex
-        // machine — Settings → Agents lets the user turn them off too).
+        // enabled one rides along. A live engine no longer stamps that
+        // combination (enablement follows detection), but a catalog from an
+        // older engine still can — the filter is the cross-version defense.
         let catalog = vec![
             descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
             descriptor(HarnessId::Codex, "Codex", Some(true), false),
