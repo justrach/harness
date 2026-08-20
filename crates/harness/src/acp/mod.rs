@@ -56,6 +56,23 @@ use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_opencode::OpencodeTracker;
 
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// OpenCode loads its plugins and MCP configuration before it answers ACP.
+/// Plugin-heavy cold starts can take minutes, so model discovery and a real
+/// chat must share one generous startup budget instead of racing 10s vs 120s.
+const DEFAULT_OPENCODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
+const OPENCODE_STARTUP_TIMEOUT_ENV: &str = "ZERON_OPENCODE_STARTUP_TIMEOUT_SECS";
+
+fn opencode_startup_timeout() -> Duration {
+    std::env::var(OPENCODE_STARTUP_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_OPENCODE_STARTUP_TIMEOUT)
+}
+
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
     id: HarnessId,
@@ -558,11 +575,18 @@ pub struct AcpHarness {
     /// Bound on the initialize → session handshake; a hang past it errors the
     /// run instead of spinning "Working" forever.
     handshake_timeout: Duration,
+    /// Bound on the initialize → session/new probe used to populate the model
+    /// picker. OpenCode shares this with its real startup budget because both
+    /// paths wait for the same plugin-heavy boot.
+    model_discovery_timeout: Duration,
     /// Discovery result cache: the advertised commands survive across calls.
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
     /// Model discovery cache: only a successful, non-empty probe is cached,
     /// so a mis-authed agent retries on the next picker open.
     models_cache: tokio::sync::OnceCell<Vec<Model>>,
+    /// Coalesce concurrent picker/title probes. Starting several OpenCode
+    /// processes at once makes cold plugin loading slower and wastes memory.
+    models_probe: tokio::sync::Mutex<()>,
 }
 
 impl AcpHarness {
@@ -576,9 +600,11 @@ impl AcpHarness {
             // Generous: the handshake is local work for every agent
             // (session/load replays from disk), so a hang past this is a
             // wedged agent, not a slow one.
-            handshake_timeout: Duration::from_secs(120),
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::OnceCell::new(),
+            models_probe: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -600,7 +626,11 @@ impl AcpHarness {
 
     /// opencode (`opencode acp`) — SST's native ACP agent.
     pub fn opencode() -> Self {
-        Self::with_spec(opencode_spec())
+        let startup_timeout = opencode_startup_timeout();
+        let mut harness = Self::with_spec(opencode_spec());
+        harness.handshake_timeout = startup_timeout;
+        harness.model_discovery_timeout = startup_timeout;
+        harness
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -627,6 +657,14 @@ impl AcpHarness {
     /// Tune the handshake bound (tests shrink it; default 120s).
     pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
         self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Tune the model-probe bound (tests shrink it; OpenCode defaults to the
+    /// same five-minute, environment-overridable budget as its real startup).
+    #[doc(hidden)]
+    pub fn with_model_discovery_timeout(mut self, timeout: Duration) -> Self {
+        self.model_discovery_timeout = timeout;
         self
     }
 
@@ -842,7 +880,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -872,11 +910,22 @@ impl AcpHarness {
             }
             Ok::<Vec<Model>, HarnessError>(models)
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
+            Err(_) => {
+                let mut error = format!(
+                    "{} model discovery did not complete within {}s",
+                    self.spec.display_name,
+                    self.model_discovery_timeout.as_secs()
+                );
+                if let Some(stderr) = stderr_tail.snapshot() {
+                    error.push_str("; stderr: ");
+                    error.push_str(&stderr);
+                }
+                Err(HarnessError::Protocol(error))
+            }
         }
     }
 }
@@ -1159,10 +1208,16 @@ impl Harness for AcpHarness {
 
     /// ACP is the source of truth: a short-lived probe reads the agent's
     /// advertised model list (cached on success). The spec's static catalog
-    /// answers when the agent advertises nothing or the probe fails — and an
-    /// absent binary still surfaces as NotInstalled, like before.
+    /// answers when the agent advertises nothing. Most legacy ACP adapters also
+    /// use it when probing fails; OpenCode does not, because presenting two
+    /// static Zen models as a successful load permanently hides a slow or
+    /// failed plugin-backed catalog from the picker.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
+        if let Some(models) = self.models_cache.get() {
+            return Ok(models.clone());
+        }
+        let _probe = self.models_probe.lock().await;
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
@@ -1171,7 +1226,9 @@ impl Harness for AcpHarness {
                 let _ = self.models_cache.set(models.clone());
                 Ok(self.models_cache.get().cloned().unwrap_or(models))
             }
-            Ok(_) | Err(_) => Ok((self.spec.models)()),
+            Ok(_) => Ok((self.spec.models)()),
+            Err(error) if self.spec.id == HarnessId::Opencode => Err(error),
+            Err(_) => Ok((self.spec.models)()),
         }
     }
 
@@ -2986,6 +3043,18 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_model_probe_and_chat_share_one_startup_budget() {
+        let harness = AcpHarness::opencode();
+        assert_eq!(
+            harness.model_discovery_timeout, harness.handshake_timeout,
+            "model discovery must not fail before the same OpenCode process would be considered hung"
+        );
+        if std::env::var_os(OPENCODE_STARTUP_TIMEOUT_ENV).is_none() {
+            assert_eq!(harness.handshake_timeout, DEFAULT_OPENCODE_STARTUP_TIMEOUT);
+        }
+    }
 
     #[test]
     fn steering_capability_reads_initialize_meta() {

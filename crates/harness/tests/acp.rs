@@ -538,6 +538,32 @@ async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn opencode_model_timeout_is_not_hidden_by_the_static_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("slow-opencode.sh");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 1000\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let harness = AcpHarness::opencode()
+        .with_executable(&script)
+        .with_graces(Duration::from_millis(10), Duration::from_millis(10))
+        .with_model_discovery_timeout(Duration::from_millis(20));
+    let error = harness
+        .models()
+        .await
+        .expect_err("OpenCode must surface discovery failure so the picker can retry");
+    assert!(
+        error
+            .to_string()
+            .contains("OpenCode model discovery did not complete within"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn hung_handshake_errors_instead_of_spinning_forever() {
     // An agent that consumes stdin and never answers initialize — the
     // "thinking for minutes, then nothing" startup class (issue #93). The
