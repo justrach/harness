@@ -1586,13 +1586,27 @@ async fn drive_run(
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id));
             let sink_known = subagents.contains_key(parent_tool_use_id);
+            // A Done with NO sink (a subagent that never streamed — codex
+            // turn ends can beat registration) is chip-only: minting a doc
+            // just to freeze it empty helps no one, and stamping the ref
+            // would link the chip to that never-created doc (an empty tab
+            // on click).
+            let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if chip_streaming {
-                if !sink_known {
+                if !sink_known && !done_only {
                     for p in folded.iter_mut() {
                         if let MessagePart::Tool {
-                            id, subagent_ref, ..
+                            id,
+                            call,
+                            subagent_ref,
+                            ..
                         } = p
                             && id == parent_tool_use_id
+                            // Genus gate: a subagent ref may only ever bind
+                            // to a SPAWN call — mis-keyed tagged traffic
+                            // must not turn an ordinary chip into a spawn
+                            // link (empty tab on click).
+                            && call.is_subagent_spawn()
                         {
                             *subagent_ref = Some(sub_id.clone());
                         }
@@ -1606,10 +1620,6 @@ async fn drive_run(
                 }
             }
             // Open the sink lazily; an open failure degrades to chip-only.
-            // A Done with NO sink (a subagent that never streamed — codex
-            // turn ends can beat registration) is chip-only: minting a doc
-            // just to freeze it empty helps no one.
-            let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if !sink_known && !done_only {
                 let opened = inner.doc_host().and_then(|host| match host.open(&sub_id) {
                     Ok(handle) => Some(handle.doc_arc()),
