@@ -22,6 +22,10 @@
 //!    current.
 //! 2. **Swap** (`activate`): overwrite the CLI's credential store (and, for
 //!    Claude, merge the identity back into `~/.claude.json`) with a saved slot.
+//!    Claude's credential blob is overloaded: `claudeAiOauth` is per-account,
+//!    but sibling keys such as `mcpOAuth` are machine-shared MCP/plugin tokens.
+//!    Activate splices those live shared fields onto the target login so a
+//!    switch does not force every MCP server to re-auth.
 //! 3. **Add** (`start_login`…): drive an OAuth flow for a NEW account without
 //!    touching the live one. Claude uses the public PKCE code flow (paste-code);
 //!    Codex spawns `codex login` against a throwaway `CODEX_HOME` and polls
@@ -66,6 +70,17 @@ const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Claude Code stores these next to `claudeAiOauth` in the same credential
+/// blob, but they are machine-shared (MCP server OAuth, plugin secrets) and
+/// rotate independently of any account slot. On activate the live copies win.
+const CLAUDE_SHARED_CREDENTIAL_KEYS: &[&str] = &[
+    "mcpOAuth",
+    "mcpOAuthClientConfig",
+    "mcpXaaIdp",
+    "mcpXaaIdpConfig",
+    "pluginSecrets",
+];
 
 const USAGE_TTL: Duration = Duration::from_secs(60);
 /// An abandoned login flow (dialog dismissed without Cancel) is reaped past this.
@@ -384,10 +399,15 @@ impl AgentAccounts {
     }
 
     async fn activate_claude(&self, slot: &Slot) -> Result<(), EngineError> {
-        self.write_claude_credentials(&slot.credentials).await?;
+        // Slot owns the account login; live owns MCP/plugin OAuth that lives in
+        // the same blob. A wholesale replace would restore stale (or empty)
+        // mcpOAuth from the target snapshot and force every MCP to re-auth.
+        let (live, _) = self.read_claude_credentials().await;
+        let credentials = compose_claude_credentials(&slot.credentials, live.as_ref());
+        self.write_claude_credentials(&credentials).await?;
         // Merge the identity back into ~/.claude.json — everything else (caches,
-        // project history, onboarding flags) is left untouched, which is all
-        // Claude Code needs to treat this as a fresh login.
+        // project history, onboarding flags, mcpServers) is left untouched, which
+        // is all Claude Code needs to treat this as a fresh login.
         //
         // GUARD the merge: a parse failure on an EXISTING file means "don't touch
         // it", not "start fresh" — writing only our identity fields would destroy
@@ -1269,7 +1289,10 @@ impl AgentAccounts {
             );
         }
         let mut refreshed = slot.clone();
-        refreshed.credentials = serde_json::json!({ "claudeAiOauth": updated });
+        // Keep sibling keys (mcpOAuth, pluginSecrets, …) — rewriting the blob
+        // as oauth-only would drop them, and a later activate of this slot
+        // would have nothing to merge if live credentials were also empty.
+        refreshed.credentials = with_claude_ai_oauth(&slot.credentials, updated);
         refreshed.saved_at = now_ms();
         if let Err(err) = self.write_slot(&refreshed) {
             tracing::warn!(slot = %slot.id, error = %err, "refreshed slot write failed");
@@ -1457,6 +1480,70 @@ fn codex_plan(plan: Option<&str>) -> Option<String> {
         first.to_uppercase(),
         chars.as_str()
     ))
+}
+
+/// Compose a target Claude login with the machine's current shared fields.
+///
+/// `claudeAiOauth` (and any other slot-owned sibling, including
+/// `trustedDeviceToken`) come from `target`. Allowlisted shared keys come
+/// from `live`, presence and absence alike — a key the live blob no longer
+/// holds is not resurrected from the slot. When there is no live JSON object
+/// (or the target is not a Claude OAuth blob), `target` is returned unchanged.
+fn compose_claude_credentials(
+    target: &serde_json::Value,
+    live: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(live_obj) = live.and_then(|v| v.as_object()) else {
+        return target.clone();
+    };
+    let Some(target_obj) = target.as_object() else {
+        return target.clone();
+    };
+    if !target_obj.contains_key("claudeAiOauth") {
+        return target.clone();
+    }
+    let unrecognized: Vec<&str> = live_obj
+        .keys()
+        .map(String::as_str)
+        .filter(|key| {
+            *key != "claudeAiOauth"
+                && *key != "trustedDeviceToken"
+                && !CLAUDE_SHARED_CREDENTIAL_KEYS.contains(key)
+        })
+        .collect();
+    if !unrecognized.is_empty() {
+        tracing::debug!(
+            keys = ?unrecognized,
+            "live Claude credentials have sibling keys we don't recognize; treating them as slot-owned"
+        );
+    }
+    let mut composed = serde_json::Map::new();
+    for (key, value) in target_obj {
+        if !CLAUDE_SHARED_CREDENTIAL_KEYS.contains(&key.as_str()) {
+            composed.insert(key.clone(), value.clone());
+        }
+    }
+    for key in CLAUDE_SHARED_CREDENTIAL_KEYS {
+        if let Some(value) = live_obj.get(*key) {
+            composed.insert((*key).to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(composed)
+}
+
+/// Replace `claudeAiOauth` without dropping sibling keys on the same blob.
+fn with_claude_ai_oauth(
+    credentials: &serde_json::Value,
+    oauth: serde_json::Value,
+) -> serde_json::Value {
+    let mut creds = credentials.clone();
+    match creds.as_object_mut() {
+        Some(map) => {
+            map.insert("claudeAiOauth".into(), oauth);
+            creds
+        }
+        None => serde_json::json!({ "claudeAiOauth": oauth }),
+    }
 }
 
 /// Parse a codex `auth.json` (the live one or a fresh login's).
@@ -1825,5 +1912,72 @@ mod tests {
             "org%3Acreate_api_key%20user%3Aprofile"
         );
         assert_eq!(urlencode("https://a/b"), "https%3A%2F%2Fa%2Fb");
+    }
+
+    #[test]
+    fn compose_claude_credentials_live_mcp_wins_over_stale_slot() {
+        let target = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "alice" },
+            "trustedDeviceToken": "alice-device",
+            "mcpOAuth": { "github": { "accessToken": "stale" } },
+            "pluginSecrets": { "old": true },
+        });
+        let live = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "bob" },
+            "trustedDeviceToken": "bob-device",
+            "mcpOAuth": { "github": { "accessToken": "live" } },
+            "pluginSecrets": { "live": true },
+        });
+        let composed = compose_claude_credentials(&target, Some(&live));
+        assert_eq!(composed["claudeAiOauth"]["accessToken"], "alice");
+        assert_eq!(composed["trustedDeviceToken"], "alice-device");
+        assert_eq!(composed["mcpOAuth"]["github"]["accessToken"], "live");
+        assert_eq!(composed["pluginSecrets"]["live"], true);
+        assert!(composed["pluginSecrets"].get("old").is_none());
+    }
+
+    #[test]
+    fn compose_claude_credentials_does_not_resurrect_absent_live_mcp() {
+        let target = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "alice" },
+            "mcpOAuth": { "github": { "accessToken": "stale" } },
+        });
+        let live = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "bob" },
+        });
+        let composed = compose_claude_credentials(&target, Some(&live));
+        assert_eq!(composed["claudeAiOauth"]["accessToken"], "alice");
+        assert!(composed.get("mcpOAuth").is_none());
+    }
+
+    #[test]
+    fn compose_claude_credentials_passthrough_without_live_or_oauth() {
+        let target = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "alice" },
+            "mcpOAuth": { "github": { "accessToken": "slot" } },
+        });
+        assert_eq!(compose_claude_credentials(&target, None), target);
+
+        let api_key = serde_json::json!({ "apiKey": "sk-x" });
+        let live = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "bob" },
+            "mcpOAuth": { "github": { "accessToken": "live" } },
+        });
+        assert_eq!(
+            compose_claude_credentials(&api_key, Some(&live)),
+            api_key,
+            "opaque/API-key shapes activate verbatim"
+        );
+    }
+
+    #[test]
+    fn with_claude_ai_oauth_keeps_sibling_keys() {
+        let creds = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "old" },
+            "mcpOAuth": { "github": { "accessToken": "keep" } },
+        });
+        let updated = with_claude_ai_oauth(&creds, serde_json::json!({ "accessToken": "new" }));
+        assert_eq!(updated["claudeAiOauth"]["accessToken"], "new");
+        assert_eq!(updated["mcpOAuth"]["github"]["accessToken"], "keep");
     }
 }
