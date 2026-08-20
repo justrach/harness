@@ -4449,6 +4449,30 @@ fn chip_header_row(
                 })
                 .child(SharedString::from(detail)),
         )
+        .when_some(tool.call.subagent_model(), |row, model| {
+            // Which model the child runs on, when the spawn named one.
+            //
+            // In the trailing slot rather than suffixed onto the detail: the
+            // detail is the truncating slot, and the model is exactly what a
+            // reader scanning a fan-out of spawns wants left once the
+            // descriptions are cut.
+            //
+            // Bare faint text, NOT a filled pill: the tiles either side of it
+            // are AFFORDANCES (the spinner means running, the arrow opens the
+            // subagent), so giving a passive label the same chrome made the
+            // trailing edge read as three buttons — the loudest thing in the
+            // row was the one thing you cannot click.
+            row.child(
+                div()
+                    .flex_none()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(model.to_owned())),
+            )
+        })
         .when(running, |row| {
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
