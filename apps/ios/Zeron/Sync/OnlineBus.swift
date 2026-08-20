@@ -33,10 +33,11 @@ final class OnlineBus: @unchecked Sendable {
 
     /// Empirical "the network is back": resumes every parked waiter.
     func notifyOnline() {
-        lock.lock()
-        let resumed = waiters
-        waiters.removeAll()
-        lock.unlock()
+        let resumed = lock.withLock {
+            let resumed = waiters
+            waiters.removeAll()
+            return resumed
+        }
         for continuation in resumed.values {
             continuation.resume()
         }
@@ -45,18 +46,18 @@ final class OnlineBus: @unchecked Sendable {
     /// OS path status from NWPathMonitor. Only a definitive "unsatisfied"
     /// parks; the offline→online transition broadcasts the online event.
     func setPathOnline(_ online: Bool) {
-        lock.lock()
-        let wasOffline = pathOffline
-        pathOffline = !online
-        lock.unlock()
+        let wasOffline = lock.withLock {
+            let wasOffline = pathOffline
+            pathOffline = !online
+            return wasOffline
+        }
         if online, wasOffline {
             notifyOnline()
         }
     }
 
     var isPathOffline: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return pathOffline
+        lock.withLock { pathOffline }
     }
 
     /// Sleep `ms`, cut short by an online event that fires during the wait.
@@ -82,29 +83,30 @@ final class OnlineBus: @unchecked Sendable {
 
     /// Await the next online broadcast (cancellation-safe).
     private func nextOnlineEvent() async {
-        lock.lock()
-        nextWaiterId += 1
-        let id = nextWaiterId
-        lock.unlock()
+        let id = lock.withLock {
+            nextWaiterId += 1
+            return nextWaiterId
+        }
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                var resumeNow = false
-                lock.lock()
-                if cancelledBeforeRegistration.remove(id) != nil {
-                    resumeNow = true
-                } else {
-                    waiters[id] = continuation
+                let resumeNow = lock.withLock {
+                    if cancelledBeforeRegistration.remove(id) != nil {
+                        return true
+                    } else {
+                        waiters[id] = continuation
+                        return false
+                    }
                 }
-                lock.unlock()
                 if resumeNow { continuation.resume() }
             }
         } onCancel: {
-            lock.lock()
-            let continuation = waiters.removeValue(forKey: id)
-            if continuation == nil {
-                cancelledBeforeRegistration.insert(id)
+            let continuation = lock.withLock {
+                let continuation = waiters.removeValue(forKey: id)
+                if continuation == nil {
+                    cancelledBeforeRegistration.insert(id)
+                }
+                return continuation
             }
-            lock.unlock()
             continuation?.resume()
         }
     }

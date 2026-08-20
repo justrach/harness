@@ -376,7 +376,7 @@ struct NewSessionView: View {
                                 reasoning: reasoning, sandbox: "workspace-write")
         Task { @MainActor in
             var cwd: String?
-            var branch = selectedRef
+            let branch = selectedRef
             var worktree: WorktreeSpec?
             switch checkoutKind {
             case .newWorktree:

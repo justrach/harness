@@ -159,7 +159,7 @@ actor RegistryClient {
                 // confusing silent failure: everything cached renders, nothing
                 // syncs. Say so and back off.
                 roomLog.error("registry: no socket URL (token unavailable); backing off")
-                await self.scheduleReconnect(gen: gen)
+                self.scheduleReconnect(gen: gen)
                 return
             }
             await self.openSocket(url: url, gen: gen)
@@ -251,7 +251,7 @@ actor RegistryClient {
             // Parked while the OS path is offline; cut short by any online
             // event (a sibling dial success, path recovery, focus probe).
             await OnlineBus.shared.waitBackoff(ms: delay)
-            await self.connect()
+            self.connect()
         }
     }
 
