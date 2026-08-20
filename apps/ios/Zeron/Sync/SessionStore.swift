@@ -259,6 +259,11 @@ final class SessionStore {
                 self.cursor = seq
                 self.saver?.poke()
             },
+            setCursor: { [weak self] seq in
+                guard let self, self.cursor != seq else { return }
+                self.cursor = seq
+                self.saver?.poke()
+            },
             event: { [weak self] event in self?.handle(event) }
         )
         let client = ChatRoomClient(
@@ -638,6 +643,10 @@ final class SessionStore {
 
     /// uploadIds an escort is actively pushing — retry/respawn dedupes on it.
     @ObservationIgnored private var activeEscorts: Set<String> = []
+    /// Fraction of the current escort batch's bytes committed to the host
+    /// (PR #185's "the ring tracks the real relay transfer" — the status
+    /// strip narrates it as "Uploading… N%"). nil = no transfer in flight.
+    private(set) var transferProgress: Double?
 
     /// Whether this store has ever dialed its chat2 room (feeds the
     /// connectivity center — an undialed room is not "degraded").
@@ -658,17 +667,24 @@ final class SessionStore {
                 for transfer in remaining {
                     self?.activeEscorts.remove(transfer.uploadId)
                 }
+                self?.transferProgress = nil
             }
             var pending = remaining
             var backoffMs = Self.transferBackoffBaseMs
             let deadline = nowMs() + Self.attachmentWaitMaxMs
+            let totalBytes = max(remaining.reduce(0) { $0 + $1.data.count }, 1)
             while let self, !pending.isEmpty, nowMs() < deadline {
                 do {
                     while let transfer = pending.first {
+                        let doneBytes = totalBytes - pending.reduce(0) { $0 + $1.data.count }
                         _ = try await uploadAttachmentChunked(
                             relay: self.relayToHost(),
                             name: transfer.name, data: transfer.data,
-                            uploadId: transfer.uploadId)
+                            uploadId: transfer.uploadId) { [weak self] fraction in
+                            self?.transferProgress = min(
+                                (Double(doneBytes) + fraction * Double(transfer.data.count))
+                                    / Double(totalBytes), 0.99)
+                        }
                         UploadStash.delete(uploadId: transfer.uploadId)
                         pending.removeFirst()
                     }
@@ -729,17 +745,69 @@ final class SessionStore {
 
     /// The "Not delivered — tap to retry" affordance (doc_host.rs
     /// retry_delivery): restart the grace clock so the surface returns to
-    /// Sending/Queued, kick the room on fresh backoff, nudge the host, and
-    /// re-derive attachment escorts from the still-pending refs.
+    /// Sending/Queued, re-issue dead attempts, kick the room on fresh
+    /// backoff, nudge the host, and re-derive attachment escorts from the
+    /// still-pending refs (a re-issued command's refs are included).
     func retryDelivery() {
         let now = nowMs()
         for ix in pendingSends.indices {
             pendingSends[ix].started = now
         }
         revision &+= 1
+        reissueDeadSends()
         kickRoom()
         nudgeHost()
         respawnEscorts()
+    }
+
+    /// PR #172's retry semantics, phone half: exactly-once is per command
+    /// ID, so a Run/Steer whose user message never landed and whose command
+    /// can never execute again — Rejected (the host's dead-command sweep
+    /// terminalized it, synced back over chat2), Expired status, or Pending
+    /// past its own TTL (the host will never drain it; an explicit user
+    /// retry is exactly the consent to re-send) — gets a FRESH attempt: new
+    /// id, same payload and messageId (the host's user-entry pre-write
+    /// dedupes by message id). One re-issue per message (latest attempt);
+    /// a live pending unexpired attempt for the same message skips it.
+    func reissueDeadSends() {
+        guard let root = doc.getDeepValue().mapValue,
+              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
+        let landed = Set(entries.map(\.id))
+        let now = nowMs()
+        struct DeadAttempt {
+            var kind: String
+            var payload: [String: Any]
+            var issuedAt: Int64
+            var oldId: String
+        }
+        var latestDead: [String: DeadAttempt] = [:]
+        var liveMessageIds: Set<String> = []
+        for value in commands {
+            guard let m = value.mapValue,
+                  m["issuedBy"]?.stringValue == config.deviceId,
+                  let kind = m["kind"]?.stringValue, kind == "run" || kind == "steer",
+                  let id = m["id"]?.stringValue,
+                  let payload = m["payload"]?.mapValue,
+                  let messageId = payload["messageId"]?.stringValue,
+                  !landed.contains(messageId) else { continue }
+            let status = m["status"]?.stringValue ?? "pending"
+            let expired = (m["expiresAt"]?.i64Value).map { $0 <= now } ?? false
+            if status == "pending", !expired {
+                liveMessageIds.insert(messageId)
+                continue
+            }
+            guard status == "rejected" || status == "expired"
+                || (status == "pending" && expired) else { continue }
+            let issuedAt = m["issuedAt"]?.i64Value ?? 0
+            if let existing = latestDead[messageId], existing.issuedAt >= issuedAt { continue }
+            guard let object = LoroValue.map(value: payload).jsonObject as? [String: Any] else { continue }
+            latestDead[messageId] = DeadAttempt(kind: kind, payload: object,
+                                                issuedAt: issuedAt, oldId: id)
+        }
+        for (messageId, attempt) in latestDead where !liveMessageIds.contains(messageId) {
+            roomLog.info("chat2 \(self.chatId, privacy: .public): retry re-issues a dead send attempt (old=\(attempt.oldId, privacy: .public))")
+            queueCommand(kind: attempt.kind, payload: attempt.payload)
+        }
     }
 }
 

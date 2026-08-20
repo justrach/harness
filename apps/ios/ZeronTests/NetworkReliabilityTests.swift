@@ -2,6 +2,7 @@
 // #170): version gates, pending:// ref round-trips, the upload chunk plan's
 // wire invariants, the whole-attachment deadline, and the relay echo frame.
 
+import Loro
 import XCTest
 @testable import Zeron
 
@@ -100,6 +101,47 @@ final class NetworkReliabilityTests: XCTestCase {
         let json = String(data: try JSONEncoder().encode(request), encoding: .utf8)!
         XCTAssertFalse(json.contains("worktree"), "old hosts must see the legacy shape")
     }
+
+    // MARK: retry re-issue (PR #172 phone half)
+
+    @MainActor
+    func testRetryReissuesADeadSendAttemptExactlyOnce() throws {
+        let config = AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
+                               userId: "u", orgId: "o", deviceId: "phone",
+                               deviceName: "phone", tokens: nil, devBearer: "u@o")
+        let store = SessionStore(chatId: "c-reissue", config: config)
+        let commands = store.doc.getList(id: "commands")
+        let dead = try commands.pushContainer(child: LoroMap())
+        try dead.insert(key: "id", v: "cmd-old")
+        try dead.insert(key: "kind", v: "run")
+        try dead.insert(key: "payload", v: LoroValue.fromJSON([
+            "kind": "run",
+            "request": ["prompt": "hi", "cwd": "/repo"],
+            "messageId": "msg-1",
+        ]))
+        try dead.insert(key: "issuedBy", v: "phone")
+        try dead.insert(key: "issuedAt", v: Int64(1_000))
+        try dead.insert(key: "expiresAt", v: nowMs() + 60_000)
+        try dead.insert(key: "status", v: "rejected")
+        store.doc.commit()
+
+        store.reissueDeadSends()
+
+        let after = try XCTUnwrap(store.doc.getDeepValue().mapValue?["commands"]?.listValue)
+        XCTAssertEqual(after.count, 2, "a rejected attempt whose message never landed re-issues")
+        let fresh = try XCTUnwrap(after[1].mapValue)
+        XCTAssertEqual(fresh["status"]?.stringValue, "pending")
+        XCTAssertNotEqual(fresh["id"]?.stringValue, "cmd-old", "exactly-once is per command id — retry mints a fresh one")
+        XCTAssertEqual(fresh["payload"]?.mapValue?["messageId"]?.stringValue, "msg-1",
+                       "the message id survives so the host's user-entry pre-write dedupes")
+
+        // A live pending attempt for the message makes a re-issue a duplicate.
+        store.reissueDeadSends()
+        let again = try XCTUnwrap(store.doc.getDeepValue().mapValue?["commands"]?.listValue)
+        XCTAssertEqual(again.count, 2, "a second retry with a live attempt queued must not duplicate")
+    }
+
+    // MARK: RunRequest wire shape (proto agent.rs, PR #159)
 
     func testWorktreeSpecEncodesCamelCase() throws {
         var request = RunRequest(prompt: "hi", cwd: "/repo")

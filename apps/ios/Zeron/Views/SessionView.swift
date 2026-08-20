@@ -243,9 +243,18 @@ struct SessionView: View {
                         .font(Theme.sans(11))
                         .foregroundStyle(Theme.warning.opacity(0.9))
                 case .sending?:
-                    Text("Sending…")
-                        .font(Theme.sans(11))
-                        .foregroundStyle(Theme.textMuted)
+                    // The percent tracks the REAL relay transfer (escort
+                    // bytes committed to the host), not just local staging.
+                    if let progress = store.transferProgress {
+                        Text("Uploading… \(Int(progress * 100))%")
+                            .font(Theme.sans(11))
+                            .foregroundStyle(Theme.textMuted)
+                            .monospacedDigit()
+                    } else {
+                        Text("Sending…")
+                            .font(Theme.sans(11))
+                            .foregroundStyle(Theme.textMuted)
+                    }
                 case nil:
                     normalStatus(chat: chat, status: status)
                 }
