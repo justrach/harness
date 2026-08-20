@@ -226,6 +226,22 @@ async fn config_options_apply_requested_model_and_effort() {
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
+
+#[tokio::test]
+async fn resumed_first_class_model_is_switched_before_prompt() {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("scenario:model-api");
+    req.resume = Some("existing-grok-session".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "model switched".into()
+        }),
+        "{events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
 #[tokio::test]
 async fn permission_requests_auto_accept_the_preferred_allow_option() {
     let (controls, _steer, _token) = controls();
