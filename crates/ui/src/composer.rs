@@ -4477,7 +4477,14 @@ impl Composer {
     /// Existing chats carry their own project, so they always send.
     fn send_blocked(&self, cx: &App) -> bool {
         let state = self.state.read(cx);
-        state.selected_chat.is_none() && state.selected_space_row().is_none()
+        if state.selected_chat.is_some() {
+            return false;
+        }
+        // New-chat canvas: needs a project AND a runnable agent. The
+        // no-agents check only fires once the catalog is loaded — offline
+        // and still-loading states must not block (the harness resolves from
+        // the remembered default and the engine reports real failures).
+        state.selected_space_row().is_none() || self.pickers.read(cx).no_agents_available()
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -5505,8 +5512,9 @@ impl Composer {
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Steer => {
-                // Dimmed and inert while no project is picked (`send_blocked`
-                // also gates `on_submit`, so Enter is a no-op too).
+                // Dimmed and inert while no project is picked or no agent is
+                // runnable (`send_blocked` also gates `on_submit`, so Enter
+                // is a no-op too).
                 let blocked = self.send_blocked(cx);
                 div()
                     .id("composer-send")

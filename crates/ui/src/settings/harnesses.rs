@@ -14,8 +14,9 @@
 //! ENABLED agent can always be turned OFF — a default-on agent the user never
 //! intends to use must not be stuck on just because its CLI is missing. The
 //! engine enforces the same gates (plus "can't disable the last enabled
-//! harness") where the state lives, so a raced or stale toggle self-corrects
-//! from the RPC reply.
+//! harness", which only protects a harness whose CLI is actually installed —
+//! an unrunnable one is always dismissable) where the state lives, so a
+//! raced or stale toggle self-corrects from the RPC reply.
 
 use gpui::{
     AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
@@ -349,8 +350,11 @@ impl HarnessesPage {
                 let installed = descriptor.installed;
                 let enabled = descriptor_enabled(&descriptor);
                 // The one enabled harness left can't be switched off — the
-                // composer needs something to run (mirrors the engine guard).
-                let last_enabled = enabled && enabled_count == 1;
+                // composer needs something to run — but only when it could
+                // actually run: an uninstalled last harness stays togglable
+                // (its hint says to turn it off) and the composer handles the
+                // resulting empty set (mirrors the engine guard).
+                let last_enabled = enabled && enabled_count == 1 && installed;
                 // Turning OFF never needs the CLI (a default-on agent the
                 // user doesn't want must not be stuck on because it isn't
                 // installed); turning ON still does.

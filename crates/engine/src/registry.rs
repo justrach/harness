@@ -157,7 +157,11 @@ impl HarnessRegistry {
 
     /// Flip one harness's enablement and persist. Refuses unknown harnesses,
     /// enabling one whose CLI is missing (the settings gate, enforced where
-    /// the state lives), and disabling the last enabled harness.
+    /// the state lives), and disabling the last RUNNABLE enabled harness —
+    /// the composer needs something to run, but a harness whose CLI is
+    /// missing can't run anyway, so the last-one guard doesn't apply to it
+    /// (a fresh machine's default-enabled, CLI-less Claude/Codex must both
+    /// be dismissable; the empty set is a valid, UI-handled state).
     pub fn set_enabled(&self, id: HarnessId, on: bool) -> Result<(), String> {
         if !self.slots().contains_key(&id) {
             return Err(format!("unknown harness {id:?}"));
@@ -169,7 +173,7 @@ impl HarnessRegistry {
         match (on, set.contains(&id)) {
             (true, false) => set.push(id),
             (false, true) => {
-                if set.len() == 1 {
+                if set.len() == 1 && self.installed_for(id) {
                     return Err("cannot disable the last enabled harness".into());
                 }
                 set.retain(|h| *h != id);
@@ -686,6 +690,29 @@ mod tests {
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.enabled_set(), vec![HarnessId::Grok]);
+    }
+
+    /// The fresh-machine shape (#128): Claude Code + Codex default-enabled
+    /// with neither CLI installed. Both must be dismissable — the last-one
+    /// guard only protects a harness that could actually run — and the empty
+    /// set persists rather than snapping back to the defaults.
+    #[test]
+    fn uninstalled_defaults_can_both_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::ClaudeCode, false);
+        test_slot(&registry, HarnessId::Codex, false);
+
+        registry.set_enabled(HarnessId::Codex, false).unwrap();
+        // Claude Code is now the last enabled harness, but its CLI is
+        // missing — the guard must not pin it on.
+        registry.set_enabled(HarnessId::ClaudeCode, false).unwrap();
+        assert_eq!(registry.enabled_set(), Vec::<HarnessId>::new());
+
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.enabled_set(), Vec::<HarnessId>::new());
     }
 
     /// The Codex lazy descriptor must be indistinguishable from `describe()`
