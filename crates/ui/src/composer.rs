@@ -4003,8 +4003,8 @@ impl Composer {
     ) -> Option<gpui::AnyElement> {
         let token = self.mention.token.as_ref()?;
         let mut card = crate::popover::popover_card(theme)
-            .w(px(380.0))
-            .max_h(px(280.0))
+            .w_full()
+            .max_h(px(320.0))
             .overflow_hidden()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && self.mention.results.is_empty() {
@@ -4040,24 +4040,20 @@ impl Composer {
         } else {
             for (ix, result) in self.mention.results.iter().enumerate() {
                 let selected = self.mention.active == Some(ix);
-                let path = result.path.clone();
-                let tooltip_path: SharedString = path.clone().into();
+                let (directory, name) = match result.path.rsplit_once('/') {
+                    Some((directory, name)) => (directory.to_string(), name.to_string()),
+                    None => (String::new(), result.path.clone()),
+                };
                 card = card.child(
                     crate::popover::menu_row(theme, selected, format!("file-mention-result-{ix}"))
                         .id(("file-mention-result", ix))
-                        .tooltip(move |_, cx| {
-                            cx.new(|_| MentionPathTooltip {
-                                path: tooltip_path.clone(),
-                                activation: ix as u64,
-                            })
-                            .into()
-                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.mention.active = Some(ix);
                             this.accept_mention(cx);
                         }))
                         .child(
                             div()
+                                .w_full()
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -4069,32 +4065,34 @@ impl Composer {
                                         crate::icons::DOCUMENT
                                     })
                                     .size(px(14.0))
+                                    .flex_none()
                                     .text_color(theme.text_muted),
                                 )
                                 .child(
                                     div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .truncate()
-                                        .text_size(px(12.5))
+                                        .flex_none()
+                                        .text_size(px(13.0))
                                         .text_color(theme.text)
-                                        .child(path),
-                                ),
+                                        .child(name),
+                                )
+                                .when(!directory.is_empty(), |row| {
+                                    row.child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .truncate()
+                                            .text_size(px(12.5))
+                                            .text_color(theme.text_muted)
+                                            .child(directory),
+                                    )
+                                }),
                         ),
                 );
             }
         }
-        let anchor = self
-            .input
-            .read(cx)
-            .visible_point_for_index(token.range.start)?;
-        // No exit phase: the completion popup tracks the token under the
-        // caret — a fade-out on every keystroke-driven dismissal would read
-        // as input lag, not polish.
-        Some(crate::popover::anchored_menu_above_at(
+        Some(crate::popover::full_width_menu_above(
             "file-mention-popup",
-            anchor,
             card.into_any_element(),
             None,
         ))
@@ -4104,7 +4102,6 @@ impl Composer {
         div()
             .relative()
             .child(self.input.clone())
-            .children(self.render_file_mention_popup(theme, cx))
             .children(self.render_slash_popup(theme, cx))
     }
 
@@ -6036,11 +6033,16 @@ impl Render for Composer {
         // via `add_paths`.
         // Frosted: the pill backdrop-blurs the transcript scrolling under it
         // (the popover glass treatment; radius matches the pill's rounding).
-        let container = container.child(crate::frost::frosted(
-            26.0,
-            16.0,
-            motion::fade_quick("composer-input", body),
-        ));
+        let container = container.child(
+            div()
+                .relative()
+                .child(crate::frost::frosted(
+                    26.0,
+                    16.0,
+                    motion::fade_quick("composer-input", body),
+                ))
+                .children(self.render_file_mention_popup(&theme, cx)),
+        );
         // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
         // checkout-kind selector + ref picker for new sessions, read-only
         // labels once the session exists. Git spaces only.
