@@ -2866,8 +2866,15 @@ impl Shell {
         motion::lerp(from, to, RESIZE.progress(raw))
     }
 
-    /// Animated width container: tweens 200ms ease-out on collapse/expand, and
-    /// clips a fixed-width inner so content never reflows mid-transition.
+    fn tween_active(&self, tween: Option<WidthTween>) -> bool {
+        tween.is_some_and(|tween| {
+            !self.reduced_motion
+                && tween.started.elapsed() < RESIZE.total().mul_f32(motion::speed_scale())
+        })
+    }
+
+    /// Animated width container: tweens 200ms ease-out on collapse/expand and
+    /// clips the surface as it follows the current width.
     fn pane_container(
         &self,
         tween: Option<WidthTween>,
@@ -5447,7 +5454,11 @@ impl Shell {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
                     // the resolved surface (fallbacks can move it).
-                    panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
+                    let resize_suspended = self.tween_active(self.right_tween);
+                    panel.update(cx, |panel, cx| {
+                        panel.set_resize_suspended(resize_suspended);
+                        panel.select_tab_by_key(tab, cx);
+                    });
                     panel.into_any_element()
                 }
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
