@@ -3646,11 +3646,7 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| {
-                tool.invocation
-                    .clone()
-                    .filter(|_| !is_spawn_link(tool))
-            })
+            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
