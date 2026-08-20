@@ -230,6 +230,8 @@ pub struct UiSettings {
     /// Base size for interface and conversational prose. Code-related surfaces
     /// retain their fixed metrics.
     pub ui_font_size: crate::typography::UiFontSize,
+    /// Changes pane: side-by-side diffs instead of the unified stack.
+    pub diff_split: bool,
 }
 
 impl Default for UiSettings {
@@ -254,6 +256,7 @@ impl Default for UiSettings {
             appearance: crate::appearance::AppearanceMode::default(),
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
+            diff_split: false,
         }
     }
 }
@@ -533,6 +536,7 @@ mod tests {
             appearance: crate::appearance::AppearanceMode::Light,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
+            diff_split: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

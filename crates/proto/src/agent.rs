@@ -203,6 +203,25 @@ pub enum ToolCall {
     },
 }
 
+impl ToolCall {
+    /// A subagent SPAWN call — the `Agent[: <description>]` naming convention
+    /// every driver decodes its spawn tool into (claude/codex `Task`, cursor
+    /// `task`, grok `spawn_subagent`, opencode `task`). This is the single
+    /// genus gate for subagent binding: tagged subagent traffic may only ever
+    /// stamp a ref/status onto a spawn call, so a driver keying bug can never
+    /// turn an ordinary Run/Read chip into a spawn chip (2026-08-20: claude's
+    /// background-shell `task_notification` did exactly that — the chip
+    /// linked to a never-created doc and opened an empty panel).
+    pub fn is_subagent_spawn(&self) -> bool {
+        let name = match self {
+            ToolCall::Unknown { name, .. } => name,
+            ToolCall::Mcp { tool, .. } => tool,
+            _ => return false,
+        };
+        name == "Agent" || name.starts_with("Agent: ")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {

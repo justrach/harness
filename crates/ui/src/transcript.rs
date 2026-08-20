@@ -292,24 +292,27 @@ pub struct ToolItem {
     pub subagent_tail: Option<SharedString>,
 }
 
-/// Subagent spawn chips — the "Agent[: <description>]" Unknown convention
-/// every native driver uses, or any tool the engine has already bound to a
-/// subagent doc. These stay out of the collapsible "Called N tools" wrap so
-/// a running subagent is visible without opening the fold.
-fn is_agent_name(name: &str) -> bool {
-    name == "Agent" || name.starts_with("Agent: ")
-}
-
+/// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
+/// every driver decodes its spawn tool into. These stay out of the
+/// collapsible "Called N tools" wrap so a running subagent is visible
+/// without opening the fold.
 fn is_agent_call(call: &ToolCall) -> bool {
-    match call {
-        ToolCall::Unknown { name, .. } => is_agent_name(name),
-        ToolCall::Mcp { tool, .. } => is_agent_name(tool),
-        _ => false,
-    }
+    call.is_subagent_spawn()
 }
 
+/// The chip's GENUS is the call itself, never the ref: docs written before
+/// the claude-driver fix carry stray `subagent_ref`s on ordinary Run chips
+/// (a background shell's `task_notification` was mis-tagged as subagent
+/// traffic), and honoring the ref alone turned those Runs into spawn chips
+/// that opened empty, never-created subagent docs.
 fn is_agent_tool(item: &ToolItem) -> bool {
-    item.subagent_ref.is_some() || is_agent_call(&item.call)
+    is_agent_call(&item.call)
+}
+
+/// A chip renders as the spawn LINK (whole-card click → subagent tab) only
+/// when an agent call has actually been bound to its doc.
+fn is_spawn_link(item: &ToolItem) -> bool {
+    is_agent_call(&item.call) && item.subagent_ref.is_some()
 }
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
@@ -3618,7 +3621,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if tool.subagent_ref.is_some() {
+                if is_spawn_link(tool) {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -3640,11 +3643,7 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| {
-                tool.invocation
-                    .clone()
-                    .filter(|_| tool.subagent_ref.is_none())
-            })
+            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -3810,9 +3809,8 @@ impl Transcript {
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = &tool.subagent_ref {
+                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let doc_id = doc_id.clone();
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
@@ -5286,6 +5284,39 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert!(!tool_group_collapses(tools));
         assert!(tools.iter().all(is_agent_tool));
+    }
+
+    #[test]
+    fn stray_subagent_ref_on_a_run_chip_stays_an_ordinary_tool() {
+        // Docs written before the claude-driver fix carry subagent refs on
+        // ordinary Run chips (a background shell's task_notification was
+        // mis-tagged as subagent traffic). The ref alone must not change the
+        // chip's genus: it folds with its neighbors and renders as a plain
+        // tool, never as a spawn link to a doc that was never created.
+        let mut stray = tool_part("b", "git clone …");
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            ..
+        } = &mut stray
+        {
+            *subagent_ref = Some("chat--sub--b".into());
+            *subagent_status = Some(SubagentStatus::Done);
+        }
+        let entry = assistant(
+            "m-stray",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1, "one folded group, no agent split");
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("tool group expected")
+        };
+        assert_eq!(tools.len(), 3);
+        assert!(tool_group_collapses(tools));
+        assert!(tools.iter().all(|t| !is_agent_tool(t)));
+        assert!(tools.iter().all(|t| !is_spawn_link(t)));
     }
 
     #[test]

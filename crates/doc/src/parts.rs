@@ -389,10 +389,16 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id,
+                    call,
                     subagent_status,
                     ..
                 } = p
                     && id == parent_tool_use_id
+                    // Genus gate: only a SPAWN call ever carries subagent
+                    // lifecycle. A driver keying bug (claude's background
+                    // shells settled through the subagent subtype,
+                    // 2026-08-20) must not decorate an ordinary chip.
+                    && call.is_subagent_spawn()
                 {
                     match status {
                         Some(s) => *subagent_status = Some(s),
@@ -961,6 +967,42 @@ mod tests {
         }
         // Content never leaked into the parent parts.
         assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn subagent_events_never_decorate_a_non_spawn_chip() {
+        // Mis-keyed tagged traffic (claude's background shells settled
+        // through the subagent subtype, 2026-08-20) must not stamp lifecycle
+        // onto an ordinary tool chip — the genus gate is the CALL.
+        use zeron_proto::DoneStatus;
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "toolu_bash".into(),
+                call: ToolCall::Exec {
+                    command: "git clone …".into(),
+                },
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Subagent {
+                parent_tool_use_id: "toolu_bash".into(),
+                event: Box::new(AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }),
+            },
+        );
+        match &parts[0] {
+            MessagePart::Tool {
+                subagent_status, ..
+            } => assert_eq!(*subagent_status, None),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
