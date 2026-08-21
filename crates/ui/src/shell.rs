@@ -4,7 +4,7 @@
 //! Layout is zeron's: collapsible drag-resizable sidebar (208–400px, default
 //! 256) with a 200ms ease-out width transition; main panel with an h-11 header,
 //! content outlet, and a reserved h-6 status strip so later content never
-//! shifts; right pane scaffold (360–760px, default 520), hidden by default.
+//! shifts; right pane scaffold (360px floor, default 520), hidden by default.
 //! Widths/collapsed state persist to `ui-settings.json` (debounced).
 //!
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
@@ -41,7 +41,7 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MAX, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
+    CHAT_PANEL_MIN, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
     SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
 };
 use crate::state::{
@@ -62,6 +62,35 @@ actions!(
     shell,
     [ToggleSidebar, ToggleChanges, AddSpacePalette, NewSession]
 );
+
+/// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
+/// the shared constructor makes left/right seams mirror each other and avoids
+/// relying on paint order when chrome crosses an animated pane boundary.
+const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
+
+fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
+    transition.map(|(from, to)| from.max(to)).unwrap_or(target)
+}
+
+fn right_panel_content_width(
+    target: f32,
+    transition: Option<(f32, f32)>,
+    takeover_width: Option<f32>,
+) -> f32 {
+    takeover_width.unwrap_or_else(|| stable_panel_content_width(target, transition))
+}
+
+fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
+    (viewport - sidebar - right).max(0.0)
+}
+
+fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f32 {
+    if is_chat_route && has_selected_chat {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -85,9 +114,27 @@ pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f3
     (titlebar_cluster_start(fullscreen) - container_pad).max(0.0)
 }
 
-/// Width of the persistent top-left button cluster itself (sidebar toggle +
-/// back/forward: three 24px buttons, 2px gaps).
-pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + 2.0 * 2.0;
+/// Within-group rhythm for Back/Forward.
+pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
+/// Structural separation between titlebar groups: sidebar, navigation,
+/// transcript identity, and trailing actions.
+pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
+/// Breathing room between the navigation cluster and transcript identity.
+pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
+/// A 28px action centered in the 38px titlebar with its 2px downward optical
+/// shift lands 6px from the top; use the same inset at the trailing edge.
+pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
+/// Width of the persistent top-left button cluster itself: a 24px sidebar
+/// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
+pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
+/// Extra width consumed when the collapsed-sidebar New Session action joins
+/// the left controls as its own group.
+pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = TITLEBAR_GROUP_GAP + 24.0;
+/// Horizontal inset owned by the titlebar control row itself. Keep this value
+/// paired with [`Self::titlebar_spacer`]: using a different number for the
+/// spacer shifts every control while leaving the declared cluster geometry
+/// unchanged.
+const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
 
 /// Width of a row of `count` Linux caption buttons, drawn at the cluster's
 /// own 24px-button / 2px-gap rhythm.
@@ -218,10 +265,24 @@ pub enum Route {
     Settings(SettingsSection),
 }
 
+/// Maximum width the right pane may occupy while retaining the conversation
+/// floor. On unusually small windows this deliberately falls below the right
+/// pane's preferred minimum: the chat remains usable and the side surface
+/// yields the scarce space.
+fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
+    (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
+}
+
+/// Width used by right-pane takeover. Unlike manual resizing, takeover is
+/// intentionally allowed to consume the conversation column completely.
+fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
+    (viewport - sidebar).max(0.0)
+}
+
 /// One right-pane surface tab (t3code RightPanelSurface, narrowed to our two
 /// kinds): a git-diff page (each tab its own [`Changes`] viewer — multiple
 /// diff panels, user request) or one embedded terminal keyed by its
-/// [`TerminalPanel`] tab key. `Picker` is the empty state ("Open a surface").
+/// [`TerminalPanel`] tab key. `Picker` is the empty surface chooser.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum RightSurface {
     #[default]
@@ -783,10 +844,6 @@ pub struct Shell {
     state: Entity<AppState>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
-    /// External file drag hovering the conversation column — shows the
-    /// "Drop images to attach" veil over the whole chat area; a drop stages
-    /// the files in the composer.
-    file_drag_active: bool,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under — written by a
     /// paint-time canvas each frame, read the NEXT frame for the fade inset,
@@ -921,12 +978,19 @@ pub struct Shell {
     debug_upload: Option<String>,
     sidebar_tween: Option<WidthTween>,
     right_tween: Option<WidthTween>,
+    /// Mirrors `right_tween` only for takeover entry/exit, allowing the visible
+    /// right-panel contents to resize with their outer frame in that mode.
+    right_takeover_content_tween: Option<WidthTween>,
+    /// Conversation-width tween used only while entering/leaving right-pane
+    /// takeover. Normal right-pane open/close keeps the upstream flex behavior.
+    main_takeover_tween: Option<WidthTween>,
     /// Changes-panel takeover (the header's expand button): the panel fills
     /// everything right of the sidebar and the conversation column collapses
     /// to zero. Session-local view state — never persisted, reset on close.
     right_pane_expanded: bool,
     /// Viewport width stamped each frame at render — the expanded panel's
-    /// width target ([`Self::right_target`] has no `Window`).
+    /// width target and the physical ceiling for free-form resizing
+    /// ([`Self::right_target`] has no `Window`).
     viewport_width: f32,
     terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
@@ -1088,7 +1152,6 @@ impl Shell {
             state,
             transcript,
             composer,
-            file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -1159,6 +1222,8 @@ impl Shell {
             debug_upload,
             sidebar_tween: None,
             right_tween: None,
+            right_takeover_content_tween: None,
+            main_takeover_tween: None,
             right_pane_expanded: false,
             viewport_width: 1280.0,
             terminal_tween: None,
@@ -1431,6 +1496,8 @@ impl Shell {
                 }
             }
             self.right_tween = None;
+            self.right_takeover_content_tween = None;
+            self.main_takeover_tween = None;
             self.terminal_tween = None;
             let panels = self.panels.get(&self.panel_key(cx));
             if let Some(panel) = self.terminal.clone() {
@@ -1518,14 +1585,18 @@ impl Shell {
     fn right_target(&self, cx: &App) -> f32 {
         if !self.right_pane_open(cx) {
             0.0
-        } else if self.right_pane_expanded {
-            // Takeover: everything right of the sidebar; the conversation
-            // column (flex_1) collapses to zero behind it. Rides the sidebar's
-            // width tween so a sidebar toggle mid-takeover stays seamless.
-            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-            (self.viewport_width - sidebar_now).max(RIGHT_PANE_MIN)
         } else {
-            self.settings.right_pane_width
+            // Manual sizing preserves a usable conversation column. Takeover
+            // intentionally consumes it completely. Both ride the sidebar
+            // tween so toggling it remains seamless.
+            let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+            if self.right_pane_expanded {
+                right_pane_takeover_width(self.viewport_width, sidebar_now)
+            } else {
+                self.settings
+                    .right_pane_width
+                    .min(right_pane_max_width(self.viewport_width, sidebar_now))
+            }
         }
     }
 
@@ -1540,6 +1611,9 @@ impl Shell {
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
         // No git gate: the pane hosts terminals too (see `right_pane_open`).
         let from = self.right_target(cx);
+        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let from_main = conversation_width(self.viewport_width, sidebar_now, from);
+        let was_expanded = self.right_pane_expanded;
         let key = self.panel_key(cx);
         let open = self.panels.toggle_changes(&key);
         if !open {
@@ -1547,7 +1621,15 @@ impl Shell {
             // with the conversation gone read as a broken chat.
             self.right_pane_expanded = false;
         }
-        self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
+        let to = self.right_target(cx);
+        self.right_tween = Some(WidthTween::new(from, to));
+        self.right_takeover_content_tween = None;
+        self.main_takeover_tween = was_expanded.then(|| {
+            WidthTween::new(
+                from_main,
+                conversation_width(self.viewport_width, sidebar_now, to),
+            )
+        });
         if open
             && let RightSurface::Diff(id) = self.resolved_right_active(cx)
             && let Some(changes) = self.diffs.get(&id).cloned()
@@ -1993,10 +2075,17 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - f32::from(event.event.position.x);
-        // zeron caps the pane at 52% of the window on top of the absolute range.
-        let max = RIGHT_PANE_MAX.min(viewport * 0.52);
-        self.settings.right_pane_width = width.clamp(RIGHT_PANE_MIN, max.max(RIGHT_PANE_MIN));
+        // No arbitrary percentage ceiling, but retain the chat's usable 300px
+        // floor instead of allowing the conversation to collapse to zero.
+        let max = right_pane_max_width(viewport, self.sidebar_target());
+        self.settings.right_pane_width = if max >= RIGHT_PANE_MIN {
+            width.clamp(RIGHT_PANE_MIN, max)
+        } else {
+            max
+        };
         self.right_tween = None;
+        self.right_takeover_content_tween = None;
+        self.main_takeover_tween = None;
         self.schedule_save(cx);
         cx.notify();
     }
@@ -2882,6 +2971,22 @@ impl Shell {
         motion::lerp(from, to, RESIZE.progress(raw))
     }
 
+    fn tween_active(&self, tween: Option<WidthTween>) -> bool {
+        tween.is_some_and(|tween| {
+            !self.reduced_motion
+                && tween.started.elapsed() < RESIZE.total().mul_f32(motion::speed_scale())
+        })
+    }
+
+    fn active_tween_endpoints(&self, tween: Option<WidthTween>) -> Option<(f32, f32)> {
+        tween
+            .filter(|transition| {
+                !self.reduced_motion
+                    && transition.started.elapsed() < RESIZE.total().mul_f32(motion::speed_scale())
+            })
+            .map(|transition| (transition.from, transition.to))
+    }
+
     /// Animated width container: tweens 200ms ease-out on collapse/expand, and
     /// clips a fixed-width inner so content never reflows mid-transition.
     fn pane_container(
@@ -2896,6 +3001,40 @@ impl Shell {
             .overflow_hidden()
             .w(px(self.eval_tween(tween, target)))
             .child(inner)
+            .into_any_element()
+    }
+
+    /// Right-anchored variant for the changes pane. The outer width follows the
+    /// existing shell tween, while descendants retain the larger endpoint's
+    /// geometry for that 200ms transition. This mirrors the sidebar's stable
+    /// inner/clipped outer behavior without changing the center column's
+    /// upstream flex layout.
+    fn right_pane_container(
+        &self,
+        tween: Option<WidthTween>,
+        target: f32,
+        inner: AnyElement,
+    ) -> AnyElement {
+        let takeover_width = self
+            .active_tween_endpoints(self.right_takeover_content_tween)
+            .map(|_| self.eval_tween(self.right_takeover_content_tween, target));
+        let content_width =
+            right_panel_content_width(target, self.active_tween_endpoints(tween), takeover_width);
+        div()
+            .h_full()
+            .flex_none()
+            .relative()
+            .overflow_hidden()
+            .w(px(self.eval_tween(tween, target)))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .w(px(content_width))
+                    .child(inner),
+            )
             .into_any_element()
     }
 
@@ -2931,7 +3070,7 @@ impl Shell {
             self.titlebar_tween,
             cluster_buttons_start(is_macos, fullscreen, self.linux_left_caption_count()),
         );
-        cluster + CLUSTER_BUTTONS_WIDTH + 10.0
+        cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
     /// The unified window titlebar: chat → the session tab strip; settings →
@@ -2947,7 +3086,7 @@ impl Shell {
                     .items_center()
                     .pt(px(Theme::TITLEBAR_TOP_PAD))
                     .pl(px(self.title_bar_content_start()))
-                    .pr(px(self.titlebar_right_pad(Theme::SPACE_LG)));
+                    .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)));
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
                 self.titlebar_drag_region("settings-header-titlebar", bar, cx)
                     .into_any_element()
@@ -3019,13 +3158,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let can_back = self.nav.can_back();
         let can_forward = self.nav.can_forward();
-        // The new-session + joins the cluster while the sidebar is collapsed
-        // (fading on the sidebar width tween) — INSIDE the cluster row so it
-        // shares the buttons' exact size and 2px rhythm; a separate mount in
-        // the title row sat 10px off the cluster and read misaligned (user
-        // report).
-        let plus_alpha = self.titlebar_plus_alpha();
-        let show_plus = matches!(self.route, Route::Chat) && plus_alpha > 0.01;
+        // The titlebar is the single owner of the new-session action in both
+        // sidebar states. Hide it on the new-session canvas: opening another
+        // blank canvas from an already blank canvas has no effect and used to
+        // leave two competing + placements across the responsive variants.
+        let plus_alpha = self.titlebar_plus_alpha(cx);
+        let show_plus = plus_alpha > 0.01;
         div()
             .absolute()
             .top_0()
@@ -3035,9 +3173,8 @@ impl Shell {
             .flex_row()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .gap(px(2.0))
-            .px(px(10.0))
-            .children(self.titlebar_spacer(12.0))
+            .px(px(TITLEBAR_CLUSTER_PAD))
+            .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
             // root-level caption overlay owns the buttons; the cluster row
             // just starts past them, at the shared 2px rhythm.
@@ -3053,23 +3190,32 @@ impl Shell {
                 &theme,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
-            .child(nav_history_button(
-                "nav-back",
-                icons::ARROW_LEFT,
-                can_back,
-                &theme,
-                cx.listener(|this, _, _, cx| this.navigate_back(cx)),
-            ))
-            .child(nav_history_button(
-                "nav-forward",
-                icons::ARROW_RIGHT,
-                can_forward,
-                &theme,
-                cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
-            ))
+            .child(
+                div()
+                    .ml(px(TITLEBAR_GROUP_GAP))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(TITLEBAR_CONTROL_GAP))
+                    .child(nav_history_button(
+                        "nav-back",
+                        icons::ARROW_LEFT,
+                        can_back,
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+                    ))
+                    .child(nav_history_button(
+                        "nav-forward",
+                        icons::ARROW_RIGHT,
+                        can_forward,
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
+                    )),
+            )
             .children(show_plus.then(|| {
                 div()
                     .flex_none()
+                    .ml(px(TITLEBAR_GROUP_GAP))
                     .opacity(plus_alpha)
                     .child(window_control_button(
                         "titlebar-new-session",
@@ -3081,13 +3227,13 @@ impl Shell {
             .into_any_element()
     }
 
-    /// How present the titlebar's new-session + is: 0 with the sidebar open
-    /// (the + lives in the sidebar header), 1 fully collapsed, riding the
-    /// sidebar width tween in between.
-    pub(super) fn titlebar_plus_alpha(&self) -> f32 {
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-        let open_width = self.settings.sidebar_width.max(1.0);
-        (1.0 - sidebar_now / open_width).clamp(0.0, 1.0)
+    /// The titlebar owns new-session creation regardless of sidebar state. It
+    /// is useful only while an existing session is selected.
+    pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
+        titlebar_new_session_alpha(
+            matches!(self.route, Route::Chat),
+            self.state.read(cx).selected_chat.is_some(),
+        )
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -4895,14 +5041,46 @@ impl Shell {
     where
         T: 'static,
     {
-        let hover = Theme::of(cx).border_strong;
+        let theme = Theme::of(cx);
+        let fade_key = format!("pane-resize-{id}");
+        let highlight = motion::hover_blend(
+            &fade_key,
+            theme.border_strong.opacity(0.0),
+            theme.border_strong,
+        );
+        let clear = highlight.opacity(0.0);
         div()
             .id(id)
-            .w(px(5.0))
-            .h_full()
+            .absolute()
+            .top(px(PANE_RESIZE_HITBOX_TOP))
+            .bottom_0()
+            .w(px(12.0))
             .flex_none()
             .cursor_col_resize()
-            .hover(move |s| s.bg(hover))
+            .on_hover(motion::hover_listener(fade_key))
+            // Codex-style seam feedback: the existing 1px panel border stays
+            // visible at rest; hover adds a stronger center highlight that
+            // fades back into that border toward both ends.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(6.0))
+                    .w(px(1.0))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().bg(gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(clear, 0.0),
+                        gpui::linear_color_stop(highlight, 1.0),
+                    )))
+                    .child(div().flex_1().bg(gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(highlight, 0.0),
+                        gpui::linear_color_stop(clear, 1.0),
+                    ))),
+            )
             .on_drag(marker(), |_, _point: Point<gpui::Pixels>, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DragGhost)
@@ -5052,9 +5230,9 @@ impl Shell {
         // File dropzone over the ENTIRE conversation column (transcript +
         // composer, not just the pill): dragging OS files anywhere across the
         // chat area shows the "Drop images to attach" veil; a drop stages the
-        // files in the composer. `has_active_drag` gates the veil so a drag
-        // that left the window (FileDrop Exited) can't strand it.
-        let file_drag_active = self.file_drag_active && cx.has_active_drag();
+        // files in the composer. GPUI derives the veil's visibility from the
+        // active payload type: an internal drag such as a pane resize must
+        // never be able to resurrect stale external-file hover state.
         div()
             .id("chat-dropzone")
             .relative()
@@ -5063,22 +5241,6 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                this.file_drag_active = false;
-                let paths = paths.paths().to_vec();
-                this.composer
-                    .update(cx, |composer, cx| composer.add_paths(paths, cx));
-                cx.notify();
-            }))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -5153,20 +5315,26 @@ impl Shell {
                     .when(has_spaces, |el| el.child(self.composer.clone()))
                     .child(self.render_terminal_container(cx))
             })
-            .when(file_drag_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bg(theme.scrim().opacity(0.4 / 0.6))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .child("Drop images to attach"),
-                )
-            })
+            .child(
+                div()
+                    .invisible()
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.scrim().opacity(0.4 / 0.6))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .child("Drop images to attach")
+                    .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.visible())
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                        let paths = paths.paths().to_vec();
+                        this.composer
+                            .update(cx, |composer, cx| composer.add_paths(paths, cx));
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 
@@ -5430,7 +5598,7 @@ impl Shell {
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), an embedded
-    /// terminal, or the "Open a surface" picker when no tabs exist.
+    /// terminal, or the surface picker when no tabs exist.
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
@@ -5466,7 +5634,11 @@ impl Shell {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
                     // the resolved surface (fallbacks can move it).
-                    panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
+                    let resize_suspended = self.tween_active(self.right_tween);
+                    panel.update(cx, |panel, cx| {
+                        panel.set_resize_suspended(resize_suspended);
+                        panel.select_tab_by_key(tab, cx);
+                    });
                     panel.into_any_element()
                 }
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
@@ -5513,21 +5685,7 @@ impl Shell {
         // Flush panel (user request — the inset card is gone): full window
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
-        // floats over the border seam.
-        let handle = self
-            .resize_handle(
-                "right-pane-resize",
-                || RightPaneResize,
-                |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
-                cx,
-            )
-            .absolute()
-            .top_0()
-            .bottom_0()
-            // INSIDE the width-clipped container (a negative inset was
-            // clipped into unreachability — user-reported dead resize),
-            // overlapping the panel's left border.
-            .left(px(0.0));
+        // lives outside this clipped container, on the root layout's seam.
         let panel_bg = if theme.is_glass() {
             bg.opacity(0.4)
         } else {
@@ -5550,25 +5708,16 @@ impl Shell {
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
         let target = self.right_target(cx);
-        // Takeover mode has no drag width — the handle would fight the
-        // viewport-derived target.
-        let handle = (!self.right_pane_expanded).then_some(handle);
-        self.pane_container(
+        self.right_pane_container(
             self.right_tween,
             target,
-            div()
-                .h_full()
-                .relative()
-                .child(panel)
-                .children(handle)
-                .into_any_element(),
+            div().h_full().relative().child(panel).into_any_element(),
         )
     }
 
-    /// The right pane's empty state: the "Open a surface" heading over a
-    /// compact vertical list of surface rows (icon + label) — the Capy
-    /// arrangement (user request): the old two-card grid clipped in narrow
-    /// panes and wasted short ones.
+    /// The right pane's empty state: a compact vertical list of surface rows
+    /// (icon + label). The old two-card grid clipped in narrow panes and
+    /// wasted short ones.
     fn render_surface_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let text = theme.text;
@@ -5612,51 +5761,23 @@ impl Shell {
                     .max_w(px(280.0))
                     .flex()
                     .flex_col()
-                    .items_center()
+                    .gap(px(8.0))
                     .child(
-                        div()
-                            .text_center()
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(text)
-                            .child(SharedString::from("Open a surface")),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .text_center()
-                            .text_size(px(11.5))
-                            .text_color(muted)
-                            .child(SharedString::from(
-                                "Choose what to show in the right panel.",
-                            )),
-                    )
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .child(
-                                row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.add_terminal_surface(cx);
-                                    }),
-                                ),
-                            )
-                            // Git only where there IS git — the pane itself
-                            // no longer gates on it (terminals work anywhere).
-                            .when(self.space_git_detected(cx), |el| {
-                                el.child(
-                                    row("surface-card-git", icons::GIT_BRANCH, "Git").on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.add_diff_surface(cx);
-                                        }),
-                                    ),
-                                )
+                        row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_terminal_surface(cx);
                             }),
-                    ),
+                        ),
+                    )
+                    // Git only where there IS git — the pane itself no
+                    // longer gates on it (terminals work anywhere).
+                    .when(self.space_git_detected(cx), |el| {
+                        el.child(row("surface-card-git", icons::GIT_BRANCH, "Git").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.add_diff_surface(cx);
+                            }),
+                        ))
+                    }),
             )
             .into_any_element()
     }
@@ -6063,23 +6184,25 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-diff")
-                                .id("right-plus-diff-row")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_diff_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::GIT_BRANCH)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                // "Git", not "Git diff" — the surface hosts
-                                // history and per-commit views too (user
-                                // request; matches the picker card).
-                                .child(SharedString::from("Git")),
-                        ),
+                        .when(self.space_git_detected(cx), |menu| {
+                            menu.child(
+                                popover::menu_row(&theme, false, "right-plus-diff")
+                                    .id("right-plus-diff-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.add_diff_surface(cx);
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::GIT_BRANCH)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    // "Git", not "Git diff" — the surface hosts
+                                    // history and per-commit views too (user
+                                    // request; matches the picker card).
+                                    .child(SharedString::from("Git")),
+                            )
+                        }),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
@@ -6089,7 +6212,9 @@ impl Shell {
                 10.0,
             ));
         }
-        strip = strip.child(plus);
+        // The empty-state picker already offers every surface. Show a single
+        // Chrome-style add-tab affordance only after at least one tab exists.
+        strip = strip.when(count > 0, |strip| strip.child(plus));
         // Edge fades on whichever side hides tabs (flags computed above).
         // Glass: per-glyph EdgeFade scope over the chips' own opacity ramps;
         // opaque: painted gradients in the shell surface tone.
@@ -6148,8 +6273,17 @@ impl Shell {
     /// width. Rides the same width tween as open/close so the jump glides.
     fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
         let from = self.right_target(cx);
+        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let from_main = conversation_width(self.viewport_width, sidebar_now, from);
         self.right_pane_expanded = !self.right_pane_expanded;
-        self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
+        let to = self.right_target(cx);
+        let right_transition = WidthTween::new(from, to);
+        self.right_tween = Some(right_transition);
+        self.right_takeover_content_tween = Some(right_transition);
+        self.main_takeover_tween = Some(WidthTween::new(
+            from_main,
+            conversation_width(self.viewport_width, sidebar_now, to),
+        ));
         cx.notify();
     }
 
@@ -6811,6 +6945,7 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport_width = f32::from(window.viewport_size().width);
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the
@@ -6965,8 +7100,15 @@ impl Render for Shell {
                 // Stamped for `right_target` — the expanded changes panel
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
-                let main_width =
-                    (viewport - self.sidebar_target() - self.right_target(cx) - 10.0).max(0.0);
+                let main_target_width =
+                    conversation_width(viewport, self.sidebar_target(), self.right_target(cx));
+                let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
+                let main_content_width =
+                    stable_panel_content_width(main_target_width, main_transition);
+                let main_width = (main_content_width - 10.0).max(0.0);
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_available_width(main_width, cx)
+                });
                 // Clearance excludes the terminal dock: the transcript
                 // viewport ends at the dock's top (see the underlay in
                 // `render_main`), so only the chrome above it overlaps.
@@ -6990,6 +7132,23 @@ impl Render for Shell {
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
                 let on_chat = matches!(self.route, Route::Chat);
+                let right_open = on_chat && self.right_pane_open(cx);
+                // Takeover mode derives its width from the viewport, so a
+                // manual drag handle would fight the expanded target.
+                let right_handle = (right_open
+                    && !self.right_pane_expanded
+                    && !self.tween_active(self.right_tween))
+                .then(|| {
+                    self.resize_handle(
+                        "right-pane-resize",
+                        || RightPaneResize,
+                        |shell, _| shell.settings.right_pane_width = RIGHT_PANE_DEFAULT,
+                        cx,
+                    )
+                    // A forgiving transparent hit target centered on the
+                    // seam; the panel's 1px border remains the visual divider.
+                    .left(px(-6.0))
+                });
                 let right: AnyElement = if on_chat {
                     self.render_right_pane(cx)
                 } else {
@@ -7002,6 +7161,17 @@ impl Render for Shell {
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
                 // (built inside `render_right_pane`).
+                let main = if main_transition.is_some() {
+                    div()
+                        .h_full()
+                        .w(px(main_content_width))
+                        .flex_none()
+                        .flex()
+                        .child(main)
+                        .into_any_element()
+                } else {
+                    main
+                };
                 let card: AnyElement = div()
                     .flex_1()
                     .min_w_0()
@@ -7023,7 +7193,21 @@ impl Render for Shell {
                     .h_full()
                     .flex_none()
                     .relative()
-                    .child(sidebar_handle.absolute().top_0().bottom_0().left(px(-2.0)));
+                    .child(sidebar_handle.left(px(-6.0)));
+                // Keep the right resize target outside the pane's
+                // overflow-hidden width container. This mirrors the sidebar
+                // seam and lets the target straddle both adjacent panes.
+                let right_seam: AnyElement = if let Some(handle) = right_handle {
+                    div()
+                        .w(px(0.0))
+                        .h_full()
+                        .flex_none()
+                        .relative()
+                        .child(handle)
+                        .into_any_element()
+                } else {
+                    Empty.into_any_element()
+                };
                 let title_bar = self.render_title_bar(cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar,
                 // spanning the FULL window height (under the traffic lights,
@@ -7058,6 +7242,7 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
+                            .child(right_seam)
                             .child(right),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
@@ -7137,6 +7322,71 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_pane_ceiling_preserves_the_chat_floor() {
+        assert_eq!(right_pane_max_width(1200.0, 256.0), 644.0);
+        assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
+        // The chat floor wins over the right pane's preferred 360px minimum
+        // when the whole window is unusually narrow.
+        assert_eq!(right_pane_max_width(800.0, 256.0), 244.0);
+        assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
+    }
+
+    #[test]
+    fn right_pane_takeover_consumes_the_chat_column() {
+        assert_eq!(right_pane_takeover_width(1200.0, 256.0), 944.0);
+        assert_eq!(1200.0 - 256.0 - 944.0, 0.0);
+    }
+
+    #[test]
+    fn right_pane_takeover_control_reverses_direction() {
+        assert_eq!(tabs::right_pane_expand_icon(false), icons::EXPAND_ARROWS);
+        assert_eq!(tabs::right_pane_expand_icon(true), icons::COLLAPSE_ARROWS);
+    }
+
+    #[test]
+    fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
+        assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
+    }
+
+    #[test]
+    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
+        assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
+        assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
+        assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
+        assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
+    }
+
+    #[test]
+    fn right_panel_content_keeps_the_larger_width_only_during_transition() {
+        assert_eq!(right_panel_content_width(520.0, None, None), 520.0);
+        assert_eq!(
+            right_panel_content_width(0.0, Some((520.0, 0.0)), None),
+            520.0
+        );
+        assert_eq!(
+            right_panel_content_width(760.0, Some((520.0, 760.0)), None),
+            760.0
+        );
+        assert_eq!(
+            right_panel_content_width(1064.0, Some((520.0, 1064.0)), Some(760.0)),
+            760.0
+        );
+
+        let conversation = conversation_width(1320.0, 256.0, 520.0);
+        let takeover = conversation_width(1320.0, 256.0, 1064.0);
+        assert_eq!(conversation, 544.0);
+        assert_eq!(takeover, 0.0);
+        assert_eq!(
+            stable_panel_content_width(takeover, Some((conversation, takeover))),
+            conversation
+        );
+        assert_eq!(
+            stable_panel_content_width(conversation, Some((takeover, conversation))),
+            conversation
+        );
+    }
 
     #[tokio::test]
     async fn remote_shutdown_waits_for_ipc_release() {
@@ -7486,6 +7736,12 @@ mod tests {
         // when fullscreen hides them.
         assert_eq!(titlebar_cluster_start(false), 88.0);
         assert_eq!(titlebar_cluster_start(true), 12.0);
+        assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
+        assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
+        assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
+        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
+        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
+        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
     }
 
     #[test]
@@ -7501,6 +7757,11 @@ mod tests {
         // Linux / Windows: never any inset.
         assert_eq!(titlebar_spacer_width(false, false, 10.0), 0.0);
         assert_eq!(titlebar_spacer_width(false, true, 10.0), 0.0);
+        assert_eq!(
+            TITLEBAR_CLUSTER_PAD + titlebar_spacer_width(true, false, TITLEBAR_CLUSTER_PAD),
+            titlebar_cluster_start(false),
+            "the rendered row padding and spacer must land on the declared cluster start"
+        );
     }
 
     #[test]
@@ -7531,21 +7792,21 @@ mod tests {
 
     #[test]
     fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..86; a 16px-padded header needs 78 more px to
-        // put content at 86 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 78.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 84.0);
+        // Linux: buttons at 10..92; a 16px-padded header needs 84 more px to
+        // put content at 92 + 8 breathing room.
+        assert_eq!(cluster_clearance(false, false, 0, 16.0), 84.0);
+        assert_eq!(cluster_clearance(false, false, 0, 10.0), 90.0);
         // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 78.0 + 26.0);
+        assert_eq!(cluster_clearance(false, false, 1, 16.0), 84.0 + 26.0);
         // macOS: buttons start at the 88px traffic-light cluster start.
         assert_eq!(
             cluster_clearance(true, false, 0, 16.0),
-            88.0 + 76.0 + 8.0 - 16.0
+            88.0 + CLUSTER_BUTTONS_WIDTH + 8.0 - 16.0
         );
         // macOS fullscreen: cluster reclaims the inset (starts at 12).
         assert_eq!(
             cluster_clearance(true, true, 0, 16.0),
-            12.0 + 76.0 + 8.0 - 16.0
+            12.0 + CLUSTER_BUTTONS_WIDTH + 8.0 - 16.0
         );
     }
 
