@@ -147,6 +147,14 @@ pub const SPRING_GROWTH_EMA: f32 = 0.12;
 pub const SPRING_CHASE_MAX_LEAD: f32 = 32.0;
 /// Treat as exactly pinned within this distance of the bottom.
 pub const AT_BOTTOM_PX: f32 = 2.0;
+
+/// A live stream already resting at the end should keep that end anchored as
+/// its measured height grows. This is deliberately narrower than `pinned`:
+/// users gliding back toward the bottom keep the normal spring behavior.
+fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming: bool) -> bool {
+    pinned && streaming && distance_from_bottom <= AT_BOTTOM_PX
+}
+
 /// Keep the spring loop warm this long after landing, so a streaming pause
 /// resumes at cruise instead of re-accelerating from zero.
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
@@ -2582,6 +2590,18 @@ impl Transcript {
                 .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
         });
 
+        // Capture this before the row splice changes the list's measured end.
+        // When the user is truly live-following, retaining the end anchor
+        // keeps the in-flow working trailer at the same viewport position as
+        // transcript lines grow above it. Nothing about the trailer's layout
+        // or coordinates changes.
+        let live_following = should_anchor_live_stream(
+            self.pinned,
+            self.distance_from_bottom(),
+            entries
+                .last()
+                .is_some_and(|entry| entry.status == Some(MessageStatus::Streaming)),
+        );
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
@@ -2638,18 +2658,28 @@ impl Transcript {
             self.own_turn_kick = true;
         }
         if self.pinned {
-            if motion::reduced_motion(cx) || was_empty {
-                // First fill (chat open) lands at the bottom instantly
-                // (mugen initialScroll:'bottom'); reduced motion always snaps.
+            if live_following {
                 self.list.scroll_to_end();
-            } else if self.is_glued() {
-                // A glued offset (`None` / anchored past the end) makes the
-                // upcoming layout hard-snap to the new end — the per-commit
-                // stutter. Materialize a pixel anchor a hair above the bottom
-                // so layout holds position and the spring glides the growth.
-                self.list.scroll_by(px(-0.75));
+                self.spring.reset();
+                self.spring_last_tick = None;
+                self.spring_settled_at = None;
+                self.spring_kick = false;
+                self.last_scroll_distance = 0.0;
+            } else {
+                if motion::reduced_motion(cx) || was_empty {
+                    // First fill (chat open) lands at the bottom instantly
+                    // (mugen initialScroll:'bottom'); reduced motion snaps.
+                    self.list.scroll_to_end();
+                } else if self.is_glued() {
+                    // A glued offset (`None` / anchored past the end) makes
+                    // the upcoming layout hard-snap to the new end — the
+                    // per-commit stutter. Materialize a pixel anchor a hair
+                    // above the bottom so layout holds position and the
+                    // spring glides the growth.
+                    self.list.scroll_by(px(-0.75));
+                }
+                self.spring_kick = true;
             }
-            self.spring_kick = true;
         }
         cx.notify();
     }
@@ -5051,6 +5081,20 @@ mod tests {
         assert!(!Transcript::should_restick(200.0, 300.0));
         // No movement — leave the pin alone.
         assert!(!Transcript::should_restick(50.0, 50.0));
+    }
+
+    #[test]
+    fn only_a_stream_at_the_bottom_gets_a_hard_end_anchor() {
+        assert!(should_anchor_live_stream(true, 0.0, true));
+        assert!(should_anchor_live_stream(true, AT_BOTTOM_PX, true));
+
+        // A user who has moved away from the end keeps control of the
+        // viewport, even if the transcript is still streaming.
+        assert!(!should_anchor_live_stream(true, AT_BOTTOM_PX + 0.1, true));
+        assert!(!should_anchor_live_stream(false, 0.0, true));
+
+        // Ordinary transcript updates retain the existing spring behavior.
+        assert!(!should_anchor_live_stream(true, 0.0, false));
     }
 
     #[test]
