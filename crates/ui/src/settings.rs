@@ -100,6 +100,8 @@ pub struct UiSettings {
     pub escape_stops_active_agent: bool,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// Changes pane: side-by-side diffs instead of the unified stack.
+    pub diff_split: bool,
 }
 
 impl Default for UiSettings {
@@ -123,6 +125,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             appearance: crate::appearance::AppearanceMode::default(),
+            diff_split: false,
         }
     }
 }
@@ -400,6 +403,7 @@ mod tests {
             },
             escape_stops_active_agent: true,
             appearance: crate::appearance::AppearanceMode::Light,
+            diff_split: true,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);

@@ -4266,6 +4266,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9098,7 +9108,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "clap",
@@ -9117,7 +9127,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "chrono",
  "loro",
@@ -9131,7 +9141,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9143,6 +9153,7 @@ dependencies = [
  "libc",
  "loro",
  "notify",
+ "nucleo-matcher",
  "portable-pty",
  "reqwest",
  "rusqlite",
@@ -9166,7 +9177,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9187,7 +9198,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "chrono",
  "serde",
@@ -9197,7 +9208,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9216,7 +9227,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -9239,7 +9250,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "thiserror 2.0.19",
  "tree-sitter",
@@ -9273,7 +9284,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -9306,7 +9317,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.18"
+version = "0.2.19"
 dependencies = [
  "anyhow",
  "futures",
