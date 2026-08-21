@@ -1850,6 +1850,11 @@ pub struct Transcript {
     /// click handlers read them as exact endpoints for the RESIZE tween. This
     /// preserves smooth layout motion without a paint → notify feedback loop.
     user_heights: HashMap<SharedString, Rc<Cell<f32>>>,
+    /// Pending long-press toggle. A single task is enough because only one
+    /// pointer can own a hold gesture at a time; a token invalidates stale
+    /// timers when the pointer is released or moves into a text selection.
+    user_hold_task: Option<Task<()>>,
+    user_hold_token: u64,
     user_collapse_scroll: Option<UserCollapseScroll>,
     user_collapse_scroll_scheduled: bool,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
@@ -2061,6 +2066,8 @@ impl Transcript {
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
             user_heights: HashMap::new(),
+            user_hold_task: None,
+            user_hold_token: 0,
             user_collapse_scroll: None,
             user_collapse_scroll_scheduled: false,
             veils: HashMap::new(),
@@ -3046,6 +3053,8 @@ impl Transcript {
             self.folds.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.user_hold_token = self.user_hold_token.wrapping_add(1);
+            self.user_hold_task = None;
             self.user_collapse_scroll = None;
             self.user_collapse_scroll_scheduled = false;
             self.veils.clear();
@@ -3395,6 +3404,50 @@ impl Transcript {
         }
     }
 
+    fn cancel_user_hold(&mut self) {
+        self.user_hold_token = self.user_hold_token.wrapping_add(1);
+        self.user_hold_task = None;
+    }
+
+    /// Arm a long-press toggle instead of using double-click. Releasing before
+    /// the threshold preserves an ordinary click/selection gesture; moving
+    /// cancels the timer so drag selection never unexpectedly toggles the
+    /// message.
+    fn arm_user_hold(
+        &mut self,
+        row_id: SharedString,
+        row_ix: usize,
+        collapsed_h: f32,
+        measured_h: Rc<Cell<f32>>,
+        selection_key: Arc<str>,
+        cx: &mut Context<Self>,
+    ) {
+        const USER_HOLD_DELAY: Duration = Duration::from_millis(360);
+        self.cancel_user_hold();
+        self.user_hold_token = self.user_hold_token.wrapping_add(1);
+        let token = self.user_hold_token;
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(USER_HOLD_DELAY).await;
+            this.update(cx, |this, cx| {
+                if this.user_hold_token != token {
+                    return;
+                }
+                this.user_hold_task = None;
+                crate::markdown::selection::clear_if_owner(&selection_key);
+                this.toggle_user_fold(
+                    row_id,
+                    row_ix,
+                    collapsed_h,
+                    measured_h.get().max(collapsed_h),
+                    motion::reduced_motion(cx),
+                );
+                cx.notify();
+            })
+            .ok();
+        });
+        self.user_hold_task = Some(task);
+    }
+
     fn step_user_collapse_scroll(&mut self, cx: &mut Context<Self>) {
         let Some(scroll) = self.user_collapse_scroll.as_ref() else {
             return;
@@ -3616,28 +3669,45 @@ impl Transcript {
             .clone();
         let full_h = measured_h.get().max(collapsed_h);
 
-        let toggle_key = row_id.clone();
-        let toggle_height = measured_h.clone();
-        let sel_key: Arc<str> = format!("{row_id}:u").into();
+        let hold_key = row_id.clone();
+        let hold_height = measured_h.clone();
+        let hold_selection: Arc<str> = format!("{row_id}:u").into();
         let body = div()
             .id(SharedString::from(format!("{row_id}-body")))
-            // Double-click anywhere in the prompt is the chevron's twin
-            // gesture. The same gesture word-selects (markdown/selection.rs),
-            // so drop that selection rather than leaving a stray wash behind.
+            // A long press toggles instead of double-click. A normal release
+            // remains available for text selection, and pointer movement
+            // cancels the pending toggle before a drag can select text.
             .when(collapsible, |el| {
-                el.on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                    if event.click_count() < 2 {
-                        return;
-                    }
-                    crate::markdown::selection::clear_if_owner(&sel_key);
-                    this.toggle_user_fold(
-                        toggle_key.clone(),
-                        row_ix,
-                        collapsed_h,
-                        toggle_height.get().max(collapsed_h),
-                        motion::reduced_motion(cx),
-                    );
-                    cx.notify();
+                let down_key = hold_key.clone();
+                let down_height = hold_height.clone();
+                let down_selection = hold_selection.clone();
+                el.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.arm_user_hold(
+                            down_key.clone(),
+                            row_ix,
+                            collapsed_h,
+                            down_height.clone(),
+                            down_selection.clone(),
+                            cx,
+                        );
+                    }),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, _| {
+                        this.cancel_user_hold();
+                    }),
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, _| {
+                        this.cancel_user_hold();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, _, _, _| {
+                    this.cancel_user_hold();
                 }))
             })
             .child(user_bubble_text(
