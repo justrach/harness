@@ -6158,23 +6158,25 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-diff")
-                                .id("right-plus-diff-row")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_diff_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::GIT_BRANCH)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                // "Git", not "Git diff" — the surface hosts
-                                // history and per-commit views too (user
-                                // request; matches the picker card).
-                                .child(SharedString::from("Git")),
-                        ),
+                        .when(self.space_git_detected(cx), |menu| {
+                            menu.child(
+                                popover::menu_row(&theme, false, "right-plus-diff")
+                                    .id("right-plus-diff-row")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.add_diff_surface(cx);
+                                        this.close_right_plus(cx);
+                                    }))
+                                    .child(
+                                        icon(icons::GIT_BRANCH)
+                                            .size(px(13.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    // "Git", not "Git diff" — the surface hosts
+                                    // history and per-commit views too (user
+                                    // request; matches the picker card).
+                                    .child(SharedString::from("Git")),
+                            )
+                        }),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
