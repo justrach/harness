@@ -7321,6 +7321,12 @@ mod tests {
     }
 
     #[test]
+    fn right_pane_takeover_control_reverses_direction() {
+        assert_eq!(tabs::right_pane_expand_icon(false), icons::EXPAND_ARROWS);
+        assert_eq!(tabs::right_pane_expand_icon(true), icons::COLLAPSE_ARROWS);
+    }
+
+    #[test]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
     }

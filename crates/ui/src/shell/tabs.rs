@@ -6,6 +6,14 @@
 
 use super::*;
 
+pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
+    if expanded {
+        icons::COLLAPSE_ARROWS
+    } else {
+        icons::EXPAND_ARROWS
+    }
+}
+
 impl Shell {
     /// Boot landing: the most recently active visible chat once the first
     /// chats frame has synced (manual selection wins; no chats → the
@@ -201,7 +209,7 @@ impl Shell {
                         )
                         .child(header_icon_button(
                             "expand-changes",
-                            icons::EXPAND_ARROWS,
+                            right_pane_expand_icon(self.right_pane_expanded),
                             &theme,
                             cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
                         )),
