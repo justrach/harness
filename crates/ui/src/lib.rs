@@ -39,6 +39,7 @@ pub mod state;
 pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
+pub mod theme_library;
 pub mod transcript;
 
 use std::borrow::Cow;
@@ -161,9 +162,12 @@ pub fn run_app(config: UiConfig) {
         // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
+        theme_library::init(data_dir.clone(), cx);
         appearance::init(
             ui_settings.appearance,
-            ui_settings.accent_color,
+            ui_settings.theme_selection,
+            ui_settings.accent,
+            ui_settings.surface,
             data_dir,
             cx,
         );

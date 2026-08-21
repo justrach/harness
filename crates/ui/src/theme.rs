@@ -37,6 +37,10 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use gpui::{App, Global, Hsla, SharedString, hsla};
 use serde::{Deserialize, Serialize};
 use zeron_syntax::HighlightKind;
+use zeron_theme::{
+    AccentPreset, AccentSelection, Color as ModelColor, SurfacePreference, SurfaceTreatment,
+    ThemeRegistry, ThemeVariant,
+};
 
 /// User-selectable accent family. A choice is one color identity, not a
 /// miniature multi-hue theme: every interactive accent role stays on the same
@@ -122,6 +126,34 @@ impl AccentColor {
             }),
             activity: primary,
             glyph: GlyphPalette::for_accent(primary, strong, appearance),
+        }
+    }
+}
+
+impl From<AccentColor> for AccentPreset {
+    fn from(value: AccentColor) -> Self {
+        match value {
+            AccentColor::Zeron => Self::Zeron,
+            AccentColor::Orange => Self::Orange,
+            AccentColor::Amber => Self::Amber,
+            AccentColor::Green => Self::Green,
+            AccentColor::Cyan => Self::Cyan,
+            AccentColor::Blue => Self::Blue,
+            AccentColor::Pink => Self::Pink,
+        }
+    }
+}
+
+impl From<AccentPreset> for AccentColor {
+    fn from(value: AccentPreset) -> Self {
+        match value {
+            AccentPreset::Zeron => Self::Zeron,
+            AccentPreset::Orange => Self::Orange,
+            AccentPreset::Amber => Self::Amber,
+            AccentPreset::Green => Self::Green,
+            AccentPreset::Cyan => Self::Cyan,
+            AccentPreset::Blue => Self::Blue,
+            AccentPreset::Pink => Self::Pink,
         }
     }
 }
@@ -236,6 +268,22 @@ pub fn theme_generation() -> u32 {
     THEME_GENERATION.load(Ordering::Relaxed)
 }
 
+fn model_appearance(appearance: zeron_theme::Appearance) -> Appearance {
+    match appearance {
+        zeron_theme::Appearance::Dark => Appearance::Dark,
+        zeron_theme::Appearance::Light => Appearance::Light,
+    }
+}
+
+fn model_color(color: ModelColor) -> Hsla {
+    let (h, s, l) = rgb_to_hsl(
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+    );
+    hsla(h, s, l, color.a as f32 / 255.0)
+}
+
 /// [`CURRENT_APPEARANCE`] is process-wide, so under the parallel test runner
 /// any test that flips it — or asserts on the output of a helper that reads it
 /// ([`ink`], [`hairline`], [`wash`], …) — must hold this lock. Crate-visible
@@ -343,6 +391,43 @@ impl SyntaxPalette {
         }
     }
 
+    fn from_variant(variant: &ThemeVariant, fallback: Self) -> Self {
+        let color = |key: &str, fallback: Hsla| {
+            variant
+                .syntax
+                .get(key)
+                .copied()
+                .map(model_color)
+                .unwrap_or(fallback)
+        };
+        Self {
+            comment: color("comment", fallback.comment),
+            keyword: color("keyword", fallback.keyword),
+            string: color("string", fallback.string),
+            string_special: color("stringSpecial", fallback.string_special),
+            escape: color("escape", fallback.escape),
+            number: color("number", fallback.number),
+            boolean: color("boolean", fallback.boolean),
+            type_name: color("type", fallback.type_name),
+            type_builtin: color("typeBuiltin", fallback.type_builtin),
+            constructor: color("constructor", fallback.constructor),
+            function: color("function", fallback.function),
+            function_builtin: color("functionBuiltin", fallback.function_builtin),
+            macro_name: color("macro", fallback.macro_name),
+            property: color("property", fallback.property),
+            constant: color("constant", fallback.constant),
+            variable: color("variable", fallback.variable),
+            variable_special: color("variableSpecial", fallback.variable_special),
+            parameter: color("parameter", fallback.parameter),
+            operator: color("operator", fallback.operator),
+            punctuation: color("punctuation", fallback.punctuation),
+            tag: color("tag", fallback.tag),
+            attribute: color("attribute", fallback.attribute),
+            label: color("label", fallback.label),
+            invalid: color("invalid", fallback.invalid),
+        }
+    }
+
     fn dark(text: Hsla, comment: Hsla, danger: Hsla) -> Self {
         // Same sources and 72% saturation treatment as history::graph_color.
         let indigo = git_graph_tone(oklch(0.673, 0.182, 276.935));
@@ -433,6 +518,17 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
 pub struct Theme {
     /// Which appearance these tokens were built for.
     pub appearance: Appearance,
+    /// Stable id of the resolved theme variant.
+    pub variant_id: SharedString,
+    /// Stable id of the family that owns [`Self::variant_id`].
+    pub family_id: SharedString,
+    /// Whether the base theme or a user preset owns interactive identity.
+    pub accent_selection: AccentSelection,
+    /// The persisted policy that resolved [`Self::surface_treatment`].
+    pub surface_preference: SurfacePreference,
+    /// The effective treatment after applying [`Self::surface_preference`] to
+    /// the selected variant's recommendation.
+    pub surface_treatment: SurfaceTreatment,
     /// The selected interactive accent used to build this theme.
     pub accent_color: AccentColor,
 
@@ -561,6 +657,9 @@ pub struct Theme {
     /// Diff: hunk-header wash (bluish grey).
     pub diff_hunk_bg: Hsla,
 
+    /// Theme-owned terminal background, selection, and ANSI16 palette.
+    pub terminal: TerminalColors,
+
     // ---- fonts ----
     /// UI font family (bundling of Geist lands with asset work; until then the
     /// text system falls back to the system sans when the family is missing).
@@ -570,6 +669,34 @@ pub struct Theme {
     /// Explicit system fallbacks, for callers that want to skip the lookup.
     pub font_sans_fallback: SharedString,
     pub font_mono_fallback: SharedString,
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalColors {
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub selection: Hsla,
+    pub ansi: [Hsla; 16],
+}
+
+impl TerminalColors {
+    fn from_variant(variant: &ThemeVariant) -> Self {
+        Self {
+            background: model_color(variant.terminal.background),
+            foreground: model_color(variant.terminal.foreground),
+            selection: model_color(variant.terminal.selection),
+            ansi: variant.terminal.ansi.map(model_color),
+        }
+    }
+
+    fn zeron(appearance: Appearance) -> Self {
+        let id = match appearance {
+            Appearance::Dark => "zeron-dark",
+            Appearance::Light => "zeron-light",
+        };
+        let registry = ThemeRegistry::active();
+        Self::from_variant(registry.variant(id).expect("Zeron terminal palette exists"))
+    }
 }
 
 impl Theme {
@@ -626,31 +753,44 @@ impl Theme {
     /// line-box whitespace rather than separating layout regions.
     pub const TEXT_STACK_GAP: f32 = 1.0;
 
-    /// The frost tint painted over the blurred window background (macOS glass).
-    /// Dark: darker than `surface`, matched to the reference vibrancy scrim
-    /// `hsl(0 0% 3%)`. Light: a near-white frost run heavier than dark's — see
-    /// [`Self::GLASS_ALPHA_LIGHT`]. On opaque platforms this IS the surface
-    /// tone (no tint swap).
+    /// The selected theme's shell tint painted over the blurred window
+    /// background (macOS glass). Keeping the hue theme-owned matters when a
+    /// user forces frost onto a palette authored for an opaque workbench: a
+    /// fixed Zeron grey would erase that palette's identity.
     pub fn glass(&self) -> Hsla {
-        match self.appearance {
-            Appearance::Dark => {
-                if Self::GLASS_ALPHA < 1.0 {
-                    grey(8).opacity(Self::GLASS_ALPHA)
-                } else {
-                    self.surface
-                }
-            }
-            Appearance::Light => {
-                if Self::GLASS_ALPHA_LIGHT < 1.0 {
-                    // 0xfa, not the surface's 0xf4-ish grey: at 90% coverage
-                    // the tint IS the sidebar tone, and the darker grey read
-                    // as a dingy pane next to the white content card.
-                    grey(0xfa).opacity(Self::GLASS_ALPHA_LIGHT)
-                } else {
-                    self.surface
-                }
+        if self.surface_treatment == SurfaceTreatment::Opaque {
+            return self.surface;
+        }
+        let base = match self.appearance {
+            Appearance::Dark => Self::GLASS_ALPHA,
+            Appearance::Light => Self::GLASS_ALPHA_LIGHT,
+        };
+        self.surface
+            .opacity(self.contrast_checked_glass_alpha(base))
+    }
+
+    /// Raise a requested tint's coverage until primary and muted shell text
+    /// remain legible against the adverse desktop luminance for this
+    /// appearance. A theme with unusually delicate contrast may therefore get
+    /// denser glass, never silently broken text.
+    fn contrast_checked_glass_alpha(&self, base: f32) -> f32 {
+        if base >= 1.0 {
+            return 1.0;
+        }
+        let adverse_backdrop = match self.appearance {
+            Appearance::Dark => grey(0xff),
+            Appearance::Light => grey(0),
+        };
+        for step in 0..=20 {
+            let alpha = base + (1.0 - base) * step as f32 / 20.0;
+            let composite = flatten(self.surface.opacity(alpha), adverse_backdrop);
+            if contrast_ratio(self.text, composite) >= 4.5
+                && contrast_ratio(self.text_muted, composite) >= 3.0
+            {
+                return alpha;
             }
         }
+        1.0
     }
 
     /// Whether this appearance paints translucent chrome over the blurred
@@ -670,40 +810,23 @@ impl Theme {
     /// wgpu platforms keep opaque floats until tested). The window chrome
     /// itself stays opaque off macOS either way.
     pub fn is_frost(&self) -> bool {
-        cfg!(any(target_os = "macos", target_os = "linux"))
+        self.surface_treatment == SurfaceTreatment::Frosted
+            && cfg!(any(target_os = "macos", target_os = "linux"))
     }
 
-    /// Hover wash for chrome that sits ON GLASS (sidebar rows, tabs, titlebar
-    /// buttons). One recipe, both appearances: the 11% [`wash`], tone-flipped
-    /// by the palette convention (soft-white on dark, soft-black on light).
-    ///
-    /// Hover and selection share the SAME fill (selection adds only the ring).
-    /// Light previously ran heavy white washes here (hover 0.55, selection
-    /// 0.92) after a black-hover-next-to-white-selection mismatch report; now
-    /// hover and selection are *both* the tone-flipped wash, so they lift the
-    /// same way again. Light's alpha sits under dark's: dark's 11% at the
-    /// light tone read too dark over the bright frost (user report).
+    /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
+    /// tabs, titlebar buttons). The importer maps this role from the source
+    /// theme, so forcing frost does not reintroduce Zeron's neutral hover.
     pub fn glass_hover(&self) -> Hsla {
-        match self.appearance {
-            Appearance::Dark => wash_for(Appearance::Dark, 0.11),
-            Appearance::Light => wash_for(Appearance::Light, 0.06),
-        }
+        self.element_hover
     }
 
-    /// The translucent tint floating cards paint over their backdrop blur
-    /// (see [`crate::frost::frosted`]). Dark: the reference zeron
-    /// `.glass-surface` menu tint verbatim — `oklch(0.33 0 0 / 34%)`. The
-    /// previous `surface_overlay` at 65% was tuned back when the tint had to
-    /// *approximate* the composited recipe without a real blur; kept over the
-    /// blur it buried the backdrop's colour and menus read as flat grey slabs
-    /// next to the hue-inheriting chrome (user report). At 34% the blurred
-    /// backdrop carries the card and the mid-grey only lifts it off the
-    /// plane. Light: heavier — a translucent white tint left menu text
-    /// ghosting over whatever sat behind the popover, so light coverage
-    /// steps up to keep rows on a known background.
+    /// The theme-owned tint floating cards paint over their backdrop blur (see
+    /// [`crate::frost::frosted`]). Light coverage stays heavier because dark
+    /// text is more vulnerable to unpredictable content behind a popover.
     pub fn glass_overlay(&self) -> Hsla {
         match self.appearance {
-            Appearance::Dark => oklch(0.33, 0.0, 0.0).opacity(0.34),
+            Appearance::Dark => self.surface_overlay.opacity(0.50),
             Appearance::Light => self.surface_overlay.opacity(0.85),
         }
     }
@@ -769,6 +892,11 @@ impl Theme {
         let accent = accent_color.tokens(Appearance::Dark);
         Self {
             appearance: Appearance::Dark,
+            variant_id: "zeron-dark".into(),
+            family_id: "zeron".into(),
+            accent_selection: AccentSelection::Preset(accent_color.into()),
+            surface_preference: SurfacePreference::ThemeDefault,
+            surface_treatment: SurfaceTreatment::Frosted,
             accent_color,
             bg: grey(6),       // main panel — sampled #060606
             surface: grey(13), // shell / sidebar — sampled #0d0d0d
@@ -816,6 +944,7 @@ impl Theme {
             diff_add: oklch(0.765, 0.177, 163.223), // emerald-400
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
+            terminal: TerminalColors::zeron(Appearance::Dark),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_sans_fallback: system_sans().into(),
@@ -839,6 +968,11 @@ impl Theme {
         let accent = accent_color.tokens(Appearance::Light);
         Self {
             appearance: Appearance::Light,
+            variant_id: "zeron-light".into(),
+            family_id: "zeron".into(),
+            accent_selection: AccentSelection::Preset(accent_color.into()),
+            surface_preference: SurfacePreference::ThemeDefault,
+            surface_treatment: SurfaceTreatment::Frosted,
             accent_color,
             bg: grey(0xff), // main panel — clean white
             // Deeper than ~neutral-100 looks on paper: the content card is pure
@@ -905,6 +1039,7 @@ impl Theme {
             diff_add: oklch(0.596, 0.145, 163.225), // emerald-600
             diff_del: oklch(0.577, 0.245, 27.325),  // red-600
             diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
+            terminal: TerminalColors::zeron(Appearance::Light),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_sans_fallback: system_sans().into(),
@@ -924,15 +1059,92 @@ impl Theme {
         }
     }
 
-    /// Sidebar chrome deliberately keeps Zeron's authored identity palette,
-    /// while live activity and glyphs inherit their explicit roles from the
-    /// selected preset. This keeps navigation stable without freezing status
-    /// feedback to one hard-coded color.
-    pub fn sidebar(appearance: Appearance, selected_accent: AccentColor) -> Self {
-        let mut theme = Self::for_preferences(appearance, AccentColor::Zeron);
-        let selected = selected_accent.tokens(appearance);
-        theme.busy = selected.activity;
-        theme.glyph = selected.glyph;
+    /// Resolve one complete registered variant and then apply the narrowly
+    /// scoped accent policy. Components consume only the resulting semantic
+    /// tokens; VS Code keys never escape the importer.
+    pub fn for_selection(
+        appearance: Appearance,
+        variant_id: &str,
+        accent_selection: AccentSelection,
+        surface_preference: SurfacePreference,
+    ) -> Self {
+        let registry = ThemeRegistry::active();
+        let fallback_id = match appearance {
+            Appearance::Dark => "zeron-dark",
+            Appearance::Light => "zeron-light",
+        };
+        let variant = registry
+            .variant(variant_id)
+            .filter(|variant| model_appearance(variant.appearance) == appearance)
+            .or_else(|| registry.variant(fallback_id))
+            .expect("the built-in registry contains both Zeron appearances");
+        Self::from_variant(variant, accent_selection, surface_preference)
+    }
+
+    pub(crate) fn from_variant(
+        variant: &ThemeVariant,
+        accent_selection: AccentSelection,
+        surface_preference: SurfacePreference,
+    ) -> Self {
+        let appearance = model_appearance(variant.appearance);
+        let accent_color = match accent_selection {
+            AccentSelection::ThemeDefault => AccentColor::Zeron,
+            AccentSelection::Preset(preset) => preset.into(),
+        };
+        let mut theme = Self::for_preferences(appearance, accent_color);
+        let colors = &variant.colors;
+        let accent = variant.accent_for(accent_selection);
+        theme.variant_id = variant.id.clone().into();
+        theme.family_id = variant.family_id.clone().into();
+        theme.accent_selection = accent_selection;
+        theme.surface_preference = surface_preference;
+        theme.surface_treatment = surface_preference.resolve(variant.recommended_surface_treatment);
+        theme.bg = model_color(colors.background);
+        theme.surface = model_color(colors.shell);
+        theme.surface_raised = model_color(colors.raised);
+        theme.surface_card = model_color(colors.card);
+        theme.surface_dialog = model_color(colors.dialog);
+        theme.surface_overlay = model_color(colors.overlay);
+        theme.element_hover = model_color(colors.hover);
+        theme.element_active = model_color(colors.active);
+        theme.border = model_color(colors.border);
+        theme.border_strong = model_color(colors.border_strong);
+        theme.text = model_color(colors.text);
+        theme.text_muted = model_color(colors.text_muted);
+        theme.text_faint = model_color(colors.text_faint);
+        theme.text_dim = model_color(colors.text_muted);
+        theme.solid = model_color(colors.solid);
+        theme.on_solid = model_color(colors.on_solid);
+        theme.accent = model_color(accent.primary);
+        theme.accent_strong = model_color(accent.strong);
+        theme.accent_wash = model_color(accent.wash);
+        theme.on_accent = model_color(accent.on);
+        theme.danger = model_color(colors.danger);
+        theme.danger_muted = model_color(colors.danger_muted);
+        theme.warning = model_color(colors.warning);
+        theme.warning_muted = model_color(colors.warning_muted);
+        theme.success = model_color(colors.success);
+        theme.success_muted = model_color(colors.success_muted);
+        theme.busy = model_color(accent.activity);
+        theme.glyph = GlyphPalette {
+            light: model_color(accent.glyph[0]),
+            mid: model_color(accent.glyph[1]),
+            deep: model_color(accent.glyph[2]),
+        };
+        theme.surface_raised_hover = model_color(colors.raised);
+        theme.band = model_color(colors.hover);
+        theme.input_bg = model_color(colors.input);
+        theme.selection = model_color(accent.selection);
+        theme.cursor = model_color(colors.cursor);
+        theme.caret = model_color(accent.caret);
+        theme.danger_strong = model_color(colors.danger);
+        theme.code_text = model_color(accent.primary);
+        theme.code_wash = model_color(accent.wash);
+        theme.syntax = SyntaxPalette::from_variant(variant, theme.syntax);
+        theme.diff_add = model_color(colors.diff_add);
+        theme.diff_del = model_color(colors.diff_delete);
+        theme.diff_hunk_bg = model_color(colors.diff_hunk);
+        theme.terminal = TerminalColors::from_variant(variant);
         theme
     }
 
@@ -952,6 +1164,28 @@ impl Theme {
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
         // resolved colors still need to be discarded for the next frame.
         if accent_changed {
+            THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn install_selection(
+        appearance: Appearance,
+        variant_id: &str,
+        accent_selection: AccentSelection,
+        surface_preference: SurfacePreference,
+        cx: &mut App,
+    ) {
+        let next =
+            Self::for_selection(appearance, variant_id, accent_selection, surface_preference);
+        let changed = cx.try_global::<Theme>().is_some_and(|theme| {
+            theme.variant_id != next.variant_id
+                || theme.accent_selection != next.accent_selection
+                || theme.surface_preference != next.surface_preference
+                || theme.appearance != next.appearance
+        });
+        set_current_appearance(appearance);
+        cx.set_global(next);
+        if changed {
             THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1427,19 +1661,68 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_keeps_zeron_chrome_but_inherits_activity_roles() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            for selected_accent in AccentColor::ALL {
-                let selected = Theme::for_preferences(appearance, selected_accent);
-                let sidebar = Theme::sidebar(appearance, selected_accent);
-                assert_eq!(sidebar.accent_color, AccentColor::Zeron);
-                assert_eq!(sidebar.accent, Theme::for_appearance(appearance).accent);
-                assert_eq!(sidebar.busy, selected.busy);
-                assert_eq!(sidebar.glyph, selected.glyph);
-                if selected_accent != AccentColor::Zeron {
-                    assert_ne!(sidebar.accent, selected.accent);
-                }
-            }
+    fn theme_recommendation_and_surface_override_resolve_independently() {
+        let catppuccin = Theme::for_selection(
+            Appearance::Dark,
+            "catppuccin-mocha",
+            AccentSelection::ThemeDefault,
+            SurfacePreference::ThemeDefault,
+        );
+        let zeron = Theme::dark();
+        assert_ne!(catppuccin.surface, zeron.surface);
+        assert_eq!(catppuccin.busy, catppuccin.accent);
+        assert_eq!(catppuccin.glyph.mid, catppuccin.accent);
+        assert_eq!(catppuccin.surface_treatment, SurfaceTreatment::Opaque);
+        assert!(!catppuccin.is_glass());
+
+        let frosted = Theme::for_selection(
+            Appearance::Dark,
+            "catppuccin-mocha",
+            AccentSelection::ThemeDefault,
+            SurfacePreference::Frosted,
+        );
+        assert_eq!(frosted.variant_id, catppuccin.variant_id);
+        assert_eq!(frosted.accent, catppuccin.accent);
+        assert_eq!(frosted.surface_treatment, SurfaceTreatment::Frosted);
+        assert_eq!(frosted.glass().h, frosted.surface.h);
+        assert_eq!(frosted.glass().s, frosted.surface.s);
+        assert_eq!(frosted.glass().l, frosted.surface.l);
+
+        let opaque_zeron = Theme::for_selection(
+            Appearance::Dark,
+            "zeron-dark",
+            AccentSelection::ThemeDefault,
+            SurfacePreference::Opaque,
+        );
+        assert_eq!(opaque_zeron.surface_treatment, SurfaceTreatment::Opaque);
+        assert_eq!(opaque_zeron.glass(), opaque_zeron.surface);
+    }
+
+    #[test]
+    fn forced_frost_preserves_shell_text_contrast_for_every_builtin() {
+        let registry = ThemeRegistry::builtin();
+        for variant in registry.families.iter().flat_map(|family| &family.variants) {
+            let appearance = model_appearance(variant.appearance);
+            let theme = Theme::from_variant(
+                variant,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Frosted,
+            );
+            let adverse_backdrop = match appearance {
+                Appearance::Dark => grey(0xff),
+                Appearance::Light => grey(0),
+            };
+            let composite = flatten(theme.glass(), adverse_backdrop);
+            assert!(
+                contrast_ratio(theme.text, composite) >= 4.5,
+                "{} primary shell text",
+                variant.id
+            );
+            assert!(
+                contrast_ratio(theme.text_muted, composite) >= 3.0,
+                "{} muted shell text",
+                variant.id
+            );
         }
     }
 

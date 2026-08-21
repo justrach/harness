@@ -1389,8 +1389,7 @@ impl Shell {
             self.debug_upload = None;
             if let Some((pct, img_path)) = spec.split_once(':')
                 && let Ok(pct) = pct.parse::<u64>()
-                && let Ok(att) =
-                    crate::attachments::stage_file(std::path::Path::new(img_path))
+                && let Ok(att) = crate::attachments::stage_file(std::path::Path::new(img_path))
             {
                 let pending_path = format!("pending/{}/{}", att.id, att.name);
                 let device_ids: Vec<String> = {
@@ -3563,8 +3562,10 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let installed_theme = Theme::of(cx);
-        let theme = Theme::sidebar(installed_theme.appearance, installed_theme.accent_color);
+        // The sidebar is part of the resolved theme. A second fixed-Zeron
+        // palette here made imported families look split in half and froze
+        // activity/glyph personality independently of the selected variant.
+        let theme = Theme::of(cx).clone();
         let inner: AnyElement = match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
             Route::Chat => self.render_chat_sidebar(&theme, cx),
@@ -7195,7 +7196,9 @@ impl Render for Shell {
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
-        self.settings.accent_color = crate::appearance::accent(cx);
+        self.settings.theme_selection = crate::appearance::themes(cx);
+        self.settings.accent = crate::appearance::accent(cx);
+        self.settings.surface = crate::appearance::surface(cx);
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the

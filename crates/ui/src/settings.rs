@@ -125,10 +125,18 @@ pub struct UiSettings {
     pub keymap: KeymapConfig,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
+    /// Independently selected light and dark theme variants.
+    pub theme_selection: zeron_theme::ThemeSelection,
     /// Changes pane: side-by-side diffs instead of the unified stack.
     pub diff_split: bool,
-    /// Interactive identity accent. Defaults to the upstream Zeron color.
-    pub accent_color: crate::theme::AccentColor,
+    /// Interactive identity overlay; imported themes default to their own accent.
+    pub accent: zeron_theme::AccentSelection,
+    /// Glass policy, independent from the selected appearance, theme, and accent.
+    pub surface: zeron_theme::SurfacePreference,
+    /// Pre-theme settings used `accentColor`. Read it once, migrate to
+    /// [`Self::accent`], and never write it again.
+    #[serde(default, rename = "accentColor", skip_serializing)]
+    legacy_accent_color: Option<crate::theme::AccentColor>,
 }
 
 impl Default for UiSettings {
@@ -156,8 +164,11 @@ impl Default for UiSettings {
             terminal_open: false,
             keymap: KeymapConfig::default(),
             appearance: crate::appearance::AppearanceMode::default(),
+            theme_selection: zeron_theme::ThemeSelection::default(),
             diff_split: false,
-            accent_color: crate::theme::AccentColor::default(),
+            accent: zeron_theme::AccentSelection::default(),
+            surface: zeron_theme::SurfacePreference::default(),
+            legacy_accent_color: None,
         }
     }
 }
@@ -364,7 +375,7 @@ impl UiSettings {
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => match serde_json::from_str::<UiSettings>(&text) {
-                Ok(settings) => settings.clamped(),
+                Ok(settings) => settings.migrated().clamped(),
                 Err(err) => {
                     tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
                     Self::default()
@@ -383,6 +394,16 @@ impl UiSettings {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)
+    }
+
+    fn migrated(mut self) -> Self {
+        if self.accent == zeron_theme::AccentSelection::ThemeDefault
+            && let Some(accent) = self.legacy_accent_color.take()
+        {
+            self.accent = zeron_theme::AccentSelection::Preset(accent.into());
+        }
+        self.legacy_accent_color = None;
+        self
     }
 
     pub fn path(data_dir: &Path) -> PathBuf {
@@ -442,8 +463,14 @@ mod tests {
                 ..KeymapConfig::default()
             },
             appearance: crate::appearance::AppearanceMode::Light,
+            theme_selection: zeron_theme::ThemeSelection {
+                light: "catppuccin-latte".into(),
+                dark: "catppuccin-mocha".into(),
+            },
             diff_split: true,
-            accent_color: crate::theme::AccentColor::Cyan,
+            accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
+            surface: zeron_theme::SurfacePreference::Frosted,
+            legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -477,7 +504,8 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
-        assert_eq!(loaded.accent_color, crate::theme::AccentColor::Zeron);
+        assert_eq!(loaded.accent, zeron_theme::AccentSelection::ThemeDefault);
+        assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled, "other keys still parse");
         assert!(
@@ -488,6 +516,20 @@ mod tests {
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
         );
+    }
+
+    #[test]
+    fn legacy_accent_color_migrates_to_an_explicit_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"accentColor":"cyan"}"#).unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(
+            loaded.accent,
+            zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan)
+        );
+        loaded.save(dir.path()).unwrap();
+        let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(!saved.contains("accentColor"));
     }
 
     #[test]
