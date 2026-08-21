@@ -5686,6 +5686,7 @@ mod tests {
             },
             entry_id: entry_id.into(),
             timestamp: None,
+            copy_text: None,
         }
     }
 
