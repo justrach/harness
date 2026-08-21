@@ -745,7 +745,10 @@ fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
         .parts
         .iter()
         .filter_map(|part| match part {
-            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.trim()),
+            // Inspect the trimmed view only to reject empty parts. Copy the
+            // original bytes so indentation-based code blocks and Markdown
+            // hard-break whitespace survive the clipboard round trip.
+            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -3471,6 +3474,7 @@ impl Transcript {
         // entry's last row. Timestamp, copy action, and copied feedback only
         // flip visibility/content, so none of them shifts the virtualizer.
         // User entries align end (under the bubble), assistant entries start.
+        // Both read timestamp first, then the copy action.
         let is_user_row = matches!(row.kind, RowKind::User { .. });
         let hovered = self
             .hovered_entry
@@ -3521,11 +3525,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            let metadata = if is_user_row {
-                metadata.child(timestamp).children(copy)
-            } else {
-                metadata.children(copy).child(timestamp)
-            };
+            let metadata = metadata.child(timestamp).children(copy);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
                 .pt(px(Theme::SPACE_SM))
@@ -6097,12 +6097,12 @@ mod tests {
             vec![
                 text_part("p1", "First **paragraph**."),
                 tool_part("tool", "printf hidden"),
-                text_part("p2", "Second paragraph."),
+                text_part("p2", "    indented code\n    stays indented"),
             ],
         );
         assert_eq!(
             assistant_copy_text(&entry).as_deref(),
-            Some("First **paragraph**.\n\nSecond paragraph.")
+            Some("First **paragraph**.\n\n    indented code\n    stays indented")
         );
     }
 
