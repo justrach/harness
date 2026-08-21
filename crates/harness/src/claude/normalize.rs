@@ -153,6 +153,26 @@ fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
     }
 }
 
+/// CLI-synthesized text that rides a user frame but is NOT conversation:
+/// `<system-reminder>` context injections and the interruption marker the CLI
+/// stamps into the transcript when a turn (or a subagent) is stopped.
+///
+/// On a TAGGED frame the distinction is load-bearing, not cosmetic. A tagged
+/// user message means "the parent steered its subagent", which announces more
+/// work and is therefore the one event allowed to resurrect a settled spawn
+/// chip. The CLI emits `[Request interrupted by user]` on the child feed
+/// immediately AFTER the subagent's `done{interrupted}` — read as a steer it
+/// un-settled a chip that nothing would ever settle again, and the spinner ran
+/// forever (2026-08-21: "orchestrator killed them but spinner doesn't stop").
+/// It announces the opposite of more work.
+///
+/// Prefix-matched: the CLI ships at least two spellings of the marker
+/// (`…by user]` and `…by user for tool use]`).
+fn is_synthetic_user_text(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<system-reminder>") || text.starts_with("[Request interrupted")
+}
+
 /// Per-run normalization state.
 ///
 /// `saw_init` dedupes `system:init` — the CLI re-emits it every time the model
@@ -463,14 +483,15 @@ impl Normalizer {
                     // A tagged user frame's TEXT blocks are the parent
                     // steering its subagent (SendMessage-style follow-ups —
                     // tool results ride their own blocks, filtered above).
-                    // Synthetic harness injections are not conversation.
+                    // Synthetic harness injections are not conversation, and
+                    // must not read as a steer — see [`is_synthetic_user_text`].
                     out.extend(
                         f.message
                             .blocks()
                             .filter(|b: &ContentBlock| {
                                 b.kind == "text"
                                     && !b.text.trim().is_empty()
-                                    && !b.text.trim_start().starts_with("<system-reminder>")
+                                    && !is_synthetic_user_text(&b.text)
                             })
                             .map(|b| tag(parent, AgentEvent::UserMessage { text: b.text })),
                     );
@@ -774,6 +795,41 @@ mod tests {
                 "{frame}: {ev:?}"
             );
         }
+    }
+
+    /// Killing a subagent puts `done{interrupted}` on the child feed and then
+    /// an interruption MARKER as a tagged user frame. Read as a steer, that
+    /// marker resurrects the spawn chip the `done` just settled — and nothing
+    /// ever settles it again, so the chip spins forever. It is CLI
+    /// bookkeeping, filtered like a `<system-reminder>`; a real steer on the
+    /// same frame shape still gets through.
+    #[test]
+    fn the_interruption_marker_is_not_a_steer() {
+        for marker in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
+            let frame = format!(
+                r#"{{"type":"user","parent_tool_use_id":"toolu_spawn","message":{{"content":[{{"type":"text","text":"{marker}"}}]}}}}"#
+            );
+            assert!(
+                !normalize_one(&frame)
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
+                "{marker} leaked as a steer"
+            );
+        }
+        // A genuine steer on the very same frame shape still arrives.
+        let real = r#"{"type":"user","parent_tool_use_id":"toolu_spawn","message":{"content":[{"type":"text","text":"Keep going."}]}}"#;
+        assert!(
+            normalize_one(real).iter().any(|e| matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if parent_tool_use_id == "toolu_spawn"
+                        && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
+            )),
+            "a real steer must still reach the subagent"
+        );
     }
 
     #[test]
