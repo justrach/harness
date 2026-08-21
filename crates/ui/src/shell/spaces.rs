@@ -550,7 +550,9 @@ impl Shell {
                 ));
 
         popover::popover_card(theme)
-            .w(px(248.0))
+            // Match the trigger row as the sidebar is resized. Both live
+            // inside the same SPACE_SM horizontal gutters.
+            .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.spaces_menu_key(event, cx)
