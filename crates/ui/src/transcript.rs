@@ -67,10 +67,6 @@ pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
-/// Vertical gap opening a new turn (new message entry).
-pub const GAP_TURN: f32 = 14.0;
-/// Vertical gap between blocks within a turn.
-pub const GAP_BLOCK: f32 = 8.0;
 /// Transcript column max width (zeron 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
@@ -147,6 +143,14 @@ pub const SPRING_GROWTH_EMA: f32 = 0.12;
 pub const SPRING_CHASE_MAX_LEAD: f32 = 32.0;
 /// Treat as exactly pinned within this distance of the bottom.
 pub const AT_BOTTOM_PX: f32 = 2.0;
+
+/// A live stream already resting at the end should keep that end anchored as
+/// its measured height grows. This is deliberately narrower than `pinned`:
+/// users gliding back toward the bottom keep the normal spring behavior.
+fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming: bool) -> bool {
+    pinned && streaming && distance_from_bottom <= AT_BOTTOM_PX
+}
+
 /// Keep the spring loop warm this long after landing, so a streaming pause
 /// resumes at cruise instead of re-accelerating from zero.
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
@@ -629,6 +633,10 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+    /// Text copied by the entry-level hover action. Present only on the last
+    /// settled row, beside the timestamp; tools and transport-only metadata
+    /// are deliberately excluded.
+    pub copy_text: Option<SharedString>,
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -729,6 +737,25 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     fnv1a(&acc)
 }
 
+/// Clipboard payload for an assistant/system entry: authored text parts in
+/// document order, preserving Markdown while excluding tool traces and other
+/// structured parts.
+fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
+    let text = entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            // Inspect the trimmed view only to reject empty parts. Copy the
+            // original bytes so indentation-based code blocks and Markdown
+            // hard-break whitespace survive the clipboard round trip.
+            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then(|| text.into())
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -766,6 +793,7 @@ pub fn rows_for_entry(
             Some((display, spans)) => (display, spans),
             None => (body, Vec::new()),
         };
+        let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
@@ -781,6 +809,7 @@ pub fn rows_for_entry(
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
+            copy_text,
         }];
     }
 
@@ -809,6 +838,7 @@ pub fn rows_for_entry(
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
+                copy_text: None,
             });
             *group_ix += 1;
         };
@@ -895,6 +925,7 @@ pub fn rows_for_entry(
                                 turn_start: false,
                                 entry_id: entry_id.clone(),
                                 timestamp: None,
+                                copy_text: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -933,6 +964,7 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
                     MessagePart::Error {
@@ -949,6 +981,7 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
                     // Tools are grouped by the outer arm; nothing reaches here.
@@ -973,6 +1006,7 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
+        last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
     rows
@@ -1097,10 +1131,11 @@ fn part_prefix(id: &str) -> &str {
 /// Vertical gap opening `row` given its predecessor: turn gap at turn starts;
 /// the markdown block gap between sibling block rows split from the same text
 /// part — matching the live row's internal spacing exactly, so the
-/// live→split handoff cannot shift a pixel; the block gap otherwise.
+/// live→split handoff cannot shift a pixel. Tool groups get one larger global
+/// step on either boundary so their dense chip stack has room to breathe.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
-        return GAP_TURN;
+        return Theme::SPACE_LG;
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
     let same_part_markdown = prev.is_some_and(|p| {
@@ -1108,8 +1143,12 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     });
     if same_part_markdown {
         render::MD_BLOCK_GAP
+    } else if matches!(row.kind, RowKind::ToolGroup { .. })
+        || prev.is_some_and(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+    {
+        Theme::SPACE_MD
     } else {
-        GAP_BLOCK
+        Theme::SPACE_SM
     }
 }
 
@@ -1584,6 +1623,9 @@ pub struct Transcript {
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
+    /// Entry whose hover action is showing transient copied-check feedback.
+    copied_message: Option<SharedString>,
+    copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -1736,6 +1778,8 @@ impl Transcript {
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
+            copied_message: None,
+            copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_loads: HashMap::new(),
@@ -2530,6 +2574,8 @@ impl Transcript {
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
+            self.copied_message = None;
+            self.copied_message_clear = None;
             self.list.reset(0);
             // A kept own-turn hold (send-created chat) owns the viewport;
             // otherwise the fresh attach pins to the bottom.
@@ -2582,6 +2628,18 @@ impl Transcript {
                 .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
         });
 
+        // Capture this before the row splice changes the list's measured end.
+        // When the user is truly live-following, retaining the end anchor
+        // keeps the in-flow working trailer at the same viewport position as
+        // transcript lines grow above it. Nothing about the trailer's layout
+        // or coordinates changes.
+        let live_following = should_anchor_live_stream(
+            self.pinned,
+            self.distance_from_bottom(),
+            entries
+                .last()
+                .is_some_and(|entry| entry.status == Some(MessageStatus::Streaming)),
+        );
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
@@ -2638,18 +2696,28 @@ impl Transcript {
             self.own_turn_kick = true;
         }
         if self.pinned {
-            if motion::reduced_motion(cx) || was_empty {
-                // First fill (chat open) lands at the bottom instantly
-                // (mugen initialScroll:'bottom'); reduced motion always snaps.
+            if live_following {
                 self.list.scroll_to_end();
-            } else if self.is_glued() {
-                // A glued offset (`None` / anchored past the end) makes the
-                // upcoming layout hard-snap to the new end — the per-commit
-                // stutter. Materialize a pixel anchor a hair above the bottom
-                // so layout holds position and the spring glides the growth.
-                self.list.scroll_by(px(-0.75));
+                self.spring.reset();
+                self.spring_last_tick = None;
+                self.spring_settled_at = None;
+                self.spring_kick = false;
+                self.last_scroll_distance = 0.0;
+            } else {
+                if motion::reduced_motion(cx) || was_empty {
+                    // First fill (chat open) lands at the bottom instantly
+                    // (mugen initialScroll:'bottom'); reduced motion snaps.
+                    self.list.scroll_to_end();
+                } else if self.is_glued() {
+                    // A glued offset (`None` / anchored past the end) makes
+                    // the upcoming layout hard-snap to the new end — the
+                    // per-commit stutter. Materialize a pixel anchor a hair
+                    // above the bottom so layout holds position and the
+                    // spring glides the growth.
+                    self.list.scroll_by(px(-0.75));
+                }
+                self.spring_kick = true;
             }
-            self.spring_kick = true;
         }
         cx.notify();
     }
@@ -3117,7 +3185,7 @@ impl Transcript {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
-                        .pt(px(10.0))
+                        .pt(px(Theme::SPACE_LG))
                         .text_size(px(12.0))
                         .text_color(theme.danger)
                         .cursor_pointer()
@@ -3166,7 +3234,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                .pt(px(10.0))
+                .pt(px(Theme::SPACE_LG))
                 .text_size(px(11.0))
                 .child(crate::loaders::gradient_spinner(
                     "working-indicator",
@@ -3212,9 +3280,9 @@ impl Transcript {
         // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
             if self.doc_override.is_some() {
-                GAP_TURN
+                Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -3402,27 +3470,65 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
         };
 
-        // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
-        // a RESERVED 16px lane under the entry's last row — the label only
-        // flips opacity, so revealing it never shifts the virtualizer's
-        // layout. User entries align end (under the bubble), assistant start.
+        // Hover-revealed metadata strip: a RESERVED 32px lane under the
+        // entry's last row. Timestamp, copy action, and copied feedback only
+        // flip visibility/content, so none of them shifts the virtualizer.
+        // User entries align end (under the bubble), assistant entries start.
+        // Both read timestamp first, then the copy action.
         let is_user_row = matches!(row.kind, RowKind::User { .. });
         let hovered = self
             .hovered_entry
             .as_ref()
             .is_some_and(|(_, entry)| entry == &row.entry_id);
-        // Vertical breathing room from the source: assistant text blocks sit
-        // in a `VStack padding={4}` (chat-view.tsx:183), so the strip starts
-        // 4px below the message text — the native markdown column has no such
-        // bottom padding, so the strip carries it as top inset (grown into the
-        // reserved height: reveal still never shifts layout). User rows are
-        // flush: the Timestamp follows the bubble HStack directly (VStack gap
-        // defaults to 0 in mugen), the label's centering inside the 16px lane
-        // is all the gap the original has.
+        let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
+        let copy_text = row.copy_text.clone();
+        let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let timestamp = div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.55))
+                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+            let copy = copy_text.map(|text| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("copy-message-hover-{entry_id}");
+                div()
+                    .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .size(px(Theme::SPACE_MD * 2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    // Same quiet icon-button treatment as the copy action
+                    // over transcript code blocks.
+                    .bg(motion::hover_blend(
+                        &fade_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
+                    .on_hover(motion::hover_listener(fade_key))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_message(entry_id.clone(), text.clone(), cx)
+                    }))
+                    .child(
+                        crate::icons::icon(if copied_message {
+                            crate::icons::CHECK
+                        } else {
+                            crate::icons::COPY
+                        })
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                    )
+            });
+            let metadata = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM));
+            let metadata = metadata.child(timestamp).children(copy);
             div()
-                .h(px(if is_user_row { 16.0 } else { 20.0 }))
-                .when(!is_user_row, |el| el.pt(px(4.0)))
+                .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
+                .pt(px(Theme::SPACE_SM))
                 .w_full()
                 .flex()
                 .items_center()
@@ -3436,11 +3542,8 @@ impl Transcript {
                 .when(is_user_row, |el| el.justify_end())
                 .when(hovered, |el| {
                     el.child(motion::fade_quick(
-                        SharedString::from(format!("ts-{}", row.id)),
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.55))
-                            .child(SharedString::from(format_timestamp(ms, &chrono::Local))),
+                        SharedString::from(format!("meta-{}", row.id)),
+                        metadata,
                     ))
                 })
         });
@@ -3490,6 +3593,24 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        self.copied_message = Some(entry_id);
+        self.copied_message_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied_message = None;
+                this.copied_message_clear = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Copy-button wiring for one row's code blocks ([`render::CopyUi`]):
@@ -5054,6 +5175,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_stream_at_the_bottom_gets_a_hard_end_anchor() {
+        assert!(should_anchor_live_stream(true, 0.0, true));
+        assert!(should_anchor_live_stream(true, AT_BOTTOM_PX, true));
+
+        // A user who has moved away from the end keeps control of the
+        // viewport, even if the transcript is still streaming.
+        assert!(!should_anchor_live_stream(true, AT_BOTTOM_PX + 0.1, true));
+        assert!(!should_anchor_live_stream(false, 0.0, true));
+
+        // Ordinary transcript updates retain the existing spring behavior.
+        assert!(!should_anchor_live_stream(true, 0.0, false));
+    }
+
+    #[test]
     fn own_turn_reservation_is_a_min_height_for_the_turn() {
         let usable = 700.0;
         // A short turn reserves the rest of the usable viewport below it.
@@ -5180,11 +5315,11 @@ mod tests {
         // Sibling markdown blocks from the same part: md block gap.
         assert_eq!(top_gap_for(Some(&rows[0]), &rows[1]), render::MD_BLOCK_GAP);
         assert_eq!(top_gap_for(Some(&rows[1]), &rows[2]), render::MD_BLOCK_GAP);
-        // Markdown → tool group and tool group → next part: block gap.
-        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_BLOCK);
-        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_BLOCK);
+        // Markdown → tool group and tool group → next part: larger boundary.
+        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), Theme::SPACE_MD);
+        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), Theme::SPACE_MD);
         // Turn starts get the turn gap regardless.
-        assert_eq!(top_gap_for(None, &rows[0]), GAP_TURN);
+        assert_eq!(top_gap_for(None, &rows[0]), Theme::SPACE_LG);
     }
 
     #[test]
@@ -5445,6 +5580,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "what color is this?");
+        assert_eq!(rows[0].copy_text.as_deref(), Some("what color is this?"));
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].path, "/data/uploads/ab12-red.png");
         assert_eq!(attachments[0].name, "ab12-red.png");
@@ -5460,6 +5596,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "");
+        assert!(rows[0].copy_text.is_none());
         assert_eq!(attachments.len(), 1);
     }
 
@@ -5932,7 +6069,12 @@ mod tests {
         let rows = rows_for_entry(&done, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
+        assert_eq!(
+            rows.last().unwrap().copy_text.as_deref(),
+            Some("one\n\ntwo")
+        );
         assert!(rows[..rows.len() - 1].iter().all(|r| r.timestamp.is_none()));
+        assert!(rows[..rows.len() - 1].iter().all(|r| r.copy_text.is_none()));
 
         // …but never mid-stream (chat-view.tsx: no hover under a moving reply).
         let live = assistant(
@@ -5942,8 +6084,26 @@ mod tests {
         );
         let rows = rows_for_entry(&live, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
+        assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
         assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
+    }
+
+    #[test]
+    fn message_copy_keeps_authored_text_and_excludes_tool_traces() {
+        let entry = assistant(
+            "a-copy",
+            MessageStatus::Complete,
+            vec![
+                text_part("p1", "First **paragraph**."),
+                tool_part("tool", "printf hidden"),
+                text_part("p2", "    indented code\n    stays indented"),
+            ],
+        );
+        assert_eq!(
+            assistant_copy_text(&entry).as_deref(),
+            Some("First **paragraph**.\n\n    indented code\n    stays indented")
+        );
     }
 
     #[test]
