@@ -1,9 +1,8 @@
 //! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
 //! the activity sidebar IS the session list, and the titlebar names the
-//! selected session (harness brand icon + title). When the sidebar is
-//! collapsed, a `+` new-session button fades into the titlebar's left end
-//! (riding the sidebar width tween). `UiSettings.open_tabs` is legacy — no
-//! longer read or written.
+//! selected session (harness brand icon + title). A `+` new-session button
+//! lives in the titlebar's left control cluster while an existing session is
+//! selected. `UiSettings.open_tabs` is legacy — no longer read or written.
 
 use super::*;
 
@@ -36,10 +35,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// `+` (sidebar header, or the titlebar while the sidebar is collapsed):
-    /// open the new-session canvas. A set sidebar filter re-homes the canvas
-    /// onto that project; under "All" the current pick (the last selected
-    /// project, restored from composer defaults) stands.
+    /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
+    /// re-homes the canvas onto that project; under "All" the current pick
+    /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         let target = {
@@ -59,7 +57,7 @@ impl Shell {
     }
 
     /// The unified titlebar in chat mode:
-    /// `[fading +] [harness icon + session title] … [toggle-changes]`.
+    /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
     /// Replaces the tab strip; inherits its titlebar duties (drag region,
     /// animated left inset, the toggle-changes button on git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -100,12 +98,11 @@ impl Shell {
             }
         };
 
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER while the
-        // sidebar is collapsed (`render_titlebar_cluster`) — this row only
-        // budgets for it: the title's left inset grows by one button slot as
-        // the + fades in, so the text never sits under it.
+        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
+        // session is selected (`render_titlebar_cluster`) — this row budgets
+        // one button slot so the title never sits under it.
         let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha();
+        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control

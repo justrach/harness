@@ -83,6 +83,14 @@ fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
     (viewport - sidebar - right).max(0.0)
 }
 
+fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f32 {
+    if is_chat_route && has_selected_chat {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -3134,13 +3142,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let can_back = self.nav.can_back();
         let can_forward = self.nav.can_forward();
-        // The new-session + joins the cluster while the sidebar is collapsed
-        // (fading on the sidebar width tween) — INSIDE the cluster row so it
-        // shares the buttons' exact size and 2px rhythm; a separate mount in
-        // the title row sat 10px off the cluster and read misaligned (user
-        // report).
-        let plus_alpha = self.titlebar_plus_alpha();
-        let show_plus = matches!(self.route, Route::Chat) && plus_alpha > 0.01;
+        // The titlebar is the single owner of the new-session action in both
+        // sidebar states. Hide it on the new-session canvas: opening another
+        // blank canvas from an already blank canvas has no effect and used to
+        // leave two competing + placements across the responsive variants.
+        let plus_alpha = self.titlebar_plus_alpha(cx);
+        let show_plus = plus_alpha > 0.01;
         div()
             .absolute()
             .top_0()
@@ -3204,13 +3211,13 @@ impl Shell {
             .into_any_element()
     }
 
-    /// How present the titlebar's new-session + is: 0 with the sidebar open
-    /// (the + lives in the sidebar header), 1 fully collapsed, riding the
-    /// sidebar width tween in between.
-    pub(super) fn titlebar_plus_alpha(&self) -> f32 {
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
-        let open_width = self.settings.sidebar_width.max(1.0);
-        (1.0 - sidebar_now / open_width).clamp(0.0, 1.0)
+    /// The titlebar owns new-session creation regardless of sidebar state. It
+    /// is useful only while an existing session is selected.
+    pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
+        titlebar_new_session_alpha(
+            matches!(self.route, Route::Chat),
+            self.state.read(cx).selected_chat.is_some(),
+        )
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -7316,6 +7323,14 @@ mod tests {
     #[test]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
+    }
+
+    #[test]
+    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
+        assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
+        assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
+        assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
+        assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
     }
 
     #[test]
