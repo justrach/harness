@@ -100,23 +100,26 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
 // roughly the same maximum footprint as the sidebar view-options menu while
 // retaining an internal scroll region for larger project lists.
 const SPACES_MENU_LIST_MAX_HEIGHT: f32 = 336.0;
-const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 32.0;
+// Sidebar rhythm: every first-level surface shares Theme's 8px inline edge;
+// list items stay tightly related at 2px, while section boundaries use 12px
+// (well over 2x the intra-list gap). Disclosure content gets a small 4px
+// handoff from its header without leaving dead space while collapsed.
+const SIDEBAR_SECTION_GAP: f32 = 12.0;
+const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
+const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
+const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
+    SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
 pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
     std::time::Duration::from_millis(120);
 
-fn sidebar_disclosure_header(
-    theme: &Theme,
-    label: SharedString,
-    chevron: AnyElement,
-) -> gpui::Div {
+fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .mt(px(12.0))
-        .mb(px(4.0))
-        .px(px(10.0))
+        .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
+        .px(px(Theme::SPACE_SM))
         .cursor_pointer()
         .child(
             div()
@@ -278,36 +281,44 @@ impl Shell {
             .into_any_element()
     }
 
-    fn sidebar_disclosure_chevron(
-        &self,
-        key: &str,
-        open: bool,
-        theme: &Theme,
-    ) -> AnyElement {
-        let chevron = div().flex_none().size(px(12.0)).child(
-            icon(if open {
-                icons::ALT_ARROW_DOWN
-            } else {
-                icons::ALT_ARROW_RIGHT
-            })
+    fn sidebar_disclosure_chevron(&self, key: &str, open: bool, theme: &Theme) -> AnyElement {
+        let resting_reveal = if open { 1.0 } else { 0.0 };
+        let chevron = icon(icons::ALT_ARROW_RIGHT)
             .size(px(12.0))
-            .text_color(theme.text_muted.opacity(0.5)),
-        );
+            .text_color(theme.text_muted.opacity(0.5));
         if let Some(tween) = self
             .sidebar_disclosure_motion
             .get(key)
             .copied()
             .filter(|motion| motion.animating())
         {
-            chevron
-                .with_animation(
+            let denominator = tween.from.max(tween.to).max(1.0);
+            let from = (tween.from / denominator).clamp(0.0, 1.0);
+            let to = (tween.to / denominator).clamp(0.0, 1.0);
+            div()
+                .flex_none()
+                .size(px(12.0))
+                .child(chevron.with_animation(
                     SharedString::from(format!("sidebar-chevron-{key}-{}", tween.epoch)),
-                    motion::CHEVRON.animation(),
-                    |el, t| el.opacity(0.25 + 0.75 * t),
-                )
+                    motion::COLLAPSE.animation(),
+                    move |el, t| {
+                        let reveal = motion::lerp(from, to, t);
+                        el.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                            reveal * 0.25,
+                        )))
+                    },
+                ))
                 .into_any_element()
         } else {
-            chevron.into_any_element()
+            div()
+                .flex_none()
+                .size(px(12.0))
+                .child(
+                    chevron.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                        resting_reveal * 0.25,
+                    ))),
+                )
+                .into_any_element()
         }
     }
     // ---- space filter ----
@@ -1134,12 +1145,17 @@ impl Shell {
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
-            let body_height = rendered_rows.iter().map(|(_, height, _)| *height).sum::<f32>()
+            let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+                + rendered_rows
+                    .iter()
+                    .map(|(_, height, _)| *height)
+                    .sum::<f32>()
                 + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
             let body = div()
                 .w_full()
                 .flex()
                 .flex_col()
+                .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP))
                 .children(rendered_rows.into_iter().map(|(_, _, row)| row));
             let visible_label: SharedString = if collapsed {
@@ -1172,12 +1188,13 @@ impl Shell {
                 body_height,
                 body.into_any_element(),
             );
-            let height = SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                + if collapsed { 0.0 } else { body_height };
+            let height =
+                SIDEBAR_DISCLOSURE_SECTION_HEIGHT + if collapsed { 0.0 } else { body_height };
             let element = div()
                 .w_full()
                 .flex()
                 .flex_col()
+                .pt(px(SIDEBAR_SECTION_GAP))
                 .child(header)
                 .child(body)
                 .into_any_element();
@@ -1231,9 +1248,14 @@ impl Shell {
         let shown = self.archived_shown.max(INITIAL);
         let visible_count = total.min(shown);
         let has_more = total > shown;
-        let body_height = visible_count as f32 * 36.0
+        let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
+            + visible_count as f32 * 36.0
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
-            + if has_more { 36.0 + SIDEBAR_LIST_GAP } else { 0.0 };
+            + if has_more {
+                36.0 + SIDEBAR_LIST_GAP
+            } else {
+                0.0
+            };
         // Header (t3code settled-shelf toggle): muted 12px label, a hairline
         // filling the middle, chevron flipping open/closed. The count only
         // shows while collapsed — expanded, the rows speak for themselves.
@@ -1260,7 +1282,11 @@ impl Shell {
         let body = {
             let selected = self.state.read(cx).selected_chat.clone();
             let selected_wash = crate::theme::glass_selected_bg();
-            let mut list = div().flex().flex_col().gap(px(2.0));
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+                .gap(px(SIDEBAR_LIST_GAP));
             for chat in rows.into_iter().take(shown) {
                 let id = chat.id.clone();
                 let hovered = self.archived_hover.as_deref() == Some(id.as_str());
@@ -1333,7 +1359,7 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(10.0))
-                        .px(px(10.0))
+                        .px(px(Theme::SPACE_SM))
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .when(is_selected, |el| el.bg(selected_wash))
@@ -1407,7 +1433,7 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(10.0))
-                        .px(px(10.0))
+                        .px(px(Theme::SPACE_SM))
                         .rounded(px(6.0))
                         .text_size(px(13.0))
                         .text_color(theme.text_muted.opacity(0.55))
@@ -1427,10 +1453,9 @@ impl Shell {
             }
             body.into_any_element()
         };
-        let body =
-            self.render_sidebar_disclosure_body("archived", open, body_height, body);
-        let section = section.child(body);
-        Some(section.pb(px(Theme::SPACE_SM)).into_any_element())
+        let body = self.render_sidebar_disclosure_body("archived", open, body_height, body);
+        let section = section.pt(px(SIDEBAR_SECTION_GAP)).child(body);
+        Some(section.into_any_element())
     }
 
     // ---- add-space flow (the ⌘K palette) ----

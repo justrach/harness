@@ -4193,7 +4193,6 @@ impl Shell {
                                     .flex()
                                     .flex_col()
                                     .gap(px(2.0))
-                                    .pb(px(Theme::SPACE_SM))
                                     .children(list_items)
                                     .into_any_element()
                             } else {
