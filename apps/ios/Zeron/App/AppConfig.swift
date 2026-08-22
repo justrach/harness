@@ -43,20 +43,18 @@ final class AppConfig: @unchecked Sendable {
     }
 
     func updateTokens(_ new: AuthTokens) {
-        lock.lock(); defer { lock.unlock() }
-        tokens = new
+        lock.withLock {
+            tokens = new
+        }
     }
 
     /// Current bearer, refreshing the WorkOS access token when needed.
     func currentToken() async -> String? {
         switch mode {
         case .dev:
-            lock.lock(); defer { lock.unlock() }
-            return devBearer
+            return lock.withLock { devBearer }
         case .workos:
-            lock.lock()
-            let current = tokens
-            lock.unlock()
+            let current = lock.withLock { tokens }
             guard let current else { return nil }
             if !Self.isExpired(jwt: current.accessToken) {
                 return current.accessToken
@@ -69,31 +67,32 @@ final class AppConfig: @unchecked Sendable {
     /// under the lock as its last act, so a caller either joins a live
     /// refresh or starts a fresh one — never a second concurrent POST.
     private func refreshedToken(current: AuthTokens) async -> String? {
-        lock.lock()
-        if let existing = refreshTask {
-            lock.unlock()
-            return await existing.value
-        }
-        let task = Task<String?, Never> { [edgeURL, orgId] in
-            let client = AuthClient(baseURL: edgeURL)
-            let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
-                                                      organizationId: orgId)
-            if let refreshed {
-                self.updateTokens(refreshed)
-                Keychain.save(refreshed.accessToken, key: "accessToken")
-                Keychain.save(refreshed.refreshToken, key: "refreshToken")
-            } else {
-                roomLog.error("auth: token refresh failed; using expired access token (server will reject and rooms will redial)")
+        let task = lock.withLock {
+            if let existing = refreshTask {
+                return existing
             }
-            self.lock.lock()
-            self.refreshTask = nil
-            self.lock.unlock()
-            // Failure falls back to the expired token: let the server
-            // reject; the rooms' backoff redials retry through here.
-            return refreshed?.accessToken ?? current.accessToken
+
+            let task = Task<String?, Never> { [edgeURL, orgId] in
+                let client = AuthClient(baseURL: edgeURL)
+                let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
+                                                          organizationId: orgId)
+                if let refreshed {
+                    self.updateTokens(refreshed)
+                    Keychain.save(refreshed.accessToken, key: "accessToken")
+                    Keychain.save(refreshed.refreshToken, key: "refreshToken")
+                } else {
+                    roomLog.error("auth: token refresh failed; using expired access token (server will reject and rooms will redial)")
+                }
+                self.lock.withLock {
+                    self.refreshTask = nil
+                }
+                // Failure falls back to the expired token: let the server
+                // reject; the rooms' backoff redials retry through here.
+                return refreshed?.accessToken ?? current.accessToken
+            }
+            refreshTask = task
+            return task
         }
-        refreshTask = task
-        lock.unlock()
         return await task.value
     }
 
@@ -130,6 +129,61 @@ final class AppConfig: @unchecked Sendable {
         guard let token = await currentToken() else { return nil }
         var request = URLRequest(url: edgeURL.appending(path: "chat2/\(chatId)/checkpoint"))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// GET /chat2/{chatId}/rows?after= — pull over plain HTTPS: one request
+    /// collapses the socket's connect→hello→state→rowsReq→backfill, and it
+    /// works on networks that strip WS upgrades (airplane wifi).
+    func chat2RowsRequest(chatId: String, after: UInt64) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [URLQueryItem(name: "after", value: String(after)),
+                                URLQueryItem(name: "device", value: deviceId)])
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// POST /chat2/{chatId}/rows?batchId= — push over plain HTTPS (batchId
+    /// dedupe makes replays no-ops); body is the raw update batch.
+    func chat2PushRequest(chatId: String, batchId: String) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [URLQueryItem(name: "batchId", value: batchId),
+                                URLQueryItem(name: "device", value: deviceId)])
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// GET /registry/{orgId}/rows?since= — the WS hello's delta answer over
+    /// plain HTTPS. `beat=1` doubles as a presence beat.
+    func registryRowsRequest(since: UInt64?) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "registry/\(orgId)/rows")
+        var items = [URLQueryItem(name: "device", value: deviceId),
+                     URLQueryItem(name: "beat", value: "1")]
+        if let since { items.append(URLQueryItem(name: "since", value: String(since))) }
+        url.append(queryItems: items)
+        // Bearer header, never ?token=: HTTP supports headers (unlike WS
+        // upgrades), and query strings can reach request logs.
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// POST /registry/{orgId}/push — one op batch over plain HTTPS (LWW
+    /// clocks make replays apply zero ops).
+    func registryPushRequest() async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "registry/\(orgId)/push")
+        url.append(queryItems: [URLQueryItem(name: "device", value: deviceId)])
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
 
