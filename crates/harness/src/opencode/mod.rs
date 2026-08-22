@@ -65,6 +65,12 @@ const STARTUP_TIMEOUT_ENV: &str = "ZERON_OPENCODE_STARTUP_TIMEOUT_SECS";
 /// Health-poll cadence while the server boots.
 const HEALTH_POLL: Duration = Duration::from_millis(150);
 
+/// Bound on ordinary (non-SSE) HTTP calls: everything is loopback and the
+/// only slow route is a cold /provider catalog. The synchronous per-turn
+/// command endpoint deliberately bypasses this (its response can take the
+/// whole turn and is ignored anyway).
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Bus reconnect: the server is our own child on loopback, so a dropped
 /// stream with a live process is transient — retry briefly, then treat the
 /// run as dead (transcript integrity is gone once frames are missed).
@@ -499,14 +505,23 @@ impl Server {
         req
     }
 
+    /// Bounded health probe. opencode's boot window ACCEPTS connections but
+    /// parks the request until the app is ready — and a request parked early
+    /// enough is never answered at all (observed live, 1.18.18), so an
+    /// unbounded send() wedges the whole startup. Abandon and re-poll.
     async fn get_raw(&self, path: &str) -> Result<reqwest::Response, reqwest::Error> {
-        self.request(reqwest::Method::GET, path).send().await
+        self.request(reqwest::Method::GET, path)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
     }
 
     /// GET with the session's directory scope (the server's per-request
     /// instance selector; both carriers set, matching the official SDK).
     async fn get_json(&self, path: &str, directory: Option<&str>) -> Result<Value, HarnessError> {
-        let mut req = self.request(reqwest::Method::GET, path);
+        let mut req = self
+            .request(reqwest::Method::GET, path)
+            .timeout(CALL_TIMEOUT);
         if let Some(dir) = directory {
             req = req
                 .query(&[("directory", dir)])
@@ -535,7 +550,10 @@ impl Server {
         directory: Option<&str>,
         body: &Value,
     ) -> Result<Value, HarnessError> {
-        let mut req = self.request(reqwest::Method::POST, path).json(body);
+        let mut req = self
+            .request(reqwest::Method::POST, path)
+            .timeout(CALL_TIMEOUT)
+            .json(body);
         if let Some(dir) = directory {
             req = req
                 .query(&[("directory", dir)])
@@ -981,7 +999,12 @@ async fn run_session(session: Session) {
                 interrupt_requested = true;
                 if turn.active {
                     let path = format!("/session/{session_id}/abort");
-                    if server.post_json(&path, dir, &Value::Null).await.is_err() {
+                    let abort = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        server.post_json(&path, dir, &Value::Null),
+                    )
+                    .await;
+                    if !matches!(abort, Ok(Ok(_))) {
                         // The abort endpoint failing means the server itself
                         // is wedged: settle now and tear down hard.
                         settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
@@ -1308,9 +1331,18 @@ async fn post_prompt(
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                 };
-                if let Err(e) = server
-                    .post_json(&path_owned, dir_owned.as_deref(), &cmd_body)
-                    .await
+                // The command endpoint blocks for the whole turn; the bus
+                // carries the real events, so this response is ignored —
+                // but it must not be cut off mid-turn by CALL_TIMEOUT.
+                let mut req = server
+                    .request(reqwest::Method::POST, &path_owned)
+                    .json(&cmd_body);
+                if let Some(dir) = dir_owned.as_deref() {
+                    req = req
+                        .query(&[("directory", dir)])
+                        .header("x-opencode-directory", encode_directory(dir));
+                }
+                if let Err(e) = req.send().await
                 {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
