@@ -26,7 +26,7 @@
 //! whole turn is already visible, so there is nothing to scroll to.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
@@ -61,16 +61,14 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
+/// Bound session-local viewport memory independently of total chat history.
+const MAX_SAVED_VIEWPORTS: usize = 256;
 /// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
 /// smooth enough to track text while avoiding a permanent animation-frame loop
 /// on low-end devices.
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
-/// Vertical gap opening a new turn (new message entry).
-pub const GAP_TURN: f32 = 14.0;
-/// Vertical gap between blocks within a turn.
-pub const GAP_BLOCK: f32 = 8.0;
 /// Transcript column max width (zeron 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
@@ -147,6 +145,14 @@ pub const SPRING_GROWTH_EMA: f32 = 0.12;
 pub const SPRING_CHASE_MAX_LEAD: f32 = 32.0;
 /// Treat as exactly pinned within this distance of the bottom.
 pub const AT_BOTTOM_PX: f32 = 2.0;
+
+/// A live stream already resting at the end should keep that end anchored as
+/// its measured height grows. This is deliberately narrower than `pinned`:
+/// users gliding back toward the bottom keep the normal spring behavior.
+fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming: bool) -> bool {
+    pinned && streaming && distance_from_bottom <= AT_BOTTOM_PX
+}
+
 /// Keep the spring loop warm this long after landing, so a streaming pause
 /// resumes at cruise instead of re-accelerating from zero.
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
@@ -629,6 +635,10 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+    /// Text copied by the entry-level hover action. Present only on the last
+    /// settled row, beside the timestamp; tools and transport-only metadata
+    /// are deliberately excluded.
+    pub copy_text: Option<SharedString>,
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -729,6 +739,25 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     fnv1a(&acc)
 }
 
+/// Clipboard payload for an assistant/system entry: authored text parts in
+/// document order, preserving Markdown while excluding tool traces and other
+/// structured parts.
+fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
+    let text = entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            // Inspect the trimmed view only to reject empty parts. Copy the
+            // original bytes so indentation-based code blocks and Markdown
+            // hard-break whitespace survive the clipboard round trip.
+            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then(|| text.into())
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -766,6 +795,7 @@ pub fn rows_for_entry(
             Some((display, spans)) => (display, spans),
             None => (body, Vec::new()),
         };
+        let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
@@ -781,6 +811,7 @@ pub fn rows_for_entry(
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
+            copy_text,
         }];
     }
 
@@ -809,6 +840,7 @@ pub fn rows_for_entry(
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
+                copy_text: None,
             });
             *group_ix += 1;
         };
@@ -895,6 +927,7 @@ pub fn rows_for_entry(
                                 turn_start: false,
                                 entry_id: entry_id.clone(),
                                 timestamp: None,
+                                copy_text: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -933,6 +966,7 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
                     MessagePart::Error {
@@ -949,6 +983,7 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
                     // Tools are grouped by the outer arm; nothing reaches here.
@@ -973,6 +1008,7 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
+        last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
     rows
@@ -1097,10 +1133,11 @@ fn part_prefix(id: &str) -> &str {
 /// Vertical gap opening `row` given its predecessor: turn gap at turn starts;
 /// the markdown block gap between sibling block rows split from the same text
 /// part — matching the live row's internal spacing exactly, so the
-/// live→split handoff cannot shift a pixel; the block gap otherwise.
+/// live→split handoff cannot shift a pixel. Tool groups get one larger global
+/// step on either boundary so their dense chip stack has room to breathe.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
-        return GAP_TURN;
+        return Theme::SPACE_LG;
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
     let same_part_markdown = prev.is_some_and(|p| {
@@ -1108,8 +1145,12 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     });
     if same_part_markdown {
         render::MD_BLOCK_GAP
+    } else if matches!(row.kind, RowKind::ToolGroup { .. })
+        || prev.is_some_and(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+    {
+        Theme::SPACE_MD
     } else {
-        GAP_BLOCK
+        Theme::SPACE_SM
     }
 }
 
@@ -1464,8 +1505,9 @@ struct FoldState {
 /// hard-tracks the pad's stale bottom on every commit — rig-traced). Wheel
 /// input releases the hold, leaving the reservation as plain scrollable
 /// space. The anchor retires once the reply overflows the reservation (pad
-/// ~0, height-neutral) and on explicit navigation / chat switches (revisits
-/// start at the bottom).
+/// ~0, height-neutral). Chat switches snapshot its runway with the viewport
+/// and restore it released, so revisiting never resumes hidden auto-follow.
+#[derive(Clone, Debug)]
 struct OwnTurnAnchor {
     chat_id: String,
     message_id: SharedString,
@@ -1479,6 +1521,219 @@ struct OwnTurnAnchor {
     /// position absolutely after every layout (glue- and lag-proof — the
     /// exact mechanism the shipped first-send anchor used).
     positioned: bool,
+    /// A fresh send may install the anchor one notification before its echo.
+    /// Once the prompt has appeared, its later disappearance is terminal
+    /// (failed echo or removed entry) and the runway must retire.
+    seen_prompt: bool,
+}
+
+impl OwnTurnAnchor {
+    fn released_for_restore(mut self) -> Self {
+        self.held = false;
+        self.positioned = false;
+        self.seen_prompt = true;
+        self
+    }
+
+    fn observe_prompt(&mut self, exists: bool) -> bool {
+        if exists {
+            self.seen_prompt = true;
+        }
+        exists || !self.seen_prompt
+    }
+}
+
+/// A stable per-chat viewport anchor. Row identity is preferred over its old
+/// index because async replay can insert or remove rows while a chat is away.
+#[derive(Clone, Debug)]
+struct ViewportAnchor {
+    row_id: SharedString,
+    entry_id: SharedString,
+    fallback_ix: usize,
+    offset_in_row: Pixels,
+}
+
+impl ViewportAnchor {
+    fn capture(rows: &[Row], scroll_top: ListOffset) -> Option<Self> {
+        let fallback_ix = scroll_top.item_ix.min(rows.len().checked_sub(1)?);
+        let row = &rows[fallback_ix];
+        Some(Self {
+            row_id: row.id.clone(),
+            entry_id: row.entry_id.clone(),
+            fallback_ix,
+            offset_in_row: scroll_top.offset_in_item,
+        })
+    }
+
+    fn resolve_exact(&self, rows: &[Row]) -> Option<ListOffset> {
+        let item_ix = rows.iter().position(|row| row.id == self.row_id)?;
+        Some(ListOffset {
+            item_ix,
+            offset_in_item: self.offset_in_row,
+        })
+    }
+
+    fn resolve(&self, rows: &[Row]) -> Option<ListOffset> {
+        if let Some(offset) = self.resolve_exact(rows) {
+            return Some(offset);
+        }
+
+        // A row can disappear when a streaming block is reshaped. Stay in the
+        // same message entry, choosing the surviving row nearest the old
+        // location; the intra-row offset is no longer meaningful in that case.
+        let item_ix = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.entry_id == self.entry_id)
+            .min_by_key(|(ix, _)| ix.abs_diff(self.fallback_ix))
+            .map(|(ix, _)| ix)
+            .unwrap_or_else(|| self.fallback_ix.min(rows.len().saturating_sub(1)));
+        (!rows.is_empty()).then_some(ListOffset {
+            item_ix,
+            offset_in_item: px(0.0),
+        })
+    }
+}
+
+/// Session-local viewport state. Chats that were following their tail keep
+/// following it; only user-owned viewports restore a concrete row anchor.
+#[derive(Clone, Debug)]
+enum SavedViewport {
+    FollowTail,
+    Anchored {
+        anchor: ViewportAnchor,
+        distance_from_bottom: f32,
+        /// Preserve the runway that made a short active turn scrollable.
+        /// Navigation releases its automatic hold, so revisiting restores the
+        /// viewport without immediately following new output to the bottom.
+        own_turn: Option<OwnTurnAnchor>,
+    },
+}
+
+struct RestoredViewport {
+    offset: ListOffset,
+    distance_from_bottom: f32,
+    own_turn: Option<OwnTurnAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewportFinalizeToken {
+    generation: u64,
+    layout_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptReplayState {
+    Pending,
+    Empty,
+    Populated,
+}
+
+impl TranscriptReplayState {
+    fn authoritative_empty(self) -> bool {
+        self == Self::Empty
+    }
+
+    fn allows_fallback(self) -> bool {
+        self == Self::Populated
+    }
+}
+
+impl ViewportFinalizeToken {
+    fn still_current(self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn layout_settled(self, layout_revision: u64) -> bool {
+        self.layout_revision == layout_revision
+    }
+}
+
+impl SavedViewport {
+    fn capture(
+        rows: &[Row],
+        scroll_top: ListOffset,
+        pinned: bool,
+        distance_from_bottom: f32,
+        own_turn: Option<&OwnTurnAnchor>,
+    ) -> Option<Self> {
+        if rows.is_empty() {
+            return None;
+        }
+        if pinned {
+            return Some(Self::FollowTail);
+        }
+        Some(Self::Anchored {
+            anchor: ViewportAnchor::capture(rows, scroll_top)?,
+            distance_from_bottom,
+            own_turn: own_turn.cloned(),
+        })
+    }
+
+    /// Before the opening reset arrives, rows may contain only optimistic
+    /// echoes. In that gap an exact row is safe, but entry/index fallbacks
+    /// would mistake an unrelated echo for the authoritative transcript.
+    fn resolve(&self, rows: &[Row], allow_fallback: bool) -> Option<RestoredViewport> {
+        let Self::Anchored {
+            anchor,
+            distance_from_bottom,
+            own_turn,
+        } = self
+        else {
+            return None;
+        };
+        let offset = if allow_fallback {
+            anchor.resolve(rows)?
+        } else {
+            anchor.resolve_exact(rows)?
+        };
+        let own_turn = own_turn
+            .clone()
+            .filter(|turn| {
+                rows.iter()
+                    .any(|row| row.turn_start && row.entry_id == turn.message_id)
+            })
+            .map(OwnTurnAnchor::released_for_restore);
+        Some(RestoredViewport {
+            offset,
+            distance_from_bottom: *distance_from_bottom,
+            own_turn,
+        })
+    }
+}
+
+#[derive(Default)]
+struct SavedViewportCache {
+    by_chat: HashMap<String, SavedViewport>,
+    recency: VecDeque<String>,
+}
+
+impl SavedViewportCache {
+    fn insert(&mut self, chat_id: String, viewport: SavedViewport) {
+        if self.by_chat.contains_key(&chat_id) {
+            self.recency.retain(|candidate| candidate != &chat_id);
+        }
+        self.recency.push_back(chat_id.clone());
+        self.by_chat.insert(chat_id, viewport);
+        while self.by_chat.len() > MAX_SAVED_VIEWPORTS {
+            let Some(evicted) = self.recency.pop_front() else {
+                break;
+            };
+            self.by_chat.remove(&evicted);
+        }
+    }
+
+    fn get_cloned_and_touch(&mut self, chat_id: &str) -> Option<SavedViewport> {
+        let viewport = self.by_chat.get(chat_id).cloned()?;
+        self.recency.retain(|candidate| candidate != chat_id);
+        self.recency.push_back(chat_id.to_string());
+        Some(viewport)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_chat.len()
+    }
 }
 
 pub struct Transcript {
@@ -1496,6 +1751,23 @@ pub struct Transcript {
     /// only then may the working trailer render — a frozen snapshot must
     /// never spin, whatever its entries claim.
     doc_live: bool,
+    /// Memory-only viewport state for primary chats visited in this window.
+    /// A transcript instance is shared across tabs, so the active ListState is
+    /// reset on every attach and cannot retain these positions by itself.
+    saved_viewports: SavedViewportCache,
+    /// An anchored viewport waiting for the selected chat's async replay.
+    pending_viewport: Option<SavedViewport>,
+    /// Generation of the selected chat, guarding post-layout restoration
+    /// callbacks across rapid A→B→A navigation.
+    viewport_generation: u64,
+    /// A restored item anchor needs one post-layout refresh of distance-based
+    /// UI state; programmatic list scrolling never invokes `handle_scroll`.
+    viewport_finalize_pending: bool,
+    viewport_finalize_scheduled: bool,
+    /// Bumped whenever sync or own-turn logic invalidates measured rows. The
+    /// post-restore finalizer waits until one layout completes without another
+    /// invalidation, avoiding a stale jump-button decision.
+    viewport_layout_revision: u64,
     /// One-shot "open at the latest content" for UNPINNED (frozen) override
     /// instances: rows land ASYNC after the tab opens (watch replay / blob
     /// fetch), so the end-scroll fires on the first non-empty sync, then
@@ -1584,6 +1856,9 @@ pub struct Transcript {
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
+    /// Entry whose hover action is showing transient copied-check feedback.
+    copied_message: Option<SharedString>,
+    copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -1705,6 +1980,12 @@ impl Transcript {
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
+            saved_viewports: SavedViewportCache::default(),
+            pending_viewport: None,
+            viewport_generation: 0,
+            viewport_finalize_pending: false,
+            viewport_finalize_scheduled: false,
+            viewport_layout_revision: 0,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
@@ -1736,6 +2017,8 @@ impl Transcript {
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
+            copied_message: None,
+            copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_loads: HashMap::new(),
@@ -1793,17 +2076,118 @@ impl Transcript {
         &self.list
     }
 
+    /// Snapshot the outgoing primary chat before its rows and ListState are
+    /// reset. Empty rows never overwrite an older snapshot: during a rapid
+    /// A→B→A switch, B's replay may not have arrived before leaving it again.
+    fn remember_current_viewport(&mut self) {
+        // Rows can already contain optimistic echoes while an older snapshot
+        // is still waiting for the authoritative replay. Leaving again in
+        // that window must preserve the older snapshot, not replace it with
+        // the partial echo-only viewport.
+        if self.pending_viewport.is_some() {
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let distance_from_bottom = if self.pinned {
+            0.0
+        } else {
+            self.distance_from_bottom()
+        };
+        let Some(viewport) = SavedViewport::capture(
+            &self.rows,
+            self.list.logical_scroll_top(),
+            self.pinned,
+            distance_from_bottom,
+            self.own_turn.as_ref(),
+        ) else {
+            return;
+        };
+        self.saved_viewports.insert(chat_id, viewport);
+    }
+
+    /// Restore an exact optimistic row while replay is pending, enable stable
+    /// fallbacks only after a populated reset, and retire snapshots proven
+    /// absent by an empty reset. `scroll_to` remains valid while the virtual
+    /// list measures restored rows on the following layout pass.
+    fn restore_pending_viewport(&mut self, replay: TranscriptReplayState) -> bool {
+        if self.pending_viewport.is_none() {
+            return false;
+        }
+        if !self.rows.is_empty()
+            && let Some(restored) = self
+                .pending_viewport
+                .as_ref()
+                .and_then(|saved| saved.resolve(&self.rows, replay.allows_fallback()))
+        {
+            self.pending_viewport = None;
+            self.list.scroll_to(restored.offset);
+            self.own_turn = restored.own_turn;
+            self.own_turn_kick = self.own_turn.is_some();
+            self.own_turn_last_tick = None;
+            if self.own_turn.is_some() {
+                // Replay readiness can change while echo rows stay identical,
+                // so the no-diff path may install a runway without splicing.
+                self.remeasure_last_row();
+            }
+            self.last_scroll_distance = restored.distance_from_bottom;
+            self.show_jump_button = restored.distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
+            self.viewport_finalize_pending = true;
+            return true;
+        }
+
+        if !replay.authoritative_empty() {
+            return false;
+        }
+        // The reset's document rows, not the combined rows, define
+        // authoritative emptiness. A matching optimistic row above remains
+        // valid, but an unrelated echo must never become an index fallback
+        // for old history.
+        self.discard_pending_viewport();
+        if self.own_turn.is_none() {
+            self.pinned = true;
+            self.last_scroll_distance = 0.0;
+            self.show_jump_button = false;
+            self.list.scroll_to_end();
+        }
+        true
+    }
+
+    /// Explicit user/navigation intent supersedes a replay-delayed restore.
+    /// Replace its cache entry with tail-follow until current rows can be
+    /// snapshotted normally on the next chat switch.
+    pub(crate) fn discard_pending_viewport(&mut self) {
+        if self.pending_viewport.take().is_some()
+            && let Some(chat_id) = self.chat_id.clone()
+        {
+            self.saved_viewports
+                .insert(chat_id, SavedViewport::FollowTail);
+        }
+    }
+
     pub(crate) fn state_entity(&self) -> &Entity<AppState> {
         &self.state
     }
 
-    /// Replace the transcript's scroll animation task (rail click / jump).
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
+    /// Hand viewport ownership to explicit rail/navigation input before its
+    /// reduced-motion or animated branch moves the list.
+    pub(crate) fn begin_scroll_navigation(&mut self) {
+        self.discard_pending_viewport();
         // Rail navigation within the session RELEASES the hold but keeps the
         // runway (user spec: only leaving and revisiting the session clears
         // it) — scrolling back down re-arms the hold like any restick.
         self.release_own_turn_hold();
         self.pinned = false;
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.scroll_anim = None;
+    }
+
+    /// Store the animation after [`Self::begin_scroll_navigation`].
+    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
         self.scroll_anim = Some(task);
     }
 
@@ -1816,9 +2200,10 @@ impl Transcript {
         self.own_turn_last_tick = None;
     }
 
-    fn remeasure_last_row(&self) {
+    fn remeasure_last_row(&mut self) {
         if let Some(last) = self.rows.len().checked_sub(1) {
             self.list.remeasure_items(last..last + 1);
+            self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
         }
     }
 
@@ -1845,6 +2230,7 @@ impl Transcript {
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
+                this.discard_pending_viewport();
                 // Wheel/touch while a runway lives: input owns the viewport,
                 // and the BOTTOM PIN must stay out of it entirely. Escaping
                 // releases the hold (the reservation stays behind as plain
@@ -2013,6 +2399,7 @@ impl Transcript {
         // successive virtualized rows.
         render::update_drag_at(position);
         self.scroll_anim = None;
+        self.discard_pending_viewport();
         self.release_own_turn_hold();
         self.pinned = false;
         self.spring.reset();
@@ -2032,6 +2419,7 @@ impl Transcript {
     /// bottom lands the prompt at the top. Replacing a still-held previous
     /// anchor collapses its pad into the same glide — one continuous motion.
     pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
+        self.discard_pending_viewport();
         self.pinned = false;
         self.show_jump_button = false;
         self.spring.reset();
@@ -2045,12 +2433,17 @@ impl Transcript {
         // CONCRETE visible item first; the pad then reads as scrollable
         // distance for the glide to cover.
         self.materialize_scroll_anchor();
+        let seen_prompt = self
+            .rows
+            .iter()
+            .any(|row| row.turn_start && row.entry_id == message_id.as_str());
         self.own_turn = Some(OwnTurnAnchor {
             chat_id,
             message_id: SharedString::from(message_id),
             runway: 0.0,
             held: true,
             positioned: false,
+            seen_prompt,
         });
         self.own_turn_last_tick = None;
         self.own_turn_kick = true;
@@ -2098,6 +2491,35 @@ impl Transcript {
             .position(|row| row.turn_start && row.entry_id == anchor.message_id)
     }
 
+    fn reconcile_own_turn_prompt(&mut self) {
+        let Some(message_id) = self
+            .own_turn
+            .as_ref()
+            .map(|anchor| anchor.message_id.clone())
+        else {
+            return;
+        };
+        let exists = self
+            .rows
+            .iter()
+            .any(|row| row.turn_start && row.entry_id == message_id);
+        let keep = self
+            .own_turn
+            .as_mut()
+            .is_some_and(|anchor| anchor.observe_prompt(exists));
+        if keep {
+            return;
+        }
+
+        self.own_turn = None;
+        self.own_turn_kick = false;
+        self.own_turn_last_tick = None;
+        self.remeasure_last_row();
+        self.last_scroll_distance = self.distance_from_bottom();
+        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+        self.viewport_finalize_pending = true;
+    }
+
     /// One post-layout own-turn step: size the reservation pad. Pure layout —
     /// all motion is the ordinary bottom pin (see [`OwnTurnAnchor`]).
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
@@ -2113,6 +2535,9 @@ impl Transcript {
             // The optimistic echo may arrive on the next state notification.
             return;
         };
+        if let Some(anchor) = self.own_turn.as_mut() {
+            anchor.seen_prompt = true;
+        }
         let viewport = self.list.viewport_bounds();
         let viewport_height = f32::from(viewport.size.height);
         if viewport_height <= 0.0 {
@@ -2380,6 +2805,7 @@ impl Transcript {
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.discard_pending_viewport();
         // With a live runway, "bottom" IS the held position (the reservation
         // makes prompt-at-top and pad-bottom the same place): re-arm the hold
         // and glide back instead of destroying the runway (user spec — only
@@ -2492,7 +2918,7 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let (selected, entries, echoes) = {
+        let (selected, entries, echoes, replay) = {
             let s = self.state.read(cx);
             match &self.doc_override {
                 // Pinned to a subagent doc: `selected` equals `chat_id` by
@@ -2502,17 +2928,35 @@ impl Transcript {
                     Some(doc_id.clone()),
                     s.sub_transcript(doc_id).to_vec(),
                     Vec::new(),
+                    TranscriptReplayState::Populated,
                 ),
-                None => (
-                    s.selected_chat.clone(),
-                    s.transcript.clone(),
-                    s.pending_echoes().to_vec(),
-                ),
+                None => {
+                    let replay = if !s.transcript_replayed {
+                        TranscriptReplayState::Pending
+                    } else if s.transcript.is_empty() {
+                        TranscriptReplayState::Empty
+                    } else {
+                        TranscriptReplayState::Populated
+                    };
+                    (
+                        s.selected_chat.clone(),
+                        s.transcript.clone(),
+                        s.pending_echoes().to_vec(),
+                        replay,
+                    )
+                }
             }
         };
 
         let attached = selected != self.chat_id;
         if attached {
+            // Read the incoming snapshot before inserting the outgoing one:
+            // a full bounded cache may evict its oldest entry, which can be
+            // exactly the chat the user is reopening.
+            let saved_viewport = selected
+                .as_ref()
+                .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
+            self.remember_current_viewport();
             let keep_own_turn = self
                 .own_turn
                 .as_ref()
@@ -2520,6 +2964,7 @@ impl Transcript {
             if !keep_own_turn {
                 self.own_turn = None;
                 self.own_turn_kick = false;
+                self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
             self.rows.clear();
@@ -2530,15 +2975,48 @@ impl Transcript {
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
+            self.copied_message = None;
+            self.copied_message_clear = None;
             self.list.reset(0);
-            // A kept own-turn hold (send-created chat) owns the viewport;
-            // otherwise the fresh attach pins to the bottom.
-            self.pinned = self.own_turn.is_none();
+            self.pending_viewport = None;
+            self.viewport_generation = self.viewport_generation.wrapping_add(1);
+            self.viewport_finalize_pending = false;
+            if self.own_turn.is_some() {
+                // A kept own-turn hold (send-created chat) owns the viewport.
+                self.pinned = false;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            } else if let Some(SavedViewport::Anchored {
+                anchor,
+                distance_from_bottom,
+                own_turn,
+            }) = saved_viewport
+            {
+                // Keep a possible runway pending until replay confirms that
+                // its optimistic prompt still exists. Installing it on this
+                // empty attach frame can leave a failed send's stale anchor
+                // intercepting scroll-to-bottom forever.
+                self.pinned = false;
+                self.last_scroll_distance = distance_from_bottom;
+                self.show_jump_button = distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
+                self.pending_viewport = Some(SavedViewport::Anchored {
+                    anchor,
+                    distance_from_bottom,
+                    own_turn,
+                });
+            } else {
+                // New chats and chats that were following their tail retain
+                // the existing open-at-bottom behavior.
+                self.pinned = true;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            }
             self.spring.reset();
             self.spring_last_tick = None;
             self.spring_settled_at = None;
             self.spring_kick = false;
-            self.show_jump_button = false;
+            self.scroll_anim = None;
+            self.stop_selection_scroll();
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
@@ -2582,12 +3060,31 @@ impl Transcript {
                 .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
         });
 
+        // Capture this before the row splice changes the list's measured end.
+        // When the user is truly live-following, retaining the end anchor
+        // keeps the in-flow working trailer at the same viewport position as
+        // transcript lines grow above it. Nothing about the trailer's layout
+        // or coordinates changes.
+        let live_following = should_anchor_live_stream(
+            self.pinned,
+            self.distance_from_bottom(),
+            entries
+                .last()
+                .is_some_and(|entry| entry.status == Some(MessageStatus::Streaming)),
+        );
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
             None => {
                 self.rows = new_rows;
                 self.refresh_protected_attachments(cx);
+                self.reconcile_own_turn_prompt();
+                // Replay readiness is independent of row content: an empty
+                // reset (or one identical to optimistic rows) still resolves
+                // or retires the pending viewport.
+                if self.restore_pending_viewport(replay) {
+                    cx.notify();
+                }
                 return;
             }
             Some((old_range, count)) => {
@@ -2613,10 +3110,13 @@ impl Transcript {
                 } else {
                     self.list.splice(old_range, count);
                 }
+                self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
             }
         }
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
+        self.reconcile_own_turn_prompt();
+        self.restore_pending_viewport(replay);
         if self.land_end_pending && !self.rows.is_empty() {
             // First content for an unpinned override tab: land at the end.
             // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
@@ -2638,18 +3138,28 @@ impl Transcript {
             self.own_turn_kick = true;
         }
         if self.pinned {
-            if motion::reduced_motion(cx) || was_empty {
-                // First fill (chat open) lands at the bottom instantly
-                // (mugen initialScroll:'bottom'); reduced motion always snaps.
+            if live_following {
                 self.list.scroll_to_end();
-            } else if self.is_glued() {
-                // A glued offset (`None` / anchored past the end) makes the
-                // upcoming layout hard-snap to the new end — the per-commit
-                // stutter. Materialize a pixel anchor a hair above the bottom
-                // so layout holds position and the spring glides the growth.
-                self.list.scroll_by(px(-0.75));
+                self.spring.reset();
+                self.spring_last_tick = None;
+                self.spring_settled_at = None;
+                self.spring_kick = false;
+                self.last_scroll_distance = 0.0;
+            } else {
+                if motion::reduced_motion(cx) || was_empty {
+                    // First fill (chat open) lands at the bottom instantly
+                    // (mugen initialScroll:'bottom'); reduced motion snaps.
+                    self.list.scroll_to_end();
+                } else if self.is_glued() {
+                    // A glued offset (`None` / anchored past the end) makes
+                    // the upcoming layout hard-snap to the new end — the
+                    // per-commit stutter. Materialize a pixel anchor a hair
+                    // above the bottom so layout holds position and the
+                    // spring glides the growth.
+                    self.list.scroll_by(px(-0.75));
+                }
+                self.spring_kick = true;
             }
-            self.spring_kick = true;
         }
         cx.notify();
     }
@@ -3117,7 +3627,7 @@ impl Transcript {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
-                        .pt(px(10.0))
+                        .pt(px(Theme::SPACE_LG))
                         .text_size(px(12.0))
                         .text_color(theme.danger)
                         .cursor_pointer()
@@ -3166,7 +3676,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                .pt(px(10.0))
+                .pt(px(Theme::SPACE_LG))
                 .text_size(px(11.0))
                 .child(crate::loaders::gradient_spinner(
                     "working-indicator",
@@ -3212,9 +3722,9 @@ impl Transcript {
         // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
             if self.doc_override.is_some() {
-                GAP_TURN
+                Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -3402,27 +3912,65 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
         };
 
-        // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
-        // a RESERVED 16px lane under the entry's last row — the label only
-        // flips opacity, so revealing it never shifts the virtualizer's
-        // layout. User entries align end (under the bubble), assistant start.
+        // Hover-revealed metadata strip: a RESERVED 32px lane under the
+        // entry's last row. Timestamp, copy action, and copied feedback only
+        // flip visibility/content, so none of them shifts the virtualizer.
+        // User entries align end (under the bubble), assistant entries start.
+        // Both read timestamp first, then the copy action.
         let is_user_row = matches!(row.kind, RowKind::User { .. });
         let hovered = self
             .hovered_entry
             .as_ref()
             .is_some_and(|(_, entry)| entry == &row.entry_id);
-        // Vertical breathing room from the source: assistant text blocks sit
-        // in a `VStack padding={4}` (chat-view.tsx:183), so the strip starts
-        // 4px below the message text — the native markdown column has no such
-        // bottom padding, so the strip carries it as top inset (grown into the
-        // reserved height: reveal still never shifts layout). User rows are
-        // flush: the Timestamp follows the bubble HStack directly (VStack gap
-        // defaults to 0 in mugen), the label's centering inside the 16px lane
-        // is all the gap the original has.
+        let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
+        let copy_text = row.copy_text.clone();
+        let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let timestamp = div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.55))
+                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+            let copy = copy_text.map(|text| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("copy-message-hover-{entry_id}");
+                div()
+                    .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .size(px(Theme::SPACE_MD * 2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    // Same quiet icon-button treatment as the copy action
+                    // over transcript code blocks.
+                    .bg(motion::hover_blend(
+                        &fade_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
+                    .on_hover(motion::hover_listener(fade_key))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_message(entry_id.clone(), text.clone(), cx)
+                    }))
+                    .child(
+                        crate::icons::icon(if copied_message {
+                            crate::icons::CHECK
+                        } else {
+                            crate::icons::COPY
+                        })
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                    )
+            });
+            let metadata = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM));
+            let metadata = metadata.child(timestamp).children(copy);
             div()
-                .h(px(if is_user_row { 16.0 } else { 20.0 }))
-                .when(!is_user_row, |el| el.pt(px(4.0)))
+                .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
+                .pt(px(Theme::SPACE_SM))
                 .w_full()
                 .flex()
                 .items_center()
@@ -3436,11 +3984,8 @@ impl Transcript {
                 .when(is_user_row, |el| el.justify_end())
                 .when(hovered, |el| {
                     el.child(motion::fade_quick(
-                        SharedString::from(format!("ts-{}", row.id)),
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.55))
-                            .child(SharedString::from(format_timestamp(ms, &chrono::Local))),
+                        SharedString::from(format!("meta-{}", row.id)),
+                        metadata,
                     ))
                 })
         });
@@ -3490,6 +4035,24 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        self.copied_message = Some(entry_id);
+        self.copied_message_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied_message = None;
+                this.copied_message_clear = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Copy-button wiring for one row's code blocks ([`render::CopyUi`]):
@@ -4779,6 +5342,39 @@ impl Render for Transcript {
                     .ok();
             });
         }
+        // Programmatic `scroll_to` does not invoke the list's user-scroll
+        // handler. Refresh distance-derived state once layout has measured the
+        // replay, guarded so a stale A callback cannot mutate B (or a newer A).
+        if self.viewport_finalize_pending && !self.viewport_finalize_scheduled {
+            self.viewport_finalize_scheduled = true;
+            let token = ViewportFinalizeToken {
+                generation: self.viewport_generation,
+                layout_revision: self.viewport_layout_revision,
+            };
+            let entity = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                entity
+                    .update(cx, |this: &mut Transcript, cx| {
+                        this.viewport_finalize_scheduled = false;
+                        if !token.still_current(this.viewport_generation) {
+                            if this.viewport_finalize_pending {
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        let distance = this.distance_from_bottom();
+                        this.last_scroll_distance = distance;
+                        this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
+                            && !this.pinned
+                            && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
+                        if token.layout_settled(this.viewport_layout_revision) {
+                            this.viewport_finalize_pending = false;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            });
+        }
         let rail = self.render_rail(cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
@@ -5054,6 +5650,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_stream_at_the_bottom_gets_a_hard_end_anchor() {
+        assert!(should_anchor_live_stream(true, 0.0, true));
+        assert!(should_anchor_live_stream(true, AT_BOTTOM_PX, true));
+
+        // A user who has moved away from the end keeps control of the
+        // viewport, even if the transcript is still streaming.
+        assert!(!should_anchor_live_stream(true, AT_BOTTOM_PX + 0.1, true));
+        assert!(!should_anchor_live_stream(false, 0.0, true));
+
+        // Ordinary transcript updates retain the existing spring behavior.
+        assert!(!should_anchor_live_stream(true, 0.0, false));
+    }
+
+    #[test]
     fn own_turn_reservation_is_a_min_height_for_the_turn() {
         let usable = 700.0;
         // A short turn reserves the rest of the usable viewport below it.
@@ -5064,6 +5674,264 @@ mod tests {
         // over with no height jump).
         assert_eq!(own_turn_reservation(usable, 700.0), 0.0);
         assert_eq!(own_turn_reservation(usable, 1_200.0), 0.0);
+    }
+
+    fn viewport_row(id: &str, entry_id: &str) -> Row {
+        Row {
+            id: id.into(),
+            version: 0,
+            turn_start: true,
+            kind: RowKind::ErrorChip {
+                message: SharedString::default(),
+            },
+            entry_id: entry_id.into(),
+            timestamp: None,
+            copy_text: None,
+        }
+    }
+
+    #[test]
+    fn viewport_anchor_tracks_a_stable_row_across_replay() {
+        let rows = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("c", "entry-c"),
+        ];
+        let anchor = ViewportAnchor::capture(
+            &rows,
+            ListOffset {
+                item_ix: 1,
+                offset_in_item: px(23.0),
+            },
+        )
+        .expect("visible row");
+
+        let replay = vec![
+            viewport_row("new", "entry-new"),
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("c", "entry-c"),
+        ];
+        let restored = anchor.resolve(&replay).expect("restored row");
+        assert_eq!(restored.item_ix, 2);
+        assert_eq!(restored.offset_in_item, px(23.0));
+    }
+
+    #[test]
+    fn viewport_anchor_has_entry_and_index_fallbacks() {
+        let rows = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("old-block", "entry-c"),
+        ];
+        let anchor = ViewportAnchor::capture(
+            &rows,
+            ListOffset {
+                item_ix: 2,
+                offset_in_item: px(31.0),
+            },
+        )
+        .expect("visible row");
+
+        let reshaped = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("inserted", "entry-new"),
+            viewport_row("new-block", "entry-c"),
+        ];
+        let same_entry = anchor.resolve(&reshaped).expect("entry fallback");
+        assert_eq!(same_entry.item_ix, 3);
+        assert_eq!(same_entry.offset_in_item, px(0.0));
+
+        let entry_removed = vec![viewport_row("a", "entry-a"), viewport_row("b", "entry-b")];
+        let clamped = anchor.resolve(&entry_removed).expect("index fallback");
+        assert_eq!(clamped.item_ix, 1);
+        assert_eq!(clamped.offset_in_item, px(0.0));
+    }
+
+    #[test]
+    fn optimistic_echo_cannot_consume_a_historical_viewport_before_replay() {
+        let history = vec![viewport_row("historical", "historical-entry")];
+        let saved = SavedViewport::capture(&history, ListOffset::default(), false, 480.0, None)
+            .expect("historical viewport");
+        let echo_only = vec![viewport_row("echo", "echo-entry")];
+
+        assert!(
+            saved.resolve(&echo_only, false).is_none(),
+            "an unrelated echo is not an authoritative index fallback"
+        );
+        assert_eq!(
+            saved
+                .resolve(&echo_only, true)
+                .expect("populated replay may use an index fallback")
+                .offset
+                .item_ix,
+            0
+        );
+        assert!(TranscriptReplayState::Empty.authoritative_empty());
+        assert!(!TranscriptReplayState::Empty.allows_fallback());
+        assert!(!TranscriptReplayState::Pending.allows_fallback());
+        assert!(TranscriptReplayState::Populated.allows_fallback());
+
+        let echo_viewport =
+            SavedViewport::capture(&echo_only, ListOffset::default(), false, 0.0, None)
+                .expect("echo viewport");
+        assert!(
+            echo_viewport.resolve(&echo_only, false).is_some(),
+            "the exact optimistic row is safe before replay"
+        );
+    }
+
+    #[test]
+    fn saved_viewport_preserves_and_releases_an_active_turn_runway() {
+        let rows = vec![viewport_row("prompt", "prompt")];
+        let own_turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 640.0,
+            held: true,
+            positioned: true,
+            seen_prompt: true,
+        };
+        let saved = SavedViewport::capture(
+            &rows,
+            ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            },
+            false,
+            0.0,
+            Some(&own_turn),
+        )
+        .expect("active chat viewport");
+        let SavedViewport::Anchored {
+            own_turn: Some(saved_turn),
+            ..
+        } = &saved
+        else {
+            panic!("an active turn must keep its runway with the viewport");
+        };
+        assert_eq!(saved_turn.runway, 640.0);
+        assert!(saved_turn.held);
+        assert!(saved_turn.positioned);
+
+        let restored = saved
+            .resolve(&rows, false)
+            .expect("exact queued echo survives an empty replay");
+        let restored_turn = restored.own_turn.expect("valid restored runway");
+        assert_eq!(restored_turn.runway, 640.0);
+        assert!(!restored_turn.held);
+        assert!(!restored_turn.positioned);
+        assert!(restored_turn.seen_prompt);
+
+        let list_state = ListState::new(rows.len(), ListAlignment::Bottom, px(0.0));
+        list_state.reset(0);
+        list_state.splice(0..0, rows.len());
+        list_state.scroll_to(restored.offset);
+        assert_eq!(list_state.logical_scroll_top().item_ix, 0);
+        assert_eq!(list_state.logical_scroll_top().offset_in_item, px(0.0));
+
+        assert!(
+            SavedViewport::capture(&[], ListOffset::default(), false, 0.0, Some(&own_turn))
+                .is_none(),
+            "an empty rapid-switch replay must not overwrite the older snapshot"
+        );
+    }
+
+    #[test]
+    fn own_turn_waits_for_its_first_echo_then_retires_if_it_disappears() {
+        let mut turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 0.0,
+            held: true,
+            positioned: false,
+            seen_prompt: false,
+        };
+
+        assert!(turn.observe_prompt(false), "fresh send waits one state gap");
+        assert!(turn.observe_prompt(true), "echo activates the runway");
+        assert!(turn.seen_prompt);
+        assert!(
+            !turn.observe_prompt(false),
+            "failed echo retires the activated runway"
+        );
+    }
+
+    #[test]
+    fn restored_viewport_discards_a_failed_optimistic_turn() {
+        let outgoing = vec![viewport_row("prompt", "prompt")];
+        let own_turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 640.0,
+            held: true,
+            positioned: true,
+            seen_prompt: true,
+        };
+        let saved = SavedViewport::capture(
+            &outgoing,
+            ListOffset::default(),
+            false,
+            420.0,
+            Some(&own_turn),
+        )
+        .expect("outgoing viewport");
+
+        // The failed echo vanished while A was hidden. The ordinary viewport
+        // still restores by index, but no stale runway may intercept jump.
+        let replay = vec![viewport_row("older", "older")];
+        let restored = saved.resolve(&replay, true).expect("index fallback");
+        assert!(restored.own_turn.is_none());
+        assert_eq!(restored.offset.item_ix, 0);
+        assert_eq!(restored.distance_from_bottom, 420.0);
+    }
+
+    #[test]
+    fn pinned_viewports_follow_tail_and_the_cache_is_bounded() {
+        let rows = vec![viewport_row("row", "entry")];
+        let pinned = SavedViewport::capture(&rows, ListOffset::default(), true, 999.0, None)
+            .expect("pinned viewport");
+        assert!(matches!(pinned, SavedViewport::FollowTail));
+
+        let mut cache = SavedViewportCache::default();
+        for ix in 0..MAX_SAVED_VIEWPORTS + 8 {
+            cache.insert(format!("chat-{ix}"), SavedViewport::FollowTail);
+        }
+        assert_eq!(cache.len(), MAX_SAVED_VIEWPORTS);
+        assert!(cache.get_cloned_and_touch("chat-0").is_none());
+        assert!(
+            cache
+                .get_cloned_and_touch(&format!("chat-{}", MAX_SAVED_VIEWPORTS + 7))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reopening_the_oldest_cached_chat_protects_it_from_the_next_eviction() {
+        let mut cache = SavedViewportCache::default();
+        for ix in 0..MAX_SAVED_VIEWPORTS {
+            cache.insert(format!("chat-{ix}"), SavedViewport::FollowTail);
+        }
+
+        assert!(cache.get_cloned_and_touch("chat-0").is_some());
+        cache.insert("outgoing-new".into(), SavedViewport::FollowTail);
+
+        assert!(cache.by_chat.contains_key("chat-0"));
+        assert!(!cache.by_chat.contains_key("chat-1"));
+        assert!(cache.by_chat.contains_key("outgoing-new"));
+    }
+
+    #[test]
+    fn viewport_finalization_waits_for_current_generation_and_stable_layout() {
+        let token = ViewportFinalizeToken {
+            generation: 7,
+            layout_revision: 11,
+        };
+        assert!(token.still_current(7));
+        assert!(!token.still_current(8));
+        assert!(token.layout_settled(11));
+        assert!(!token.layout_settled(12));
     }
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
@@ -5180,11 +6048,11 @@ mod tests {
         // Sibling markdown blocks from the same part: md block gap.
         assert_eq!(top_gap_for(Some(&rows[0]), &rows[1]), render::MD_BLOCK_GAP);
         assert_eq!(top_gap_for(Some(&rows[1]), &rows[2]), render::MD_BLOCK_GAP);
-        // Markdown → tool group and tool group → next part: block gap.
-        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_BLOCK);
-        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_BLOCK);
+        // Markdown → tool group and tool group → next part: larger boundary.
+        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), Theme::SPACE_MD);
+        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), Theme::SPACE_MD);
         // Turn starts get the turn gap regardless.
-        assert_eq!(top_gap_for(None, &rows[0]), GAP_TURN);
+        assert_eq!(top_gap_for(None, &rows[0]), Theme::SPACE_LG);
     }
 
     #[test]
@@ -5445,6 +6313,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "what color is this?");
+        assert_eq!(rows[0].copy_text.as_deref(), Some("what color is this?"));
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].path, "/data/uploads/ab12-red.png");
         assert_eq!(attachments[0].name, "ab12-red.png");
@@ -5460,6 +6329,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "");
+        assert!(rows[0].copy_text.is_none());
         assert_eq!(attachments.len(), 1);
     }
 
@@ -5932,7 +6802,12 @@ mod tests {
         let rows = rows_for_entry(&done, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
+        assert_eq!(
+            rows.last().unwrap().copy_text.as_deref(),
+            Some("one\n\ntwo")
+        );
         assert!(rows[..rows.len() - 1].iter().all(|r| r.timestamp.is_none()));
+        assert!(rows[..rows.len() - 1].iter().all(|r| r.copy_text.is_none()));
 
         // …but never mid-stream (chat-view.tsx: no hover under a moving reply).
         let live = assistant(
@@ -5942,8 +6817,26 @@ mod tests {
         );
         let rows = rows_for_entry(&live, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
+        assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
         assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
+    }
+
+    #[test]
+    fn message_copy_keeps_authored_text_and_excludes_tool_traces() {
+        let entry = assistant(
+            "a-copy",
+            MessageStatus::Complete,
+            vec![
+                text_part("p1", "First **paragraph**."),
+                tool_part("tool", "printf hidden"),
+                text_part("p2", "    indented code\n    stays indented"),
+            ],
+        );
+        assert_eq!(
+            assistant_copy_text(&entry).as_deref(),
+            Some("First **paragraph**.\n\n    indented code\n    stays indented")
+        );
     }
 
     #[test]
