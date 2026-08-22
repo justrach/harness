@@ -509,12 +509,31 @@ pub fn resort_offsets(
     offsets
 }
 
-/// Estimated sidebar row height for the resort diff (title line 17px inside
-/// 6px vertical padding + the location subline's 14px line + 2px gap — Active
-/// rows always carry the folder · device subline).
-/// Session row height (FLIP estimate): space line + title + meta line
-/// (harness mark, plus branch for worktrees).
-const CHAT_ROW_HEIGHT: f32 = 61.0;
+/// Exact active-session row height. The first two lines and the two 2px flex
+/// gaps consume 47px including vertical padding; the metadata line then grows
+/// to its tallest visible child. Keeping this calculation beside the renderer's
+/// metrics prevents disclosure clips when view options alter that third line.
+pub(super) fn chat_row_height(
+    shows_harness: bool,
+    shows_branch: bool,
+    shows_pull_request: bool,
+    shows_working_spinner: bool,
+) -> f32 {
+    let mut metadata_height: f32 = 0.0;
+    if shows_harness {
+        metadata_height = metadata_height.max(11.0);
+    }
+    if shows_branch {
+        metadata_height = metadata_height.max(14.0);
+    }
+    if shows_pull_request {
+        metadata_height = metadata_height.max(16.0);
+    }
+    if shows_working_spinner {
+        metadata_height = metadata_height.max(8.0);
+    }
+    47.0 + metadata_height
+}
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 
@@ -8085,6 +8104,16 @@ mod tests {
 
     fn keys(list: &[(&str, f32)]) -> Vec<(String, f32)> {
         list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
+    }
+
+    #[test]
+    fn sidebar_chat_height_tracks_visible_metadata() {
+        assert_eq!(chat_row_height(false, false, false, false), 47.0);
+        assert_eq!(chat_row_height(true, false, false, false), 58.0);
+        assert_eq!(chat_row_height(false, true, false, false), 61.0);
+        assert_eq!(chat_row_height(false, false, true, false), 63.0);
+        assert_eq!(chat_row_height(false, false, false, true), 55.0);
+        assert_eq!(chat_row_height(true, true, true, true), 63.0);
     }
 
     #[test]
