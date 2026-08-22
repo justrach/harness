@@ -96,6 +96,11 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
     SidebarViewRow::ShowHarness,
 ];
 
+// With the search field and card insets, this lets the project picker grow to
+// roughly the same maximum footprint as the sidebar view-options menu while
+// retaining an internal scroll region for larger project lists.
+const SPACES_MENU_LIST_MAX_HEIGHT: f32 = 336.0;
+
 /// One row of the open dropdown, in display order.
 #[derive(Clone, PartialEq)]
 pub(super) enum SpacesMenuRow {
@@ -695,7 +700,7 @@ impl Shell {
             .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
             .tooltip_show_delay(std::time::Duration::from_millis(350))
             .child(
-                icon(icons::SORT_VERTICAL)
+                icon(icons::LIST)
                     .size(px(16.0))
                     .text_color(theme.text_muted),
             );
@@ -778,7 +783,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .max_h(px(224.0))
+                .max_h(px(SPACES_MENU_LIST_MAX_HEIGHT))
                 .overflow_y_scroll()
                 .track_scroll(&list_scroll)
                 .children(details.into_iter().enumerate().map(
