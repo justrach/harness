@@ -123,10 +123,10 @@ const FOLD_TWEEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 pub const USER_COLLAPSED_LINES: usize = 5;
 /// The user bubble's line box.
 pub const USER_LINE_HEIGHT: f32 = 22.0;
-/// Conservative soft-wrap proxy for the fixed-width long-prompt bubble:
-/// roughly five 80-character lines. Keeping this high avoids adding the fold
-/// control to ordinary two- or three-line prose; explicit newlines are counted
-/// exactly by [`user_message_needs_collapse`].
+/// Conservative first-frame soft-wrap proxy for the fixed-width long-prompt
+/// bubble. The final decision uses the wrapped `StyledText` layout, but this
+/// fallback lets clearly long prompts render their affordance immediately
+/// before that first layout has completed.
 pub const USER_COLLAPSE_CHARS: usize = 400;
 /// The expander strip under a clipped prompt: a right-aligned chevron button
 /// inside the bubble, on its own row so it never paints over the last line.
@@ -772,10 +772,10 @@ fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
     (!text.is_empty()).then(|| text.into())
 }
 
-/// Decide before layout whether a prompt needs a fold affordance. Explicit
-/// newlines are exact; the character threshold is deliberately conservative
-/// for soft-wrapped pasted text. The actual visual cap is gpui's `line_clamp`,
-/// so measured layout never feeds back into the virtualizer.
+/// Conservative first-frame fallback for whether a prompt may need a fold
+/// affordance. Once the text element has measured, `render_user_body` replaces
+/// this proxy with the exact wrapped-line count, so glyph width and script no
+/// longer affect eligibility heuristically.
 pub fn user_message_needs_collapse(text: &str) -> bool {
     text.lines().count() > USER_COLLAPSED_LINES || text.chars().count() > USER_COLLAPSE_CHARS
 }
@@ -3347,6 +3347,8 @@ impl Transcript {
         reduced_motion: bool,
     ) {
         let duration_ms = user_resize_duration_ms(full_h - collapsed_h);
+        self.user_collapse_scroll = None;
+        self.user_collapse_scroll_scheduled = false;
         let entry = self.user_folds.entry(row_id).or_default();
         let currently_open = entry.open.unwrap_or(false);
         entry.from = if currently_open { full_h } else { collapsed_h };
@@ -3355,51 +3357,61 @@ impl Transcript {
         entry.toggled_at = Some(Instant::now());
         entry.duration_ms = duration_ms;
 
+        // An expansion must release the bottom pin too. Otherwise the spring
+        // keeps the transcript's tail fixed while the bubble grows, lifting
+        // the newly revealed first lines behind the top fade.
+        if !currently_open {
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_settled_at = None;
+            self.spring_kick = false;
+        }
+
         // Capture a screen-space anchor for the clicked row. We do not subtract
         // the removed height: that is only correct when the row's top is
         // exactly at the viewport bottom. At the top or middle of a long
-        // message it overscrolls past the collapsed bubble.
-        if currently_open {
-            let Some(item_bounds) = self.list.bounds_for_item(row_ix) else {
-                return;
-            };
-            let viewport = self.list.viewport_bounds();
-            let initial_top = f32::from(item_bounds.top());
-            // Keep a newly revealed bubble below the transcript's top fade
-            // band. A 12px inset alone still leaves the first lines washed
-            // into the edge fade when the expanded row started above view.
-            let viewport_top =
-                f32::from(viewport.top()) + Theme::TRANSCRIPT_FADE_BAND + 28.0;
-            let viewport_bottom =
-                f32::from(viewport.bottom()) - collapsed_h - 12.0;
-            let target_top = if viewport_bottom >= viewport_top {
-                initial_top.clamp(viewport_top, viewport_bottom)
-            } else {
-                viewport_top
-            };
-            let needs_scroll = (target_top - initial_top).abs() > 0.5;
+        // message it overscrolls past the collapsed bubble. The same anchor is
+        // used for expansion, with the full target height, so a bottom-pinned
+        // prompt reveals its beginning below the top fade instead of above it.
+        let Some(item_bounds) = self.list.bounds_for_item(row_ix) else {
+            return;
+        };
+        let viewport = self.list.viewport_bounds();
+        let initial_top = f32::from(item_bounds.top());
+        // Keep a newly revealed bubble below the transcript's top fade band. A
+        // 12px inset alone still leaves the first lines washed into the edge
+        // fade when the expanded row started above view.
+        let viewport_top = f32::from(viewport.top()) + Theme::TRANSCRIPT_FADE_BAND + 28.0;
+        let target_height = if currently_open { collapsed_h } else { full_h };
+        let viewport_bottom = f32::from(viewport.bottom()) - target_height - 12.0;
+        let target_top = if viewport_bottom >= viewport_top {
+            initial_top.clamp(viewport_top, viewport_bottom)
+        } else {
+            viewport_top
+        };
+        let needs_scroll = (target_top - initial_top).abs() > 0.5;
 
-            if needs_scroll {
-                self.pinned = false;
-                self.spring.reset();
-                self.spring_last_tick = None;
-                self.spring_settled_at = None;
-                self.spring_kick = false;
-                if reduced_motion {
-                    if let Some(current) = self.list.bounds_for_item(row_ix) {
-                        self.list
-                            .scroll_by(px(f32::from(current.top()) - target_top));
-                    }
-                } else {
-                    self.user_collapse_scroll = Some(UserCollapseScroll {
-                        started_at: Instant::now(),
-                        duration_ms,
-                        height_delta: (full_h - collapsed_h).max(0.0),
-                        row_ix,
-                        initial_top,
-                        target_top,
-                    });
+        if needs_scroll {
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+            self.spring_settled_at = None;
+            self.spring_kick = false;
+            if reduced_motion {
+                if let Some(current) = self.list.bounds_for_item(row_ix) {
+                    self.list
+                        .scroll_by(px(f32::from(current.top()) - target_top));
                 }
+            } else {
+                self.user_collapse_scroll = Some(UserCollapseScroll {
+                    started_at: Instant::now(),
+                    duration_ms,
+                    height_delta: (full_h - collapsed_h).max(0.0),
+                    row_ix,
+                    initial_top,
+                    target_top,
+                });
             }
         }
     }
@@ -3660,13 +3672,16 @@ impl Transcript {
     ) -> AnyElement {
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
-        let collapsible = user_message_needs_collapse(&text);
         let collapsed_h = USER_COLLAPSED_LINES as f32 * USER_LINE_HEIGHT;
         let measured_h = self
             .user_heights
             .entry(row_id.clone())
-            .or_insert_with(|| Rc::new(Cell::new(collapsed_h)))
+            .or_insert_with(|| Rc::new(Cell::new(0.0)))
             .clone();
+        let measured = measured_h.get();
+        let collapsible = text.lines().count() > USER_COLLAPSED_LINES
+            || (measured > 0.0 && measured > collapsed_h + 0.5)
+            || (measured == 0.0 && user_message_needs_collapse(&text));
         let full_h = measured_h.get().max(collapsed_h);
 
         let hold_key = row_id.clone();
@@ -3716,6 +3731,7 @@ impl Transcript {
                 mentions,
                 theme,
                 measured_h.clone(),
+                cx.entity_id(),
             ));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
@@ -5042,6 +5058,7 @@ fn user_bubble_text(
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
     measured_h: Rc<Cell<f32>>,
+    entity_id: gpui::EntityId,
 ) -> AnyElement {
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
@@ -5081,7 +5098,7 @@ fn user_bubble_text(
     let sel_theme = theme.clone();
     let underlay = canvas(
         |_, _, _| (),
-        move |_, _, window, _| {
+        move |_, _, window, cx| {
             for span in mentions.iter() {
                 for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
                     window.paint_quad(quad(
@@ -5105,9 +5122,15 @@ fn user_bubble_text(
                 .iter()
                 .map(|line| line.wrap_boundaries.len() + 1)
                 .sum();
-            measured_h.set(
-                (line_count.max(1) as f32) * f32::from(layout.line_height()),
-            );
+            let next_h = (line_count.max(1) as f32) * f32::from(layout.line_height());
+            if (measured_h.get() - next_h).abs() > 0.5 {
+                measured_h.set(next_h);
+                // The first layout is the source of truth for soft wrapping.
+                // Invalidate the transcript once so the expander and clip are
+                // present even when glyph widths make a short-looking string
+                // exceed five visual lines.
+                cx.notify(entity_id);
+            }
         },
     )
     .absolute()
