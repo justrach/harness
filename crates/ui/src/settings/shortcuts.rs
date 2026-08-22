@@ -132,6 +132,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::PrevSession => {
             "Select the previous session in the sidebar, wrapping at the start."
         }
+        ShortcutId::ArchiveSession => "Move the current session to the archived shelf.",
     }
 }
 

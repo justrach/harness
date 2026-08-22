@@ -1301,6 +1301,15 @@ impl AppState {
         self.chats.iter().find(|c| c.id == id)
     }
 
+    /// The chat the Archive session shortcut acts on: the selected one, unless
+    /// it is already archived. The shortcut archives and never unarchives, so
+    /// an archived chat is left alone. Pure.
+    pub fn archivable_selected_chat(&self) -> Option<&str> {
+        self.selected_chat_row()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
+    }
+
     /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
     pub fn change_request_for_chat(&self, chat: &Chat) -> Option<&ChangeRequestSummary> {
         self.change_requests
@@ -2973,6 +2982,22 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    #[test]
+    fn archive_shortcut_only_targets_an_open_active_chat() {
+        let mut state = AppState::new();
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        state.apply_chats(vec![archived, chat("b", 1, None)]);
+        // No chat open: nothing to archive.
+        assert_eq!(state.archivable_selected_chat(), None);
+        // The open active chat is the target.
+        state.selected_chat = Some("b".into());
+        assert_eq!(state.archivable_selected_chat(), Some("b"));
+        // An already archived chat stays put — the shortcut never unarchives.
+        state.selected_chat = Some("a".into());
+        assert_eq!(state.archivable_selected_chat(), None);
     }
 
     #[test]
