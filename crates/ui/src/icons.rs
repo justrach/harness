@@ -52,6 +52,7 @@ icon_assets![
     (MONITOR, "monitor"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
+    (SORT, "sort"),
     (SORT_VERTICAL, "sort-vertical"),
     (CLOCK_CIRCLE, "clock-circle"),
     (CALENDAR, "calendar"),
