@@ -788,6 +788,28 @@ pub fn band() -> gpui::Hsla {
     crate::theme::band()
 }
 
+/// Shared shell for command-palette-style flows. The recessed header/footer
+/// bands are supplied by callers, while this owns the glass tint, outline,
+/// radius, clipping, and shadow that make Cmd+K and its sibling flows read as
+/// one component family.
+pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::Div {
+    div()
+        .w(width)
+        .rounded(px(corner_radius))
+        .border_1()
+        .border_color(hairline(0.10))
+        .bg(if theme.is_frost() {
+            theme.glass_overlay()
+        } else {
+            theme.surface_overlay
+        })
+        .shadow_lg()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .text_color(theme.text)
+}
+
 /// One footer key-cap (22px, rounded-5, `white/[0.05]`) holding arbitrary
 /// children — the base of [`key_hint`]/[`key_hint_pair`] and the search-bar
 /// chips ("⌘K", "esc").

@@ -30,7 +30,9 @@ between built-in, imported, and linked themes. Forced frost derives window,
 floating, input, card, and hover tints from the variant's mapped shell roles
 instead of fixed Zeron greys. Its window tint becomes denser when necessary to
 keep primary text at 4.5:1 and muted text at 3:1 against the adverse desktop
-luminance.
+luminance. Floating overlays, settings cards, and inputs run the same
+composited-background check independently; a delicate palette can therefore
+receive a thicker material on one surface without disabling frost everywhere.
 
 macOS can frost the main window. Linux and Windows keep the main window opaque
 because compositor blur is not guaranteed; supported floating surfaces can
@@ -87,16 +89,31 @@ The importer records `Opaque` as the variant's recommended surface treatment
 and reports that inference. This preserves the source palette by default while
 still allowing the independent Zeron surface preference to force frost.
 
-The custom library has three source forms:
+After source mapping, a deterministic hardening pass checks Zeron's shared
+roles across every solid surface where they are painted. It keeps VS Code's
+semantic distinctions (`foreground`, `descriptionForeground`,
+`editor.foreground`, and component-specific foregrounds), promotes a stronger
+related source role when the preferred one cannot carry the Zeron role, and
+only then adjusts the original color toward a contrast-safe anchor. Primary,
+muted, button, terminal, focus/status, and interaction roles are covered.
+Foundational surfaces with alpha are flattened against the resolved theme
+background so an opaque import cannot accidentally expose the desktop. Syntax,
+terminal ANSI, diff, warning, error, and success identity remain theme-owned;
+their unresolved quality findings stay visible in the report.
+
+The custom library has four source forms:
 
 - `ImportedSnapshot` persists a self-contained compiled copy.
 - `LinkedFile` follows one source theme file.
 - `LinkedPackage` follows a VS Code extension package.
+- `EditableFile` follows a native resolved-family JSON file created by
+  “Duplicate as editable”.
 
-Linked sources reload explicitly. A failed reload stores a quiet warning and
-continues using the last successfully compiled family. All three forms compile
-to the same `ThemeFamily` model as built-ins, so runtime components remain
-unaware of VS Code tokens. The library is stored in
+Linked and editable sources reload explicitly. A failed reload or validation
+stores a quiet warning and continues using the last successfully compiled
+family. All four forms resolve to the same `ThemeFamily` model as built-ins, so
+runtime components remain unaware of VS Code tokens. Library mutations are
+activated only after the updated library is persisted successfully. The library is stored in
 `{data_dir}/theme-library.json` and is loaded before the first palette is
 installed.
 
@@ -119,16 +136,22 @@ cargo run -p zeron-theme --bin zeron-theme-import -- \
   --license MIT
 ```
 
-The report records every source mapping, fallback, unsupported font style,
-invalid color, and accent candidate. Zeron does not fetch or execute VSIX
-packages at runtime; custom sources are local files and folders compiled into
-resolved data.
+The report records every source mapping, hardening adjustment, fallback,
+unsupported font style, invalid color, validation result, and accent candidate
+without truncating the advanced mapping review. Structural errors such as
+duplicate ids or incomplete provenance block installation. Contrast findings
+remain reviewable because compiled imports and runtime native-theme resolution
+apply deterministic safeguards rather than rejecting an otherwise valid
+source. Zeron does not fetch or execute VSIX packages at runtime; custom
+sources are local files and folders compiled into resolved data.
 
 ## Acceptance and visual QA
 
 `ThemeRegistry::validate` checks unique ids, provenance, text contrast,
 interaction contrast, on-accent contrast, and terminal foreground contrast.
-Tests also exercise every preset against both appearances.
+Issues are classified as structural or contrast so callers cannot accidentally
+treat a repairable quality finding as corrupt data. Tests also exercise every
+preset against both appearances and adverse frosted backdrops.
 
 Before adding or updating a bundled variant, review both appearances where
 available across every `VisualFixture` scene:

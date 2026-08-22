@@ -568,7 +568,7 @@ impl ThemeRegistry {
         for family in &self.families {
             for variant in &family.variants {
                 if variant.id.trim().is_empty() || !ids.insert(&variant.id) {
-                    issues.push(ValidationIssue::error(
+                    issues.push(ValidationIssue::structural_error(
                         &variant.id,
                         "variant id must be unique",
                     ));
@@ -618,14 +618,20 @@ impl ThemeRegistry {
                     || variant.source.license.is_empty()
                     || variant.source.asset_hash.is_empty()
                 {
-                    issues.push(ValidationIssue::error(
+                    issues.push(ValidationIssue::structural_error(
                         &variant.id,
                         "source provenance is incomplete",
                     ));
                 }
-                for (index, color) in variant.terminal.ansi.iter().enumerate().skip(1).take(6) {
+                for (index, color) in variant.terminal.ansi.iter().enumerate() {
+                    // Slots 0 and 8 are structural black/dim colors. Every
+                    // chromatic normal and bright slot is expected to remain
+                    // distinguishable as terminal text.
+                    if index % 8 == 0 {
+                        continue;
+                    }
                     if color.contrast(variant.terminal.background) < 3.0 {
-                        issues.push(ValidationIssue::warning(
+                        issues.push(ValidationIssue::contrast_warning(
                             &variant.id,
                             format!("terminal ANSI slot {index} is below 3:1"),
                         ));
@@ -647,7 +653,7 @@ fn validate_contrast(
 ) {
     let actual = foreground.contrast(background);
     if actual < minimum {
-        issues.push(ValidationIssue::error(
+        issues.push(ValidationIssue::contrast_error(
             &variant.id,
             format!("{role} contrast is {actual:.2}:1; expected {minimum:.1}:1"),
         ));
@@ -661,28 +667,56 @@ pub enum ValidationSeverity {
     Error,
 }
 
+/// Whether a validation issue makes a theme structurally unsafe to install or
+/// describes a visual quality problem that the compiler/runtime can harden.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ValidationCategory {
+    Structural,
+    #[default]
+    Contrast,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationIssue {
     pub variant_id: String,
+    #[serde(default)]
+    pub category: ValidationCategory,
     pub severity: ValidationSeverity,
     pub message: String,
 }
 
 impl ValidationIssue {
-    fn error(variant_id: &str, message: impl Into<String>) -> Self {
+    fn structural_error(variant_id: &str, message: impl Into<String>) -> Self {
         Self {
             variant_id: variant_id.into(),
+            category: ValidationCategory::Structural,
             severity: ValidationSeverity::Error,
             message: message.into(),
         }
     }
 
-    fn warning(variant_id: &str, message: impl Into<String>) -> Self {
+    fn contrast_error(variant_id: &str, message: impl Into<String>) -> Self {
         Self {
             variant_id: variant_id.into(),
+            category: ValidationCategory::Contrast,
+            severity: ValidationSeverity::Error,
+            message: message.into(),
+        }
+    }
+
+    fn contrast_warning(variant_id: &str, message: impl Into<String>) -> Self {
+        Self {
+            variant_id: variant_id.into(),
+            category: ValidationCategory::Contrast,
             severity: ValidationSeverity::Warning,
             message: message.into(),
         }
+    }
+
+    pub fn is_blocking(&self) -> bool {
+        self.category == ValidationCategory::Structural
+            && self.severity == ValidationSeverity::Error
     }
 }
 

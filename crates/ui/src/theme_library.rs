@@ -62,10 +62,9 @@ pub fn install(
         return Err(anyhow!("custom theme library is not initialized"));
     }
     let state = cx.global_mut::<ThemeLibraryState>();
-    let id = state
-        .library
-        .install(compilation, selected_variant_ids, mode)?;
-    persist_and_activate(state)?;
+    let mut next = state.library.clone();
+    let id = next.install(compilation, selected_variant_ids, mode)?;
+    persist_and_activate(state, next)?;
     reconcile_and_refresh(cx);
     Ok(id)
 }
@@ -75,10 +74,11 @@ pub fn reload(id: &str, cx: &mut App) -> Result<()> {
         return Err(anyhow!("custom theme library is not initialized"));
     }
     let state = cx.global_mut::<ThemeLibraryState>();
-    let result = state.library.reload(id);
+    let mut next = state.library.clone();
+    let result = next.reload(id);
     // Reload failures update the durable warning while deliberately preserving
     // the last known good family.
-    persist_and_activate(state)?;
+    persist_and_activate(state, next)?;
     reconcile_and_refresh(cx);
     result
 }
@@ -92,8 +92,21 @@ pub fn duplicate_as_snapshot(id: &str, cx: &mut App) -> Result<String> {
         return Err(anyhow!("custom theme library is not initialized"));
     }
     let state = cx.global_mut::<ThemeLibraryState>();
-    let duplicate = state.library.duplicate_as_snapshot(id)?;
-    persist_and_activate(state)?;
+    let mut next = state.library.clone();
+    let duplicate = next.duplicate_as_snapshot(id)?;
+    persist_and_activate(state, next)?;
+    reconcile_and_refresh(cx);
+    Ok(duplicate)
+}
+
+pub fn duplicate_as_editable(id: &str, cx: &mut App) -> Result<String> {
+    if !cx.has_global::<ThemeLibraryState>() {
+        return Err(anyhow!("custom theme library is not initialized"));
+    }
+    let state = cx.global_mut::<ThemeLibraryState>();
+    let mut next = state.library.clone();
+    let duplicate = next.duplicate_as_editable(id, &state.data_dir)?;
+    persist_and_activate(state, next)?;
     reconcile_and_refresh(cx);
     Ok(duplicate)
 }
@@ -125,25 +138,23 @@ fn mutate<T>(
         return Err(anyhow!("custom theme library is not initialized"));
     }
     let state = cx.global_mut::<ThemeLibraryState>();
-    let output = operation(&mut state.library)?;
-    persist_and_activate(state)?;
+    let mut next = state.library.clone();
+    let output = operation(&mut next)?;
+    persist_and_activate(state, next)?;
     reconcile_and_refresh(cx);
     Ok(output)
 }
 
-fn persist_and_activate(state: &mut ThemeLibraryState) -> Result<()> {
-    state
-        .library
-        .save(&state.data_dir)
+fn persist_and_activate(state: &mut ThemeLibraryState, next: CustomThemeLibrary) -> Result<()> {
+    next.save(&state.data_dir)
         .context("could not save custom theme library")?;
     replace_custom_families(
-        state
-            .library
-            .entries
+        next.entries
             .iter()
             .map(|entry| entry.family.clone())
             .collect(),
     );
+    state.library = next;
     state.load_warning = None;
     Ok(())
 }
@@ -165,4 +176,42 @@ fn reconcile_and_refresh(cx: &mut App) {
         }
     }
     appearance::apply_registry_change(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_persistence_leaves_library_state_unchanged() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let blocking_file = data_dir.path().join("not-a-directory");
+        std::fs::write(&blocking_file, "occupied").unwrap();
+        let original = CustomThemeLibrary::default();
+        let mut state = ThemeLibraryState {
+            data_dir: blocking_file,
+            library: original.clone(),
+            load_warning: Some("previous warning".into()),
+        };
+        let mut next = original.clone();
+        next.entries.push(CustomThemeEntry {
+            id: "unpersisted".into(),
+            name: "Unpersisted".into(),
+            source: zeron_theme::CustomThemeSource::ImportedSnapshot {
+                imported_from: None,
+            },
+            family: zeron_theme::ThemeFamily {
+                id: "unpersisted".into(),
+                name: "Unpersisted".into(),
+                variants: Vec::new(),
+            },
+            reports: Default::default(),
+            selected_variant_ids: Vec::new(),
+            status: zeron_theme::CustomThemeStatus::Ready,
+        });
+
+        assert!(persist_and_activate(&mut state, next).is_err());
+        assert_eq!(state.library, original);
+        assert_eq!(state.load_warning.as_deref(), Some("previous warning"));
+    }
 }

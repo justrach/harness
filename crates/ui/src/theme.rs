@@ -284,6 +284,44 @@ fn model_color(color: ModelColor) -> Hsla {
     hsla(h, s, l, color.a as f32 / 255.0)
 }
 
+fn harden_model_foreground(
+    color: ModelColor,
+    backgrounds: &[ModelColor],
+    minimum: f32,
+    preferred_target: Option<ModelColor>,
+) -> ModelColor {
+    let minimum_contrast = |candidate: ModelColor| {
+        backgrounds
+            .iter()
+            .map(|background| candidate.contrast(*background))
+            .fold(f32::INFINITY, f32::min)
+    };
+    if minimum_contrast(color) >= minimum {
+        return color;
+    }
+    let mut targets = Vec::with_capacity(3);
+    if let Some(target) = preferred_target {
+        targets.push(target);
+    }
+    targets.extend([ModelColor::BLACK, ModelColor::WHITE]);
+    let mut best = color;
+    let mut best_contrast = minimum_contrast(color);
+    for target in targets {
+        for step in 1..=100 {
+            let candidate = color.mix(target, step as f32 / 100.0);
+            let contrast = minimum_contrast(candidate);
+            if contrast > best_contrast {
+                best = candidate;
+                best_contrast = contrast;
+            }
+            if contrast >= minimum {
+                return candidate;
+            }
+        }
+    }
+    best
+}
+
 /// [`CURRENT_APPEARANCE`] is process-wide, so under the parallel test runner
 /// any test that flips it — or asserts on the output of a helper that reads it
 /// ([`ink`], [`hairline`], [`wash`], …) — must hold this lock. Crate-visible
@@ -774,23 +812,31 @@ impl Theme {
     /// appearance. A theme with unusually delicate contrast may therefore get
     /// denser glass, never silently broken text.
     fn contrast_checked_glass_alpha(&self, base: f32) -> f32 {
-        if base >= 1.0 {
-            return 1.0;
-        }
-        let adverse_backdrop = match self.appearance {
-            Appearance::Dark => grey(0xff),
-            Appearance::Light => grey(0),
-        };
+        self.contrast_checked_tint_alpha(self.surface, base, self.adverse_backdrop())
+    }
+
+    /// Increase tint coverage only as far as needed for Zeron's shared text
+    /// roles. This is used for both window glass and in-app frosted surfaces,
+    /// whose blurred content can otherwise invalidate an imported palette's
+    /// original solid-background assumptions.
+    fn contrast_checked_tint_alpha(&self, tint: Hsla, base: f32, backdrop: Hsla) -> f32 {
         for step in 0..=20 {
             let alpha = base + (1.0 - base) * step as f32 / 20.0;
-            let composite = flatten(self.surface.opacity(alpha), adverse_backdrop);
-            if contrast_ratio(self.text, composite) >= 4.5
-                && contrast_ratio(self.text_muted, composite) >= 3.0
+            let composite = flatten(tint.opacity(alpha), backdrop);
+            if painted_contrast(self.text, composite) >= 4.5
+                && painted_contrast(self.text_muted, composite) >= 3.0
             {
                 return alpha;
             }
         }
         1.0
+    }
+
+    fn adverse_backdrop(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => grey(0xff),
+            Appearance::Light => grey(0),
+        }
     }
 
     /// Whether this appearance paints translucent chrome over the blurred
@@ -825,10 +871,19 @@ impl Theme {
     /// [`crate::frost::frosted`]). Light coverage stays heavier because dark
     /// text is more vulnerable to unpredictable content behind a popover.
     pub fn glass_overlay(&self) -> Hsla {
-        match self.appearance {
+        let base = match self.appearance {
             Appearance::Dark => self.surface_overlay.opacity(0.50),
             Appearance::Light => self.surface_overlay.opacity(0.85),
+        };
+        if !self.is_frost() {
+            return self.surface_overlay;
         }
+        self.surface_overlay
+            .opacity(self.contrast_checked_tint_alpha(
+                self.surface_overlay,
+                base.a,
+                self.adverse_backdrop(),
+            ))
     }
 
     /// The composer pill / question panel fill. Light's `input_bg` is opaque
@@ -838,11 +893,17 @@ impl Theme {
     /// over the 0.80 frost — lowered on user request). Dark's 3% white wash
     /// is already glass-native.
     pub fn input_glass_bg(&self) -> Hsla {
-        if self.is_frost() && matches!(self.appearance, Appearance::Light) {
-            self.input_bg.opacity(0.30)
-        } else {
-            self.input_bg
+        if !self.is_frost() {
+            return self.input_bg;
         }
+        let base = if matches!(self.appearance, Appearance::Light) {
+            0.30
+        } else {
+            self.input_bg.a
+        };
+        let window = flatten(self.glass(), self.adverse_backdrop());
+        self.input_bg
+            .opacity(self.contrast_checked_tint_alpha(self.input_bg, base, window))
     }
 
     /// Section-card fill (settings cards and similar in-panel cards). The
@@ -850,11 +911,12 @@ impl Theme {
     /// frosted blur (user report), so glass thins it to a translucent tint;
     /// opaque platforms keep the true card tone.
     pub fn card_glass_bg(&self) -> Hsla {
-        if self.is_glass() {
-            self.surface.opacity(0.40)
-        } else {
-            self.surface
+        if !self.is_frost() {
+            return self.surface;
         }
+        let window = flatten(self.glass(), self.adverse_backdrop());
+        self.surface
+            .opacity(self.contrast_checked_tint_alpha(self.surface, 0.40, window))
     }
 
     /// The standard modal backdrop — see [`scrim`].
@@ -1094,6 +1156,28 @@ impl Theme {
         let mut theme = Self::for_preferences(appearance, accent_color);
         let colors = &variant.colors;
         let accent = variant.accent_for(accent_selection);
+        let text_backgrounds = [
+            colors.background,
+            colors.shell,
+            colors.raised,
+            colors.card,
+            colors.dialog,
+            colors.overlay,
+            colors.input,
+        ];
+        let is_curated_builtin = ThemeRegistry::builtin()
+            .variant(&variant.id)
+            .is_some_and(|builtin| builtin == variant);
+        let safe_text = if is_curated_builtin {
+            colors.text
+        } else {
+            harden_model_foreground(colors.text, &text_backgrounds, 4.5, None)
+        };
+        let safe_text_muted = if is_curated_builtin {
+            colors.text_muted
+        } else {
+            harden_model_foreground(colors.text_muted, &text_backgrounds, 4.5, Some(safe_text))
+        };
         theme.variant_id = variant.id.clone().into();
         theme.family_id = variant.family_id.clone().into();
         theme.accent_selection = accent_selection;
@@ -1109,12 +1193,16 @@ impl Theme {
         theme.element_active = model_color(colors.active);
         theme.border = model_color(colors.border);
         theme.border_strong = model_color(colors.border_strong);
-        theme.text = model_color(colors.text);
-        theme.text_muted = model_color(colors.text_muted);
+        theme.text = model_color(safe_text);
+        theme.text_muted = model_color(safe_text_muted);
         theme.text_faint = model_color(colors.text_faint);
-        theme.text_dim = model_color(colors.text_muted);
+        theme.text_dim = model_color(safe_text_muted);
         theme.solid = model_color(colors.solid);
-        theme.on_solid = model_color(colors.on_solid);
+        theme.on_solid = model_color(if is_curated_builtin {
+            colors.on_solid
+        } else {
+            harden_model_foreground(colors.on_solid, &[colors.solid], 4.5, Some(safe_text))
+        });
         theme.accent = model_color(accent.primary);
         theme.accent_strong = model_color(accent.strong);
         theme.accent_wash = model_color(accent.wash);
@@ -1145,6 +1233,14 @@ impl Theme {
         theme.diff_del = model_color(colors.diff_delete);
         theme.diff_hunk_bg = model_color(colors.diff_hunk);
         theme.terminal = TerminalColors::from_variant(variant);
+        if !is_curated_builtin {
+            theme.terminal.foreground = model_color(harden_model_foreground(
+                variant.terminal.foreground,
+                &[variant.terminal.background],
+                4.5,
+                Some(safe_text),
+            ));
+        }
         theme
     }
 
@@ -1175,6 +1271,45 @@ impl Theme {
         surface_preference: SurfacePreference,
         cx: &mut App,
     ) {
+        Self::install_selection_inner(
+            appearance,
+            variant_id,
+            accent_selection,
+            surface_preference,
+            false,
+            cx,
+        );
+    }
+
+    /// Re-resolve a selection after its registry entry changed in place.
+    /// Linked themes keep stable ids across reloads, so identity comparisons
+    /// cannot detect that their resolved colors moved. Forcing the generation
+    /// invalidates paint caches that contain already-resolved colors.
+    pub fn reinstall_selection(
+        appearance: Appearance,
+        variant_id: &str,
+        accent_selection: AccentSelection,
+        surface_preference: SurfacePreference,
+        cx: &mut App,
+    ) {
+        Self::install_selection_inner(
+            appearance,
+            variant_id,
+            accent_selection,
+            surface_preference,
+            true,
+            cx,
+        );
+    }
+
+    fn install_selection_inner(
+        appearance: Appearance,
+        variant_id: &str,
+        accent_selection: AccentSelection,
+        surface_preference: SurfacePreference,
+        force_generation: bool,
+        cx: &mut App,
+    ) {
         let next =
             Self::for_selection(appearance, variant_id, accent_selection, surface_preference);
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
@@ -1185,7 +1320,7 @@ impl Theme {
         });
         set_current_appearance(appearance);
         cx.set_global(next);
-        if changed {
+        if changed || force_generation {
             THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1537,6 +1672,10 @@ pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
     (hi + 0.05) / (lo + 0.05)
 }
 
+fn painted_contrast(foreground: Hsla, background: Hsla) -> f32 {
+    contrast_ratio(flatten(foreground, background), background)
+}
+
 /// Composite `fg` (which may be translucent) over an opaque `bg`, returning the
 /// opaque result — the color the eye actually receives.
 pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
@@ -1714,13 +1853,81 @@ mod tests {
             };
             let composite = flatten(theme.glass(), adverse_backdrop);
             assert!(
-                contrast_ratio(theme.text, composite) >= 4.5,
+                painted_contrast(theme.text, composite) >= 4.5,
                 "{} primary shell text",
                 variant.id
             );
             assert!(
-                contrast_ratio(theme.text_muted, composite) >= 3.0,
+                painted_contrast(theme.text_muted, composite) >= 3.0,
                 "{} muted shell text",
+                variant.id
+            );
+            for (surface_name, surface) in [
+                (
+                    "floating overlay",
+                    flatten(theme.glass_overlay(), adverse_backdrop),
+                ),
+                ("settings card", flatten(theme.card_glass_bg(), composite)),
+                ("input", flatten(theme.input_glass_bg(), composite)),
+            ] {
+                assert!(
+                    painted_contrast(theme.text, surface) >= 4.5,
+                    "{} primary text on {surface_name}",
+                    variant.id
+                );
+                assert!(
+                    painted_contrast(theme.text_muted, surface) >= 3.0,
+                    "{} muted text on {surface_name}",
+                    variant.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_hardening_protects_native_custom_theme_edits() {
+        let mut variant = ThemeRegistry::builtin()
+            .variant("zeron-dark")
+            .unwrap()
+            .clone();
+        variant.colors.text = variant.colors.background;
+        variant.colors.text_muted = variant.colors.background;
+        variant.colors.on_solid = variant.colors.solid;
+        variant.terminal.foreground = variant.terminal.background;
+
+        let theme = Theme::from_variant(
+            &variant,
+            AccentSelection::ThemeDefault,
+            SurfacePreference::Opaque,
+        );
+        assert!(painted_contrast(theme.text, theme.bg) >= 4.5);
+        assert!(painted_contrast(theme.text_muted, theme.bg) >= 4.5);
+        assert!(painted_contrast(theme.on_solid, theme.solid) >= 4.5);
+        assert!(painted_contrast(theme.terminal.foreground, theme.terminal.background) >= 4.5);
+    }
+
+    #[test]
+    fn runtime_hardening_leaves_curated_builtin_text_unchanged() {
+        for variant in ThemeRegistry::builtin()
+            .families
+            .iter()
+            .flat_map(|family| &family.variants)
+        {
+            let theme = Theme::from_variant(
+                variant,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Opaque,
+            );
+            assert_eq!(
+                theme.text,
+                model_color(variant.colors.text),
+                "{} text",
+                variant.id
+            );
+            assert_eq!(
+                theme.text_muted,
+                model_color(variant.colors.text_muted),
+                "{} muted text",
                 variant.id
             );
         }

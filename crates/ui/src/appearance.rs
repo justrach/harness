@@ -318,7 +318,7 @@ pub fn apply_registry_change(cx: &mut App) {
     let accent = state.accent;
     let surface = state.surface;
     let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
-    Theme::install_selection(wanted, &variant_id, accent, surface, cx);
+    Theme::reinstall_selection(wanted, &variant_id, accent, surface, cx);
     cx.refresh_windows();
     reapply_window_background(cx);
 }

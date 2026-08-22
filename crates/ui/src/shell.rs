@@ -2181,13 +2181,15 @@ impl Shell {
             cx.background_executor()
                 .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
                 .await;
-            // Re-stamp the appearance from the global before writing. The View
-            // menu changes it through `appearance::set_mode`, which never touches
-            // this shell's in-memory copy — without this, the next pane resize
-            // would quietly write the boot-time appearance back over the user's
-            // choice.
+            // Re-stamp every appearance-owned value from the globals before
+            // writing. These settings persist independently of the shell, and
+            // correctness must not depend on a Shell render happening before
+            // this debounce fires.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
+                shell.settings.theme_selection = crate::appearance::themes(cx);
+                shell.settings.accent = crate::appearance::accent(cx);
+                shell.settings.surface = crate::appearance::surface(cx);
                 shell.settings.clone()
             }) else {
                 return;

@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AccentRoles, Appearance, Color, SurfaceTreatment, ThemeFamily, ThemeRegistry, ThemeSource,
-    ThemeVariant,
+    ThemeVariant, ValidationIssue,
 };
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,24 @@ pub struct ImportReport {
     pub fallbacks: Vec<String>,
     pub dropped: Vec<String>,
     pub warnings: Vec<String>,
+    /// Deterministic repairs made after mapping so the compiled Zeron roles
+    /// remain usable without erasing the source theme's syntax identity.
+    #[serde(default)]
+    pub adjustments: Vec<ImportAdjustment>,
     pub accent_candidates: Vec<AccentCandidate>,
+    /// Resolved-palette checks run after mapping and hardening. Structural
+    /// errors block install; contrast findings remain reviewable.
+    #[serde(default)]
+    pub validation: Vec<ValidationIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportAdjustment {
+    pub zeron_role: String,
+    pub original: String,
+    pub resolved: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,11 +314,13 @@ fn detect_appearance(
     normalized: &NormalizedTheme,
 ) -> Appearance {
     if let Some(ui_theme) = ui_theme {
-        return if ui_theme.eq_ignore_ascii_case("vs") {
-            Appearance::Light
-        } else {
-            Appearance::Dark
-        };
+        match ui_theme.to_ascii_lowercase().as_str() {
+            "vs" | "hc-light" => return Appearance::Light,
+            "vs-dark" | "hc-black" => return Appearance::Dark,
+            // Future or third-party values still get the more reliable
+            // explicit-type/background inference below.
+            _ => {}
+        }
     }
     if let Ok(source) = fs::read_to_string(path)
         && let Ok(value) = json5::from_str::<Value>(&source)
@@ -541,6 +560,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
         .variant(base_id)
         .expect("Zeron base theme exists")
         .clone();
+    let fallback_background = output.colors.background;
     output.id = options.id.clone();
     output.family_id = options.family_id;
     output.name = options.name;
@@ -796,6 +816,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     }
 
     map_syntax(&theme, &mut output, &mut report);
+    harden_variant(&theme, &mut output, fallback_background, &mut report);
     let mut hasher = Sha256::new();
     for path in &theme.files {
         hasher
@@ -811,10 +832,296 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     };
     let encoded = serde_json::to_vec(&output).context("could not hash generated theme")?;
     output.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+    report.validation = ThemeRegistry {
+        families: vec![ThemeFamily {
+            id: output.family_id.clone(),
+            name: output.name.clone(),
+            variants: vec![output.clone()],
+        }],
+    }
+    .validate();
     Ok(ImportResult {
         theme: output,
         report,
     })
+}
+
+fn harden_variant(
+    source: &NormalizedTheme,
+    output: &mut ThemeVariant,
+    fallback_background: Color,
+    report: &mut ImportReport,
+) {
+    output.colors.background = flatten_foundation(
+        "background",
+        output.colors.background,
+        fallback_background,
+        report,
+    );
+    let background = output.colors.background;
+    output.colors.shell = flatten_foundation("shell", output.colors.shell, background, report);
+    output.colors.raised = flatten_foundation("raised", output.colors.raised, background, report);
+    output.colors.card = flatten_foundation("card", output.colors.card, background, report);
+    output.colors.dialog = flatten_foundation("dialog", output.colors.dialog, background, report);
+    output.colors.overlay =
+        flatten_foundation("overlay", output.colors.overlay, background, report);
+    output.colors.input = flatten_foundation("input", output.colors.input, background, report);
+    output.colors.solid = flatten_foundation("solid", output.colors.solid, background, report);
+    output.terminal.background = flatten_foundation(
+        "terminal.background",
+        output.terminal.background,
+        background,
+        report,
+    );
+
+    let text_backgrounds = [
+        background,
+        output.colors.shell,
+        output.colors.raised,
+        output.colors.card,
+        output.colors.dialog,
+        output.colors.overlay,
+        output.colors.input,
+    ];
+    output.colors.text = harden_foreground(
+        source,
+        report,
+        "text",
+        output.colors.text,
+        &[
+            "foreground",
+            "sideBar.foreground",
+            "editorWidget.foreground",
+            "quickInput.foreground",
+            "input.foreground",
+            "menu.foreground",
+            "editor.foreground",
+        ],
+        &text_backgrounds,
+        4.5,
+        None,
+    );
+    output.colors.text_muted = harden_foreground(
+        source,
+        report,
+        "textMuted",
+        output.colors.text_muted,
+        &[
+            "descriptionForeground",
+            "tab.inactiveForeground",
+            "sideBarSectionHeader.foreground",
+        ],
+        &text_backgrounds,
+        4.5,
+        Some(output.colors.text),
+    );
+    output.colors.on_solid = harden_foreground(
+        source,
+        report,
+        "onSolid",
+        output.colors.on_solid,
+        &["button.foreground", "foreground", "editor.foreground"],
+        &[output.colors.solid],
+        4.5,
+        Some(output.colors.text),
+    );
+    output.terminal.foreground = harden_foreground(
+        source,
+        report,
+        "terminal.foreground",
+        output.terminal.foreground,
+        &["terminal.foreground", "editor.foreground", "foreground"],
+        &[output.terminal.background],
+        4.5,
+        Some(output.colors.text),
+    );
+
+    for (role, color) in [
+        ("danger", &mut output.colors.danger),
+        ("warning", &mut output.colors.warning),
+        ("success", &mut output.colors.success),
+        ("cursor", &mut output.colors.cursor),
+        ("borderStrong", &mut output.colors.border_strong),
+    ] {
+        let original = *color;
+        *color = ensure_contrast_across(original, &text_backgrounds[..2], 3.0, None);
+        record_adjustment(
+            report,
+            role,
+            original,
+            *color,
+            "raised to 3:1 across the main and shell surfaces",
+        );
+    }
+
+    harden_accent(output, report, &text_backgrounds[..4]);
+}
+
+fn flatten_foundation(
+    role: &str,
+    color: Color,
+    background: Color,
+    report: &mut ImportReport,
+) -> Color {
+    if color.a == 255 {
+        return color;
+    }
+    let resolved = color.blend_over(background);
+    record_adjustment(
+        report,
+        role,
+        color,
+        resolved,
+        "flattened a translucent foundational surface against the theme background",
+    );
+    resolved
+}
+
+fn harden_foreground(
+    source: &NormalizedTheme,
+    report: &mut ImportReport,
+    role: &str,
+    current: Color,
+    candidate_keys: &[&str],
+    backgrounds: &[Color],
+    minimum: f32,
+    preferred_target: Option<Color>,
+) -> Color {
+    let current_contrast = minimum_contrast(current, backgrounds);
+    if current_contrast >= minimum {
+        return current;
+    }
+
+    for key in candidate_keys {
+        let Some(value) = source.colors.get(*key) else {
+            continue;
+        };
+        let Ok(candidate) = value.parse::<Color>() else {
+            continue;
+        };
+        if minimum_contrast(candidate, backgrounds) >= minimum {
+            record_adjustment(
+                report,
+                role,
+                current,
+                candidate,
+                format!("used {key} because the mapped color reached only {current_contrast:.2}:1"),
+            );
+            if let Some(mapping) = report
+                .mappings
+                .iter_mut()
+                .find(|mapping| mapping.zeron_role == role)
+            {
+                mapping.vscode_key = (*key).into();
+                mapping.value = candidate.to_string();
+            }
+            return candidate;
+        }
+    }
+
+    let resolved = ensure_contrast_across(current, backgrounds, minimum, preferred_target);
+    record_adjustment(
+        report,
+        role,
+        current,
+        resolved,
+        format!(
+            "preserved the source hue while raising worst-case contrast from {current_contrast:.2}:1 to {:.2}:1",
+            minimum_contrast(resolved, backgrounds)
+        ),
+    );
+    resolved
+}
+
+fn ensure_contrast_across(
+    color: Color,
+    backgrounds: &[Color],
+    minimum: f32,
+    preferred_target: Option<Color>,
+) -> Color {
+    if minimum_contrast(color, backgrounds) >= minimum {
+        return color;
+    }
+    let mut targets = Vec::with_capacity(3);
+    if let Some(target) = preferred_target {
+        targets.push(target);
+    }
+    targets.extend([Color::BLACK, Color::WHITE]);
+
+    let mut best = color;
+    let mut best_contrast = minimum_contrast(color, backgrounds);
+    for target in targets {
+        for step in 1..=100 {
+            let candidate = color.mix(target, step as f32 / 100.0);
+            let contrast = minimum_contrast(candidate, backgrounds);
+            if contrast > best_contrast {
+                best = candidate;
+                best_contrast = contrast;
+            }
+            if contrast >= minimum {
+                return candidate;
+            }
+        }
+    }
+    best
+}
+
+fn minimum_contrast(color: Color, backgrounds: &[Color]) -> f32 {
+    backgrounds
+        .iter()
+        .map(|background| color.contrast(*background))
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn harden_accent(output: &mut ThemeVariant, report: &mut ImportReport, backgrounds: &[Color]) {
+    let current = output.accent.primary;
+    if minimum_contrast(current, backgrounds) >= 3.0 {
+        return;
+    }
+    for candidate in &report.accent_candidates {
+        let Ok(primary) = candidate.value.parse::<Color>() else {
+            continue;
+        };
+        if minimum_contrast(primary, backgrounds) >= 3.0 {
+            output.accent =
+                AccentRoles::derive(primary, output.appearance, output.colors.background);
+            record_adjustment(
+                report,
+                "accent.*",
+                current,
+                output.accent.primary,
+                format!("used {} to keep interactions at 3:1", candidate.vscode_key),
+            );
+            return;
+        }
+    }
+    let primary = ensure_contrast_across(current, backgrounds, 3.0, None);
+    output.accent = AccentRoles::derive(primary, output.appearance, output.colors.background);
+    record_adjustment(
+        report,
+        "accent.*",
+        current,
+        output.accent.primary,
+        "preserved the source hue while raising interaction contrast to 3:1",
+    );
+}
+
+fn record_adjustment(
+    report: &mut ImportReport,
+    role: &str,
+    original: Color,
+    resolved: Color,
+    reason: impl Into<String>,
+) {
+    if original == resolved {
+        return;
+    }
+    report.adjustments.push(ImportAdjustment {
+        zeron_role: role.into(),
+        original: original.to_string(),
+        resolved: resolved.to_string(),
+        reason: reason.into(),
+    });
 }
 
 fn first_color<'a>(
@@ -996,6 +1303,106 @@ mod tests {
                 .dropped
                 .iter()
                 .any(|item| item.contains("italic bold"))
+        );
+    }
+
+    #[test]
+    fn hardens_ayu_style_low_contrast_workbench_roles_without_blocking_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ayu-mirage.json");
+        fs::write(
+            &path,
+            r##"{
+              "name": "Ayu Mirage",
+              "type": "dark",
+              "colors": {
+                "editor.background": "#242936",
+                "foreground": "#707a8c",
+                "descriptionForeground": "#707a8c",
+                "editor.foreground": "#cccac2",
+                "focusBorder": "#ffcc66",
+                "terminal.background": "#242936",
+                "terminal.foreground": "#707a8c"
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let imported = import_file(&path, options()).unwrap();
+        assert_eq!(
+            imported.theme.colors.text,
+            "#cccac2".parse::<Color>().unwrap()
+        );
+        assert!(
+            imported
+                .theme
+                .colors
+                .text_muted
+                .contrast(imported.theme.colors.background)
+                >= 4.5
+        );
+        assert!(
+            imported
+                .theme
+                .terminal
+                .foreground
+                .contrast(imported.theme.terminal.background)
+                >= 4.5
+        );
+        assert!(imported.report.adjustments.iter().any(|adjustment| {
+            adjustment.zeron_role == "text" && adjustment.reason.contains("editor.foreground")
+        }));
+        assert!(
+            imported
+                .report
+                .validation
+                .iter()
+                .all(|issue| !issue.is_blocking())
+        );
+    }
+
+    #[test]
+    fn flattens_translucent_foundational_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transparent.json");
+        fs::write(
+            &path,
+            r##"{
+              "colors": {
+                "editor.background": "#101820cc",
+                "sideBar.background": "#ffffff10",
+                "foreground": "#ffffff"
+              }
+            }"##,
+        )
+        .unwrap();
+
+        let imported = import_file(&path, options()).unwrap();
+        assert_eq!(imported.theme.colors.background.a, 255);
+        assert_eq!(imported.theme.colors.shell.a, 255);
+        assert!(imported.report.adjustments.iter().any(|adjustment| {
+            adjustment.zeron_role == "background"
+                && adjustment.reason.contains("translucent foundational")
+        }));
+    }
+
+    #[test]
+    fn appearance_detection_handles_high_contrast_and_unknown_ui_themes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.json");
+        fs::write(&path, r##"{"colors":{"editor.background":"#ffffff"}}"##).unwrap();
+        let mut normalized = NormalizedTheme::default();
+        normalized
+            .colors
+            .insert("editor.background".into(), "#ffffff".into());
+
+        assert_eq!(
+            detect_appearance(&path, Some("hc-light"), &normalized),
+            Appearance::Light
+        );
+        assert_eq!(
+            detect_appearance(&path, Some("third-party-theme-kind"), &normalized),
+            Appearance::Light
         );
     }
 

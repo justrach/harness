@@ -2728,25 +2728,8 @@ impl Shell {
             });
 
         let card =
-            div()
+            popover::palette_card(&theme, px(680.0), card_radius)
                 .id("add-space-palette")
-                .w(px(680.0))
-                .rounded(px(card_radius))
-                .border_1()
-                .border_color(crate::theme::hairline(0.10))
-                // The popover_card glass recipe: a translucent tint over the
-                // frosted backdrop blur (`popover::modal` wraps in `frosted`) —
-                // an opaque fill here killed the vibrancy every other float has.
-                .bg(if theme.is_frost() {
-                    theme.glass_overlay()
-                } else {
-                    theme.surface_overlay
-                })
-                .shadow_lg()
-                .overflow_hidden()
-                .flex()
-                .flex_col()
-                .text_color(theme.text)
                 // On the keyboard dispatch path (see `AddSpaceFlow::focus`) — the
                 // pickers' proven structure for frame-level keys with a focused
                 // child input.

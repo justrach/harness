@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, Entity, Hsla, IntoElement, Render, SharedString, Subscription, Window,
-    div, prelude::*, px,
+    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, Render, SharedString,
+    Subscription, Window, div, prelude::*, px,
 };
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
@@ -25,6 +25,8 @@ use crate::theme_library;
 struct ImportDialog {
     input: Entity<ComposerInput>,
     _events: Subscription,
+    focus: FocusHandle,
+    focus_pending: bool,
     mode: InstallMode,
     compilation: Option<SourceCompilation>,
     selected: HashSet<String>,
@@ -52,16 +54,51 @@ impl AppearancePage {
     }
 
     fn open_import(&mut self, cx: &mut Context<Self>) {
-        let input =
-            cx.new(|cx| ComposerInput::new("Theme file, package.json, or extension folder", cx));
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.compile_import(cx);
+        let input = cx.new(|cx| {
+            ComposerInput::with_context(
+                "Theme file, package.json, or extension folder",
+                "PaletteSearch",
+                cx,
+            )
+        });
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
+            ComposerInputEvent::Edited => {
+                let source = this
+                    .import_dialog
+                    .as_ref()
+                    .map(|dialog| PathBuf::from(dialog.input.read(cx).text().trim()));
+                if let Some(dialog) = this.import_dialog.as_mut()
+                    && dialog
+                        .compilation
+                        .as_ref()
+                        .zip(source.as_ref())
+                        .is_some_and(|(compilation, source)| compilation.path != *source)
+                {
+                    dialog.compilation = None;
+                    dialog.selected.clear();
+                    dialog.review_variant = None;
+                    dialog.error = None;
+                    cx.notify();
+                }
             }
+            ComposerInputEvent::Submitted => {
+                if this
+                    .import_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.compilation.is_some())
+                {
+                    this.finish_import(cx);
+                } else {
+                    this.compile_import(cx);
+                }
+            }
+            _ => {}
         });
         self.import_dialog = Some(ImportDialog {
             input,
             _events: events,
+            focus: cx.focus_handle(),
+            focus_pending: true,
             mode: InstallMode::Snapshot,
             compilation: None,
             selected: HashSet::new(),
@@ -136,6 +173,11 @@ impl AppearancePage {
         let Some(dialog) = self.import_dialog.as_mut() else {
             return;
         };
+        if dialog.selected.is_empty() {
+            dialog.error = Some("Select at least one variant to import.".into());
+            cx.notify();
+            return;
+        }
         let Some(compilation) = dialog.compilation.take() else {
             return;
         };
@@ -216,16 +258,14 @@ fn surface_label(surface: SurfacePreference) -> &'static str {
 fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> String {
     match surface {
         SurfacePreference::ThemeDefault => format!(
-            "Theme default · This theme recommends {} surfaces.",
+            "Uses this theme's {} default.",
             match resolved {
                 SurfaceTreatment::Frosted => "frosted",
                 SurfaceTreatment::Opaque => "opaque",
             }
         ),
-        SurfacePreference::Frosted => {
-            "Frosted · Uses theme-colored glass wherever the platform supports blur.".into()
-        }
-        SurfacePreference::Opaque => "Opaque · Keeps surfaces solid across every theme.".into(),
+        SurfacePreference::Frosted => "Theme-colored glass where supported.".into(),
+        SurfacePreference::Opaque => "Solid surfaces for every theme.".into(),
     }
 }
 
@@ -372,21 +412,6 @@ fn preview(
     }
 }
 
-fn helper(mode: AppearanceMode, system: Appearance) -> SharedString {
-    match mode {
-        AppearanceMode::System => {
-            let resolved = if system.is_dark() { "dark" } else { "light" };
-            format!(
-                "Following the system appearance — currently {resolved}. Zeron switches with \
-                 macOS, including scheduled changes."
-            )
-            .into()
-        }
-        AppearanceMode::Light => "Always light, whatever the system is set to.".into(),
-        AppearanceMode::Dark => "Always dark, whatever the system is set to.".into(),
-    }
-}
-
 fn model_appearance(appearance: Appearance) -> zeron_theme::Appearance {
     match appearance {
         Appearance::Dark => zeron_theme::Appearance::Dark,
@@ -519,11 +544,13 @@ fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
 
 fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Div> {
     let summary = format!(
-        "{} mapped · {} inferred/fallback · {} unsupported · {} warnings",
+        "{} mapped · {} adjusted · {} inferred/fallback · {} unsupported · {} warnings · {} validation",
         report.mappings.len(),
+        report.adjustments.len(),
         report.fallbacks.len(),
         report.dropped.len(),
-        report.warnings.len()
+        report.warnings.len(),
+        report.validation.len(),
     );
     div()
         .id(SharedString::from(format!(
@@ -543,6 +570,12 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .line_height(px(16.0))
         .text_color(theme.text_muted)
         .child(div().text_color(theme.text).child(summary))
+        .children(report.adjustments.iter().map(|adjustment| {
+            div().mt(px(4.0)).child(SharedString::from(format!(
+                "Adjusted · {} {} → {} · {}",
+                adjustment.zeron_role, adjustment.original, adjustment.resolved, adjustment.reason
+            )))
+        }))
         .children(report.fallbacks.iter().map(|message| {
             div()
                 .mt(px(4.0))
@@ -553,7 +586,18 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
                 .mt(px(4.0))
                 .child(SharedString::from(format!("Warning · {message}")))
         }))
-        .children(report.mappings.iter().take(12).map(|mapping| {
+        .children(report.validation.iter().map(|issue| {
+            div().mt(px(4.0)).child(SharedString::from(format!(
+                "Validation {:?} {:?} · {}",
+                issue.category, issue.severity, issue.message
+            )))
+        }))
+        .children(report.dropped.iter().map(|message| {
+            div()
+                .mt(px(4.0))
+                .child(SharedString::from(format!("Unsupported · {message}")))
+        }))
+        .children(report.mappings.iter().map(|mapping| {
             div().mt(px(4.0)).child(SharedString::from(format!(
                 "{} ← {}",
                 mapping.zeron_role, mapping.vscode_key
@@ -830,75 +874,190 @@ impl AppearancePage {
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        {
+            let dialog = self.import_dialog.as_mut()?;
+            if std::mem::take(&mut dialog.focus_pending) {
+                let input_focus = dialog.input.focus_handle(cx);
+                window.focus(&input_focus, cx);
+            }
+        }
         let dialog = self.import_dialog.as_ref()?;
         let input = dialog.input.clone();
+        let focus = dialog.focus.clone();
         let mode = dialog.mode;
         let compilation = dialog.compilation.clone();
         let selected = dialog.selected.clone();
         let review_variant = dialog.review_variant.clone();
         let error = dialog.error.clone();
+        let ready = compilation.is_some() && !selected.is_empty();
+        let card_radius = 14.0;
+        let hairline = crate::theme::hairline(0.06);
+        let band = popover::band();
 
-        let mode_control = |label: &'static str, value: InstallMode| {
+        let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
-            div()
-                .id(SharedString::from(format!(
-                    "theme-import-mode-{}",
-                    slug(label)
-                )))
-                .px(px(10.0))
-                .py(px(6.0))
-                .rounded(px(7.0))
-                .border_1()
-                .border_color(if active { theme.accent } else { theme.border })
-                .bg(if active {
-                    theme.accent_wash
-                } else {
-                    theme.surface_raised.opacity(0.35)
-                })
-                .text_size(px(12.0))
-                .text_color(if active {
-                    theme.accent
-                } else {
-                    theme.text_muted
-                })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(dialog) = this.import_dialog.as_mut() {
-                        dialog.mode = value;
-                    }
-                    cx.notify();
-                }))
-                .child(label)
+            popover::menu_row(
+                theme,
+                active,
+                SharedString::from(format!("theme-import-mode-hover-{}", slug(label))),
+            )
+            .id(SharedString::from(format!(
+                "theme-import-mode-{}",
+                slug(label)
+            )))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(dialog) = this.import_dialog.as_mut() {
+                    dialog.mode = value;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(if active { theme.text } else { theme.text_muted })
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .mt(px(1.0))
+                            .text_size(px(10.5))
+                            .text_color(theme.text_muted.opacity(0.55))
+                            .child(description),
+                    ),
+            )
+            .when(active, |row| {
+                row.child(
+                    icons::icon(icons::CHECK)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(theme.accent),
+                )
+            })
         };
 
-        let mut card = popover::dialog_card(theme)
-            .id("theme-import-card")
-            .w(px(660.0))
-            .max_h(px(720.0))
+        let action_label = if compilation.is_some() {
+            "Import selected"
+        } else {
+            "Analyze"
+        };
+        let action = popover::btn_primary(theme, "")
+            .id("theme-import-action")
+            .h(px(24.0))
+            .px(px(8.0))
+            .py(px(0.0))
+            .rounded(px(5.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(12.0))
+            .when(compilation.is_some() && !ready, |button| {
+                button.opacity(0.45)
+            })
+            .when(compilation.is_none() || ready, |button| {
+                button.on_click(cx.listener(move |this, _, _, cx| {
+                    if this
+                        .import_dialog
+                        .as_ref()
+                        .is_some_and(|dialog| dialog.compilation.is_some())
+                    {
+                        this.finish_import(cx);
+                    } else {
+                        this.compile_import(cx);
+                    }
+                }))
+            })
+            .child(
+                icons::icon(icons::RETURN)
+                    .size(px(11.0))
+                    .text_color(theme.on_solid.opacity(0.8)),
+            )
+            .child(action_label);
+
+        let header = div()
+            .h(px(48.0))
+            .flex_none()
+            .rounded_t(px(card_radius))
+            .pl(px(12.0))
+            .pr(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .bg(band)
+            .border_b_1()
+            .border_color(hairline)
+            .child(
+                popover::key_cap(theme).child(
+                    icons::icon(icons::DOCUMENT_ADD)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted.opacity(0.75)),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(14.0))
+                    .child(input.into_any_element()),
+            )
+            .child(
+                popover::btn_ghost(theme, "Browse", "theme-import-browse")
+                    .id("theme-import-browse")
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .py(px(0.0))
+                    .rounded(px(5.0))
+                    .flex_none()
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
+            )
+            .child(action)
+            .child(
+                popover::key_cap(theme)
+                    .id("theme-import-esc")
+                    .cursor_pointer()
+                    .hover(|style| style.bg(crate::theme::ink(0.09)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.import_dialog = None;
+                        cx.notify();
+                    }))
+                    .text_size(px(11.0))
+                    .font_family(theme.font_mono.clone())
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child("esc"),
+            );
+
+        let mut main = div()
+            .id("theme-import-main")
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .overflow_y_scroll()
-            .child(popover::dialog_title(theme, "Add a custom theme"));
+            .px(px(8.0))
+            .py(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0));
 
         if let Some(ref compilation) = compilation {
-            card = card
-                .child(
-                    popover::dialog_body(
-                        theme,
-                        format!(
-                            "{} detected · Choose the variants to keep. Runtime components use the resolved Zeron palette, never VS Code token names.",
-                            compilation.family.name
-                        ),
-                    )
-                    .mt(px(6.0)),
-                )
+            main = main
+                .child(popover::menu_heading(theme, "Detected variants"))
                 .child(
                     div()
-                        .mt(px(12.0))
-                        .flex()
-                        .gap(px(8.0))
-                        .child(mode_control("Import snapshot", InstallMode::Snapshot))
-                        .child(mode_control("Link source", InstallMode::Link)),
+                        .px(px(8.0))
+                        .pb(px(5.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted.opacity(0.6))
+                        .child(SharedString::from(format!(
+                            "{} · Select the variants to keep",
+                            compilation.family.name
+                        ))),
                 );
             for variant in &compilation.family.variants {
                 let variant_id = variant.id.clone();
@@ -910,118 +1069,127 @@ impl AppearancePage {
                     "Light"
                 };
                 let report = compilation.reports.get(&variant.id);
-                card = card.child(
-                    div()
-                        .mt(px(10.0))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(if selected_now {
-                            theme.border_strong
-                        } else {
-                            theme.border
-                        })
-                        .bg(theme.surface_raised.opacity(0.28))
-                        .p(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "theme-import-select-{variant_id}"
-                                        )))
-                                        .size(px(18.0))
-                                        .rounded(px(5.0))
-                                        .border_1()
-                                        .border_color(if selected_now {
-                                            theme.accent
-                                        } else {
-                                            theme.border_strong
-                                        })
-                                        .bg(if selected_now { theme.accent } else { theme.bg })
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .when(selected_now, |item| {
-                                            item.child(
-                                                icons::icon(icons::CHECK)
-                                                    .size(px(12.0))
-                                                    .text_color(theme.on_accent),
-                                            )
-                                        })
-                                        .on_click(cx.listener({
-                                            let variant_id = variant_id.clone();
-                                            move |this, _, _, cx| {
-                                                if let Some(dialog) = this.import_dialog.as_mut() {
-                                                    if !dialog.selected.remove(&variant_id) {
-                                                        dialog.selected.insert(variant_id.clone());
-                                                    }
-                                                }
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                                .text_color(theme.text)
-                                                .child(SharedString::from(variant.name.clone())),
+                let sample = Theme::from_variant(
+                    variant,
+                    AccentSelection::ThemeDefault,
+                    SurfacePreference::ThemeDefault,
+                );
+                main = main.child(
+                    popover::menu_row(
+                        theme,
+                        selected_now,
+                        SharedString::from(format!("theme-import-row-hover-{variant_id}")),
+                    )
+                    .id(SharedString::from(format!("theme-import-row-{variant_id}")))
+                    .flex_col()
+                    .items_stretch()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "theme-import-select-{variant_id}"
+                                    )))
+                                    .size(px(18.0))
+                                    .rounded(px(5.0))
+                                    .border_1()
+                                    .border_color(if selected_now {
+                                        theme.accent
+                                    } else {
+                                        theme.border_strong
+                                    })
+                                    .bg(if selected_now { theme.accent } else { theme.bg })
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .when(selected_now, |item| {
+                                        item.child(
+                                            icons::icon(icons::CHECK)
+                                                .size(px(12.0))
+                                                .text_color(theme.on_accent),
                                         )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(theme.text_muted)
-                                                .child(appearance),
-                                        ),
-                                )
-                                .child(
-                                    compact_action(
-                                        theme,
-                                        if review_open {
-                                            "Hide mapping"
-                                        } else {
-                                            "Review mapping"
-                                        },
-                                        format!("theme-import-review-{variant_id}"),
-                                    )
+                                    })
                                     .on_click(cx.listener({
                                         let variant_id = variant_id.clone();
                                         move |this, _, _, cx| {
                                             if let Some(dialog) = this.import_dialog.as_mut() {
-                                                dialog.review_variant =
-                                                    if dialog.review_variant.as_deref()
-                                                        == Some(variant_id.as_str())
-                                                    {
-                                                        None
-                                                    } else {
-                                                        Some(variant_id.clone())
-                                                    };
+                                                if !dialog.selected.remove(&variant_id) {
+                                                    dialog.selected.insert(variant_id.clone());
+                                                }
                                             }
                                             cx.notify();
                                         }
                                     })),
-                                ),
+                            )
+                            .child(palette_preview(&sample))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.5))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(variant.name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(theme.text_muted.opacity(0.65))
+                                            .child(appearance),
+                                    ),
+                            )
+                            .child(
+                                compact_action(
+                                    theme,
+                                    if review_open {
+                                        "Hide mapping"
+                                    } else {
+                                        "Review mapping"
+                                    },
+                                    format!("theme-import-review-{variant_id}"),
+                                )
+                                .on_click(cx.listener({
+                                    let variant_id = variant_id.clone();
+                                    move |this, _, _, cx| {
+                                        if let Some(dialog) = this.import_dialog.as_mut() {
+                                            dialog.review_variant =
+                                                if dialog.review_variant.as_deref()
+                                                    == Some(variant_id.as_str())
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(variant_id.clone())
+                                                };
+                                        }
+                                        cx.notify();
+                                    }
+                                })),
+                            ),
+                    )
+                    .when(review_open, |row| {
+                        row.child(
+                            div()
+                                .mt(px(8.0))
+                                .pt(px(8.0))
+                                .border_t_1()
+                                .border_color(hairline)
+                                .child(import_scene_preview(variant)),
                         )
-                        .when(review_open, |row| {
-                            row.child(import_scene_preview(variant))
-                                .when_some(report, |row, report| {
-                                    row.child(report_panel(theme, report))
-                                })
-                        }),
+                        .when_some(report, |row, report| row.child(report_panel(theme, report)))
+                    }),
                 );
             }
             for failure in &compilation.failures {
-                card = card.child(
+                main = main.child(
                     div()
-                        .mt(px(8.0))
+                        .px(px(8.0))
+                        .py(px(5.0))
                         .text_size(px(11.0))
                         .text_color(theme.warning)
                         .child(SharedString::from(format!(
@@ -1031,90 +1199,176 @@ impl AppearancePage {
                 );
             }
         } else {
-            card = card
+            main = main
+                .child(popover::menu_heading(theme, "Add a theme"))
                 .child(
-                    popover::dialog_body(
-                        theme,
-                        "Paste a VS Code theme JSON/JSONC file, package.json, or extension folder. Zeron detects variants and appearance automatically.",
-                    )
-                    .mt(px(6.0)),
-                )
-                .child(
-                    div()
-                        .mt(px(14.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
+                    popover::menu_row(theme, false, "theme-import-local-source-hover")
+                        .id("theme-import-local-source")
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx)))
                         .child(
-                            popover::dialog_field(input.into_any_element())
-                                .flex_1()
-                                .min_w_0(),
+                            icons::icon(icons::FOLDER_WITH_FILES)
+                                .size(px(15.0))
+                                .flex_none()
+                                .text_color(theme.text_muted.opacity(0.8)),
                         )
                         .child(
-                            compact_action(theme, "Choose…", "theme-import-choose")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.choose_import_source(cx)
-                                })),
-                        ),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .text_color(theme.text)
+                                        .child("Choose a local source"),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(1.0))
+                                        .text_size(px(10.5))
+                                        .text_color(theme.text_muted.opacity(0.55))
+                                        .child("Theme file, package.json, or extension folder"),
+                                ),
+                        )
+                        .child(popover::kbd_hint(theme, "Browse")),
                 )
                 .child(
                     div()
-                        .mt(px(10.0))
-                        .flex()
-                        .gap(px(8.0))
-                        .child(mode_control("Import snapshot", InstallMode::Snapshot))
-                        .child(mode_control("Link source", InstallMode::Link)),
+                        .mx(px(8.0))
+                        .mt(px(7.0))
+                        .pt(px(10.0))
+                        .border_t_1()
+                        .border_color(hairline)
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_muted.opacity(0.55))
+                        .child(
+                            "Zeron detects light and dark variants, maps the palette, and validates contrast before import.",
+                        ),
                 );
         }
 
-        if let Some(error) = error {
-            card = card.child(
+        let rail = div()
+            .w(px(196.0))
+            .flex_none()
+            .h_full()
+            .border_l_1()
+            .border_color(hairline)
+            .px(px(8.0))
+            .py(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(popover::menu_heading(theme, "Import mode"))
+            .child(mode_control(
+                "Import snapshot",
+                "Keep a self-contained copy",
+                InstallMode::Snapshot,
+            ))
+            .child(mode_control(
+                "Link source",
+                "Reload changes from disk",
+                InstallMode::Link,
+            ))
+            .child(div().h(px(1.0)).mx(px(2.0)).my(px(7.0)).bg(hairline))
+            .child(
                 div()
-                    .mt(px(10.0))
-                    .text_size(px(11.5))
-                    .text_color(theme.danger)
-                    .child(error),
+                    .px(px(8.0))
+                    .flex()
+                    .items_start()
+                    .gap(px(6.0))
+                    .text_size(px(10.5))
+                    .line_height(px(15.0))
+                    .text_color(theme.text_muted.opacity(0.5))
+                    .child(
+                        icons::icon(icons::INFO_CIRCLE)
+                            .size(px(12.0))
+                            .flex_none()
+                            .mt(px(1.0)),
+                    )
+                    .child("Theme tokens are compiled into Zeron roles."),
             );
-        }
 
-        let ready = compilation.is_some() && !selected.is_empty();
-        card = card.child(
-            div()
-                .mt(px(16.0))
-                .flex()
-                .justify_end()
-                .gap(px(8.0))
-                .child(
-                    popover::btn_ghost(theme, "Cancel", "theme-import-cancel")
-                        .id("theme-import-cancel")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.import_dialog = None;
-                            cx.notify();
-                        })),
+        let body = div()
+            .h(px(if compilation.is_some() { 460.0 } else { 250.0 }))
+            .flex()
+            .items_stretch()
+            .child(main)
+            .child(rail);
+
+        let footer = div()
+            .flex_none()
+            .rounded_b(px(card_radius))
+            .bg(band)
+            .border_t_1()
+            .border_color(hairline)
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .child(popover::key_hint(
+                theme,
+                icons::RETURN,
+                if compilation.is_some() {
+                    "Import selected"
+                } else {
+                    "Analyze"
+                },
+            ))
+            .child(popover::key_hint_text(theme, "esc", "Close"))
+            .when_some(error, |footer, error| {
+                footer.child(
+                    div()
+                        .ml_auto()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.danger)
+                        .child(error),
                 )
-                .when(compilation.is_none(), |actions| {
-                    actions.child(
-                        popover::btn_primary(theme, "Analyze source")
-                            .id("theme-import-analyze")
-                            .on_click(cx.listener(|this, _, _, cx| this.compile_import(cx))),
-                    )
-                })
-                .when(compilation.is_some(), |actions| {
-                    actions.child(
-                        popover::btn_primary(theme, "Import selected")
-                            .id("theme-import-finish")
-                            .opacity(if ready { 1.0 } else { 0.45 })
-                            .when(ready, |button| {
-                                button
-                                    .on_click(cx.listener(|this, _, _, cx| this.finish_import(cx)))
-                            }),
-                    )
-                }),
-        );
-        Some(popover::modal(
+            });
+
+        let card = popover::palette_card(theme, px(680.0), card_radius)
+            .id("theme-import-card")
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                match popover::classify_key(
+                    event.keystroke.key.as_str(),
+                    event.keystroke.modifiers.platform,
+                    event.keystroke.modifiers.control,
+                ) {
+                    popover::MenuKey::Escape => {
+                        this.import_dialog = None;
+                        cx.notify();
+                    }
+                    popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
+                        if this
+                            .import_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.compilation.is_some())
+                        {
+                            this.finish_import(cx);
+                        } else {
+                            this.compile_import(cx);
+                        }
+                    }
+                    _ => {}
+                }
+            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.import_dialog = None;
+                cx.notify();
+            }))
+            .child(header)
+            .child(body)
+            .child(footer)
+            .into_any_element();
+
+        Some(popover::modal_glass(
             "theme-import-dialog",
             viewport,
-            card.into_any_element(),
+            card,
+            card_radius,
         ))
     }
 
@@ -1270,18 +1524,20 @@ impl AppearancePage {
                         ),
                     )
                     .child(
-                        compact_action(theme, "Duplicate", format!("theme-duplicate-{id}"))
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _, _, cx| {
-                                    if let Err(error) =
-                                        theme_library::duplicate_as_snapshot(&id, cx)
-                                    {
-                                        this.library_error = Some(error.to_string().into());
-                                    }
-                                    cx.notify();
+                        compact_action(
+                            theme,
+                            "Duplicate as editable",
+                            format!("theme-duplicate-{id}"),
+                        )
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| {
+                                if let Err(error) = theme_library::duplicate_as_editable(&id, cx) {
+                                    this.library_error = Some(error.to_string().into());
                                 }
-                            })),
+                                cx.notify();
+                            }
+                        })),
                     )
                     .when(linked, |actions| {
                         actions.child(
@@ -1312,14 +1568,17 @@ impl AppearancePage {
             .into_any_element()
     }
 
-    fn render_theme_library(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_theme_library_rows(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let entries = theme_library::entries(cx);
         let (linked, imported): (Vec<_>, Vec<_>) = entries
             .into_iter()
             .partition(|entry| entry.source.is_linked());
-        let builtins = ThemeRegistry::builtin().families.len();
         let mut rows = vec![
-            widgets::card_row(theme, true)
+            widgets::card_row(theme, false)
                 .child(widgets::row_tile(theme, icons::FOLDER_WITH_FILES))
                 .child(
                     div()
@@ -1330,7 +1589,7 @@ impl AppearancePage {
                             theme,
                             vec![
                                 div()
-                                    .child("Built-in, imported, and linked theme families.")
+                                    .child("Import or link custom themes.")
                                     .into_any_element(),
                             ],
                         )),
@@ -1339,24 +1598,6 @@ impl AppearancePage {
                     popover::btn_primary(theme, "Add theme")
                         .id("theme-library-add")
                         .on_click(cx.listener(|this, _, _, cx| this.open_import(cx))),
-                )
-                .into_any_element(),
-            widgets::card_row(theme, false)
-                .child(widgets::row_tile(theme, icons::ZERON_LOGO))
-                .child(
-                    div()
-                        .flex_1()
-                        .child(widgets::row_title(theme, "Built-in"))
-                        .child(widgets::meta_line(
-                            theme,
-                            vec![
-                                div()
-                                    .child(SharedString::from(format!(
-                                        "{builtins} curated families · Updated with Zeron."
-                                    )))
-                                    .into_any_element(),
-                            ],
-                        )),
                 )
                 .into_any_element(),
         ];
@@ -1400,9 +1641,7 @@ impl AppearancePage {
                     .map(|entry| self.render_library_entry(entry, theme, cx)),
             );
         }
-        widgets::section_card(theme)
-            .children(rows)
-            .into_any_element()
+        rows
     }
 }
 
@@ -1413,11 +1652,6 @@ impl Render for AppearancePage {
         let current_themes = appearance::themes(cx);
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
-        let system = cx
-            .try_global::<appearance::AppearanceState>()
-            .map(|state| state.system)
-            .unwrap_or_default();
-
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -1465,7 +1699,8 @@ impl Render for AppearancePage {
                                 ],
                             )),
                     )
-                    .child(selector),
+                    .child(selector)
+                    .into_any_element(),
             );
         }
 
@@ -1494,13 +1729,73 @@ impl Render for AppearancePage {
                 ))
             })
             .collect::<Vec<_>>();
-        let library = self.render_theme_library(&theme, cx);
+        let mut settings_rows = theme_rows;
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::TUNING))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Accent color"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(accent_helper(current_accent)))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(accent_controls),
+                )
+                .into_any_element(),
+        );
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::WIDGET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Glass"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(surface_helper(
+                                        current_surface,
+                                        theme.surface_treatment,
+                                    )))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(surface_controls),
+                )
+                .into_any_element(),
+        );
+        settings_rows.extend(self.render_theme_library_rows(&theme, cx));
         let library_warning = self
             .library_error
             .clone()
             .or_else(|| theme_library::load_warning(cx).map(SharedString::from));
         let modal = self
-            .render_import_dialog(window.viewport_size(), &theme, cx)
+            .render_import_dialog(window.viewport_size(), &theme, window, cx)
             .or_else(|| self.render_review_dialog(window.viewport_size(), &theme, cx));
 
         div()
@@ -1527,78 +1822,7 @@ impl Render for AppearancePage {
                             .child(widgets::field_label(&theme, "Appearance"))
                             .child(widgets::option_card_row().children(cards)),
                     )
-                    .child(
-                        div()
-                            .mt(px(16.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .line_height(px(18.0))
-                            .child(helper(current_mode, system)),
-                    )
-                    .child(widgets::section_card(&theme).children(theme_rows))
-                    .child(
-                        widgets::section_card(&theme)
-                            .child(
-                                widgets::card_row(&theme, true)
-                                    .child(widgets::row_tile(&theme, icons::TUNING))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(widgets::row_title(&theme, "Accent color"))
-                                            .child(widgets::meta_line(
-                                                &theme,
-                                                vec![
-                                                    div()
-                                                        .child(SharedString::from(accent_helper(
-                                                            current_accent,
-                                                        )))
-                                                        .into_any_element(),
-                                                ],
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .ml(px(10.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
-                                            .children(accent_controls),
-                                    ),
-                            )
-                            .child(
-                                widgets::card_row(&theme, false)
-                                    .child(widgets::row_tile(&theme, icons::WIDGET))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(widgets::row_title(&theme, "Glass"))
-                                            .child(widgets::meta_line(
-                                                &theme,
-                                                vec![
-                                                    div()
-                                                        .child(SharedString::from(surface_helper(
-                                                            current_surface,
-                                                            theme.surface_treatment,
-                                                        )))
-                                                        .into_any_element(),
-                                                ],
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .ml(px(10.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
-                                            .children(surface_controls),
-                                    ),
-                            ),
-                    )
-                    .child(library)
+                    .child(widgets::section_card(&theme).children(settings_rows))
                     .when_some(library_warning, |page, warning| {
                         page.child(
                             div()
@@ -1651,33 +1875,14 @@ mod tests {
     #[test]
     fn surface_helper_explains_theme_default_and_global_overrides() {
         let default = surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Opaque);
-        assert!(default.contains("theme recommends opaque"));
+        assert!(default.contains("opaque default"));
         assert!(
             surface_helper(SurfacePreference::Frosted, SurfaceTreatment::Opaque)
-                .contains("wherever the platform supports blur")
+                .contains("where supported")
         );
         assert!(
             surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted)
-                .contains("across every theme")
+                .contains("every theme")
         );
-    }
-
-    #[test]
-    fn system_helper_names_the_resolved_appearance() {
-        let dark = helper(AppearanceMode::System, Appearance::Dark);
-        let light = helper(AppearanceMode::System, Appearance::Light);
-        assert!(dark.contains("currently dark"), "got {dark}");
-        assert!(light.contains("currently light"), "got {light}");
-    }
-
-    #[test]
-    fn pinned_helpers_do_not_mention_following() {
-        for mode in [AppearanceMode::Light, AppearanceMode::Dark] {
-            for system in [Appearance::Light, Appearance::Dark] {
-                let copy = helper(mode, system).to_lowercase();
-                assert!(!copy.contains("following"), "{mode:?}: {copy}");
-                assert!(copy.contains("whatever the system"), "{mode:?}: {copy}");
-            }
-        }
     }
 }
