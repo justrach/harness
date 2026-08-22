@@ -121,9 +121,8 @@ impl FakeOpencode {
                     Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 }
             }
-            let body: Value =
-                serde_json::from_slice(&buf[header_end..header_end + content_length])
-                    .unwrap_or(Value::Null);
+            let body: Value = serde_json::from_slice(&buf[header_end..header_end + content_length])
+                .unwrap_or(Value::Null);
             buf.drain(..header_end + content_length);
 
             let mut parts = start.split_whitespace();
@@ -415,7 +414,10 @@ async fn foreign_session_idle_never_settles_our_turn() {
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Done { status: DoneStatus::Completed, .. })
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
     ));
 }
 
@@ -496,7 +498,10 @@ async fn steer_queues_mid_turn_and_delivers_at_idle() {
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Done { status: DoneStatus::Completed, .. })
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
     ));
 }
 
@@ -518,7 +523,10 @@ async fn interrupt_aborts_and_settles_interrupted() {
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Done { status: DoneStatus::Interrupted, .. })
+        Some(AgentEvent::Done {
+            status: DoneStatus::Interrupted,
+            ..
+        })
     ));
 }
 
@@ -548,7 +556,10 @@ async fn provider_retries_surface_and_cap_out() {
     let AgentEvent::Error { message } = &ev else {
         panic!("expected a retry error chip, got {ev:?}");
     };
-    assert!(message.contains("retrying") && message.contains("attempt 3"), "{message}");
+    assert!(
+        message.contains("retrying") && message.contains("attempt 3"),
+        "{message}"
+    );
     assert!(message.contains("unreachable"), "{message}");
 
     fake.emit(retry(8));
@@ -563,7 +574,11 @@ async fn provider_retries_surface_and_cap_out() {
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Done { status: DoneStatus::Errored, error: Some(_), .. })
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(_),
+            ..
+        })
     ));
 }
 
@@ -711,7 +726,10 @@ async fn subagent_task_streams_tagged_and_settles_from_the_task_part() {
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::Done { status: DoneStatus::Completed, .. })
+        Some(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        })
     ));
 }
 

@@ -278,7 +278,12 @@ fn child_binding_falls_back_to_title_match() {
     assert!(bind_child(&mut children, &mut pending, "ses_a", "mystery"));
     assert_eq!(children.get("ses_a").unwrap().parent_tool_use_id, "prt_1");
     // Nothing pending: no bind.
-    assert!(!bind_child(&mut children, &mut pending, "ses_c", "anything"));
+    assert!(!bind_child(
+        &mut children,
+        &mut pending,
+        "ses_c",
+        "anything"
+    ));
 }
 
 #[test]
@@ -368,6 +373,9 @@ fn stall_env_and_startup_env_parse() {
 
 #[test]
 fn directory_header_percent_encodes() {
-    assert_eq!(encode_directory("/home/u/my project"), "/home/u/my%20project");
+    assert_eq!(
+        encode_directory("/home/u/my project"),
+        "/home/u/my%20project"
+    );
     assert_eq!(encode_directory("/plain/path"), "/plain/path");
 }

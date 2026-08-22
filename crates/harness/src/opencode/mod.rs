@@ -282,9 +282,7 @@ impl OpencodeHarness {
                 ));
             }
             if let Ok(commands) = server.get_json("/command", None).await {
-                let _ = self
-                    .commands_cache
-                    .set(commands_from_wire(&commands));
+                let _ = self.commands_cache.set(commands_from_wire(&commands));
             }
             Ok(models)
         }
@@ -652,7 +650,12 @@ fn models_from_providers(providers: &Value) -> Vec<Model> {
                 let mut levels: Vec<ReasoningLevel> = model
                     .get("variants")
                     .and_then(Value::as_object)
-                    .map(|variants| variants.keys().filter_map(|k| variant_to_level(k)).collect())
+                    .map(|variants| {
+                        variants
+                            .keys()
+                            .filter_map(|k| variant_to_level(k))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 levels.sort();
                 levels.dedup();
@@ -825,10 +828,7 @@ async fn run_session(session: Session) {
         let session_id = match &request.resume {
             Some(resume) => {
                 // Sessions are durable server-side: resume = reuse the id.
-                match server
-                    .get_json(&format!("/session/{resume}"), dir)
-                    .await
-                {
+                match server.get_json(&format!("/session/{resume}"), dir).await {
                     Ok(info) => info
                         .get("id")
                         .and_then(Value::as_str)
@@ -848,7 +848,10 @@ async fn run_session(session: Session) {
 
         // Provider catalog: resolves the model's advertised reasoning
         // variants so the requested effort only rides models that have it.
-        let providers = server.get_json("/provider", dir).await.unwrap_or(Value::Null);
+        let providers = server
+            .get_json("/provider", dir)
+            .await
+            .unwrap_or(Value::Null);
         Ok::<(String, Value), HarnessError>((session_id, providers))
     };
     let (session_id, providers) = tokio::select! {
@@ -928,11 +931,7 @@ async fn run_session(session: Session) {
 
     // ---- SSE bus ----------------------------------------------------------
     let (bus_tx, mut bus_rx) = mpsc::channel::<BusMsg>(256);
-    let bus_handle = tokio::spawn(bus_task(
-        server.base.clone(),
-        server.auth.clone(),
-        bus_tx,
-    ));
+    let bus_handle = tokio::spawn(bus_task(server.base.clone(), server.auth.clone(), bus_tx));
 
     // ---- first prompt -----------------------------------------------------
     let stall = stall_bound();
@@ -942,16 +941,33 @@ async fn run_session(session: Session) {
         variant.as_deref(),
         &request.attachments,
     );
-    if let Err(e) = post_prompt(&server, &session_id, dir, &commands, &request.prompt, first_body)
-        .await
+    if let Err(e) = post_prompt(
+        &server,
+        &session_id,
+        dir,
+        &commands,
+        &request.prompt,
+        first_body,
+    )
+    .await
     {
-        let _ = send(&event_tx, AgentEvent::Error { message: e.to_string() }).await;
-        let _ = send(&event_tx, AgentEvent::Done {
-            status: DoneStatus::Errored,
-            result: None,
-            error: Some(e.to_string()),
-            session_id: Some(session_id.clone()),
-        }).await;
+        let _ = send(
+            &event_tx,
+            AgentEvent::Error {
+                message: e.to_string(),
+            },
+        )
+        .await;
+        let _ = send(
+            &event_tx,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                result: None,
+                error: Some(e.to_string()),
+                session_id: Some(session_id.clone()),
+            },
+        )
+        .await;
         bus_handle.abort();
         server.shutdown(kill_grace).await;
         return;
@@ -1342,8 +1358,7 @@ async fn post_prompt(
                         .query(&[("directory", dir)])
                         .header("x-opencode-directory", encode_directory(dir));
                 }
-                if let Err(e) = req.send().await
-                {
+                if let Err(e) = req.send().await {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
                         "command turn failed: {e}"
@@ -1624,7 +1639,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 let mut settle: Vec<AgentEvent> = Vec::new();
                 // A completed `task` part settles its child chip.
                 if let Some((child_session, failed)) = task_completion(part) {
-                    let by_meta = children.get_mut(&child_session).map(|c| (child_session.clone(), c));
+                    let by_meta = children
+                        .get_mut(&child_session)
+                        .map(|c| (child_session.clone(), c));
                     let target = match by_meta {
                         Some(v) => Some(v),
                         None => {
@@ -1721,7 +1738,11 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     stderr_tail: crate::StderrTail::default(),
                 };
                 if server
-                    .post_json(&reply_path, dir_owned.as_deref(), &json!({ "reply": "always" }))
+                    .post_json(
+                        &reply_path,
+                        dir_owned.as_deref(),
+                        &json!({ "reply": "always" }),
+                    )
                     .await
                     .is_err()
                 {
@@ -2225,10 +2246,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                                     .collect()
                             })
                             .unwrap_or_default(),
-                        multi_select: q
-                            .get("multiple")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
                     })
                 })
                 .collect()
