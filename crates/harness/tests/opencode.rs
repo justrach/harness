@@ -616,6 +616,21 @@ async fn session_error_with_no_content_settles_errored() {
         &ev,
         AgentEvent::Error { message } if message.contains("no credentials")
     ));
+    // opencode re-emits the same failure with an exception-name prefix and a
+    // stack — that must NOT mint a second chip (field report: every failure
+    // rendered twice).
+    fake.emit(json!({
+        "type": "session.error",
+        "properties": { "sessionID": "ses_test", "error": {
+            "name": "UnknownError",
+            "data": { "message": "ProviderAuthError: no credentials for anthropic\n    at stack" },
+        }},
+    }));
+    let quiet = tokio::time::timeout(Duration::from_millis(400), stream.next()).await;
+    assert!(
+        quiet.is_err(),
+        "duplicate error must not mint a second chip"
+    );
     idle(&fake, "ses_test");
     let events = drain_to_done(&mut stream).await;
     assert!(matches!(
@@ -835,11 +850,19 @@ async fn first_prompt_waits_for_the_live_event_subscription() {
 async fn models_discover_from_the_provider_catalog() {
     let fake = FakeOpencode::start().await;
     fake.set_providers(json!({
-        "all": [{
-            "id": "opencode",
-            "name": "OpenCode Zen",
-            "models": { "big-pickle": { "name": "Big Pickle" } },
-        }],
+        "all": [
+            {
+                "id": "opencode",
+                "name": "OpenCode Zen",
+                "models": { "big-pickle": { "name": "Big Pickle" } },
+            },
+            {
+                "id": "catalog-only",
+                "name": "Needs A Key",
+                "models": { "locked": { "name": "Locked" } },
+            },
+        ],
+        "connected": ["opencode"],
     }));
     let harness = harness(&fake);
     let models = harness.models().await.expect("models");

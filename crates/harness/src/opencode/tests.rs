@@ -26,7 +26,9 @@ fn models_map_provider_catalog_with_variant_ladders() {
         "connected": ["anthropic"],
     });
     let models = models_from_providers(&providers);
-    assert_eq!(models.len(), 3);
+    // `connected` filters: the full catalog is 194 providers / 7k models of
+    // which the user can run almost none (v0.2.21 field report).
+    assert_eq!(models.len(), 2);
     let opus = models
         .iter()
         .find(|m| m.id == "anthropic/claude-opus-5")
@@ -47,7 +49,29 @@ fn models_map_provider_catalog_with_variant_ladders() {
         .find(|m| m.id == "anthropic/claude-haiku-4-5")
         .expect("haiku");
     assert!(haiku.reasoning_levels.is_empty());
-    assert!(models.iter().any(|m| m.id == "opencode/big-pickle"));
+    assert!(
+        !models.iter().any(|m| m.id == "opencode/big-pickle"),
+        "unconnected providers stay out of the picker"
+    );
+}
+
+#[test]
+fn missing_connected_list_falls_back_to_the_full_catalog() {
+    let providers = json!({
+        "all": [
+            {"id": "a", "models": {"m1": {}}},
+            {"id": "b", "models": {"m2": {}}},
+        ],
+    });
+    assert_eq!(models_from_providers(&providers).len(), 2);
+    let providers = json!({
+        "all": [
+            {"id": "a", "models": {"m1": {}}},
+            {"id": "b", "models": {"m2": {}}},
+        ],
+        "connected": [],
+    });
+    assert_eq!(models_from_providers(&providers).len(), 2);
 }
 
 #[test]

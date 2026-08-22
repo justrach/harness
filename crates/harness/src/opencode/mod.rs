@@ -621,7 +621,20 @@ fn truncate_body(body: &str) -> String {
 
 /// `GET /provider` → picker models: `{providerID}/{modelID}` ids, effort
 /// ladder from the model's reasoning variants.
+///
+/// Filtered to CONNECTED providers: `all` is the entire models.dev catalog
+/// (measured live: 194 providers / 7,203 models, nearly all needing an API
+/// key the user hasn't set) — offering it verbatim made the picker slow to
+/// open, slow to scroll, and full of models every run of which fails with
+/// "Model not found" (field report, v0.2.21). `connected` names exactly
+/// the usable set (credentialed + config-declared + the anonymous Zen
+/// tier). An absent/empty `connected` (older server) falls back to `all`.
 fn models_from_providers(providers: &Value) -> Vec<Model> {
+    let connected: std::collections::HashSet<&str> = providers
+        .get("connected")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let list = providers
         .get("all")
         .and_then(Value::as_array)
@@ -632,6 +645,9 @@ fn models_from_providers(providers: &Value) -> Vec<Model> {
         let Some(provider_id) = provider.get("id").and_then(Value::as_str) else {
             continue;
         };
+        if !connected.is_empty() && !connected.contains(provider_id) {
+            continue;
+        }
         let provider_name = provider
             .get("name")
             .and_then(Value::as_str)
@@ -1599,8 +1615,17 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         name.to_owned()
                     }
                 });
+            // opencode emits the same failure twice (once bare, once wrapped
+            // with an exception-name/stack prefix) — one chip per distinct
+            // failure: dedupe when either first line contains the other.
+            let first = |m: &str| m.lines().next().unwrap_or(m).trim().to_owned();
+            let line = first(&message);
+            let duplicate = turn.error.as_deref().is_some_and(|prev| {
+                let prev = first(prev);
+                !line.is_empty() && (prev.contains(&line) || line.contains(&prev))
+            });
             turn.error = Some(message.clone());
-            if !send(event_tx, AgentEvent::Error { message }).await {
+            if !duplicate && !send(event_tx, AgentEvent::Error { message }).await {
                 return BusOutcome::ConsumerGone;
             }
             BusOutcome::Continue
