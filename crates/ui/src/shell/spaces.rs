@@ -1385,7 +1385,7 @@ impl Shell {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(SIDEBAR_HARNESS_TITLE_GAP))
+                        .gap(px(SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP))
                         .px(px(Theme::SPACE_SM))
                         .rounded(px(6.0))
                         .cursor_pointer()
@@ -1421,7 +1421,7 @@ impl Shell {
                         .when_some(brand, |el, (mark, tint)| {
                             el.child(
                                 crate::icons::icon(mark)
-                                    .size(px(SIDEBAR_HARNESS_ICON_SIZE))
+                                    .size(px(SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(if hovered || is_selected {
                                         tint.unwrap_or(theme.text_muted)

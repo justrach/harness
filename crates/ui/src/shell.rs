@@ -542,10 +542,13 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
 }
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
-/// Shared harness/title geometry for both active and archived sidebar rows.
-/// Identity marks should never shift size or relationship as a chat settles.
-const SIDEBAR_HARNESS_ICON_SIZE: f32 = 14.0;
-const SIDEBAR_HARNESS_TITLE_GAP: f32 = 10.0;
+/// Harness/title geometry follows the row hierarchy: active multi-line cards
+/// keep identity close on the standard 8px rhythm, while the one-line archived
+/// shelf gives its larger mark a little more separation.
+const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
+const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
+const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -3967,13 +3970,13 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(SIDEBAR_HARNESS_TITLE_GAP))
+                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
                             el.child(
                                 icon(path)
-                                    .size(px(SIDEBAR_HARNESS_ICON_SIZE))
+                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(tint.unwrap_or(subline).opacity(0.8)),
                             )
@@ -8139,6 +8142,15 @@ mod tests {
         assert_eq!(chat_row_height(true, false), 61.0);
         assert_eq!(chat_row_height(false, true), 63.0);
         assert_eq!(chat_row_height(true, true), 63.0);
+    }
+
+    #[test]
+    fn sidebar_harness_geometry_reflects_row_hierarchy() {
+        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
+        assert!(
+            SIDEBAR_ACTIVE_HARNESS_TITLE_GAP < SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP
+        );
+        assert!(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE < SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE);
     }
 
     #[test]
