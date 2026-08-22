@@ -1112,18 +1112,7 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                let shows_working_spinner = if status == ChatIndicator::Working {
-                    let state = self.state.read(cx);
-                    !state.send_queued(&chat.id, now) && !state.send_undelivered(&chat.id, now)
-                } else {
-                    false
-                };
-                let height = super::chat_row_height(
-                    harness.is_some(),
-                    branch.is_some(),
-                    change_request.is_some(),
-                    shows_working_spinner,
-                );
+                let height = super::chat_row_height(branch.is_some(), change_request.is_some());
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(

@@ -509,28 +509,29 @@ pub fn resort_offsets(
     offsets
 }
 
-/// Exact active-session row height. The first two lines and the two 2px flex
-/// gaps consume 47px including vertical padding; the metadata line then grows
-/// to its tallest visible child. Keeping this calculation beside the renderer's
-/// metrics prevents disclosure clips when view options alter that third line.
-pub(super) fn chat_row_height(
-    shows_harness: bool,
-    shows_branch: bool,
-    shows_pull_request: bool,
-    shows_working_spinner: bool,
-) -> f32 {
+/// Height changes do not constitute a list reorder. In particular, sidebar
+/// disclosures animate their own height and must not also trigger FLIP offsets
+/// on every following keyed section.
+fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|((old_key, _), (new_key, _))| old_key != new_key)
+}
+
+/// Exact active-session row height. Harness identity now lives on the title
+/// line and the Working glyph lives in the status corner, so neither adds a
+/// third line. Only branch / pull-request metadata can grow the 47px base.
+/// Keeping this calculation beside the renderer's metrics prevents disclosure
+/// clips when view options alter that metadata line.
+pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
     let mut metadata_height: f32 = 0.0;
-    if shows_harness {
-        metadata_height = metadata_height.max(11.0);
-    }
     if shows_branch {
         metadata_height = metadata_height.max(14.0);
     }
     if shows_pull_request {
         metadata_height = metadata_height.max(16.0);
-    }
-    if shows_working_spinner {
-        metadata_height = metadata_height.max(8.0);
     }
     47.0 + metadata_height
 }
@@ -539,7 +540,7 @@ const SIDEBAR_LIST_GAP: f32 = 2.0;
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
-const SIDEBAR_GLASS_FADE_BAND: f32 = 32.0;
+const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -3682,10 +3683,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One session row (zeron session-row.tsx): status rail on the left
-    /// (a live 2×3 mini spinner while working, a dot otherwise), title +
-    /// relative time on the first line, "folder · device" underneath aligned
-    /// to the title. Click selects; right-click opens the context menu.
+    /// One session row: context + status on line one, harness + title on line
+    /// two, and source metadata below. Working uses the live thread glyph in
+    /// the status corner. Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
         &self,
@@ -3741,7 +3741,6 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
-        let queued = queued && !undelivered;
         let corner_body: AnyElement = if corner_hovered {
             div()
                 .flex()
@@ -3784,15 +3783,26 @@ impl Shell {
         } else {
             match status_label {
                 Some(label) => {
-                    // Glyph slot: Done wears the check; every other status a
-                    // dot in its color (the Working spinner lives at the
-                    // row's bottom-right, not up here).
+                    // Glyph slot: Working carries its active thread glyph
+                    // beside the accent word; Done wears the check; other
+                    // statuses retain a quiet semantic dot.
                     let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
                             .into_any_element()
+                    } else if status == zeron_proto::ChatIndicator::Working
+                        && !queued
+                        && !undelivered
+                    {
+                        loaders::mini_gradient_spinner(
+                            format!("chat-working-{id}"),
+                            2.0,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
                     } else {
                         div()
                             .size(px(6.0))
@@ -3939,17 +3949,8 @@ impl Shell {
                     )
                     .child(div().text_color(subline).child(corner)),
             )
-            // Line 2: the session title, flush left (t3code card line 2).
-            .child(
-                div()
-                    .w_full()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .line_height(px(17.0))
-                    .child(title),
-            )
-            // Line 3 (always): harness brand mark, branch, optional PR badge,
-            // and the working spinner. Branch remains the only shrinking item.
+            // Line 2: harness identity belongs directly with the title,
+            // instead of floating as unrelated metadata below it.
             .child(
                 div()
                     .w_full()
@@ -3968,6 +3969,24 @@ impl Shell {
                             )
                         },
                     )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .line_height(px(17.0))
+                            .child(title),
+                    ),
+            )
+            // Line 3 (always): branch and optional PR badge. Branch remains
+            // the only shrinking item.
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
                     .when_some(branch, |el, branch| {
                         el.child(
                             icon(icons::GIT_BRANCH)
@@ -3985,23 +4004,9 @@ impl Shell {
                                 .child(branch),
                         )
                     })
-                    // Stable invisible spring: keeps the optional spinner and
-                    // PR badge pinned right without changing no-PR paint.
+                    // Stable invisible spring keeps the optional PR badge
+                    // pinned right without changing no-PR paint.
                     .child(div().flex_1().min_w_0())
-                    // Working rows animate the spinner at the row's
-                    // bottom-right (the status word keeps its dot up top).
-                    // Queued/Failed rows don't: a spinner would fake progress.
-                    .when(
-                        status == zeron_proto::ChatIndicator::Working && !queued && !undelivered,
-                        |el| {
-                            el.child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                        },
-                    )
                     .when_some(change_request, |el, summary| {
                         el.child(crate::change_requests::pull_request_badge(
                             format!("chat-pr-{id}").into(),
@@ -4092,8 +4097,17 @@ impl Shell {
         // don't reorder) never animate.
         let order: Vec<(String, f32)> = keyed.iter().map(|(k, h, _)| (k.clone(), *h)).collect();
         if self.sidebar_prev_order != order {
+            let key_order_changed = sidebar_key_order_changed(&self.sidebar_prev_order, &order);
             if !self.sidebar_prev_order.is_empty() {
-                let offsets = resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP);
+                // A disclosure already animates its own body height. Applying
+                // FLIP offsets when only keyed heights change double-counts
+                // that movement, leaving gaps and momentary overlaps between
+                // the first group, following groups, and Archived.
+                let offsets = if key_order_changed {
+                    resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP)
+                } else {
+                    std::collections::HashMap::new()
+                };
                 let prev_keys: std::collections::HashSet<&str> = self
                     .sidebar_prev_order
                     .iter()
@@ -4104,7 +4118,7 @@ impl Shell {
                     .filter(|(k, _)| !prev_keys.contains(k.as_str()))
                     .map(|(k, _)| k.clone())
                     .collect();
-                if !offsets.is_empty() || !new_keys.is_empty() {
+                if key_order_changed && (!offsets.is_empty() || !new_keys.is_empty()) {
                     self.resort_epoch += 1;
                     self.sidebar_resort = offsets;
                     self.sidebar_new_keys = new_keys;
@@ -8108,12 +8122,20 @@ mod tests {
 
     #[test]
     fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false, false, false), 47.0);
-        assert_eq!(chat_row_height(true, false, false, false), 58.0);
-        assert_eq!(chat_row_height(false, true, false, false), 61.0);
-        assert_eq!(chat_row_height(false, false, true, false), 63.0);
-        assert_eq!(chat_row_height(false, false, false, true), 55.0);
-        assert_eq!(chat_row_height(true, true, true, true), 63.0);
+        assert_eq!(chat_row_height(false, false), 47.0);
+        assert_eq!(chat_row_height(true, false), 61.0);
+        assert_eq!(chat_row_height(false, true), 63.0);
+        assert_eq!(chat_row_height(true, true), 63.0);
+    }
+
+    #[test]
+    fn sidebar_height_change_is_not_a_reorder() {
+        let open = keys(&[("first-group", 105.0), ("second-group", 240.0)]);
+        let collapsed = keys(&[("first-group", 40.0), ("second-group", 240.0)]);
+        assert!(!sidebar_key_order_changed(&open, &collapsed));
+
+        let reordered = keys(&[("second-group", 240.0), ("first-group", 40.0)]);
+        assert!(sidebar_key_order_changed(&collapsed, &reordered));
     }
 
     #[test]
