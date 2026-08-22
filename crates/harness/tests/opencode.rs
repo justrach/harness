@@ -34,6 +34,10 @@ struct FakeOpencode {
     /// Recorded `(path, body)` of every POST.
     posts: Arc<Mutex<Vec<(String, Value)>>>,
     providers: Arc<Mutex<Value>>,
+    /// Whether an SSE subscriber existed when the FIRST prompt_async landed
+    /// (the no-replay bus makes prompting before the subscription a real
+    /// event-loss race — observed live on fast-failing turns).
+    first_prompt_had_subscriber: Arc<Mutex<Option<bool>>>,
 }
 
 impl FakeOpencode {
@@ -47,6 +51,7 @@ impl FakeOpencode {
             backlog: Arc::new(Mutex::new(Vec::new())),
             posts: Arc::new(Mutex::new(Vec::new())),
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
+            first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
         };
         let accept = fake.clone();
         tokio::spawn(async move {
@@ -165,6 +170,12 @@ impl FakeOpencode {
             }
 
             if method == "POST" {
+                if path.ends_with("/prompt_async") {
+                    let mut first = self.first_prompt_had_subscriber.lock().unwrap();
+                    if first.is_none() {
+                        *first = Some(self.events.receiver_count() > 0);
+                    }
+                }
                 self.posts.lock().unwrap().push((path.clone(), body));
             }
             let (status, payload) = self.route(&method, &path);
@@ -772,6 +783,52 @@ async fn slash_command_routes_through_the_command_endpoint() {
     assistant_message(&fake, "ses_test", "msg_1");
     idle(&fake, "ses_test");
     drain_to_done(&mut stream).await;
+}
+
+#[tokio::test]
+async fn first_prompt_waits_for_the_live_event_subscription() {
+    // The v1 bus has no replay: a fast-failing turn (bad model id) emits
+    // busy → session.error → idle within ~200ms of the prompt. Prompting
+    // before the SSE stream exists loses the whole turn (observed live,
+    // 1.18.21) — the driver must gate the first prompt on the connection.
+    let fake = FakeOpencode::start().await;
+    let (controls, _steer, _token) = controls();
+    let mut stream = harness(&fake)
+        .run(request("hi"), controls)
+        .await
+        .expect("run starts");
+    let _ = next_event(&mut stream).await;
+    let _ = next_event(&mut stream).await;
+    wait_posts(&fake, "/session/ses_test/prompt_async", 1).await;
+    assert_eq!(
+        *fake.first_prompt_had_subscriber.lock().unwrap(),
+        Some(true),
+        "prompt must not be posted before the /global/event subscription exists"
+    );
+
+    // And the fast-failure lifecycle settles promptly (all three frames in
+    // one burst), not via the stall watchdog.
+    fake.emit(json!({
+        "type": "session.status",
+        "properties": { "sessionID": "ses_test", "status": { "type": "busy" } },
+    }));
+    fake.emit(json!({
+        "type": "session.error",
+        "properties": { "sessionID": "ses_test", "error": {
+            "name": "UnknownError",
+            "data": { "message": "Model not found: opencode/gone-model" },
+        }},
+    }));
+    idle(&fake, "ses_test");
+    let events = drain_to_done(&mut stream).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::Done {
+            status: DoneStatus::Errored,
+            error: Some(e),
+            ..
+        }) if e.contains("Model not found")
+    ));
 }
 
 #[tokio::test]

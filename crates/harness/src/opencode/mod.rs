@@ -726,6 +726,14 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
 
 /// What the bus reader hands the session loop.
 enum BusMsg {
+    /// A stream (re)connected and delivered its first frame. The FIRST one
+    /// gates the initial prompt: the v1 bus has NO replay, and a
+    /// fast-failing turn (bad model id errors in ~200ms) can emit
+    /// busy → session.error → idle before a late subscription exists —
+    /// observed live (1.18.21), leaving only the stall watchdog. Later ones
+    /// mean a reconnect gap that may have swallowed our idle: the loop
+    /// re-syncs from `GET /session/status`.
+    Connected,
     Event(Value),
     /// The stream is gone past the reconnect budget (or the reader saw the
     /// consumer close).
@@ -934,6 +942,26 @@ async fn run_session(session: Session) {
     let bus_handle = tokio::spawn(bus_task(server.base.clone(), server.auth.clone(), bus_tx));
 
     // ---- first prompt -----------------------------------------------------
+    // The bus has no replay: wait for the subscription to be LIVE before
+    // prompting, or a fast-failing turn's whole lifecycle can slip into the
+    // gap (observed live: busy → error → idle inside ~200ms). Bounded — the
+    // stall watchdog still guards a bus that never comes up.
+    let connect_wait = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match bus_rx.recv().await {
+                Some(BusMsg::Connected) | None => return,
+                // Nothing else can arrive before Connected; drop defensively.
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    if connect_wait.is_err() {
+        tracing::debug!(
+            target: "zeron_harness::opencode",
+            "event bus not connected within 15s; prompting anyway"
+        );
+    }
     let stall = stall_bound();
     let first_body = prompt_body(
         &request.prompt,
@@ -990,6 +1018,77 @@ async fn run_session(session: Session) {
     // arrives the run hard-stops. Unlike the stall bound this is NOT
     // disarmed by activity — only idle ends an abort.
     let mut abort_deadline: Option<tokio::time::Instant> = None;
+
+    // Idle settlement, shared by the idle bus events and the post-reconnect
+    // status re-sync (a macro so `break`/`continue` act on the caller's
+    // loop): emit held usage, then Interrupted / next queued steer /
+    // AssistantMessageCompleted + Done.
+    macro_rules! settle_idle {
+        ($label:lifetime) => {{
+            if !turn.active {
+                continue $label;
+            }
+            turn.active = false;
+            if let Some(usage) = pending_usage.take()
+                && !send(&event_tx, usage).await
+            {
+                break $label;
+            }
+            if interrupt_requested {
+                settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
+                let _ = send(&event_tx, AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: Some(session_id.clone()),
+                }).await;
+                done_sent = true;
+                break $label;
+            }
+            if let Some(steer) = queued_steers.pop_front() {
+                let (prev, next) = rotate(&mut assistant_message_id);
+                if !send(&event_tx, AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
+                }).await {
+                    break $label;
+                }
+                let body = prompt_body(&steer, &model, variant.as_deref(), &[]);
+                match post_prompt(&server, &session_id, dir, &commands, &steer, body).await {
+                    Ok(()) => {
+                        turn = TurnState::begin(stall);
+                        continue $label;
+                    }
+                    Err(e) => {
+                        let _ = send(&event_tx, AgentEvent::Error {
+                            message: e.to_string(),
+                        }).await;
+                        // Fall through to Done below.
+                    }
+                }
+            }
+            let (prev, _next) = rotate(&mut assistant_message_id);
+            if !send(&event_tx, AgentEvent::AssistantMessageCompleted {
+                assistant_message_id: prev,
+            }).await {
+                break $label;
+            }
+            let errored = turn.aborted_for_retry
+                || (turn.error.is_some() && !turn.saw_content);
+            let _ = send(&event_tx, AgentEvent::Done {
+                status: if errored {
+                    DoneStatus::Errored
+                } else {
+                    DoneStatus::Completed
+                },
+                result: None,
+                error: if errored { turn.error.clone() } else { None },
+                session_id: Some(session_id.clone()),
+            }).await;
+            done_sent = true;
+            break $label;
+        }};
+    }
 
     'main: loop {
         // The stall watchdog only arms while a turn awaits its first sign of
@@ -1106,6 +1205,23 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
+                    BusMsg::Connected => {
+                        // A RECONNECT mid-turn may have swallowed our idle
+                        // (no replay): re-sync from the server's own status
+                        // map — absent means idle.
+                        if turn.active {
+                            let status = server.get_json("/session/status", dir).await;
+                            let busy = match &status {
+                                Ok(map) => map.get(&session_id).is_some(),
+                                // Can't tell: leave the turn running; the
+                                // next disconnect or event decides.
+                                Err(_) => true,
+                            };
+                            if !busy {
+                                settle_idle!('main);
+                            }
+                        }
+                    }
                     BusMsg::Disconnected => {
                         let crashed = match server.child.as_mut() {
                             Some(child) => child.try_wait().ok().flatten(),
@@ -1151,70 +1267,7 @@ async fn run_session(session: Session) {
                         match outcome {
                             BusOutcome::Continue => {}
                             BusOutcome::ConsumerGone => break 'main,
-                            BusOutcome::TurnIdle => {
-                                if !turn.active {
-                                    continue;
-                                }
-                                turn.active = false;
-                                if let Some(usage) = pending_usage.take()
-                                    && !send(&event_tx, usage).await
-                                {
-                                    break 'main;
-                                }
-                                if interrupt_requested {
-                                    settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
-                                    let _ = send(&event_tx, AgentEvent::Done {
-                                        status: DoneStatus::Interrupted,
-                                        result: None,
-                                        error: None,
-                                        session_id: Some(session_id.clone()),
-                                    }).await;
-                                    done_sent = true;
-                                    break 'main;
-                                }
-                                if let Some(steer) = queued_steers.pop_front() {
-                                    let (prev, next) = rotate(&mut assistant_message_id);
-                                    if !send(&event_tx, AgentEvent::Steered {
-                                        assistant_message_id: Some(prev),
-                                        next_assistant_message_id: Some(next),
-                                    }).await {
-                                        break 'main;
-                                    }
-                                    let body = prompt_body(&steer, &model, variant.as_deref(), &[]);
-                                    match post_prompt(&server, &session_id, dir, &commands, &steer, body).await {
-                                        Ok(()) => {
-                                            turn = TurnState::begin(stall);
-                                            continue;
-                                        }
-                                        Err(e) => {
-                                            let _ = send(&event_tx, AgentEvent::Error {
-                                                message: e.to_string(),
-                                            }).await;
-                                            // Fall through to Done below.
-                                        }
-                                    }
-                                }
-                                let (prev, _next) = rotate(&mut assistant_message_id);
-                                if !send(&event_tx, AgentEvent::AssistantMessageCompleted {
-                                    assistant_message_id: prev,
-                                }).await {
-                                    break 'main;
-                                }
-                                let errored = turn.aborted_for_retry
-                                    || (turn.error.is_some() && !turn.saw_content);
-                                let _ = send(&event_tx, AgentEvent::Done {
-                                    status: if errored {
-                                        DoneStatus::Errored
-                                    } else {
-                                        DoneStatus::Completed
-                                    },
-                                    result: None,
-                                    error: if errored { turn.error.clone() } else { None },
-                                    session_id: Some(session_id.clone()),
-                                }).await;
-                                done_sent = true;
-                                break 'main;
-                            }
+                            BusOutcome::TurnIdle => settle_idle!('main),
                         }
                     }
                 }
@@ -2371,6 +2424,8 @@ async fn bus_task(base: String, auth: Option<String>, tx: mpsc::Sender<BusMsg>) 
             }
             _ => {}
         }
+        // (stream_bus sends Connected itself once the first frame lands —
+        // an accepted-but-parked boot-window connection must not count.)
         failures += 1;
         if failures > BUS_RECONNECT_ATTEMPTS {
             let _ = tx.send(BusMsg::Disconnected).await;
@@ -2383,10 +2438,17 @@ async fn bus_task(base: String, auth: Option<String>, tx: mpsc::Sender<BusMsg>) 
 async fn stream_bus(tx: &mpsc::Sender<BusMsg>, resp: reqwest::Response) {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
+    let mut announced = false;
     while let Some(chunk) = stream.next().await {
         let Ok(bytes) = chunk else {
             return;
         };
+        if !announced {
+            announced = true;
+            if tx.send(BusMsg::Connected).await.is_err() {
+                return;
+            }
+        }
         buf.extend_from_slice(&bytes);
         // SSE frames are blank-line separated; each data line is one event.
         while let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
