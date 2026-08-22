@@ -520,11 +520,12 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
             .any(|((old_key, _), (new_key, _))| old_key != new_key)
 }
 
-/// Exact active-session row height. Harness identity now lives on the title
-/// line and the Working glyph lives in the status corner, so neither adds a
-/// third line. Only branch / pull-request metadata can grow the 47px base.
+/// Exact active-session row height. Harness identity lives on the title line
+/// and the Working glyph lives in the status corner, so neither adds a third
+/// line. Compact rows omit the metadata line and its preceding gap entirely;
+/// branch / pull-request rows add the exact height of their tallest child.
 /// Keeping this calculation beside the renderer's metrics prevents disclosure
-/// clips when view options alter that metadata line.
+/// clips when view options alter the row structure.
 pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
     let mut metadata_height: f32 = 0.0;
     if shows_branch {
@@ -533,10 +534,18 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
     if shows_pull_request {
         metadata_height = metadata_height.max(16.0);
     }
-    47.0 + metadata_height
+    if metadata_height == 0.0 {
+        45.0
+    } else {
+        47.0 + metadata_height
+    }
 }
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
+/// Shared harness/title geometry for both active and archived sidebar rows.
+/// Identity marks should never shift size or relationship as a chat settles.
+const SIDEBAR_HARNESS_ICON_SIZE: f32 = 14.0;
+const SIDEBAR_HARNESS_TITLE_GAP: f32 = 10.0;
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -3741,6 +3750,7 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
+        let shows_metadata = branch.is_some() || change_request.is_some();
         let corner_body: AnyElement = if corner_hovered {
             div()
                 .flex()
@@ -3957,13 +3967,13 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(SIDEBAR_HARNESS_TITLE_GAP))
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
                             el.child(
                                 icon(path)
-                                    .size(px(11.0))
+                                    .size(px(SIDEBAR_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(tint.unwrap_or(subline).opacity(0.8)),
                             )
@@ -3971,6 +3981,7 @@ impl Shell {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(px(13.0))
@@ -3978,44 +3989,46 @@ impl Shell {
                             .child(title),
                     ),
             )
-            // Line 3 (always): branch and optional PR badge. Branch remains
-            // the only shrinking item.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .when_some(branch, |el, branch| {
-                        el.child(
-                            icon(icons::GIT_BRANCH)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(subline),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(branch),
-                        )
-                    })
-                    // Stable invisible spring keeps the optional PR badge
-                    // pinned right without changing no-PR paint.
-                    .child(div().flex_1().min_w_0())
-                    .when_some(change_request, |el, summary| {
-                        el.child(crate::change_requests::pull_request_badge(
-                            format!("chat-pr-{id}").into(),
-                            summary,
-                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                            theme,
-                        ))
-                    }),
-            )
+            // Line 3 is structural, not reserved whitespace: compact states
+            // omit it completely when both Branch and Pull request are hidden.
+            .when(shows_metadata, |row| {
+                row.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .when_some(branch, |el, branch| {
+                            el.child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(11.0))
+                                    .flex_none()
+                                    .text_color(subline),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(subline)
+                                    .child(branch),
+                            )
+                        })
+                        // Stable invisible spring keeps the optional PR badge
+                        // pinned right without changing no-PR paint.
+                        .child(div().flex_1().min_w_0())
+                        .when_some(change_request, |el, summary| {
+                            el.child(crate::change_requests::pull_request_badge(
+                                format!("chat-pr-{id}").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                theme,
+                            ))
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -8122,7 +8135,7 @@ mod tests {
 
     #[test]
     fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 47.0);
+        assert_eq!(chat_row_height(false, false), 45.0);
         assert_eq!(chat_row_height(true, false), 61.0);
         assert_eq!(chat_row_height(false, true), 63.0);
         assert_eq!(chat_row_height(true, true), 63.0);

@@ -112,6 +112,29 @@ const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
 pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
     std::time::Duration::from_millis(120);
 
+/// Put this machine's device group first without disturbing the recency-based
+/// order of any remote groups. A targeted promotion is more truthful than a
+/// full name sort: local context leads, then the user's chosen chat sort wins.
+fn promote_local_device_group<T>(
+    groups: &mut Vec<(Option<(String, String)>, Vec<T>)>,
+    local_device_id: Option<&str>,
+) {
+    let Some(local_device_id) = local_device_id else {
+        return;
+    };
+    let Some(index) = groups.iter().position(|(group, _)| {
+        group
+            .as_ref()
+            .is_some_and(|(device_id, _)| device_id == local_device_id)
+    }) else {
+        return;
+    };
+    if index > 0 {
+        let local = groups.remove(index);
+        groups.insert(0, local);
+    }
+}
+
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
@@ -1090,6 +1113,10 @@ impl Shell {
                 groups.push((row.group.clone(), vec![row]));
             }
         }
+        if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
+            let local_device_id = self.state.read(cx).local_device_id.clone();
+            promote_local_device_group(&mut groups, local_device_id.as_deref());
+        }
 
         let selected = self.state.read(cx).selected_chat.clone();
         let mut rendered = Vec::new();
@@ -1358,7 +1385,7 @@ impl Shell {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(10.0))
+                        .gap(px(SIDEBAR_HARNESS_TITLE_GAP))
                         .px(px(Theme::SPACE_SM))
                         .rounded(px(6.0))
                         .cursor_pointer()
@@ -1394,7 +1421,7 @@ impl Shell {
                         .when_some(brand, |el, (mark, tint)| {
                             el.child(
                                 crate::icons::icon(mark)
-                                    .size(px(14.0))
+                                    .size(px(SIDEBAR_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(if hovered || is_selected {
                                         tint.unwrap_or(theme.text_muted)
@@ -2963,5 +2990,41 @@ impl Shell {
         }
 
         overlays
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::promote_local_device_group;
+
+    fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
+        (Some((device.into(), device.into())), vec![value])
+    }
+
+    #[test]
+    fn current_device_is_promoted_without_resorting_remote_groups() {
+        let mut groups = vec![
+            group("recent-remote", 1),
+            group("local", 2),
+            group("older-remote", 3),
+        ];
+
+        promote_local_device_group(&mut groups, Some("local"));
+
+        let order: Vec<_> = groups
+            .iter()
+            .map(|(group, _)| group.as_ref().unwrap().0.as_str())
+            .collect();
+        assert_eq!(order, ["local", "recent-remote", "older-remote"]);
+    }
+
+    #[test]
+    fn missing_current_device_leaves_group_order_untouched() {
+        let mut groups = vec![group("first", 1), group("second", 2)];
+        let before = groups.clone();
+
+        promote_local_device_group(&mut groups, Some("not-present"));
+
+        assert_eq!(groups, before);
     }
 }
