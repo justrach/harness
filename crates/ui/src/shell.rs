@@ -76,6 +76,43 @@ struct ChatMenuState {
     page: ChatMenuPage,
 }
 
+/// Interruptible height tween for the sidebar's device/archive disclosures.
+/// The rendered element owns the frame clock; this state preserves the current
+/// interpolated height when a second click reverses an in-flight transition.
+#[derive(Clone, Copy)]
+pub(super) struct SidebarDisclosureMotion {
+    pub(super) epoch: u64,
+    pub(super) from: f32,
+    pub(super) to: f32,
+    started: std::time::Instant,
+}
+
+impl SidebarDisclosureMotion {
+    fn new(epoch: u64, from: f32, to: f32) -> Self {
+        Self {
+            epoch,
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn current(self) -> f32 {
+        let total = motion::COLLAPSE.total().as_secs_f32();
+        let raw = if total > 0.0 {
+            self.started.elapsed().as_secs_f32() / total
+        } else {
+            1.0
+        };
+        motion::lerp(self.from, self.to, motion::COLLAPSE.progress(raw))
+    }
+
+    fn animating(self) -> bool {
+        self.started.elapsed()
+            < motion::COLLAPSE.total() + spaces::SIDEBAR_DISCLOSURE_TWEEN_GRACE
+    }
+}
+
 /// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
 /// the shared constructor makes left/right seams mirror each other and avoids
 /// relying on paint order when chrome crosses an animated pane boundary.
@@ -874,6 +911,9 @@ pub struct Shell {
     pub(super) archived_hover: Option<String>,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// In-flight disclosure tweens, shared by device groups and Archived.
+    pub(super) sidebar_disclosure_motion:
+        std::collections::HashMap<String, SidebarDisclosureMotion>,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
@@ -1165,6 +1205,7 @@ impl Shell {
             archived_shown: 0,
             archived_hover: None,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_disclosure_motion: std::collections::HashMap::new(),
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
@@ -8193,5 +8234,13 @@ mod tests {
             Some(NavEntry::Settings(SettingsSection::Devices))
         );
         assert_eq!(nav.back(), Some(chat("a")));
+    }
+
+    #[test]
+    fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
+        let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
+        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
+        assert_eq!(tween.current(), 0.0);
+        assert!(!tween.animating());
     }
 }

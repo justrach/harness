@@ -100,6 +100,35 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
 // roughly the same maximum footprint as the sidebar view-options menu while
 // retaining an internal scroll region for larger project lists.
 const SPACES_MENU_LIST_MAX_HEIGHT: f32 = 336.0;
+const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 32.0;
+pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
+    std::time::Duration::from_millis(120);
+
+fn sidebar_disclosure_header(
+    theme: &Theme,
+    label: SharedString,
+    chevron: AnyElement,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .mt(px(12.0))
+        .mb(px(4.0))
+        .px(px(10.0))
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted.opacity(0.5))
+                .child(label),
+        )
+        .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
+        .child(chevron)
+}
 
 /// One row of the open dropdown, in display order.
 #[derive(Clone, PartialEq)]
@@ -197,6 +226,90 @@ pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
 }
 
 impl Shell {
+    fn begin_sidebar_disclosure_motion(
+        &mut self,
+        key: &str,
+        resting_height: f32,
+        target_height: f32,
+    ) {
+        let previous = self.sidebar_disclosure_motion.get(key).copied();
+        let from = previous
+            .filter(|motion| motion.animating())
+            .map(SidebarDisclosureMotion::current)
+            .unwrap_or(resting_height);
+        let epoch = previous.map_or(1, |motion| motion.epoch + 1);
+        self.sidebar_disclosure_motion.insert(
+            key.to_owned(),
+            SidebarDisclosureMotion::new(epoch, from, target_height),
+        );
+    }
+
+    fn render_sidebar_disclosure_body(
+        &self,
+        key: &str,
+        open: bool,
+        full_height: f32,
+        content: AnyElement,
+    ) -> AnyElement {
+        let target = if open { full_height } else { 0.0 };
+        let frame = div().w_full().flex_none().overflow_hidden().child(content);
+        let Some(tween) = self
+            .sidebar_disclosure_motion
+            .get(key)
+            .copied()
+            .filter(|motion| motion.animating())
+        else {
+            return frame.h(px(target)).into_any_element();
+        };
+        let denominator = full_height.max(1.0);
+        frame
+            .with_animation(
+                SharedString::from(format!("sidebar-disclosure-{key}-{}", tween.epoch)),
+                motion::COLLAPSE.animation(),
+                move |el, t| {
+                    let height = motion::lerp(tween.from, tween.to, t);
+                    let reveal = (height / denominator).clamp(0.0, 1.0);
+                    el.h(px(height))
+                        .opacity(0.35 + 0.65 * reveal)
+                        .relative()
+                        .top(px(-3.0 * (1.0 - reveal)))
+                },
+            )
+            .into_any_element()
+    }
+
+    fn sidebar_disclosure_chevron(
+        &self,
+        key: &str,
+        open: bool,
+        theme: &Theme,
+    ) -> AnyElement {
+        let chevron = div().flex_none().size(px(12.0)).child(
+            icon(if open {
+                icons::ALT_ARROW_DOWN
+            } else {
+                icons::ALT_ARROW_RIGHT
+            })
+            .size(px(12.0))
+            .text_color(theme.text_muted.opacity(0.5)),
+        );
+        if let Some(tween) = self
+            .sidebar_disclosure_motion
+            .get(key)
+            .copied()
+            .filter(|motion| motion.animating())
+        {
+            chevron
+                .with_animation(
+                    SharedString::from(format!("sidebar-chevron-{key}-{}", tween.epoch)),
+                    motion::CHEVRON.animation(),
+                    |el, t| el.opacity(0.25 + 0.75 * t),
+                )
+                .into_any_element()
+        } else {
+            chevron.into_any_element()
+        }
+    }
     // ---- space filter ----
 
     /// Set the sidebar's session filter (`None` = All spaces). On the
@@ -970,50 +1083,7 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         let mut rendered = Vec::new();
         for (group, rows) in groups {
-            let mut collapsed = false;
-            if let Some((key, label)) = group {
-                let organization = match self.settings.sidebar_organization {
-                    SidebarOrganization::ByDevice => "device",
-                    SidebarOrganization::ByProject | SidebarOrganization::InOneList => "list",
-                };
-                let collapse_key = format!("{organization}:{key}");
-                collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
-                let toggle_key = collapse_key.clone();
-                let height = 27.0;
-                let element = div()
-                    .id(collapse_key.clone())
-                    .h(px(height))
-                    .flex()
-                    .items_end()
-                    .gap(px(4.0))
-                    .px(px(Theme::SPACE_SM))
-                    .pb(px(4.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.sidebar_collapsed_groups.remove(&toggle_key) {
-                            this.sidebar_collapsed_groups.insert(toggle_key.clone());
-                        }
-                        cx.notify();
-                    }))
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted.opacity(0.65))
-                    .child(
-                        icon(if collapsed {
-                            icons::ALT_ARROW_RIGHT
-                        } else {
-                            icons::ALT_ARROW_DOWN
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_muted.opacity(0.6)),
-                    )
-                    .child(SharedString::from(label))
-                    .into_any_element();
-                rendered.push((format!("g:{collapse_key}"), height, element));
-            }
-            if collapsed {
-                continue;
-            }
+            let mut rendered_rows = Vec::with_capacity(rows.len());
             for row in rows {
                 let ActiveChatRow {
                     status,
@@ -1049,8 +1119,69 @@ impl Shell {
                     theme,
                     cx,
                 );
-                rendered.push((format!("c:{}", chat.id), height, element));
+                rendered_rows.push((format!("c:{}", chat.id), height, element));
             }
+
+            let Some((key, label)) = group else {
+                rendered.extend(rendered_rows);
+                continue;
+            };
+            let organization = match self.settings.sidebar_organization {
+                SidebarOrganization::ByDevice => "device",
+                SidebarOrganization::ByProject | SidebarOrganization::InOneList => "list",
+            };
+            let collapse_key = format!("{organization}:{key}");
+            let motion_key = format!("group:{collapse_key}");
+            let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
+            let row_count = rendered_rows.len();
+            let body_height = rendered_rows.iter().map(|(_, height, _)| *height).sum::<f32>()
+                + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
+            let body = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(SIDEBAR_LIST_GAP))
+                .children(rendered_rows.into_iter().map(|(_, _, row)| row));
+            let visible_label: SharedString = if collapsed {
+                format!("{label} ({row_count})").into()
+            } else {
+                label.into()
+            };
+            let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
+            let toggle_key = collapse_key.clone();
+            let toggle_motion_key = motion_key.clone();
+            let header = sidebar_disclosure_header(theme, visible_label, chevron)
+                .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                    this.begin_sidebar_disclosure_motion(
+                        &toggle_motion_key,
+                        if was_open { body_height } else { 0.0 },
+                        if was_open { 0.0 } else { body_height },
+                    );
+                    if was_open {
+                        this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                    } else {
+                        this.sidebar_collapsed_groups.remove(&toggle_key);
+                    }
+                    cx.notify();
+                }));
+            let body = self.render_sidebar_disclosure_body(
+                &motion_key,
+                !collapsed,
+                body_height,
+                body.into_any_element(),
+            );
+            let height = SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                + if collapsed { 0.0 } else { body_height };
+            let element = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(body)
+                .into_any_element();
+            rendered.push((format!("g:{collapse_key}"), height, element));
         }
         rendered
     }
@@ -1098,6 +1229,11 @@ impl Shell {
         let total = rows.len();
         let open = self.archived_open;
         let shown = self.archived_shown.max(INITIAL);
+        let visible_count = total.min(shown);
+        let has_more = total > shown;
+        let body_height = visible_count as f32 * 36.0
+            + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
+            + if has_more { 36.0 + SIDEBAR_LIST_GAP } else { 0.0 };
         // Header (t3code settled-shelf toggle): muted 12px label, a hairline
         // filling the middle, chevron flipping open/closed. The count only
         // shows while collapsed — expanded, the rows speak for themselves.
@@ -1106,42 +1242,22 @@ impl Shell {
         } else {
             format!("Archived ({total})").into()
         };
-        let header = div()
+        let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
+        let header = sidebar_disclosure_header(theme, label, chevron)
             .id("archived-toggle")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .mt(px(12.0))
-            .mb(px(4.0))
-            .px(px(10.0))
-            .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.archived_open = !this.archived_open;
+                let was_open = this.archived_open;
+                this.begin_sidebar_disclosure_motion(
+                    "archived",
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                this.archived_open = !was_open;
                 this.archived_shown = INITIAL;
                 cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted.opacity(0.5))
-                    .child(label),
-            )
-            .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
-            .child(
-                crate::icons::icon(if open {
-                    crate::icons::ALT_ARROW_DOWN
-                } else {
-                    crate::icons::ALT_ARROW_RIGHT
-                })
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_muted.opacity(0.5)),
-            );
-        let mut section = div().flex().flex_col().child(header);
-        if open {
+            }));
+        let section = div().flex().flex_col().child(header);
+        let body = {
             let selected = self.state.read(cx).selected_chat.clone();
             let selected_wash = crate::theme::glass_selected_bg();
             let mut list = div().flex().flex_col().gap(px(2.0));
@@ -1277,12 +1393,10 @@ impl Shell {
                         .child(right),
                 );
             }
-            // Mount fade: the shelf popping in whole read as jank — a quick
-            // fade on the expanded list softens the accordion.
-            section = section.child(motion::fade_quick("archived-list", list));
-            if total > shown {
+            let mut body = div().w_full().flex().flex_col().child(list);
+            if has_more {
                 let remaining = (total - shown).min(PAGE);
-                section = section.child(
+                body = body.child(
                     div()
                         .id("archived-more")
                         // Sits outside the rows' gapped column — match the
@@ -1311,7 +1425,11 @@ impl Shell {
                         .child(SharedString::from(format!("Show {remaining} more"))),
                 );
             }
-        }
+            body.into_any_element()
+        };
+        let body =
+            self.render_sidebar_disclosure_body("archived", open, body_height, body);
+        let section = section.child(body);
         Some(section.pb(px(Theme::SPACE_SM)).into_any_element())
     }
 
