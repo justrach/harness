@@ -1,6 +1,6 @@
 # Sidebar view options and conversation links
 
-Status: planning  
+Status: implemented and verified locally
 Branch: `wip/sidebar-view-options`  
 Base: `origin/main` at `3fc7bb0` (`v0.2.20`)  
 Research date: 2026-08-22

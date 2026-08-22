@@ -19,6 +19,7 @@ struct ActiveChatRow {
     folder: String,
     branch: Option<String>,
     change_request: Option<zeron_proto::ChangeRequestSummary>,
+    group: Option<(String, String)>,
 }
 
 /// The space-filter dropdown, `Some` while open. The same searchable-menu
@@ -35,6 +36,51 @@ pub(super) struct SpacesMenu {
     list_scroll: gpui::ScrollHandle,
     _search_events: Subscription,
 }
+
+pub(super) struct SidebarViewMenu {
+    active: usize,
+    focus: FocusHandle,
+}
+
+struct SidebarViewOptionsTooltip;
+
+impl Render for SidebarViewOptionsTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(theme.text)
+            .child("Sidebar view options")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SidebarViewRow {
+    ByProject,
+    ByDevice,
+    InOneList,
+    LastUpdated,
+    Created,
+    ShowBranch,
+    ShowPullRequest,
+}
+
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
+    SidebarViewRow::ByProject,
+    SidebarViewRow::ByDevice,
+    SidebarViewRow::InOneList,
+    SidebarViewRow::LastUpdated,
+    SidebarViewRow::Created,
+    SidebarViewRow::ShowBranch,
+    SidebarViewRow::ShowPullRequest,
+];
 
 /// One row of the open dropdown, in display order.
 #[derive(Clone, PartialEq)]
@@ -205,6 +251,7 @@ impl Shell {
     }
 
     fn open_spaces_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_sidebar_view_menu(cx);
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
         let search =
@@ -291,6 +338,180 @@ impl Shell {
             }
             popover::MenuKey::Backspace | popover::MenuKey::Other => {}
         }
+    }
+
+    fn close_sidebar_view_menu(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_view_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.sidebar_view_menu);
+            cx.notify();
+        }
+    }
+
+    fn open_sidebar_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_spaces_menu(cx);
+        let focus = cx.focus_handle();
+        self.sidebar_view_menu.open(SidebarViewMenu {
+            active: 0,
+            focus: focus.clone(),
+        });
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn activate_sidebar_view_row(&mut self, row: SidebarViewRow, cx: &mut Context<Self>) {
+        match row {
+            SidebarViewRow::ByProject => {
+                self.settings.sidebar_organization = SidebarOrganization::ByProject
+            }
+            SidebarViewRow::ByDevice => {
+                self.settings.sidebar_organization = SidebarOrganization::ByDevice
+            }
+            SidebarViewRow::InOneList => {
+                self.settings.sidebar_organization = SidebarOrganization::InOneList
+            }
+            SidebarViewRow::LastUpdated => {
+                self.settings.sidebar_sort = SidebarSort::LastUpdated
+            }
+            SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
+            SidebarViewRow::ShowBranch => {
+                self.settings.sidebar_show_branch = !self.settings.sidebar_show_branch
+            }
+            SidebarViewRow::ShowPullRequest => {
+                self.settings.sidebar_show_pull_request =
+                    !self.settings.sidebar_show_pull_request;
+                let visible = self.settings.sidebar_show_pull_request;
+                self.state
+                    .update(cx, |state, cx| state.set_change_requests_visible(visible, cx));
+            }
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    fn sidebar_view_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        if !self.sidebar_view_menu.is_open() {
+            return;
+        }
+        match popover::classify_key(
+            event.keystroke.key.as_str(),
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+        ) {
+            popover::MenuKey::Escape => self.close_sidebar_view_menu(cx),
+            popover::MenuKey::Up | popover::MenuKey::Down => {
+                let up = event.keystroke.key.eq_ignore_ascii_case("arrowup");
+                if let Some(menu) = self.sidebar_view_menu.open_mut() {
+                    menu.active = popover::menu_step(
+                        Some(menu.active),
+                        SIDEBAR_VIEW_ROWS.len(),
+                        if up { -1 } else { 1 },
+                    )
+                    .unwrap_or(0);
+                    cx.notify();
+                }
+            }
+            popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
+                let active = self.sidebar_view_menu.get().map(|m| m.active).unwrap_or(0);
+                if let Some(row) = SIDEBAR_VIEW_ROWS.get(active).copied() {
+                    self.activate_sidebar_view_row(row, cx);
+                }
+            }
+            popover::MenuKey::Backspace | popover::MenuKey::Other => {}
+        }
+    }
+
+    fn render_sidebar_view_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(menu_state) = self.sidebar_view_menu.get() else {
+            return div().into_any_element();
+        };
+        let active = menu_state.active;
+        let focus = menu_state.focus.clone();
+        let organization = self.settings.sidebar_organization;
+        let sort = self.settings.sidebar_sort;
+        let show_branch = self.settings.sidebar_show_branch;
+        let show_pr = self.settings.sidebar_show_pull_request;
+
+        let heading = |label: &'static str| {
+            div()
+                .px(px(8.0))
+                .pt(px(7.0))
+                .pb(px(3.0))
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted.opacity(0.65))
+                .child(SharedString::from(label))
+                .into_any_element()
+        };
+        let labels = [
+            "By project",
+            "By device",
+            "In one list",
+            "Last updated",
+            "Created",
+            "Branch",
+            "Pull request",
+        ];
+        let selected = [
+            organization == SidebarOrganization::ByProject,
+            organization == SidebarOrganization::ByDevice,
+            organization == SidebarOrganization::InOneList,
+            sort == SidebarSort::LastUpdated,
+            sort == SidebarSort::Created,
+            show_branch,
+            show_pr,
+        ];
+        let mut rows: Vec<AnyElement> = SIDEBAR_VIEW_ROWS
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(ix, row)| {
+                popover::menu_row_nav(
+                    theme,
+                    selected[ix],
+                    ix == active,
+                    format!("sidebar-view-row-{ix}"),
+                )
+                .id(("sidebar-view-row", ix))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.activate_sidebar_view_row(row, cx)
+                }))
+                .child(
+                    div().w(px(16.0)).flex_none().when(selected[ix], |el| {
+                        el.child(
+                            icon(icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.text_muted),
+                        )
+                    }),
+                )
+                .child(SharedString::from(labels[ix]))
+                .into_any_element()
+            })
+            .collect();
+        let show_rows = rows.split_off(5);
+        let sort_rows = rows.split_off(3);
+        let organization_rows = rows;
+
+        popover::popover_card(theme)
+            .w(px(202.0))
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                this.sidebar_view_menu_key(event, cx)
+            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.close_sidebar_view_menu(cx)
+            }))
+            .flex()
+            .flex_col()
+            .child(heading("Organize"))
+            .children(organization_rows)
+            .child(popover::menu_separator())
+            .child(heading("Sort"))
+            .children(sort_rows)
+            .child(popover::menu_separator())
+            .child(heading("Show"))
+            .children(show_rows)
+            .into_any_element()
     }
 
     /// The sidebar's space-filter row: current filter ("All projects" or the
@@ -417,6 +638,49 @@ impl Shell {
             trigger
         };
 
+        let view_open = self.sidebar_view_menu.is_open();
+        let view_trigger = div()
+            .id("sidebar-view-options")
+            .size(px(29.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_color(theme.text_muted)
+            .bg(if view_open {
+                theme.glass_hover()
+            } else {
+                theme.glass_hover().opacity(0.0)
+            })
+            .hover(|el| el.bg(theme.glass_hover()))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.sidebar_view_menu.note_trigger_press()),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.sidebar_view_menu.take_press_was_open() {
+                    this.close_sidebar_view_menu(cx);
+                } else {
+                    this.open_sidebar_view_menu(window, cx);
+                }
+            }))
+            .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
+            .tooltip_show_delay(std::time::Duration::from_millis(350))
+            .child(icon(icons::TUNING).size(px(16.0)));
+        let view_trigger = if self.sidebar_view_menu.get().is_some() {
+            let closing = self.sidebar_view_menu.closing_since();
+            let menu = self.render_sidebar_view_menu(theme, cx);
+            view_trigger.relative().child(popover::anchored_menu_below(
+                "sidebar-view-options-menu",
+                menu,
+                closing,
+            ))
+        } else {
+            view_trigger
+        };
+
         div()
             .flex_none()
             .flex()
@@ -427,6 +691,7 @@ impl Shell {
             .pt(px(8.0))
             .pb(px(4.0))
             .child(trigger)
+            .child(view_trigger)
             .into_any_element()
     }
 
@@ -580,56 +845,151 @@ impl Shell {
     ) -> Vec<(String, f32, AnyElement)> {
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
-        let rows: Vec<ActiveChatRow> = {
+        let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
-            state
+            let mut chats: Vec<_> = state
                 .overview_chats(now)
                 .into_iter()
                 .filter(|(_, chat)| match &filter {
                     Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
                     None => true,
                 })
+                .map(|(status, chat)| (status, chat.clone()))
+                .collect();
+            match self.settings.sidebar_sort {
+                SidebarSort::Created => {
+                    chats.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+                }
+                SidebarSort::LastUpdated => chats.sort_by(|a, b| {
+                    b.1.last_message_at
+                        .unwrap_or(b.1.created_at)
+                        .cmp(&a.1.last_message_at.unwrap_or(a.1.created_at))
+                }),
+            }
+            chats
+                .into_iter()
                 .map(|(status, chat)| {
                     // Line 1 is "project @ device" (t3code's project row);
                     // project-less sessions read as their home-dir cwd `~`.
-                    let space = state.space_for_chat(chat);
-                    let mut folder = match (space, chat.space_id.as_deref()) {
+                    let space = state.space_for_chat(&chat);
+                    let project = match (space, chat.space_id.as_deref()) {
                         (Some(space), _) => space.display_name().to_string(),
                         (None, None) => "~".to_string(),
                         (None, Some(_)) => "?".to_string(),
                     };
+                    let device = state
+                        .device_name(&chat.device_id)
+                        .unwrap_or("Unknown device")
+                        .to_string();
+                    let mut folder = project.clone();
                     // Unknown device → no fragment, same as the archived list.
-                    if let Some(device) = state.device_name(&chat.device_id) {
+                    if state.device_name(&chat.device_id).is_some() {
                         folder = format!("{folder} @ {device}");
                     }
                     // The branch shows whenever the engine has stamped one —
                     // main-checkout sessions included, not just worktrees.
-                    let branch = chat
-                        .branch
-                        .as_deref()
+                    let branch = crate::change_requests::conversation_branch(&chat, &state.spaces)
                         .map(str::trim)
                         .filter(|b| !b.is_empty())
                         .map(str::to_string);
-                    let change_request = state.change_request_for_chat(chat).cloned();
+                    let change_request = state.change_request_for_chat(&chat).cloned();
+                    let group = match self.settings.sidebar_organization {
+                        SidebarOrganization::ByProject if filter.is_none() => Some((
+                            chat.space_id.clone().unwrap_or_else(|| "~".into()),
+                            project,
+                        )),
+                        SidebarOrganization::ByDevice => {
+                            Some((chat.device_id.clone(), device))
+                        }
+                        SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
+                    };
                     ActiveChatRow {
                         status,
                         chat: chat.clone(),
                         folder,
                         branch,
                         change_request,
+                        group,
                     }
                 })
                 .collect()
         };
+        if !self.settings.sidebar_show_branch {
+            for row in &mut rows {
+                row.branch = None;
+            }
+        }
+        if !self.settings.sidebar_show_pull_request {
+            for row in &mut rows {
+                row.change_request = None;
+            }
+        }
+
+        let mut groups: Vec<(Option<(String, String)>, Vec<ActiveChatRow>)> = Vec::new();
+        for row in rows {
+            if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &row.group) {
+                existing.push(row);
+            } else {
+                groups.push((row.group.clone(), vec![row]));
+            }
+        }
+
         let selected = self.state.read(cx).selected_chat.clone();
-        rows.into_iter()
-            .map(|row| {
+        let mut rendered = Vec::new();
+        for (group, rows) in groups {
+            let mut collapsed = false;
+            if let Some((key, label)) = group {
+                let organization = match self.settings.sidebar_organization {
+                    SidebarOrganization::ByProject => "project",
+                    SidebarOrganization::ByDevice => "device",
+                    SidebarOrganization::InOneList => "list",
+                };
+                let collapse_key = format!("{organization}:{key}");
+                collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
+                let toggle_key = collapse_key.clone();
+                let height = 27.0;
+                let element = div()
+                    .id(collapse_key.clone())
+                    .h(px(height))
+                    .flex()
+                    .items_end()
+                    .gap(px(4.0))
+                    .px(px(Theme::SPACE_SM))
+                    .pb(px(4.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.sidebar_collapsed_groups.remove(&toggle_key) {
+                            this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text_muted.opacity(0.65))
+                    .child(
+                        icon(if collapsed {
+                            icons::ALT_ARROW_RIGHT
+                        } else {
+                            icons::ALT_ARROW_DOWN
+                        })
+                        .size(px(12.0))
+                        .text_color(theme.text_muted.opacity(0.6)),
+                    )
+                    .child(SharedString::from(label))
+                    .into_any_element();
+                rendered.push((format!("g:{collapse_key}"), height, element));
+            }
+            if collapsed {
+                continue;
+            }
+            for row in rows {
                 let ActiveChatRow {
                     status,
                     chat,
                     folder,
                     branch,
                     change_request,
+                    group: _,
                 } = row;
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
@@ -653,9 +1013,10 @@ impl Shell {
                     theme,
                     cx,
                 );
-                (format!("c:{}", chat.id), height, element)
-            })
-            .collect()
+                rendered.push((format!("c:{}", chat.id), height, element));
+            }
+        }
+        rendered
     }
 
     /// The sidebar's archived shelf — a direct port of t3code's settled
@@ -674,7 +1035,7 @@ impl Shell {
         const PAGE: usize = 25;
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
-        let rows: Vec<zeron_proto::Chat> = {
+        let mut rows: Vec<zeron_proto::Chat> = {
             let state = self.state.read(cx);
             state
                 .chats
@@ -687,6 +1048,14 @@ impl Shell {
                 .cloned()
                 .collect()
         };
+        match self.settings.sidebar_sort {
+            SidebarSort::Created => rows.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            SidebarSort::LastUpdated => rows.sort_by(|a, b| {
+                b.last_message_at
+                    .unwrap_or(b.created_at)
+                    .cmp(&a.last_message_at.unwrap_or(a.created_at))
+            }),
+        }
         if rows.is_empty() {
             return None;
         }
@@ -832,7 +1201,11 @@ impl Shell {
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                this.chat_menu.open((menu_id.clone(), event.position));
+                                this.chat_menu.open(ChatMenuState {
+                                    chat_id: menu_id.clone(),
+                                    position: event.position,
+                                    page: ChatMenuPage::Root,
+                                });
                                 cx.notify();
                             }),
                         )

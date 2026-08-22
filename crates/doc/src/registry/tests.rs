@@ -257,6 +257,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         cwd: Some("/tmp/repo".into()),
         branch: Some("main".into()),
         checkout_id: None,
+        source_context: None,
         config: Some(ChatConfig {
             harness: HarnessId::Mock,
             model: Some("mock-1".into()),

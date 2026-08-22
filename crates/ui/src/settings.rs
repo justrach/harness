@@ -46,6 +46,23 @@ pub const SAVE_DEBOUNCE_MS: u64 = 400;
 
 const FILE_NAME: &str = "ui-settings.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarOrganization {
+    ByProject,
+    ByDevice,
+    #[default]
+    InOneList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarSort {
+    #[default]
+    LastUpdated,
+    Created,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -54,6 +71,13 @@ pub struct UiSettings {
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
+    /// How active sessions are partitioned in the sidebar.
+    pub sidebar_organization: SidebarOrganization,
+    /// Timestamp used to order active sessions (newest first).
+    pub sidebar_sort: SidebarSort,
+    /// Optional repository metadata shown below each session title.
+    pub sidebar_show_branch: bool,
+    pub sidebar_show_pull_request: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +131,10 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
+            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_show_branch: true,
+            sidebar_show_pull_request: true,
             last_space_id: None,
             open_tabs: None,
             space_filter: None,
@@ -378,6 +406,10 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
+            sidebar_organization: SidebarOrganization::ByDevice,
+            sidebar_sort: SidebarSort::Created,
+            sidebar_show_branch: false,
+            sidebar_show_pull_request: false,
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),

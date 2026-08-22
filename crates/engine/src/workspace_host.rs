@@ -872,6 +872,7 @@ impl WorkspaceHost {
                 })),
                 branch: None,
                 checkout_id: None,
+                source_context: None,
                 config,
                 last_message_preview: None,
                 last_message_at: None,
@@ -1056,6 +1057,14 @@ impl WorkspaceHost {
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
     pub fn set_chat_branch(&self, chat_id: &str, branch: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.set_chat_branch(chat_id, branch))?)
+    }
+
+    pub fn set_chat_source_context(
+        &self,
+        chat_id: &str,
+        context: &zeron_proto::ConversationSourceContext,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_source_context(chat_id, context))?)
     }
 
     /// Retarget a chat onto another folder (mid-session switch to an existing

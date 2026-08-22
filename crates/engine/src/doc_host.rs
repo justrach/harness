@@ -17,6 +17,7 @@
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
@@ -31,7 +32,7 @@ use zeron_doc::{
     SessionCommandStatus, SessionDoc, SessionMessageEntry, evaluate_command,
     join_continuation_entries,
 };
-use zeron_proto::{HarnessId, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
 use crate::sessions::{SessionsEngine, SteerOutcome};
@@ -3135,6 +3136,11 @@ impl DocHost {
                             tracing::warn!(chat = %chat_id, error = %err, "worktree branch stamp failed");
                         }
                     }
+                    if let Some(context) = self.capture_source_context(&request.cwd).await
+                        && let Err(err) = ws.set_chat_source_context(chat_id, &context)
+                    {
+                        tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+                    }
                 }
                 let harness = self.harness_for_request(chat_id, &request);
                 // A row with no config renders no harness glyph (and every
@@ -3291,6 +3297,22 @@ impl DocHost {
                 ))
             }
         }
+    }
+
+    async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
+        let repos = self.inner.repos.get()?;
+        let path = Path::new(cwd);
+        let identity = repos.checkout_identity(path).await.ok()?;
+        let branch = repos.current_branch(path).await.ok()?;
+        let head_sha = repos.head_sha(path).await.ok().flatten();
+        Some(ConversationSourceContext {
+            checkout_id: identity.id,
+            repo_root: identity.root.to_string_lossy().into_owned(),
+            cwd: cwd.to_string(),
+            branch,
+            head_sha,
+            observed_at: chrono::Utc::now(),
+        })
     }
 
     /// Create (or reuse) the isolated worktree a Run's [`zeron_proto::WorktreeSpec`]

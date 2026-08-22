@@ -173,6 +173,8 @@ pub(crate) fn pull_request_badge(
 pub(crate) struct ChangeRequestWatchKey {
     pub device_id: String,
     pub cwd: String,
+    pub branch: String,
+    pub checkout_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -241,17 +243,25 @@ pub(crate) fn desired_watch_targets(
     chats
         .iter()
         .filter(|chat| !chat.archived)
-        .filter(|chat| {
-            chat.branch
-                .as_deref()
-                .is_some_and(|branch| !branch.trim().is_empty())
-        })
         .filter(|chat| !is_unsupported(&chat.device_id))
         .filter_map(|chat| {
-            let cwd = effective_chat_cwd(chat, spaces)?;
+            let (cwd, branch, checkout_id) = if let Some(source) = &chat.source_context {
+                (
+                    source.repo_root.as_str(),
+                    source.branch.as_str(),
+                    Some(source.checkout_id.clone()),
+                )
+            } else {
+                legacy_conversation_source(chat, spaces)?
+            };
+            if branch.trim().is_empty() {
+                return None;
+            }
             Some(ChangeRequestWatchKey {
                 device_id: chat.device_id.clone(),
                 cwd: cwd.to_owned(),
+                branch: branch.to_owned(),
+                checkout_id,
             })
         })
         .collect()
@@ -261,7 +271,10 @@ pub(crate) fn watch_params(
     target: &ChangeRequestWatchKey,
     local_device_id: Option<&str>,
 ) -> serde_json::Value {
-    let mut params = serde_json::json!({ "cwd": target.cwd });
+    let mut params = serde_json::json!({
+        "cwd": target.cwd,
+        "branch": target.branch,
+    });
     if local_device_id != Some(target.device_id.as_str())
         && let Some(object) = params.as_object_mut()
     {
@@ -283,11 +296,20 @@ pub fn change_request_for_chat<'a>(
     spaces: &[Space],
     snapshots: impl IntoIterator<Item = &'a CheckoutChangeRequestStatus>,
 ) -> Option<&'a ChangeRequestSummary> {
-    let branch = chat.branch.as_deref()?.trim();
+    let branch = conversation_branch(chat, spaces)?.trim();
     if branch.is_empty() {
         return None;
     }
-    let cwd = effective_chat_cwd(chat, spaces)?;
+    let cwd = if let Some(source) = &chat.source_context {
+        source.repo_root.as_str()
+    } else {
+        legacy_conversation_source(chat, spaces)?.0
+    };
+    let checkout_id = chat
+        .source_context
+        .as_ref()
+        .map(|source| source.checkout_id.as_str())
+        .or(chat.checkout_id.as_deref());
 
     snapshots
         .into_iter()
@@ -295,11 +317,43 @@ pub fn change_request_for_chat<'a>(
             snapshot.device_id == chat.device_id
                 && snapshot.cwd == cwd
                 && snapshot.branch == branch
-                && chat.checkout_id.as_deref().is_none_or(|checkout_id| {
+                && checkout_id.is_none_or(|checkout_id| {
                     !snapshot.checkout_id.is_empty() && snapshot.checkout_id == checkout_id
                 })
         })
         .and_then(|snapshot| snapshot.change_request.as_ref())
+}
+
+/// Branch metadata safe to render for this conversation. Pre-source-context
+/// rows that point at their project's shared root are intentionally rejected:
+/// old builds copied that checkout's current branch onto every chat.
+pub(crate) fn conversation_branch<'a>(chat: &'a Chat, spaces: &'a [Space]) -> Option<&'a str> {
+    chat.source_context
+        .as_ref()
+        .map(|source| source.branch.as_str())
+        .or_else(|| legacy_conversation_source(chat, spaces).map(|(_, branch, _)| branch))
+        .filter(|branch| !branch.trim().is_empty())
+}
+
+fn legacy_conversation_source<'a>(
+    chat: &'a Chat,
+    spaces: &'a [Space],
+) -> Option<(&'a str, &'a str, Option<String>)> {
+    let cwd = effective_chat_cwd(chat, spaces)?;
+    let branch = chat.branch.as_deref()?.trim();
+    if branch.is_empty() {
+        return None;
+    }
+    let shared_root = chat.space_id.as_deref().and_then(|space_id| {
+        spaces
+            .iter()
+            .find(|space| space.id == space_id && space.device_id == chat.device_id)
+            .map(|space| space.path.as_str())
+    });
+    if shared_root.is_some_and(|root| root == cwd) {
+        return None;
+    }
+    Some((cwd, branch, chat.checkout_id.clone()))
 }
 
 fn effective_chat_cwd<'a>(chat: &'a Chat, spaces: &'a [Space]) -> Option<&'a str> {
@@ -332,6 +386,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             branch: Some("feature/pr".into()),
             checkout_id: checkout.map(str::to_owned),
+            source_context: None,
             config: None,
             last_message_preview: None,
             last_message_at: None,
@@ -376,6 +431,36 @@ mod tests {
         }
     }
 
+    fn with_source(mut chat: Chat, branch: &str) -> Chat {
+        chat.source_context = Some(zeron_proto::ConversationSourceContext {
+            checkout_id: "checkout".into(),
+            repo_root: "/repo".into(),
+            cwd: "/repo".into(),
+            branch: branch.into(),
+            head_sha: Some("abc123".into()),
+            observed_at: Utc.timestamp_opt(2, 0).unwrap(),
+        });
+        chat
+    }
+
+    #[test]
+    fn shared_checkout_keeps_conversation_branches_independent() {
+        let first = with_source(chat("first", "local", Some("/repo"), None), "feature/one");
+        let second = with_source(chat("second", "local", Some("/repo"), None), "feature/two");
+        let targets = desired_watch_targets(&[first.clone(), second.clone()], &[], |_| false);
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().any(|target| target.branch == "feature/one"));
+        assert!(targets.iter().any(|target| target.branch == "feature/two"));
+
+        let mut first_snapshot = snapshot("local", "/repo", "checkout");
+        first_snapshot.branch = "feature/one".into();
+        assert_eq!(
+            change_request_for_chat(&first, &[], [&first_snapshot]).map(|pr| pr.number),
+            Some(90)
+        );
+        assert!(change_request_for_chat(&second, &[], [&first_snapshot]).is_none());
+    }
+
     #[test]
     fn local_chat_finds_local_snapshot() {
         let chat = chat("chat", "local", Some("/repo"), Some("checkout"));
@@ -411,13 +496,11 @@ mod tests {
     }
 
     #[test]
-    fn project_root_is_used_only_when_chat_has_no_cwd() {
+    fn source_less_project_root_hides_legacy_branch_metadata() {
         let chat = chat("chat", "local", None, None);
         let status = snapshot("local", "/project", "checkout");
-        assert_eq!(
-            change_request_for_chat(&chat, &[space("local")], [&status]).map(|pr| pr.number),
-            Some(90)
-        );
+        assert!(change_request_for_chat(&chat, &[space("local")], [&status]).is_none());
+        assert!(desired_watch_targets(&[chat], &[space("local")], |_| false).is_empty());
     }
 
     #[test]
@@ -452,6 +535,8 @@ mod tests {
             ChangeRequestWatchKey {
                 device_id: "old-engine".into(),
                 cwd: "/repo".into(),
+                branch: "feature/pr".into(),
+                checkout_id: Some("checkout".into()),
             },
             snapshot("old-engine", "/repo", "checkout"),
         );
@@ -485,6 +570,8 @@ mod tests {
         let key = ChangeRequestWatchKey {
             device_id: "local".into(),
             cwd: "/repo".into(),
+            branch: "feature/pr".into(),
+            checkout_id: Some("checkout".into()),
         };
         let mut state = ChangeRequestClientState::default();
         state.store(key.clone(), snapshot("local", "/repo", "checkout"));
@@ -501,17 +588,21 @@ mod tests {
         let target = ChangeRequestWatchKey {
             device_id: "host".into(),
             cwd: "/repo".into(),
+            branch: "feature/pr".into(),
+            checkout_id: Some("checkout".into()),
         };
         assert_eq!(
             watch_params(&target, Some("host")),
             serde_json::json!({
-                "cwd": "/repo"
+                "cwd": "/repo",
+                "branch": "feature/pr"
             })
         );
         assert_eq!(
             watch_params(&target, Some("viewport")),
             serde_json::json!({
                 "cwd": "/repo",
+                "branch": "feature/pr",
                 "targetDeviceId": "host"
             })
         );
