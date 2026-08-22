@@ -53,6 +53,8 @@ icon_assets![
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT_VERTICAL, "sort-vertical"),
+    (CLOCK_CIRCLE, "clock-circle"),
+    (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),

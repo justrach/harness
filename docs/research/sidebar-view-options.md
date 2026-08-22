@@ -168,12 +168,16 @@ Sort
 Show
   Branch
   Pull request
+  Harness
 ```
 
 Defaults preserve today's presentation (`In one list`, `Last updated`, Branch
-on, Pull request on). Organizing deduplicates project/device context into section
-headers; it does not change the selected project, open tabs, or new-session
-target. Section collapsed state is local to the selected organization mode.
+on, Pull request on, Harness on). The view menu mirrors the project selector:
+it uses the same sidebar-inner width and spacing conventions, but aligns its
+trailing edge to the view-options button. Organizing deduplicates project/device
+context into section headers; it does not change the selected project, open
+tabs, or new-session target. Section collapsed state is local to the selected
+organization mode.
 
 Follow-ups, not first-slice requirements:
 

@@ -70,9 +70,10 @@ enum SidebarViewRow {
     Created,
     ShowBranch,
     ShowPullRequest,
+    ShowHarness,
 }
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 8] = [
     SidebarViewRow::ByProject,
     SidebarViewRow::ByDevice,
     SidebarViewRow::InOneList,
@@ -80,6 +81,7 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
     SidebarViewRow::Created,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
+    SidebarViewRow::ShowHarness,
 ];
 
 /// One row of the open dropdown, in display order.
@@ -369,19 +371,20 @@ impl Shell {
             SidebarViewRow::InOneList => {
                 self.settings.sidebar_organization = SidebarOrganization::InOneList
             }
-            SidebarViewRow::LastUpdated => {
-                self.settings.sidebar_sort = SidebarSort::LastUpdated
-            }
+            SidebarViewRow::LastUpdated => self.settings.sidebar_sort = SidebarSort::LastUpdated,
             SidebarViewRow::Created => self.settings.sidebar_sort = SidebarSort::Created,
             SidebarViewRow::ShowBranch => {
                 self.settings.sidebar_show_branch = !self.settings.sidebar_show_branch
             }
             SidebarViewRow::ShowPullRequest => {
-                self.settings.sidebar_show_pull_request =
-                    !self.settings.sidebar_show_pull_request;
+                self.settings.sidebar_show_pull_request = !self.settings.sidebar_show_pull_request;
                 let visible = self.settings.sidebar_show_pull_request;
-                self.state
-                    .update(cx, |state, cx| state.set_change_requests_visible(visible, cx));
+                self.state.update(cx, |state, cx| {
+                    state.set_change_requests_visible(visible, cx)
+                });
+            }
+            SidebarViewRow::ShowHarness => {
+                self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
             }
         }
         self.schedule_save(cx);
@@ -428,20 +431,10 @@ impl Shell {
         let focus = menu_state.focus.clone();
         let organization = self.settings.sidebar_organization;
         let sort = self.settings.sidebar_sort;
+        let show_harness = self.settings.sidebar_show_harness;
         let show_branch = self.settings.sidebar_show_branch;
         let show_pr = self.settings.sidebar_show_pull_request;
 
-        let heading = |label: &'static str| {
-            div()
-                .px(px(8.0))
-                .pt(px(7.0))
-                .pb(px(3.0))
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted.opacity(0.65))
-                .child(SharedString::from(label))
-                .into_any_element()
-        };
         let labels = [
             "By project",
             "By device",
@@ -450,6 +443,17 @@ impl Shell {
             "Created",
             "Branch",
             "Pull request",
+            "Harness",
+        ];
+        let icons = [
+            icons::FOLDER,
+            icons::LAPTOP,
+            icons::LIST,
+            icons::CLOCK_CIRCLE,
+            icons::CALENDAR,
+            icons::GIT_BRANCH,
+            icons::PULL_REQUEST,
+            icons::BOT,
         ];
         let selected = [
             organization == SidebarOrganization::ByProject,
@@ -459,6 +463,7 @@ impl Shell {
             sort == SidebarSort::Created,
             show_branch,
             show_pr,
+            show_harness,
         ];
         let mut rows: Vec<AnyElement> = SIDEBAR_VIEW_ROWS
             .iter()
@@ -472,19 +477,23 @@ impl Shell {
                     format!("sidebar-view-row-{ix}"),
                 )
                 .id(("sidebar-view-row", ix))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.activate_sidebar_view_row(row, cx)
-                }))
-                .child(
-                    div().w(px(16.0)).flex_none().when(selected[ix], |el| {
-                        el.child(
-                            icon(icons::CHECK)
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                        )
-                    }),
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.activate_sidebar_view_row(row, cx)),
                 )
-                .child(SharedString::from(labels[ix]))
+                .child(
+                    icon(icons[ix])
+                        .size(px(15.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.8)),
+                )
+                .child(div().flex_1().child(SharedString::from(labels[ix])))
+                .child(div().w(px(14.0)).flex_none().when(selected[ix], |el| {
+                    el.child(
+                        icon(icons::CHECK)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted),
+                    )
+                }))
                 .into_any_element()
             })
             .collect();
@@ -493,24 +502,28 @@ impl Shell {
         let organization_rows = rows;
 
         popover::popover_card(theme)
-            .w(px(202.0))
+            .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.sidebar_view_menu_key(event, cx)
             }))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_sidebar_view_menu(cx)
-            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_sidebar_view_menu(cx)))
             .flex()
             .flex_col()
-            .child(heading("Organize"))
-            .children(organization_rows)
+            .child(popover::menu_heading(theme, "Organize"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .children(organization_rows),
+            )
             .child(popover::menu_separator())
-            .child(heading("Sort"))
-            .children(sort_rows)
+            .child(popover::menu_heading(theme, "Sort"))
+            .child(div().flex().flex_col().gap(px(2.0)).children(sort_rows))
             .child(popover::menu_separator())
-            .child(heading("Show"))
-            .children(show_rows)
+            .child(popover::menu_heading(theme, "Show"))
+            .child(div().flex().flex_col().gap(px(2.0)).children(show_rows))
             .into_any_element()
     }
 
@@ -672,11 +685,13 @@ impl Shell {
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
-            view_trigger.relative().child(popover::anchored_menu_below(
-                "sidebar-view-options-menu",
-                menu,
-                closing,
-            ))
+            view_trigger
+                .relative()
+                .child(popover::anchored_menu_below_end(
+                    "sidebar-view-options-menu",
+                    menu,
+                    closing,
+                ))
         } else {
             view_trigger
         };
@@ -995,7 +1010,11 @@ impl Shell {
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let height = super::CHAT_ROW_HEIGHT;
-                let harness = chat.config.as_ref().map(|c| c.harness);
+                let harness = self
+                    .settings
+                    .sidebar_show_harness
+                    .then(|| chat.config.as_ref().map(|c| c.harness))
+                    .flatten();
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
@@ -1119,11 +1138,13 @@ impl Shell {
                 .into();
                 let time_ago: SharedString =
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let (mark, tint) = chat
-                    .config
-                    .as_ref()
-                    .map(|c| crate::pickers::harness_brand_icon(c.harness))
-                    .unwrap_or((crate::icons::CHAT_ROUND_LINE, None));
+                let brand = if self.settings.sidebar_show_harness {
+                    chat.config
+                        .as_ref()
+                        .map(|c| crate::pickers::harness_brand_icon(c.harness))
+                } else {
+                    None
+                };
                 // Right slot: time at rest; the Unarchive affordance takes
                 // its place on row hover (t3code: "only the time/jump label
                 // yields to the settle affordance").
@@ -1211,16 +1232,18 @@ impl Shell {
                         )
                         // Archived history recedes: dimmed mark at rest,
                         // restored on hover (t3code's grayscale favicon).
-                        .child(
-                            crate::icons::icon(mark)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(if hovered || is_selected {
-                                    tint.unwrap_or(theme.text_muted)
-                                } else {
-                                    tint.unwrap_or(theme.text_muted).opacity(0.4)
-                                }),
-                        )
+                        .when_some(brand, |el, (mark, tint)| {
+                            el.child(
+                                crate::icons::icon(mark)
+                                    .size(px(14.0))
+                                    .flex_none()
+                                    .text_color(if hovered || is_selected {
+                                        tint.unwrap_or(theme.text_muted)
+                                    } else {
+                                        tint.unwrap_or(theme.text_muted).opacity(0.4)
+                                    }),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
