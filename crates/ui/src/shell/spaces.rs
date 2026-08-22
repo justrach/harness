@@ -63,7 +63,6 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
-    ByProject,
     ByDevice,
     InOneList,
     LastUpdated,
@@ -73,8 +72,7 @@ enum SidebarViewRow {
     ShowHarness,
 }
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 8] = [
-    SidebarViewRow::ByProject,
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
@@ -362,9 +360,6 @@ impl Shell {
 
     fn activate_sidebar_view_row(&mut self, row: SidebarViewRow, cx: &mut Context<Self>) {
         match row {
-            SidebarViewRow::ByProject => {
-                self.settings.sidebar_organization = SidebarOrganization::ByProject
-            }
             SidebarViewRow::ByDevice => {
                 self.settings.sidebar_organization = SidebarOrganization::ByDevice
             }
@@ -436,7 +431,6 @@ impl Shell {
         let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
-            "By project",
             "By device",
             "In one list",
             "Last updated",
@@ -446,7 +440,6 @@ impl Shell {
             "Harness",
         ];
         let icons = [
-            icons::FOLDER,
             icons::LAPTOP,
             icons::LIST,
             icons::CLOCK_CIRCLE,
@@ -456,7 +449,6 @@ impl Shell {
             icons::BOT,
         ];
         let selected = [
-            organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
@@ -497,8 +489,8 @@ impl Shell {
                 .into_any_element()
             })
             .collect();
-        let show_rows = rows.split_off(5);
-        let sort_rows = rows.split_off(3);
+        let show_rows = rows.split_off(4);
+        let sort_rows = rows.split_off(2);
         let organization_rows = rows;
 
         popover::popover_card(theme)
@@ -681,7 +673,7 @@ impl Shell {
             }))
             .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
             .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(icon(icons::TUNING).size(px(16.0)));
+            .child(icon(icons::SORT_VERTICAL).size(px(16.0)));
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
@@ -909,10 +901,6 @@ impl Shell {
                         .map(str::to_string);
                     let change_request = state.change_request_for_chat(&chat).cloned();
                     let group = match self.settings.sidebar_organization {
-                        SidebarOrganization::ByProject if filter.is_none() => Some((
-                            chat.space_id.clone().unwrap_or_else(|| "~".into()),
-                            project,
-                        )),
                         SidebarOrganization::ByDevice => {
                             Some((chat.device_id.clone(), device))
                         }
@@ -955,9 +943,8 @@ impl Shell {
             let mut collapsed = false;
             if let Some((key, label)) = group {
                 let organization = match self.settings.sidebar_organization {
-                    SidebarOrganization::ByProject => "project",
                     SidebarOrganization::ByDevice => "device",
-                    SidebarOrganization::InOneList => "list",
+                    SidebarOrganization::ByProject | SidebarOrganization::InOneList => "list",
                 };
                 let collapse_key = format!("{organization}:{key}");
                 collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);

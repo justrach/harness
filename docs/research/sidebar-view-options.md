@@ -157,7 +157,6 @@ Focused first version:
 
 ```text
 Organize
-  By project
   By device
   In one list
 
@@ -171,7 +170,9 @@ Show
   Harness
 ```
 
-Defaults preserve today's presentation (`In one list`, `Last updated`, Branch
+Project scope belongs exclusively to the project selector; the legacy
+`By project` organization value normalizes to `In one list`. Defaults preserve
+today's presentation (`In one list`, `Last updated`, Branch
 on, Pull request on, Harness on). The view menu mirrors the project selector:
 it uses the same sidebar-inner width and spacing conventions, but aligns its
 trailing edge to the view-options button. Organizing deduplicates project/device
