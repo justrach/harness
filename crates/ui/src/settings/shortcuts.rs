@@ -133,6 +133,9 @@ fn description(id: ShortcutId) -> &'static str {
             "Select the previous session in the sidebar, wrapping at the start."
         }
         ShortcutId::ArchiveSession => "Move the current session to the archived shelf.",
+        // One line per slot would repeat itself nine times; the ordinal is
+        // already in the row's label.
+        ShortcutId::JumpSession(_) => "Open the session at this place in the sidebar list.",
     }
 }
 
