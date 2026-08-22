@@ -38,7 +38,10 @@ pub(super) struct SpacesMenu {
 }
 
 pub(super) struct SidebarViewMenu {
-    active: usize,
+    /// Keyboard cursor. Mouse-opened menus start without one so the persisted
+    /// radio/check state is the only selection signal until an arrow key is
+    /// pressed.
+    active: Option<usize>,
     focus: FocusHandle,
 }
 
@@ -70,6 +73,17 @@ enum SidebarViewRow {
     ShowBranch,
     ShowPullRequest,
     ShowHarness,
+}
+
+impl SidebarViewRow {
+    /// Radio-style presentation choices behave like the project selector and
+    /// dismiss after selection. Show toggles stay open for batch changes.
+    fn closes_menu(self) -> bool {
+        matches!(
+            self,
+            Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+        )
+    }
 }
 
 const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
@@ -351,7 +365,7 @@ impl Shell {
         self.close_spaces_menu(cx);
         let focus = cx.focus_handle();
         self.sidebar_view_menu.open(SidebarViewMenu {
-            active: 0,
+            active: None,
             focus: focus.clone(),
         });
         window.focus(&focus, cx);
@@ -383,6 +397,9 @@ impl Shell {
             }
         }
         self.schedule_save(cx);
+        if row.closes_menu() {
+            self.close_sidebar_view_menu(cx);
+        }
         cx.notify();
     }
 
@@ -400,17 +417,16 @@ impl Shell {
                 let up = event.keystroke.key.eq_ignore_ascii_case("arrowup");
                 if let Some(menu) = self.sidebar_view_menu.open_mut() {
                     menu.active = popover::menu_step(
-                        Some(menu.active),
+                        menu.active,
                         SIDEBAR_VIEW_ROWS.len(),
                         if up { -1 } else { 1 },
-                    )
-                    .unwrap_or(0);
+                    );
                     cx.notify();
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let active = self.sidebar_view_menu.get().map(|m| m.active).unwrap_or(0);
-                if let Some(row) = SIDEBAR_VIEW_ROWS.get(active).copied() {
+                let active = self.sidebar_view_menu.get().and_then(|m| m.active);
+                if let Some(row) = active.and_then(|ix| SIDEBAR_VIEW_ROWS.get(ix)).copied() {
                     self.activate_sidebar_view_row(row, cx);
                 }
             }
@@ -465,12 +481,17 @@ impl Shell {
                 popover::menu_row_nav(
                     theme,
                     selected[ix],
-                    ix == active,
+                    active == Some(ix),
                     format!("sidebar-view-row-{ix}"),
                 )
                 .id(("sidebar-view-row", ix))
                 .on_click(
-                    cx.listener(move |this, _, _, cx| this.activate_sidebar_view_row(row, cx)),
+                    cx.listener(move |this, _, _, cx| {
+                        if let Some(menu) = this.sidebar_view_menu.open_mut() {
+                            menu.active = None;
+                        }
+                        this.activate_sidebar_view_row(row, cx)
+                    }),
                 )
                 .child(
                     icon(icons[ix])
@@ -673,7 +694,11 @@ impl Shell {
             }))
             .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
             .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(icon(icons::SORT_VERTICAL).size(px(16.0)));
+            .child(
+                icon(icons::SORT_VERTICAL)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            );
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
