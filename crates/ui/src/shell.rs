@@ -3717,23 +3717,10 @@ impl Shell {
         };
         let queued = queued && !undelivered;
         let corner_body: AnyElement = if let Some(label) = jump_label {
-            // t3code's jump chip: a small key-cap in the corner the time-ago
-            // normally holds, so the overlay reflows nothing.
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(18.0))
-                .px(px(5.0))
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.surface_raised)
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(label)
-                .into_any_element()
+            // The jump hint replaces the status/time corner while the modifier
+            // is held, wearing the app's standard badge (the Accounts plan
+            // badge) rather than a bespoke key-cap.
+            crate::settings::widgets::badge(&theme, label).into_any_element()
         } else if corner_hovered {
             div()
                 .flex()
