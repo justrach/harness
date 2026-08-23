@@ -3731,9 +3731,29 @@ impl Shell {
         let queued = queued && !undelivered;
         let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
-            // is held, wearing the app's keyboard-hint badge — the same
-            // borderless chip as the model picker's ⌘N hints, PR-badge scale.
-            crate::popover::kbd_hint(&theme, &label).into_any_element()
+            // is held, cut to the sidebar PR badge's exact cloth
+            // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
+            // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
+            // neutral here — and the label in the badge's mono at 10 MEDIUM.
+            // Any other geometry reads as a second badge system on the row.
+            {
+                let tone = theme.text_muted;
+                div()
+                    .h(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(tone.opacity(0.08))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tone.opacity(0.85))
+                    .font_family(theme.font_mono.clone())
+                    .child(label)
+                    .into_any_element()
+            }
         } else if corner_hovered {
             div()
                 .flex()
