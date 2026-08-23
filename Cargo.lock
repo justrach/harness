@@ -9328,7 +9328,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.21"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "clap",
