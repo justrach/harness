@@ -6,13 +6,6 @@
 
 use super::*;
 
-/// Whether a chat belongs in the sidebar's Sessions list under `filter`
-/// (`None` = "All spaces"). Shared with [`Shell::render_active_rows`] so the
-/// cycling order can never drift from the list the user is looking at.
-pub(super) fn in_space_filter(chat: &zeron_proto::Chat, filter: Option<&str>) -> bool {
-    filter.is_none_or(|space_id| chat.space_id.as_deref() == Some(space_id))
-}
-
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
 ///
@@ -64,10 +57,11 @@ impl Shell {
         let filter = self.settings.space_filter.clone();
         let (order, selected) = {
             let state = self.state.read(cx);
+            // The same list `render_active_rows` draws and the jump shortcuts
+            // count — one function, so neither can drift from the screen.
             let order = state
-                .overview_chats(Utc::now())
+                .sidebar_chats(Utc::now(), filter.as_deref())
                 .into_iter()
-                .filter(|(_, chat)| in_space_filter(chat, filter.as_deref()))
                 .map(|(_, chat)| chat.id.clone())
                 .collect::<Vec<_>>();
             (order, state.selected_chat.clone())
@@ -365,27 +359,6 @@ mod cycle_tests {
         ids.iter().map(|id| id.to_string()).collect()
     }
 
-    fn chat(id: &str, space_id: Option<&str>) -> zeron_proto::Chat {
-        zeron_proto::Chat {
-            id: id.into(),
-            device_id: "dev".into(),
-            title: None,
-            archived: false,
-            cwd: None,
-            branch: None,
-            checkout_id: None,
-            config: None,
-            last_message_preview: None,
-            last_message_at: None,
-            created_at: Utc::now(),
-            harness_session_id: None,
-            harness_session_cwd: None,
-            space_id: space_id.map(Into::into),
-            last_seen_at: None,
-            room_gen: None,
-        }
-    }
-
     #[test]
     fn steps_forward_and_back_through_the_list() {
         let list = order(&["a", "b", "c"]);
@@ -438,18 +411,9 @@ mod cycle_tests {
         assert_eq!(cycle_target(&[], Some("a"), true), None);
     }
 
-    #[test]
-    fn cycling_honors_the_sidebar_space_filter() {
-        // Cycling walks the rows the sidebar is drawing, not every chat: under
-        // a space filter the shortcut must not jump to a hidden session.
-        let mine = chat("mine", Some("space-1"));
-        let theirs = chat("theirs", Some("space-2"));
-        let loose = chat("loose", None);
-        assert!(in_space_filter(&mine, Some("space-1")));
-        assert!(!in_space_filter(&theirs, Some("space-1")));
-        assert!(!in_space_filter(&loose, Some("space-1")));
-        for chat in [&mine, &theirs, &loose] {
-            assert!(in_space_filter(chat, None));
-        }
-    }
+    // Cycling walks the rows the sidebar is drawing, not every chat: that
+    // guarantee is structural now — `cycle_session` reads the same
+    // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
+    // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
+    // space-filter behaviour for all of them.
 }
