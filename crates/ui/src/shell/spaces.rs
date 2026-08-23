@@ -618,7 +618,9 @@ impl Shell {
                 .collect()
         };
         let selected = self.state.read(cx).selected_chat.clone();
-        let jump_hints = self.jump_hints;
+        // Re-checked at render so the chips drop the FRAME a popover opens,
+        // not on the next modifier event — the jumps are suppressed under it.
+        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
         let keymap = self.settings.keymap.clone();
         rows.into_iter()
             .enumerate()

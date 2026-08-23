@@ -873,6 +873,13 @@ impl Pickers {
         self.open.as_open().copied()
     }
 
+    /// Whether any picker popover is open (shell-side: session-nav shortcuts
+    /// go quiet underneath an open popover instead of yanking the session out
+    /// from under it).
+    pub fn is_open(&self) -> bool {
+        self.open.as_open().is_some()
+    }
+
     /// The picker to render: open or mid-exit.
     fn mounted_kind(&self) -> Option<PickerKind> {
         self.open.get().copied()

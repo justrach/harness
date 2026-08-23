@@ -2462,6 +2462,16 @@ impl Shell {
         self.open_chat(chat_id, cx);
     }
 
+    /// Whether an overlay that owns the keyboard is up — the add-space
+    /// palette or a composer picker popover (model selector, traits, repo,
+    /// branch…). Session-nav shortcuts (cycle/jump/archive) go quiet
+    /// underneath one: gpui runs a matched binding before any `on_key_down`,
+    /// so an unguarded jump would switch sessions UNDER the open popover,
+    /// stranding it over a session the user never picked.
+    pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
+        self.add_space.is_some() || self.composer.read(cx).pickers().read(cx).is_open()
+    }
+
     /// Track the held modifiers so the sidebar can show its jump hints. Only a
     /// change in visibility repaints — modifier traffic is otherwise constant.
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
@@ -2471,7 +2481,10 @@ impl Shell {
         } else {
             mods.control
         };
+        // No hints while an overlay owns the keyboard — the jumps they
+        // advertise are suppressed there.
         let visible = matches!(self.route, Route::Chat)
+            && !self.overlay_owns_keyboard(cx)
             && jump_hints_visible(&self.settings.keymap, primary, mods.alt, mods.shift);
         self.set_jump_hints(visible, cx);
     }
@@ -7165,17 +7178,21 @@ impl Render for Shell {
                 }
             }))
             // Chat-scoped like the panel toggles: Settings has no current
-            // session to archive.
+            // session to archive. Quiet under an open popover, like the other
+            // session-nav shortcuts.
             .on_action(cx.listener(|this, _: &ArchiveSession, _, cx| {
-                if matches!(this.route, Route::Chat) {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
                     this.archive_selected_chat(cx)
                 }
             }))
             // A jump routes back to chat itself, so Settings is not a dead
-            // spot — the same call a click on that sidebar row makes.
-            .on_action(
-                cx.listener(|this, jump: &JumpSession, _, cx| this.jump_to_session(jump.0, cx)),
-            )
+            // spot — the same call a click on that sidebar row makes. But an
+            // open picker/palette owns the keyboard: no jumping underneath it.
+            .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
+                if !this.overlay_owns_keyboard(cx) {
+                    this.jump_to_session(jump.0, cx)
+                }
+            }))
             .on_modifiers_changed(
                 cx.listener(|this, event, _, cx| this.on_modifiers_changed(event, cx)),
             )
