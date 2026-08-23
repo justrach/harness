@@ -44,7 +44,7 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     CHAT_PANEL_MIN, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
     SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, ShortcutId, TERMINAL_DEFAULT_HEIGHT, UiSettings,
-    display_combo, jump_hints_visible, platform_combo,
+    badge_combo, jump_hints_visible, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -3731,9 +3731,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
-            // is held, wearing the app's standard badge (the Accounts plan
-            // badge) rather than a bespoke key-cap.
-            crate::settings::widgets::badge(&theme, label).into_any_element()
+            // is held, wearing the app's keyboard-hint badge — the same
+            // borderless chip as the model picker's ⌘N hints, PR-badge scale.
+            crate::popover::kbd_hint(&theme, &label).into_any_element()
         } else if corner_hovered {
             div()
                 .flex()

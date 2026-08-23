@@ -641,7 +641,7 @@ impl Shell {
                 // keeps its time-ago.
                 let jump_label: Option<SharedString> = if jump_hints {
                     let combo = keymap.get(ShortcutId::JumpSession(slot));
-                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| display_combo(combo).into())
+                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
                 } else {
                     None
                 };
