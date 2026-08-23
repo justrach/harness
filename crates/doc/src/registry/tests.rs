@@ -368,6 +368,54 @@ fn rows_round_trip_and_upsert_refreshes() {
 }
 
 #[test]
+fn future_harness_chat_rows_stay_visible_without_their_config() {
+    // Field incident: a pre-v0.2.10 client received rows whose
+    // config.harness said "opencode" — a variant it didn't have — and
+    // dropped the WHOLE row ("skipping malformed registry row"), so new
+    // sessions silently never appeared in that device's sidebar. Unknown
+    // config values must cost the config, not the row.
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let fields: std::collections::BTreeMap<String, serde_json::Value> = [
+        ("id".to_owned(), json!("chat-2")),
+        ("deviceId".to_owned(), json!("dev-b")),
+        ("createdAt".to_owned(), json!(1_000)),
+        (
+            "config".to_owned(),
+            json!({
+                "harness": "harness-from-the-future",
+                "model": "novel/model",
+                "sandbox": "workspace-write",
+            }),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    ws.apply_rows(
+        7,
+        vec![RegistryRow {
+            kind: "chats".into(),
+            id: "chat-2".into(),
+            seq: 7,
+            deleted: false,
+            del_hlc: None,
+            fields,
+            clocks: Default::default(),
+        }],
+    );
+
+    let chats = ws.read_chats().unwrap();
+    assert_eq!(chats.len(), 2, "the future-harness row must not vanish");
+    let newcomer = chats.iter().find(|c| c.id == "chat-2").expect("visible");
+    assert_eq!(
+        newcomer.config, None,
+        "unknown config degrades, row survives"
+    );
+    // The well-formed sibling keeps its config untouched.
+    assert!(chats.iter().any(|c| c.id == "chat-1" && c.config.is_some()));
+}
+
+#[test]
 fn field_mutators_round_trip() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_device(&device("dev-a", "laptop")).unwrap();
