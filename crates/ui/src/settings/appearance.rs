@@ -129,11 +129,9 @@ impl AppearancePage {
                     .iter()
                     .map(|variant| variant.id.clone())
                     .collect();
-                dialog.review_variant = compilation
-                    .family
-                    .variants
-                    .first()
-                    .map(|variant| variant.id.clone());
+                // Mapping diagnostics are useful, but they are an advanced
+                // inspection surface rather than part of the happy path.
+                dialog.review_variant = None;
                 dialog.compilation = Some(compilation);
                 dialog.error = None;
             }
@@ -440,7 +438,18 @@ fn compact_action(
     id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
-    popover::btn_ghost(theme, label, id.clone()).id(id)
+    popover::btn_ghost(theme, label, id.clone())
+        .id(id)
+        .h(px(28.0))
+        .px(px(9.0))
+        .py(px(0.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised.opacity(0.34))
+        .flex()
+        .items_center()
+        .text_size(px(11.5))
 }
 
 fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
@@ -893,172 +902,163 @@ impl AppearancePage {
         let review_variant = dialog.review_variant.clone();
         let error = dialog.error.clone();
         let ready = compilation.is_some() && !selected.is_empty();
-        let card_radius = 14.0;
-        let hairline = crate::theme::hairline(0.06);
-        let band = popover::band();
+        let hairline = crate::theme::hairline(0.08);
 
         let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
-            popover::menu_row(
-                theme,
-                active,
-                SharedString::from(format!("theme-import-mode-hover-{}", slug(label))),
-            )
-            .id(SharedString::from(format!(
-                "theme-import-mode-{}",
-                slug(label)
-            )))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(dialog) = this.import_dialog.as_mut() {
-                    dialog.mode = value;
-                }
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(if active { theme.text } else { theme.text_muted })
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .mt(px(1.0))
-                            .text_size(px(10.5))
-                            .text_color(theme.text_muted.opacity(0.55))
-                            .child(description),
-                    ),
-            )
-            .when(active, |row| {
-                row.child(
-                    icons::icon(icons::CHECK)
-                        .size(px(13.0))
-                        .flex_none()
-                        .text_color(theme.accent),
-                )
-            })
-        };
-
-        let action_label = if compilation.is_some() {
-            "Import selected"
-        } else {
-            "Analyze"
-        };
-        let action = popover::btn_primary(theme, "")
-            .id("theme-import-action")
-            .h(px(24.0))
-            .px(px(8.0))
-            .py(px(0.0))
-            .rounded(px(5.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .text_size(px(12.0))
-            .when(compilation.is_some() && !ready, |button| {
-                button.opacity(0.45)
-            })
-            .when(compilation.is_none() || ready, |button| {
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    if this
-                        .import_dialog
-                        .as_ref()
-                        .is_some_and(|dialog| dialog.compilation.is_some())
-                    {
-                        this.finish_import(cx);
-                    } else {
-                        this.compile_import(cx);
+            div()
+                .id(SharedString::from(format!(
+                    "theme-import-mode-{}",
+                    slug(label)
+                )))
+                .flex_1()
+                .min_w_0()
+                .p(px(10.0))
+                .rounded(px(9.0))
+                .border_1()
+                .border_color(if active { theme.accent } else { theme.border })
+                .bg(if active {
+                    theme.accent_wash
+                } else {
+                    theme.surface_raised.opacity(0.28)
+                })
+                .cursor_pointer()
+                .when(!active, |control| {
+                    control.hover(|style| style.bg(theme.surface_raised_hover))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(dialog) = this.import_dialog.as_mut() {
+                        dialog.mode = value;
                     }
+                    cx.notify();
                 }))
-            })
-            .child(
-                icons::icon(icons::RETURN)
-                    .size(px(11.0))
-                    .text_color(theme.on_solid.opacity(0.8)),
-            )
-            .child(action_label);
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(
+                            div()
+                                .size(px(16.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(if active {
+                                    theme.accent
+                                } else {
+                                    theme.border_strong
+                                })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(active, |dot| {
+                                    dot.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if active { theme.text } else { theme.text_muted })
+                                .child(label),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(4.0))
+                        .ml(px(23.0))
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted.opacity(0.68))
+                        .child(description),
+                )
+        };
 
-        let header = div()
-            .h(px(48.0))
-            .flex_none()
-            .rounded_t(px(card_radius))
-            .pl(px(12.0))
-            .pr(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .bg(band)
-            .border_b_1()
-            .border_color(hairline)
-            .child(
-                popover::key_cap(theme).child(
-                    icons::icon(icons::DOCUMENT_ADD)
-                        .size(px(13.0))
-                        .text_color(theme.text_muted.opacity(0.75)),
-                ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(14.0))
-                    .child(input.into_any_element()),
-            )
-            .child(
-                popover::btn_ghost(theme, "Browse", "theme-import-browse")
-                    .id("theme-import-browse")
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .py(px(0.0))
-                    .rounded(px(5.0))
-                    .flex_none()
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
-            )
-            .child(action)
-            .child(
-                popover::key_cap(theme)
-                    .id("theme-import-esc")
-                    .cursor_pointer()
-                    .hover(|style| style.bg(crate::theme::ink(0.09)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.import_dialog = None;
-                        cx.notify();
-                    }))
-                    .text_size(px(11.0))
-                    .font_family(theme.font_mono.clone())
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child("esc"),
-            );
+        let section_label = |label: &'static str| {
+            div()
+                .mb(px(7.0))
+                .text_size(px(11.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.text_muted)
+                .child(label)
+        };
 
         let mut main = div()
             .id("theme-import-main")
-            .flex_1()
-            .min_w_0()
-            .h_full()
+            .max_h(px(520.0))
             .overflow_y_scroll()
-            .px(px(8.0))
-            .py(px(8.0))
+            .px(px(20.0))
+            .pb(px(18.0))
             .flex()
             .flex_col()
-            .gap(px(3.0));
+            .child(section_label("Source"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        popover::dialog_field(input.into_any_element())
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(36.0))
+                            .py(px(0.0))
+                            .flex()
+                            .items_center(),
+                    )
+                    .child(
+                        compact_action(theme, "Browse…", "theme-import-browse")
+                            .h(px(36.0))
+                            .px(px(12.0))
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .child(section_label("Keep it up to date"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(mode_control(
+                                "Import a copy",
+                                "Works independently from the original file.",
+                                InstallMode::Snapshot,
+                            ))
+                            .child(mode_control(
+                                "Link to source",
+                                "Reload changes from the file on disk.",
+                                InstallMode::Link,
+                            )),
+                    ),
+            );
 
         if let Some(ref compilation) = compilation {
-            main = main
-                .child(popover::menu_heading(theme, "Detected variants"))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pb(px(5.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_muted.opacity(0.6))
-                        .child(SharedString::from(format!(
-                            "{} · Select the variants to keep",
-                            compilation.family.name
-                        ))),
-                );
+            main = main.child(
+                div()
+                    .mt(px(18.0))
+                    .pt(px(16.0))
+                    .border_t_1()
+                    .border_color(hairline)
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .child(section_label("Detected themes").mb(px(0.0)))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.text_muted.opacity(0.65))
+                            .child(SharedString::from(format!(
+                                "{} variant{}",
+                                compilation.family.variants.len(),
+                                if compilation.family.variants.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            ))),
+                    ),
+            );
             for variant in &compilation.family.variants {
                 let variant_id = variant.id.clone();
                 let selected_now = selected.contains(&variant_id);
@@ -1075,121 +1075,133 @@ impl AppearancePage {
                     SurfacePreference::ThemeDefault,
                 );
                 main = main.child(
-                    popover::menu_row(
-                        theme,
-                        selected_now,
-                        SharedString::from(format!("theme-import-row-hover-{variant_id}")),
-                    )
-                    .id(SharedString::from(format!("theme-import-row-{variant_id}")))
-                    .flex_col()
-                    .items_stretch()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(9.0))
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "theme-import-select-{variant_id}"
-                                    )))
-                                    .size(px(18.0))
-                                    .rounded(px(5.0))
-                                    .border_1()
-                                    .border_color(if selected_now {
-                                        theme.accent
-                                    } else {
-                                        theme.border_strong
-                                    })
-                                    .bg(if selected_now { theme.accent } else { theme.bg })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .when(selected_now, |item| {
-                                        item.child(
-                                            icons::icon(icons::CHECK)
-                                                .size(px(12.0))
-                                                .text_color(theme.on_accent),
+                    div()
+                        .id(SharedString::from(format!("theme-import-row-{variant_id}")))
+                        .mt(px(8.0))
+                        .p(px(11.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(if selected_now {
+                            theme.accent.opacity(0.7)
+                        } else {
+                            theme.border
+                        })
+                        .bg(if selected_now {
+                            theme.accent_wash.opacity(0.42)
+                        } else {
+                            theme.surface_raised.opacity(0.22)
+                        })
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(9.0))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "theme-import-select-{variant_id}"
+                                        )))
+                                        .size(px(18.0))
+                                        .rounded(px(5.0))
+                                        .border_1()
+                                        .border_color(if selected_now {
+                                            theme.accent
+                                        } else {
+                                            theme.border_strong
+                                        })
+                                        .bg(if selected_now { theme.accent } else { theme.bg })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .when(selected_now, |item| {
+                                            item.child(
+                                                icons::icon(icons::CHECK)
+                                                    .size(px(12.0))
+                                                    .text_color(theme.on_accent),
+                                            )
+                                        })
+                                        .on_click(cx.listener({
+                                            let variant_id = variant_id.clone();
+                                            move |this, _, _, cx| {
+                                                if let Some(dialog) = this.import_dialog.as_mut() {
+                                                    if !dialog.selected.remove(&variant_id) {
+                                                        dialog.selected.insert(variant_id.clone());
+                                                    }
+                                                }
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                                .child(palette_preview(&sample))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_size(px(12.5))
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .text_color(theme.text)
+                                                .child(SharedString::from(variant.name.clone())),
                                         )
-                                    })
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted.opacity(0.65))
+                                                .child(appearance),
+                                        ),
+                                )
+                                .child(
+                                    compact_action(
+                                        theme,
+                                        if review_open {
+                                            "Hide details"
+                                        } else {
+                                            "Details"
+                                        },
+                                        format!("theme-import-review-{variant_id}"),
+                                    )
                                     .on_click(cx.listener({
                                         let variant_id = variant_id.clone();
                                         move |this, _, _, cx| {
                                             if let Some(dialog) = this.import_dialog.as_mut() {
-                                                if !dialog.selected.remove(&variant_id) {
-                                                    dialog.selected.insert(variant_id.clone());
-                                                }
+                                                dialog.review_variant =
+                                                    if dialog.review_variant.as_deref()
+                                                        == Some(variant_id.as_str())
+                                                    {
+                                                        None
+                                                    } else {
+                                                        Some(variant_id.clone())
+                                                    };
                                             }
                                             cx.notify();
                                         }
                                     })),
-                            )
-                            .child(palette_preview(&sample))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.5))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child(SharedString::from(variant.name.clone())),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_muted.opacity(0.65))
-                                            .child(appearance),
-                                    ),
-                            )
-                            .child(
-                                compact_action(
-                                    theme,
-                                    if review_open {
-                                        "Hide mapping"
-                                    } else {
-                                        "Review mapping"
-                                    },
-                                    format!("theme-import-review-{variant_id}"),
-                                )
-                                .on_click(cx.listener({
-                                    let variant_id = variant_id.clone();
-                                    move |this, _, _, cx| {
-                                        if let Some(dialog) = this.import_dialog.as_mut() {
-                                            dialog.review_variant =
-                                                if dialog.review_variant.as_deref()
-                                                    == Some(variant_id.as_str())
-                                                {
-                                                    None
-                                                } else {
-                                                    Some(variant_id.clone())
-                                                };
-                                        }
-                                        cx.notify();
-                                    }
-                                })),
-                            ),
-                    )
-                    .when(review_open, |row| {
-                        row.child(
-                            div()
-                                .mt(px(8.0))
-                                .pt(px(8.0))
-                                .border_t_1()
-                                .border_color(hairline)
-                                .child(import_scene_preview(variant)),
+                                ),
                         )
-                        .when_some(report, |row, report| row.child(report_panel(theme, report)))
-                    }),
+                        .when(review_open, |row| {
+                            row.child(
+                                div()
+                                    .mt(px(10.0))
+                                    .pt(px(10.0))
+                                    .border_t_1()
+                                    .border_color(hairline)
+                                    .child(import_scene_preview(variant)),
+                            )
+                            .when_some(report, |row, report| row.child(report_panel(theme, report)))
+                        }),
                 );
             }
             for failure in &compilation.failures {
                 main = main.child(
                     div()
-                        .px(px(8.0))
-                        .py(px(5.0))
+                        .mt(px(8.0))
+                        .p(px(10.0))
+                        .rounded(px(8.0))
+                        .bg(theme.warning.opacity(0.08))
                         .text_size(px(11.0))
                         .text_color(theme.warning)
                         .child(SharedString::from(format!(
@@ -1199,137 +1211,150 @@ impl AppearancePage {
                 );
             }
         } else {
-            main = main
-                .child(popover::menu_heading(theme, "Add a theme"))
-                .child(
-                    popover::menu_row(theme, false, "theme-import-local-source-hover")
-                        .id("theme-import-local-source")
-                        .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx)))
-                        .child(
-                            icons::icon(icons::FOLDER_WITH_FILES)
-                                .size(px(15.0))
-                                .flex_none()
-                                .text_color(theme.text_muted.opacity(0.8)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .text_color(theme.text)
-                                        .child("Choose a local source"),
-                                )
-                                .child(
-                                    div()
-                                        .mt(px(1.0))
-                                        .text_size(px(10.5))
-                                        .text_color(theme.text_muted.opacity(0.55))
-                                        .child("Theme file, package.json, or extension folder"),
-                                ),
-                        )
-                        .child(popover::kbd_hint(theme, "Browse")),
-                )
-                .child(
-                    div()
-                        .mx(px(8.0))
-                        .mt(px(7.0))
-                        .pt(px(10.0))
-                        .border_t_1()
-                        .border_color(hairline)
-                        .text_size(px(11.0))
-                        .line_height(px(16.0))
-                        .text_color(theme.text_muted.opacity(0.55))
-                        .child(
-                            "Zeron detects light and dark variants, maps the palette, and validates contrast before import.",
-                        ),
-                );
-        }
-
-        let rail = div()
-            .w(px(196.0))
-            .flex_none()
-            .h_full()
-            .border_l_1()
-            .border_color(hairline)
-            .px(px(8.0))
-            .py(px(8.0))
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .child(popover::menu_heading(theme, "Import mode"))
-            .child(mode_control(
-                "Import snapshot",
-                "Keep a self-contained copy",
-                InstallMode::Snapshot,
-            ))
-            .child(mode_control(
-                "Link source",
-                "Reload changes from disk",
-                InstallMode::Link,
-            ))
-            .child(div().h(px(1.0)).mx(px(2.0)).my(px(7.0)).bg(hairline))
-            .child(
+            main = main.child(
                 div()
-                    .px(px(8.0))
+                    .mt(px(14.0))
                     .flex()
                     .items_start()
-                    .gap(px(6.0))
-                    .text_size(px(10.5))
-                    .line_height(px(15.0))
-                    .text_color(theme.text_muted.opacity(0.5))
+                    .gap(px(7.0))
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_muted.opacity(0.72))
                     .child(
                         icons::icon(icons::INFO_CIRCLE)
-                            .size(px(12.0))
+                            .size(px(13.0))
+                            .mt(px(1.0))
+                            .flex_none(),
+                    )
+                    .child("Zeron finds light and dark variants automatically."),
+            );
+        }
+
+        if let Some(error) = error {
+            main = main.child(
+                div()
+                    .mt(px(12.0))
+                    .p(px(10.0))
+                    .rounded(px(8.0))
+                    .bg(theme.danger.opacity(0.08))
+                    .flex()
+                    .items_start()
+                    .gap(px(7.0))
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.danger)
+                    .child(
+                        icons::icon(icons::DANGER_TRIANGLE)
+                            .size(px(13.0))
                             .flex_none()
                             .mt(px(1.0)),
                     )
-                    .child("Theme tokens are compiled into Zeron roles."),
+                    .child(div().flex_1().min_w_0().truncate().child(error)),
+            );
+        }
+
+        let header = div()
+            .px(px(20.0))
+            .pt(px(18.0))
+            .pb(px(16.0))
+            .flex()
+            .items_start()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(popover::dialog_title(theme, "Add a theme"))
+                    .child(
+                        popover::dialog_body(
+                            theme,
+                            "Import a local theme into your library or keep it linked to its source.",
+                        )
+                        .mt(px(4.0)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("theme-import-close")
+                    .size(px(28.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.surface_raised.opacity(0.28))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.surface_raised_hover))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.import_dialog = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        icons::icon(icons::CLOSE)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
             );
 
-        let body = div()
-            .h(px(if compilation.is_some() { 460.0 } else { 250.0 }))
-            .flex()
-            .items_stretch()
-            .child(main)
-            .child(rail);
-
         let footer = div()
-            .flex_none()
-            .rounded_b(px(card_radius))
-            .bg(band)
             .border_t_1()
             .border_color(hairline)
-            .px(px(12.0))
-            .py(px(8.0))
+            .bg(theme.surface_raised.opacity(0.18))
+            .px(px(20.0))
+            .py(px(12.0))
             .flex()
             .items_center()
-            .gap(px(12.0))
-            .child(popover::key_hint(
-                theme,
-                icons::RETURN,
-                if compilation.is_some() {
-                    "Import selected"
-                } else {
-                    "Analyze"
-                },
-            ))
-            .child(popover::key_hint_text(theme, "esc", "Close"))
-            .when_some(error, |footer, error| {
-                footer.child(
-                    div()
-                        .ml_auto()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.0))
-                        .text_color(theme.danger)
-                        .child(error),
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                compact_action(theme, "Cancel", "theme-import-cancel")
+                    .h(px(34.0))
+                    .px(px(13.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.import_dialog = None;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                popover::btn_primary(
+                    theme,
+                    if compilation.is_some() {
+                        "Import selected"
+                    } else {
+                        "Analyze theme"
+                    },
                 )
-            });
+                .id("theme-import-action")
+                .h(px(34.0))
+                .px(px(14.0))
+                .py(px(0.0))
+                .flex()
+                .items_center()
+                .when(compilation.is_some() && !ready, |button| {
+                    button.opacity(0.45)
+                })
+                .when(compilation.is_none() || ready, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        if this
+                            .import_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.compilation.is_some())
+                        {
+                            this.finish_import(cx);
+                        } else {
+                            this.compile_import(cx);
+                        }
+                    }))
+                }),
+            );
 
-        let card = popover::palette_card(theme, px(680.0), card_radius)
+        let card = popover::dialog_card(theme)
             .id("theme-import-card")
+            .w(px(600.0))
+            .max_h(px(760.0))
+            .p(px(0.0))
+            .overflow_hidden()
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 match popover::classify_key(
@@ -1360,16 +1385,11 @@ impl AppearancePage {
                 cx.notify();
             }))
             .child(header)
-            .child(body)
+            .child(main)
             .child(footer)
             .into_any_element();
 
-        Some(popover::modal_glass(
-            "theme-import-dialog",
-            viewport,
-            card,
-            card_radius,
-        ))
+        Some(popover::modal("theme-import-dialog", viewport, card))
     }
 
     fn render_review_dialog(
