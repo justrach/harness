@@ -52,7 +52,10 @@ icon_assets![
     (MONITOR, "monitor"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
+    (SORT, "sort"),
     (SORT_VERTICAL, "sort-vertical"),
+    (CLOCK_CIRCLE, "clock-circle"),
+    (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
@@ -87,6 +90,8 @@ icon_assets![
     // Hand-drawn expand/maximize arrows in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no expand glyph.
     (EXPAND_ARROWS, "expand-arrows"),
+    // Inward-pointing companion used to restore an expanded pane.
+    (COLLAPSE_ARROWS, "collapse-arrows"),
     // Hand-drawn fold-all chevrons, drawn as a family with EXPAND_ARROWS
     // (same stroke, caps, 90° joints) — Solar has no unfold-less either.
     (FOLD_VERTICAL, "fold-vertical"),
