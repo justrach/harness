@@ -45,7 +45,16 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 /// EphemeralStore's 30s TTL the old workspace room used).
 const PRESENCE_TTL: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
-const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Worst-case dark window after the network returns (event wakes usually
+/// beat this; the cap only matters when every event path missed).
+const BACKOFF_CAP: Duration = Duration::from_secs(16);
+/// A joined session must survive this long before a disconnect resets the
+/// backoff to base. Resetting on join alone lets a connect-and-die socket
+/// (captive portal, half-broken NAT) hot-loop at 250ms forever.
+const STABLE_RESET: Duration = Duration::from_secs(30);
+/// Safety re-check cadence while parked on "OS says offline" — a stuck or
+/// wrong path monitor degrades to slow polling, never to silence.
+const OFFLINE_PARK_RECHECK: Duration = Duration::from_secs(30);
 
 /// Quiet-room probe cadence default. The workspace registry is one room per
 /// engine, so a fixed 15min cadence costs ~100 DO wakes/day total.
@@ -234,6 +243,9 @@ async fn pump(
 #[derive(Default)]
 struct Stats {
     connected: std::sync::atomic::AtomicBool,
+    /// Latched once a server state applies this process (hello or HTTPS
+    /// pull) — never cleared by disconnects; see `RoomStatsSnapshot::synced`.
+    synced: std::sync::atomic::AtomicBool,
     last_pushed_ms: std::sync::atomic::AtomicI64,
     last_ack_ms: std::sync::atomic::AtomicI64,
     rejoins: std::sync::atomic::AtomicU64,
@@ -241,6 +253,25 @@ struct Stats {
     full_resyncs: std::sync::atomic::AtomicU64,
     disconnects: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
+    /// Epoch ms of the next scheduled dial attempt (0 = connected or dialing
+    /// right now). Drives the "Reconnecting — retrying in Ns" countdown.
+    retry_at_ms: std::sync::atomic::AtomicI64,
+    /// Monotonic dial-attempt counter; each attempt's number is its trace id
+    /// in logs, so an incident reads as one numbered sequence.
+    dial_seq: std::sync::atomic::AtomicU64,
+    /// The failure that started/extended the current outage. Sticky: cleared
+    /// only by a successful join, so the UI can keep the last failure visible
+    /// through the next attempt instead of flickering to "connecting…".
+    last_failure: Mutex<Option<String>>,
+}
+
+/// One room's reconnect posture, for connection-status UI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconnectState {
+    /// Epoch ms of the next scheduled dial (0 = none pending).
+    pub retry_at_ms: i64,
+    /// Failure that started the current outage; `None` once rejoined.
+    pub last_failure: Option<String>,
 }
 
 impl Stats {
@@ -248,6 +279,7 @@ impl Stats {
         use std::sync::atomic::Ordering::Relaxed;
         RoomStatsSnapshot {
             connected: self.connected.load(Relaxed),
+            synced: self.synced.load(Relaxed),
             last_pushed_ms: self.last_pushed_ms.load(Relaxed),
             last_ack_ms: self.last_ack_ms.load(Relaxed),
             rejoins: self.rejoins.load(Relaxed),
@@ -448,6 +480,18 @@ impl RegistryClient {
         self.stats.snapshot()
     }
 
+    /// Current reconnect posture (next-dial deadline + sticky last failure)
+    /// for connection-status UI.
+    pub fn reconnect_state(&self) -> ReconnectState {
+        ReconnectState {
+            retry_at_ms: self
+                .stats
+                .retry_at_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            last_failure: lock(&self.stats.last_failure).clone(),
+        }
+    }
+
     /// Leave cleanly and stop the actor.
     pub async fn shutdown(mut self) {
         let _ = self.shutdown.send(true);
@@ -526,6 +570,11 @@ impl Actor {
             if *self.shutdown.borrow() {
                 return;
             }
+            let attempt = self
+                .stats
+                .dial_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
             let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
@@ -534,7 +583,8 @@ impl Actor {
                         let _ = ready.send(Err(err));
                         return; // first join failed: caller owns the retry
                     }
-                    tracing::warn!(error = %err, "registry dial failed; backing off");
+                    tracing::warn!(error = %err, attempt, "registry dial failed; backing off");
+                    self.note_failure(format!("dial failed: {err}"));
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -548,7 +598,8 @@ impl Actor {
                         let _ = ready.send(Err(SyncError::WebSocket("connect timeout".into())));
                         return;
                     }
-                    tracing::warn!("registry dial timed out; backing off");
+                    tracing::warn!(attempt, "registry dial timed out; backing off");
+                    self.note_failure("dial timed out".into());
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
@@ -559,13 +610,17 @@ impl Actor {
                 }
             };
 
+            let session_started = tokio::time::Instant::now();
             match self.run_session(pipe, &mut ready).await {
                 SessionEnd::Stop => return,
                 SessionEnd::Reconnect => {
                     lock(&self.doc).mark_disconnected();
-                    // A session that had joined resets the backoff — without
-                    // this, ~7 flaps pinned every future reconnect at the cap
-                    // for the life of the client.
+                    // Only a session that joined AND stayed healthy for a
+                    // while earns a fresh backoff. Reset-on-join alone let a
+                    // connect-and-die socket (captive portal, half-broken
+                    // NAT) hot-loop at 250ms forever; without any reset, ~7
+                    // flaps pinned every future reconnect at the cap for the
+                    // life of the client.
                     let joined = self
                         .stats
                         .connected
@@ -573,6 +628,7 @@ impl Actor {
                     self.stats
                         .disconnects
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.note_failure("connection dropped".into());
                     let _ = self.events.send(RegistryEvent::Disconnected);
                     if ready.is_some() {
                         // Handshake failed on the very first session.
@@ -582,12 +638,12 @@ impl Actor {
                         }
                         return;
                     }
-                    if joined {
+                    if joined && session_started.elapsed() >= STABLE_RESET {
                         backoff = BACKOFF_BASE;
                     }
                     // Socket down: sync over HTTPS while we wait — pending
                     // pushes flush and the doc stays fresh at backoff cadence
-                    // (≤30s), so a WS-hostile network degrades to polling
+                    // (≤16s), so a WS-hostile network degrades to polling
                     // instead of silence.
                     self.spawn_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
@@ -600,8 +656,17 @@ impl Actor {
         }
     }
 
+    /// Record the failure that started/extended the current outage (sticky
+    /// until the next successful join — the UI keeps it visible through the
+    /// next attempt instead of flickering back to a bare "connecting").
+    fn note_failure(&self, msg: String) {
+        *lock(&self.stats.last_failure) = Some(msg);
+    }
+
     /// Sleep out one backoff, cut short by system wake, a sibling dial
-    /// success, or shutdown.
+    /// success, or shutdown. While the OS reports no network path, the wait
+    /// parks on the event buses (with a coarse safety timer) instead of
+    /// burning dial attempts that cannot succeed.
     async fn wait_backoff(
         &mut self,
         wake: &mut tokio::sync::broadcast::Receiver<()>,
@@ -612,7 +677,16 @@ impl Actor {
         // or our own last dial would cut every wait to zero.
         while wake.try_recv().is_ok() {}
         while online.try_recv().is_ok() {}
-        tokio::select! {
+        use std::sync::atomic::Ordering::Relaxed;
+        let wait = if crate::wake::path_is_offline() {
+            wait.max(OFFLINE_PARK_RECHECK)
+        } else {
+            wait
+        };
+        self.stats
+            .retry_at_ms
+            .store(epoch_ms() + wait.as_millis() as i64, Relaxed);
+        let waited = tokio::select! {
             _ = tokio::time::sleep(wait) => Waited::Elapsed,
             _ = wake.recv() => Waited::Woke,
             _ = online.recv() => Waited::Woke,
@@ -623,7 +697,9 @@ impl Actor {
                     Waited::Elapsed
                 }
             }
-        }
+        };
+        self.stats.retry_at_ms.store(0, Relaxed);
+        waited
     }
 
     async fn run_session(
@@ -696,7 +772,10 @@ impl Actor {
             }
         }
         self.stats.connected.store(true, Relaxed);
+        self.stats.synced.store(true, Relaxed);
         self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
+        self.stats.retry_at_ms.store(0, Relaxed);
+        *lock(&self.stats.last_failure) = None;
         if ready.is_none() {
             self.stats.rejoins.fetch_add(1, Relaxed);
         }
@@ -810,14 +889,31 @@ impl Actor {
             let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
             let mut push_failed = false;
             for batch in &batches {
-                let body = serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
+                let body =
+                    serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
                 match transport.push(body).await {
                     Ok(ack) => {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ack) {
-                            if let (Some(b), Some(seq)) = (v["batch"].as_str(), v["seq"].as_u64()) {
-                                lock(&doc).ack_batch(b, seq);
+                        let parsed = serde_json::from_str::<serde_json::Value>(&ack)
+                            .ok()
+                            .and_then(|v| {
+                                Some((v["batch"].as_str()?.to_owned(), v["seq"].as_u64()?))
+                            });
+                        match parsed {
+                            Some((b, seq)) => {
+                                lock(&doc).ack_batch(&b, seq);
                                 stats.last_ack_ms.store(epoch_ms(), Relaxed);
                                 let _ = events.send(RegistryEvent::Applied);
+                            }
+                            None => {
+                                // An unreadable ack must count as a FAILED
+                                // push: swallowing it left the batch marked
+                                // in-flight, and on a pure-HTTPS device no
+                                // socket disconnect ever comes along to
+                                // un-mark it — the write was stranded until
+                                // process restart.
+                                tracing::warn!("registry: http push ack unreadable; will retry");
+                                push_failed = true;
+                                break;
                             }
                         }
                     }
@@ -858,6 +954,7 @@ impl Actor {
                                 map.insert(device, (at, now));
                             }
                             drop(map);
+                            stats.synced.store(true, Relaxed);
                             stats.last_pushed_ms.store(epoch_ms(), Relaxed);
                             let _ = events.send(RegistryEvent::Applied);
                         }
@@ -901,9 +998,16 @@ impl Actor {
         };
         match frame {
             ServerFrame::Rows { seq, rows } => {
-                lock(&self.doc).apply_rows(seq, rows);
+                let contiguous = lock(&self.doc).apply_rows(seq, rows);
                 self.stats.last_pushed_ms.store(epoch_ms(), Relaxed);
                 let _ = self.events.send(RegistryEvent::Applied);
+                if !contiguous {
+                    // Frames between the cursor and this batch were missed;
+                    // the cursor held. Reconnect — the fresh hello pulls the
+                    // whole gap from the true cursor.
+                    tracing::warn!(seq, "registry: broadcast seq gap; resyncing");
+                    return false;
+                }
             }
             ServerFrame::Ack { batch, seq, .. } => {
                 lock(&self.doc).ack_batch(&batch, seq);

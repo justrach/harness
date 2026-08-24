@@ -3,8 +3,8 @@
 //!
 //! Row model (docs/research/mugen-pretext.md §3):
 //! - one row per BLOCK: user message = one bubble row; assistant messages split
-//!   into one row per markdown top-level block, plus consecutive-tool groups and
-//!   input/error chips;
+//!   into one row per markdown top-level block, plus consecutive-tool groups
+//!   (agent/spawn chips split out so they never collapse) and input/error chips;
 //! - stable row ids `{msgId}#{partId}.{blockIx}` / `{msgId}#g{groupIx}` — LIVE
 //!   (streaming) entries split per block exactly like completed ones (the list
 //!   virtualizes them, so a fading live reply re-renders only its visible tail
@@ -26,22 +26,25 @@
 //! whole turn is already visible, so there is nothing to scroll to.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
-    ListScrollEvent, ListState, ObjectFit, SharedString, StyledImage as _, StyledText,
-    Subscription, Task, TextRun, Window, canvas, div, img, list, prelude::*, px, quad,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
+    ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels,
+    Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window, canvas,
+    div, img, list, prelude::*, px, quad,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
-use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
+use crate::markdown::parser::{
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
+};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _, RESIZE};
@@ -60,10 +63,14 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
-/// Vertical gap opening a new turn (new message entry).
-pub const GAP_TURN: f32 = 14.0;
-/// Vertical gap between blocks within a turn.
-pub const GAP_BLOCK: f32 = 8.0;
+/// Bound session-local viewport memory independently of total chat history.
+const MAX_SAVED_VIEWPORTS: usize = 256;
+/// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
+/// smooth enough to track text while avoiding a permanent animation-frame loop
+/// on low-end devices.
+const SELECTION_SCROLL_TICK_MS: u64 = 24;
+const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
+const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 /// Transcript column max width (zeron 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// Tool chip row height / gap — analytic, so fold heights need no measurement.
@@ -73,6 +80,40 @@ pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 pub const CHIP_HEIGHT: f32 = 38.0;
 pub const CHIP_GAP: f32 = 0.0;
 pub const CHIP_CARD_HEIGHT: f32 = 30.0;
+/// Inner height of the chip header: [`CHIP_CARD_HEIGHT`] is the card's
+/// border-box (explicit `h` in gpui includes the 1px border), so a 30px
+/// header inside a 30px bordered card clips 2px off the bottom and every
+/// glyph/icon reads high (user report).
+const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
+
+/// Signed list scroll step for a pointer near a viewport edge.
+///
+/// GPUI list offsets increase toward the document bottom. The quadratic ramp
+/// keeps entry into the edge zone gentle and reaches full speed at the edge.
+fn selection_scroll_step(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
+    let height = f32::from(bounds.size.height);
+    if height <= 0.0 {
+        return 0.0;
+    }
+    let edge = SELECTION_SCROLL_EDGE_PX.min(height / 3.0);
+    if edge <= 0.0 {
+        return 0.0;
+    }
+    let y = f32::from(position.y);
+    let top = f32::from(bounds.top());
+    let bottom = f32::from(bounds.bottom());
+    let scaled = |penetration: f32| {
+        let t = (penetration / edge).clamp(0.0, 1.0);
+        SELECTION_SCROLL_MAX_STEP_PX * t * t
+    };
+    if y < top + edge {
+        -scaled(top + edge - y)
+    } else if y > bottom - edge {
+        scaled(y - (bottom - edge))
+    } else {
+        0.0
+    }
+}
 const CHIPS_TOP_PAD: f32 = 2.0;
 /// How long a user fold toggle keeps its height tween armed: the RESIZE
 /// spec's 200ms plus margin. Past this the fold renders statically — an armed
@@ -106,6 +147,14 @@ pub const SPRING_GROWTH_EMA: f32 = 0.12;
 pub const SPRING_CHASE_MAX_LEAD: f32 = 32.0;
 /// Treat as exactly pinned within this distance of the bottom.
 pub const AT_BOTTOM_PX: f32 = 2.0;
+
+/// A live stream already resting at the end should keep that end anchored as
+/// its measured height grows. This is deliberately narrower than `pinned`:
+/// users gliding back toward the bottom keep the normal spring behavior.
+fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming: bool) -> bool {
+    pinned && streaming && distance_from_bottom <= AT_BOTTOM_PX
+}
+
 /// Keep the spring loop warm this long after landing, so a streaming pause
 /// resumes at cruise instead of re-accelerating from zero.
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
@@ -249,6 +298,362 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    /// A REASONING part riding the tool group as a chip (user request: the
+    /// thought process belongs inside the combined "Ran N commands"
+    /// accordion, opening/closing with the same tween). Synthesized in
+    /// [`rows_for_entry`] — never comes from a doc tool part. The thought
+    /// text is the `detail`; `resolved == false` means it is still
+    /// streaming (the chip then defaults open).
+    pub is_thought: bool,
+}
+
+/// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
+/// every driver decodes its spawn tool into. These stay out of the
+/// collapsible "Called N tools" wrap so a running subagent is visible
+/// without opening the fold.
+fn is_agent_call(call: &ToolCall) -> bool {
+    call.is_subagent_spawn()
+}
+
+/// The chip's GENUS is the call itself, never the ref: docs written before
+/// the claude-driver fix carry stray `subagent_ref`s on ordinary Run chips
+/// (a background shell's `task_notification` was mis-tagged as subagent
+/// traffic), and honoring the ref alone turned those Runs into spawn chips
+/// that opened empty, never-created subagent docs.
+fn is_agent_tool(item: &ToolItem) -> bool {
+    is_agent_call(&item.call)
+}
+
+/// A chip renders as the spawn LINK (whole-card click → subagent tab) only
+/// when an agent call has actually been bound to its doc.
+fn is_spawn_link(item: &ToolItem) -> bool {
+    is_agent_call(&item.call) && item.subagent_ref.is_some()
+}
+
+/// Ordinary tool groups fold behind a summary header; agent/spawn chips
+/// render as their own always-open row.
+fn tool_group_collapses(tools: &[ToolItem]) -> bool {
+    tools.iter().any(|t| !is_agent_tool(t))
+}
+
+/// Column budget for soft-wrapping thought text into detail lines. The
+/// detail body is preformatted (no element wrapping), so the wrap happens
+/// here — conservative enough to fit the card at typical transcript widths.
+const THOUGHT_WRAP_COLS: usize = 96;
+
+/// Flatten a thought's parsed markdown into wrapped, STYLED detail lines —
+/// inline markers render as real styling (bold/italic/code/links) instead of
+/// literal `**` glyphs; blocks flatten structurally (headings bold, list
+/// bullets, quote bars, verbatim code lines). Every line is one fixed-height
+/// row, so the detail height stays analytic (lines × [`OUTPUT_LINE_HEIGHT`])
+/// and the group's fold tween keeps working without measurement.
+fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
+    let mut out: Vec<Vec<InlineRun>> = Vec::new();
+    for top in &tree.blocks {
+        if !out.is_empty() {
+            // One blank separator row between top-level blocks (the old
+            // plain-text wrap kept paragraph gaps the same way).
+            out.push(Vec::new());
+        }
+        thought_block_lines(&top.block, 0, &mut out);
+    }
+    while out
+        .last()
+        .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+    {
+        out.pop();
+    }
+    out
+}
+
+/// The slot-0 indent run every emitted thought line opens with (possibly
+/// empty). List/quote handlers rewrite it in place to plant markers/bars, so
+/// it must exist even at zero indent.
+fn indent_run(indent: usize) -> Vec<InlineRun> {
+    vec![InlineRun {
+        text: " ".repeat(indent),
+        style: InlineStyle::default(),
+    }]
+}
+
+/// Append text to a line's run list, merging into the tail run when styles
+/// match (keeps run counts small for the shaper).
+fn push_styled(line: &mut Vec<InlineRun>, text: &str, style: &InlineStyle) {
+    if text.is_empty() {
+        return;
+    }
+    match line.last_mut() {
+        Some(last) if last.style == *style => last.text.push_str(text),
+        _ => line.push(InlineRun {
+            text: text.to_owned(),
+            style: style.clone(),
+        }),
+    }
+}
+
+/// Close a wrapped line: the slot-0 indent run in front (see [`indent_run`]).
+fn finish_line(indent: usize, mut line: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut full = indent_run(indent);
+    full.append(&mut line);
+    full
+}
+
+/// Word-wrap styled runs at the thought column budget. Char-counted like
+/// every detail wrap — block heights must stay analytic — with words glued
+/// across style boundaries (`**bold**tail` wraps as one unit), separator
+/// spaces riding the preceding run, and pathological overlong tokens
+/// hard-split at the budget. Hard breaks (`\n` runs) split into
+/// separately-wrapped segments.
+fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    let budget = THOUGHT_WRAP_COLS.saturating_sub(indent).max(16);
+    let mut segments: Vec<Vec<InlineRun>> = vec![Vec::new()];
+    for run in runs {
+        for (ix, piece) in run.text.split('\n').enumerate() {
+            if ix > 0 {
+                segments.push(Vec::new());
+            }
+            if !piece.is_empty() {
+                segments.last_mut().unwrap().push(InlineRun {
+                    text: piece.to_owned(),
+                    style: run.style.clone(),
+                });
+            }
+        }
+    }
+    for segment in segments {
+        // Tokens: maximal non-whitespace piece lists, glued across run
+        // boundaries so a word split by styling never wraps mid-word.
+        let mut tokens: Vec<Vec<InlineRun>> = Vec::new();
+        let mut in_token = false;
+        for run in &segment {
+            let text = run.text.as_str();
+            let mut pos = 0;
+            while pos < text.len() {
+                let rest = &text[pos..];
+                let ws = rest.chars().next().is_some_and(char::is_whitespace);
+                let end = rest
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace() != ws)
+                    .map_or(text.len(), |(i, _)| pos + i);
+                if ws {
+                    in_token = false;
+                } else {
+                    if !in_token {
+                        tokens.push(Vec::new());
+                        in_token = true;
+                    }
+                    push_styled(tokens.last_mut().unwrap(), &text[pos..end], &run.style);
+                }
+                pos = end;
+            }
+        }
+        let mut line: Vec<InlineRun> = Vec::new();
+        let mut len = 0usize;
+        for token in tokens {
+            let tok_len: usize = token.iter().map(|r| r.text.chars().count()).sum();
+            if tok_len > budget {
+                // Hard-split a pathological token at the budget.
+                if len > 0 {
+                    out.push(finish_line(indent, std::mem::take(&mut line)));
+                    len = 0;
+                }
+                for piece in token {
+                    let mut chars = piece.text.chars();
+                    loop {
+                        let chunk: String = chars.by_ref().take(budget - len).collect();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        len += chunk.chars().count();
+                        push_styled(&mut line, &chunk, &piece.style);
+                        if len == budget {
+                            out.push(finish_line(indent, std::mem::take(&mut line)));
+                            len = 0;
+                        }
+                    }
+                }
+                continue;
+            }
+            if len > 0 && len + 1 + tok_len > budget {
+                out.push(finish_line(indent, std::mem::take(&mut line)));
+                len = 0;
+            }
+            if len > 0 {
+                if let Some(last) = line.last_mut() {
+                    last.text.push(' ');
+                }
+                len += 1;
+            }
+            for piece in token {
+                push_styled(&mut line, &piece.text, &piece.style);
+            }
+            len += tok_len;
+        }
+        if len > 0 {
+            out.push(finish_line(indent, line));
+        }
+    }
+}
+
+/// One markdown block into thought detail lines, `indent` spaces deep.
+fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    match block {
+        Block::Paragraph { runs } => wrap_styled_runs(runs, indent, out),
+        Block::Heading { runs, .. } => {
+            // Headings keep the detail's single type size — bold is the cue
+            // (an 18px line box can't host display sizes).
+            let bold: Vec<InlineRun> = runs
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r.style.bold = true;
+                    r
+                })
+                .collect();
+            wrap_styled_runs(&bold, indent, out);
+        }
+        Block::CodeBlock { code, .. } => {
+            let style = InlineStyle {
+                code: true,
+                ..InlineStyle::default()
+            };
+            for line in code.lines() {
+                for chunk in wrap_cols(line, THOUGHT_WRAP_COLS.saturating_sub(indent).max(16)) {
+                    let mut row = indent_run(indent);
+                    if !chunk.is_empty() {
+                        row.push(InlineRun {
+                            text: chunk.to_string(),
+                            style: style.clone(),
+                        });
+                    }
+                    out.push(row);
+                }
+            }
+        }
+        Block::List {
+            ordered_start,
+            items,
+        } => {
+            // Tight rendering: no blank rows inside a list.
+            for (ix, item) in items.iter().enumerate() {
+                let marker = match ordered_start {
+                    Some(start) => format!("{}. ", start + ix as u64),
+                    None => "• ".to_string(),
+                };
+                let inner = indent + marker.chars().count();
+                let mark = out.len();
+                for child in item {
+                    thought_block_lines(child, inner, out);
+                }
+                if out.len() == mark {
+                    // An empty item still shows its marker.
+                    out.push(indent_run(inner));
+                }
+                // The item's first line trades its indent spaces for the
+                // marker (the slot-0 run is always the indent).
+                if let Some(first) = out[mark].first_mut() {
+                    first.text = format!("{}{marker}", " ".repeat(indent));
+                }
+            }
+        }
+        Block::BlockQuote { children } => {
+            let mark = out.len();
+            for (ix, child) in children.iter().enumerate() {
+                if ix > 0 {
+                    out.push(Vec::new());
+                }
+                thought_block_lines(child, indent + 2, out);
+            }
+            // Trade the two quote-indent spaces for the bar on every quoted
+            // line — replace, not overwrite: nested list handlers already
+            // planted markers after their own deeper indent.
+            for line in &mut out[mark..] {
+                if let Some(first) = line.first_mut()
+                    && first.text.len() >= indent + 2
+                {
+                    first.text.replace_range(indent..indent + 2, "│ ");
+                }
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            // A thought is a record, not a layout surface: cells joined with
+            // a dot separator, header bold — no column machinery.
+            let join = |cells: &[Vec<InlineRun>], bold: bool| -> Vec<InlineRun> {
+                let mut line: Vec<InlineRun> = Vec::new();
+                for (ix, cell) in cells.iter().enumerate() {
+                    if ix > 0 {
+                        push_styled(&mut line, " · ", &InlineStyle::default());
+                    }
+                    for r in cell {
+                        let mut r = r.clone();
+                        r.style.bold |= bold;
+                        line.push(r);
+                    }
+                }
+                line
+            };
+            wrap_styled_runs(&join(header, true), indent, out);
+            for row in rows {
+                wrap_styled_runs(&join(row, false), indent, out);
+            }
+        }
+        Block::Rule => {
+            let mut row = indent_run(indent);
+            row.push(InlineRun {
+                text: "———".into(),
+                style: InlineStyle::default(),
+            });
+            out.push(row);
+        }
+    }
+}
+
+/// A reasoning part as a tool-group chip: "Thought process" header over the
+/// thought's markdown flattened into styled detail lines (analytic height —
+/// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
+/// outputs, with the counted tail. `live` = the part is still streaming
+/// (chip defaults open).
+fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
+    let mut lines = thought_lines(tree);
+    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
+    if truncated_by > 0 {
+        // Keep the TAIL while streaming (the fresh thinking is the signal);
+        // settled thoughts keep the head like tool outputs do.
+        if live {
+            lines.drain(..truncated_by);
+            // The cut can land on a block separator — drop the orphan blank.
+            while lines
+                .first()
+                .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+            {
+                lines.remove(0);
+            }
+        } else {
+            lines.truncate(OUTPUT_DETAIL_MAX_LINES);
+        }
+    }
+    ToolItem {
+        call: ToolCall::Unknown {
+            name: "Thought process".into(),
+            input: None,
+        },
+        is_error: false,
+        resolved: !live,
+        detail: (!lines.is_empty()).then(|| {
+            Arc::new(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            })
+        }),
+        invocation: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+        is_thought: true,
+    }
 }
 
 /// A chip's expandable detail payload.
@@ -258,6 +663,13 @@ pub enum ToolDetail {
     /// intact), capped at [`OUTPUT_DETAIL_MAX_LINES`] with a counted tail.
     Output {
         lines: Vec<SharedString>,
+        truncated_by: usize,
+    },
+    /// A thought's markdown, pre-flattened into wrapped STYLED lines — one
+    /// fixed-height row each, so the height stays analytic like `Output`
+    /// while inline markers render as real styling ([`thought_lines`]).
+    Thought {
+        lines: Vec<Vec<InlineRun>>,
         truncated_by: usize,
     },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
@@ -559,6 +971,10 @@ pub struct Row {
     /// LAST row of a completed entry (user rows always; assistant rows only
     /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
     pub timestamp: Option<i64>,
+    /// Text copied by the entry-level hover action. Present only on the last
+    /// settled row, beside the timestamp; tools and transport-only metadata
+    /// are deliberately excluded.
+    pub copy_text: Option<SharedString>,
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -607,6 +1023,30 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
                 let bytes: usize = lines.iter().map(|l| l.len()).sum();
                 acc.extend_from_slice(&(bytes as u32).to_le_bytes());
+            }
+            Some(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            }) => {
+                // Byte-exact plus style bits: a live mend can restyle runs
+                // without changing the flattened length, and the row must
+                // still re-splice.
+                acc.push(4);
+                acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
+                acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
+                for line in lines {
+                    for run in line {
+                        acc.extend_from_slice(run.text.as_bytes());
+                        acc.push(
+                            run.style.bold as u8
+                                | (run.style.italic as u8) << 1
+                                | (run.style.code as u8) << 2
+                                | (run.style.strikethrough as u8) << 3
+                                | (run.style.link.is_some() as u8) << 4,
+                        );
+                    }
+                    acc.push(b'\n');
+                }
             }
             Some(ToolDetail::Diff { file, .. }) => {
                 acc.push(2);
@@ -659,6 +1099,25 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     fnv1a(&acc)
 }
 
+/// Clipboard payload for an assistant/system entry: authored text parts in
+/// document order, preserving Markdown while excluding tool traces and other
+/// structured parts.
+fn assistant_copy_text(entry: &SessionMessageEntry) -> Option<SharedString> {
+    let text = entry
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            // Inspect the trimmed view only to reject empty parts. Copy the
+            // original bytes so indentation-based code blocks and Markdown
+            // hard-break whitespace survive the clipboard round trip.
+            MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.is_empty()).then(|| text.into())
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -696,6 +1155,7 @@ pub fn rows_for_entry(
             Some((display, spans)) => (display, spans),
             None => (body, Vec::new()),
         };
+        let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
             version: (raw.len() as u64) << 1 | pending as u64,
@@ -711,10 +1171,13 @@ pub fn rows_for_entry(
             // User rows always carry the strip (chat-view.tsx: whenever
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
+            copy_text,
         }];
     }
 
-    // Assistant/system: split parts into block rows, folding consecutive tools.
+    // Assistant/system: split parts into block rows, folding consecutive
+    // ordinary tools. Agent/spawn chips flush into their own group so they
+    // never share a collapse with Reads/Runs.
     let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
@@ -737,6 +1200,7 @@ pub fn rows_for_entry(
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
+                copy_text: None,
             });
             *group_ix += 1;
         };
@@ -758,7 +1222,7 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
-                pending_group.push(ToolItem {
+                let item = ToolItem {
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
@@ -771,7 +1235,50 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
-                });
+                    is_thought: false,
+                };
+                // Agent chips don't share a fold with ordinary tools: flush
+                // whenever the genus flips so each group is uniform.
+                if pending_group
+                    .first()
+                    .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
+                {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                }
+                pending_group.push(item);
+                group_last_part_ix = part_ix;
+            }
+            // Thinking rides the SAME accordion as the tools around it
+            // (user request) — a thought chip in the group, not its own row.
+            MessagePart::Reasoning { id: part_id, text } => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                // Live only while it is the tail of a streaming reply — once
+                // text or a tool follows, the thought is finished even though
+                // the entry still streams.
+                let live = streaming && part_ix == last_part_ix;
+                // The same parse wiring as text parts: incremental while
+                // streaming, hanging inline markers mended for display, the
+                // settled cache once complete.
+                let tree = parse(&format!("{}#{}", entry.id, part_id), text);
+                let item = thought_item(&tree, live);
+                // Thoughts join ordinary tool groups; agent (spawn-link)
+                // groups stay pure, exactly like the tool genus rule.
+                if pending_group.first().is_some_and(is_agent_tool) {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                }
+                pending_group.push(item);
                 group_last_part_ix = part_ix;
             }
             other => {
@@ -809,6 +1316,7 @@ pub fn rows_for_entry(
                                 turn_start: false,
                                 entry_id: entry_id.clone(),
                                 timestamp: None,
+                                copy_text: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -847,6 +1355,7 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
                     MessagePart::Error {
@@ -863,10 +1372,12 @@ pub fn rows_for_entry(
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
+                            copy_text: None,
                         });
                     }
-                    // Tools are grouped by the outer arm; nothing reaches here.
-                    MessagePart::Tool { .. } => {}
+                    // Tools and thoughts are grouped by the outer arms;
+                    // nothing reaches here.
+                    MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
                 }
             }
         }
@@ -887,6 +1398,7 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
+        last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
     rows
@@ -1011,10 +1523,11 @@ fn part_prefix(id: &str) -> &str {
 /// Vertical gap opening `row` given its predecessor: turn gap at turn starts;
 /// the markdown block gap between sibling block rows split from the same text
 /// part — matching the live row's internal spacing exactly, so the
-/// live→split handoff cannot shift a pixel; the block gap otherwise.
+/// live→split handoff cannot shift a pixel. Tool groups get one larger global
+/// step on either boundary so their dense chip stack has room to breathe.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
-        return GAP_TURN;
+        return Theme::SPACE_LG;
     }
     let is_md = |k: &RowKind| matches!(k, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
     let same_part_markdown = prev.is_some_and(|p| {
@@ -1022,8 +1535,12 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     });
     if same_part_markdown {
         render::MD_BLOCK_GAP
+    } else if matches!(row.kind, RowKind::ToolGroup { .. })
+        || prev.is_some_and(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+    {
+        Theme::SPACE_MD
     } else {
-        GAP_BLOCK
+        Theme::SPACE_SM
     }
 }
 
@@ -1056,8 +1573,28 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// The rule lives in `zeron_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
-    let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
-    zeron_proto::view::tool_group_summary(&pairs)
+    let pairs: Vec<(ToolCall, bool)> = tools
+        .iter()
+        .filter(|t| !t.is_thought)
+        .map(|t| (t.call.clone(), t.is_error))
+        .collect();
+    let thoughts = tools.iter().filter(|t| t.is_thought).count();
+    // The shared summary answers "used 0 tools" for an empty set — a
+    // thought-only group must not inherit that.
+    let base = if pairs.is_empty() {
+        String::new()
+    } else {
+        zeron_proto::view::tool_group_summary(&pairs)
+    };
+    // Thought chips ride the group (they are UI-synthesized, so the shared
+    // view summary never sees them): name them on the collapsed line.
+    match (base.is_empty(), thoughts) {
+        (_, 0) => base,
+        (true, 1) => "Thought process".into(),
+        (true, n) => format!("Thought {n} times"),
+        (false, 1) => format!("Thought · {base}"),
+        (false, n) => format!("Thought {n} times · {base}"),
+    }
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
@@ -1082,6 +1619,13 @@ pub fn chips_height(count: usize) -> f32 {
 pub fn detail_height(detail: &ToolDetail) -> f32 {
     let body = match detail {
         ToolDetail::Output {
+            lines,
+            truncated_by,
+        } => {
+            let rows = lines.len() + usize::from(*truncated_by > 0);
+            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+        }
+        ToolDetail::Thought {
             lines,
             truncated_by,
         } => {
@@ -1378,8 +1922,9 @@ struct FoldState {
 /// hard-tracks the pad's stale bottom on every commit — rig-traced). Wheel
 /// input releases the hold, leaving the reservation as plain scrollable
 /// space. The anchor retires once the reply overflows the reservation (pad
-/// ~0, height-neutral) and on explicit navigation / chat switches (revisits
-/// start at the bottom).
+/// ~0, height-neutral). Chat switches snapshot its runway with the viewport
+/// and restore it released, so revisiting never resumes hidden auto-follow.
+#[derive(Clone, Debug)]
 struct OwnTurnAnchor {
     chat_id: String,
     message_id: SharedString,
@@ -1393,6 +1938,219 @@ struct OwnTurnAnchor {
     /// position absolutely after every layout (glue- and lag-proof — the
     /// exact mechanism the shipped first-send anchor used).
     positioned: bool,
+    /// A fresh send may install the anchor one notification before its echo.
+    /// Once the prompt has appeared, its later disappearance is terminal
+    /// (failed echo or removed entry) and the runway must retire.
+    seen_prompt: bool,
+}
+
+impl OwnTurnAnchor {
+    fn released_for_restore(mut self) -> Self {
+        self.held = false;
+        self.positioned = false;
+        self.seen_prompt = true;
+        self
+    }
+
+    fn observe_prompt(&mut self, exists: bool) -> bool {
+        if exists {
+            self.seen_prompt = true;
+        }
+        exists || !self.seen_prompt
+    }
+}
+
+/// A stable per-chat viewport anchor. Row identity is preferred over its old
+/// index because async replay can insert or remove rows while a chat is away.
+#[derive(Clone, Debug)]
+struct ViewportAnchor {
+    row_id: SharedString,
+    entry_id: SharedString,
+    fallback_ix: usize,
+    offset_in_row: Pixels,
+}
+
+impl ViewportAnchor {
+    fn capture(rows: &[Row], scroll_top: ListOffset) -> Option<Self> {
+        let fallback_ix = scroll_top.item_ix.min(rows.len().checked_sub(1)?);
+        let row = &rows[fallback_ix];
+        Some(Self {
+            row_id: row.id.clone(),
+            entry_id: row.entry_id.clone(),
+            fallback_ix,
+            offset_in_row: scroll_top.offset_in_item,
+        })
+    }
+
+    fn resolve_exact(&self, rows: &[Row]) -> Option<ListOffset> {
+        let item_ix = rows.iter().position(|row| row.id == self.row_id)?;
+        Some(ListOffset {
+            item_ix,
+            offset_in_item: self.offset_in_row,
+        })
+    }
+
+    fn resolve(&self, rows: &[Row]) -> Option<ListOffset> {
+        if let Some(offset) = self.resolve_exact(rows) {
+            return Some(offset);
+        }
+
+        // A row can disappear when a streaming block is reshaped. Stay in the
+        // same message entry, choosing the surviving row nearest the old
+        // location; the intra-row offset is no longer meaningful in that case.
+        let item_ix = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.entry_id == self.entry_id)
+            .min_by_key(|(ix, _)| ix.abs_diff(self.fallback_ix))
+            .map(|(ix, _)| ix)
+            .unwrap_or_else(|| self.fallback_ix.min(rows.len().saturating_sub(1)));
+        (!rows.is_empty()).then_some(ListOffset {
+            item_ix,
+            offset_in_item: px(0.0),
+        })
+    }
+}
+
+/// Session-local viewport state. Chats that were following their tail keep
+/// following it; only user-owned viewports restore a concrete row anchor.
+#[derive(Clone, Debug)]
+enum SavedViewport {
+    FollowTail,
+    Anchored {
+        anchor: ViewportAnchor,
+        distance_from_bottom: f32,
+        /// Preserve the runway that made a short active turn scrollable.
+        /// Navigation releases its automatic hold, so revisiting restores the
+        /// viewport without immediately following new output to the bottom.
+        own_turn: Option<OwnTurnAnchor>,
+    },
+}
+
+struct RestoredViewport {
+    offset: ListOffset,
+    distance_from_bottom: f32,
+    own_turn: Option<OwnTurnAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewportFinalizeToken {
+    generation: u64,
+    layout_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptReplayState {
+    Pending,
+    Empty,
+    Populated,
+}
+
+impl TranscriptReplayState {
+    fn authoritative_empty(self) -> bool {
+        self == Self::Empty
+    }
+
+    fn allows_fallback(self) -> bool {
+        self == Self::Populated
+    }
+}
+
+impl ViewportFinalizeToken {
+    fn still_current(self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn layout_settled(self, layout_revision: u64) -> bool {
+        self.layout_revision == layout_revision
+    }
+}
+
+impl SavedViewport {
+    fn capture(
+        rows: &[Row],
+        scroll_top: ListOffset,
+        pinned: bool,
+        distance_from_bottom: f32,
+        own_turn: Option<&OwnTurnAnchor>,
+    ) -> Option<Self> {
+        if rows.is_empty() {
+            return None;
+        }
+        if pinned {
+            return Some(Self::FollowTail);
+        }
+        Some(Self::Anchored {
+            anchor: ViewportAnchor::capture(rows, scroll_top)?,
+            distance_from_bottom,
+            own_turn: own_turn.cloned(),
+        })
+    }
+
+    /// Before the opening reset arrives, rows may contain only optimistic
+    /// echoes. In that gap an exact row is safe, but entry/index fallbacks
+    /// would mistake an unrelated echo for the authoritative transcript.
+    fn resolve(&self, rows: &[Row], allow_fallback: bool) -> Option<RestoredViewport> {
+        let Self::Anchored {
+            anchor,
+            distance_from_bottom,
+            own_turn,
+        } = self
+        else {
+            return None;
+        };
+        let offset = if allow_fallback {
+            anchor.resolve(rows)?
+        } else {
+            anchor.resolve_exact(rows)?
+        };
+        let own_turn = own_turn
+            .clone()
+            .filter(|turn| {
+                rows.iter()
+                    .any(|row| row.turn_start && row.entry_id == turn.message_id)
+            })
+            .map(OwnTurnAnchor::released_for_restore);
+        Some(RestoredViewport {
+            offset,
+            distance_from_bottom: *distance_from_bottom,
+            own_turn,
+        })
+    }
+}
+
+#[derive(Default)]
+struct SavedViewportCache {
+    by_chat: HashMap<String, SavedViewport>,
+    recency: VecDeque<String>,
+}
+
+impl SavedViewportCache {
+    fn insert(&mut self, chat_id: String, viewport: SavedViewport) {
+        if self.by_chat.contains_key(&chat_id) {
+            self.recency.retain(|candidate| candidate != &chat_id);
+        }
+        self.recency.push_back(chat_id.clone());
+        self.by_chat.insert(chat_id, viewport);
+        while self.by_chat.len() > MAX_SAVED_VIEWPORTS {
+            let Some(evicted) = self.recency.pop_front() else {
+                break;
+            };
+            self.by_chat.remove(&evicted);
+        }
+    }
+
+    fn get_cloned_and_touch(&mut self, chat_id: &str) -> Option<SavedViewport> {
+        let viewport = self.by_chat.get(chat_id).cloned()?;
+        self.recency.retain(|candidate| candidate != chat_id);
+        self.recency.push_back(chat_id.to_string());
+        Some(viewport)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_chat.len()
+    }
 }
 
 pub struct Transcript {
@@ -1410,6 +2168,23 @@ pub struct Transcript {
     /// only then may the working trailer render — a frozen snapshot must
     /// never spin, whatever its entries claim.
     doc_live: bool,
+    /// Memory-only viewport state for primary chats visited in this window.
+    /// A transcript instance is shared across tabs, so the active ListState is
+    /// reset on every attach and cannot retain these positions by itself.
+    saved_viewports: SavedViewportCache,
+    /// An anchored viewport waiting for the selected chat's async replay.
+    pending_viewport: Option<SavedViewport>,
+    /// Generation of the selected chat, guarding post-layout restoration
+    /// callbacks across rapid A→B→A navigation.
+    viewport_generation: u64,
+    /// A restored item anchor needs one post-layout refresh of distance-based
+    /// UI state; programmatic list scrolling never invokes `handle_scroll`.
+    viewport_finalize_pending: bool,
+    viewport_finalize_scheduled: bool,
+    /// Bumped whenever sync or own-turn logic invalidates measured rows. The
+    /// post-restore finalizer waits until one layout completes without another
+    /// invalidation, avoiding a stale jump-button decision.
+    viewport_layout_revision: u64,
     /// One-shot "open at the latest content" for UNPINNED (frozen) override
     /// instances: rows land ASYNC after the tab opens (watch replay / blob
     /// fetch), so the end-scroll fires on the first non-empty sync, then
@@ -1475,6 +2250,11 @@ pub struct Transcript {
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
     scroll_anim: Option<Task<()>>,
+    /// Last pointer sample while markdown selection owns a left-button drag.
+    selection_drag_position: Option<Point<Pixels>>,
+    /// One-shot timer rescheduled only while the pointer remains in an edge
+    /// zone. Dropping it on mouse-up stops all selection scroll work.
+    selection_scroll_task: Option<Task<()>>,
     /// MessageRail width gate (set by the shell from the container width).
     rail_enabled: bool,
     /// Height of the shell's composer/status/terminal stack overlaying the
@@ -1493,6 +2273,9 @@ pub struct Transcript {
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
+    /// Entry whose hover action is showing transient copied-check feedback.
+    copied_message: Option<SharedString>,
+    copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -1614,6 +2397,12 @@ impl Transcript {
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
+            saved_viewports: SavedViewportCache::default(),
+            pending_viewport: None,
+            viewport_generation: 0,
+            viewport_finalize_pending: false,
+            viewport_finalize_scheduled: false,
+            viewport_layout_revision: 0,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
@@ -1637,12 +2426,16 @@ impl Transcript {
             spring_kick: false,
             spring_scheduled: false,
             scroll_anim: None,
+            selection_drag_position: None,
+            selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
             rail_hover: None,
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
+            copied_message: None,
+            copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_loads: HashMap::new(),
@@ -1700,17 +2493,118 @@ impl Transcript {
         &self.list
     }
 
+    /// Snapshot the outgoing primary chat before its rows and ListState are
+    /// reset. Empty rows never overwrite an older snapshot: during a rapid
+    /// A→B→A switch, B's replay may not have arrived before leaving it again.
+    fn remember_current_viewport(&mut self) {
+        // Rows can already contain optimistic echoes while an older snapshot
+        // is still waiting for the authoritative replay. Leaving again in
+        // that window must preserve the older snapshot, not replace it with
+        // the partial echo-only viewport.
+        if self.pending_viewport.is_some() {
+            return;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let distance_from_bottom = if self.pinned {
+            0.0
+        } else {
+            self.distance_from_bottom()
+        };
+        let Some(viewport) = SavedViewport::capture(
+            &self.rows,
+            self.list.logical_scroll_top(),
+            self.pinned,
+            distance_from_bottom,
+            self.own_turn.as_ref(),
+        ) else {
+            return;
+        };
+        self.saved_viewports.insert(chat_id, viewport);
+    }
+
+    /// Restore an exact optimistic row while replay is pending, enable stable
+    /// fallbacks only after a populated reset, and retire snapshots proven
+    /// absent by an empty reset. `scroll_to` remains valid while the virtual
+    /// list measures restored rows on the following layout pass.
+    fn restore_pending_viewport(&mut self, replay: TranscriptReplayState) -> bool {
+        if self.pending_viewport.is_none() {
+            return false;
+        }
+        if !self.rows.is_empty()
+            && let Some(restored) = self
+                .pending_viewport
+                .as_ref()
+                .and_then(|saved| saved.resolve(&self.rows, replay.allows_fallback()))
+        {
+            self.pending_viewport = None;
+            self.list.scroll_to(restored.offset);
+            self.own_turn = restored.own_turn;
+            self.own_turn_kick = self.own_turn.is_some();
+            self.own_turn_last_tick = None;
+            if self.own_turn.is_some() {
+                // Replay readiness can change while echo rows stay identical,
+                // so the no-diff path may install a runway without splicing.
+                self.remeasure_last_row();
+            }
+            self.last_scroll_distance = restored.distance_from_bottom;
+            self.show_jump_button = restored.distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
+            self.viewport_finalize_pending = true;
+            return true;
+        }
+
+        if !replay.authoritative_empty() {
+            return false;
+        }
+        // The reset's document rows, not the combined rows, define
+        // authoritative emptiness. A matching optimistic row above remains
+        // valid, but an unrelated echo must never become an index fallback
+        // for old history.
+        self.discard_pending_viewport();
+        if self.own_turn.is_none() {
+            self.pinned = true;
+            self.last_scroll_distance = 0.0;
+            self.show_jump_button = false;
+            self.list.scroll_to_end();
+        }
+        true
+    }
+
+    /// Explicit user/navigation intent supersedes a replay-delayed restore.
+    /// Replace its cache entry with tail-follow until current rows can be
+    /// snapshotted normally on the next chat switch.
+    pub(crate) fn discard_pending_viewport(&mut self) {
+        if self.pending_viewport.take().is_some()
+            && let Some(chat_id) = self.chat_id.clone()
+        {
+            self.saved_viewports
+                .insert(chat_id, SavedViewport::FollowTail);
+        }
+    }
+
     pub(crate) fn state_entity(&self) -> &Entity<AppState> {
         &self.state
     }
 
-    /// Replace the transcript's scroll animation task (rail click / jump).
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
+    /// Hand viewport ownership to explicit rail/navigation input before its
+    /// reduced-motion or animated branch moves the list.
+    pub(crate) fn begin_scroll_navigation(&mut self) {
+        self.discard_pending_viewport();
         // Rail navigation within the session RELEASES the hold but keeps the
         // runway (user spec: only leaving and revisiting the session clears
         // it) — scrolling back down re-arms the hold like any restick.
         self.release_own_turn_hold();
         self.pinned = false;
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.spring_settled_at = None;
+        self.spring_kick = false;
+        self.scroll_anim = None;
+    }
+
+    /// Store the animation after [`Self::begin_scroll_navigation`].
+    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
         self.scroll_anim = Some(task);
     }
 
@@ -1723,9 +2617,10 @@ impl Transcript {
         self.own_turn_last_tick = None;
     }
 
-    fn remeasure_last_row(&self) {
+    fn remeasure_last_row(&mut self) {
         if let Some(last) = self.rows.len().checked_sub(1) {
             self.list.remeasure_items(last..last + 1);
+            self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
         }
     }
 
@@ -1752,6 +2647,7 @@ impl Transcript {
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
+                this.discard_pending_viewport();
                 // Wheel/touch while a runway lives: input owns the viewport,
                 // and the BOTTOM PIN must stay out of it entirely. Escaping
                 // releases the hold (the reservation stays behind as plain
@@ -1844,6 +2740,94 @@ impl Transcript {
         });
     }
 
+    fn on_selection_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.dragging() || !crate::markdown::selection::is_dragging() {
+            self.stop_selection_scroll();
+            return;
+        }
+        self.selection_drag_position = Some(event.position);
+        if render::update_drag_at(event.position) {
+            cx.notify();
+        }
+        self.schedule_selection_scroll(cx);
+    }
+
+    fn on_selection_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_selection_scroll();
+        if let Some(_text) = crate::markdown::selection::end_active_drag() {
+            // X11 middle-click paste parity, including the case where the
+            // anchor row has virtualized away and cannot receive mouse-up.
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            cx.write_to_primary(ClipboardItem::new_string(_text));
+        }
+    }
+
+    fn stop_selection_scroll(&mut self) {
+        self.selection_drag_position = None;
+        self.selection_scroll_task = None;
+    }
+
+    fn schedule_selection_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.selection_scroll_task.is_some() || !crate::markdown::selection::is_dragging() {
+            return;
+        }
+        let Some(position) = self.selection_drag_position else {
+            return;
+        };
+        if selection_scroll_step(self.list.viewport_bounds(), position) == 0.0 {
+            return;
+        }
+        self.selection_scroll_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(SELECTION_SCROLL_TICK_MS))
+                .await;
+            let _ = this.update(cx, |transcript, cx| {
+                transcript.selection_scroll_task = None;
+                transcript.step_selection_scroll(cx);
+            });
+        }));
+    }
+
+    fn step_selection_scroll(&mut self, cx: &mut Context<Self>) {
+        if !crate::markdown::selection::is_dragging() {
+            self.stop_selection_scroll();
+            return;
+        }
+        let Some(position) = self.selection_drag_position else {
+            return;
+        };
+        let step = selection_scroll_step(self.list.viewport_bounds(), position);
+        if step == 0.0 {
+            return;
+        }
+
+        // Resolve against the registry painted after the previous step before
+        // moving it again. This is what lets a stationary edge pointer consume
+        // successive virtualized rows.
+        render::update_drag_at(position);
+        self.scroll_anim = None;
+        self.discard_pending_viewport();
+        self.release_own_turn_hold();
+        self.pinned = false;
+        self.spring.reset();
+        self.spring_last_tick = None;
+        self.list.scroll_by(px(step));
+        self.last_scroll_distance = self.distance_from_bottom();
+        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+        cx.notify();
+        self.schedule_selection_scroll(cx);
+    }
+
     /// Reserve the reply's space below a locally-sent prompt — EVERY send,
     /// not just the first (a steer or a post-turn send used to collapse the
     /// previous reservation and drop the messages back down — user report).
@@ -1852,6 +2836,7 @@ impl Transcript {
     /// bottom lands the prompt at the top. Replacing a still-held previous
     /// anchor collapses its pad into the same glide — one continuous motion.
     pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
+        self.discard_pending_viewport();
         self.pinned = false;
         self.show_jump_button = false;
         self.spring.reset();
@@ -1865,12 +2850,17 @@ impl Transcript {
         // CONCRETE visible item first; the pad then reads as scrollable
         // distance for the glide to cover.
         self.materialize_scroll_anchor();
+        let seen_prompt = self
+            .rows
+            .iter()
+            .any(|row| row.turn_start && row.entry_id == message_id.as_str());
         self.own_turn = Some(OwnTurnAnchor {
             chat_id,
             message_id: SharedString::from(message_id),
             runway: 0.0,
             held: true,
             positioned: false,
+            seen_prompt,
         });
         self.own_turn_last_tick = None;
         self.own_turn_kick = true;
@@ -1918,6 +2908,35 @@ impl Transcript {
             .position(|row| row.turn_start && row.entry_id == anchor.message_id)
     }
 
+    fn reconcile_own_turn_prompt(&mut self) {
+        let Some(message_id) = self
+            .own_turn
+            .as_ref()
+            .map(|anchor| anchor.message_id.clone())
+        else {
+            return;
+        };
+        let exists = self
+            .rows
+            .iter()
+            .any(|row| row.turn_start && row.entry_id == message_id);
+        let keep = self
+            .own_turn
+            .as_mut()
+            .is_some_and(|anchor| anchor.observe_prompt(exists));
+        if keep {
+            return;
+        }
+
+        self.own_turn = None;
+        self.own_turn_kick = false;
+        self.own_turn_last_tick = None;
+        self.remeasure_last_row();
+        self.last_scroll_distance = self.distance_from_bottom();
+        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+        self.viewport_finalize_pending = true;
+    }
+
     /// One post-layout own-turn step: size the reservation pad. Pure layout —
     /// all motion is the ordinary bottom pin (see [`OwnTurnAnchor`]).
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
@@ -1933,6 +2952,9 @@ impl Transcript {
             // The optimistic echo may arrive on the next state notification.
             return;
         };
+        if let Some(anchor) = self.own_turn.as_mut() {
+            anchor.seen_prompt = true;
+        }
         let viewport = self.list.viewport_bounds();
         let viewport_height = f32::from(viewport.size.height);
         if viewport_height <= 0.0 {
@@ -2200,6 +3222,7 @@ impl Transcript {
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.discard_pending_viewport();
         // With a live runway, "bottom" IS the held position (the reservation
         // makes prompt-at-top and pad-bottom the same place): re-arm the hold
         // and glide back instead of destroying the runway (user spec — only
@@ -2312,7 +3335,7 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let (selected, entries, echoes) = {
+        let (selected, entries, echoes, replay) = {
             let s = self.state.read(cx);
             match &self.doc_override {
                 // Pinned to a subagent doc: `selected` equals `chat_id` by
@@ -2322,17 +3345,35 @@ impl Transcript {
                     Some(doc_id.clone()),
                     s.sub_transcript(doc_id).to_vec(),
                     Vec::new(),
+                    TranscriptReplayState::Populated,
                 ),
-                None => (
-                    s.selected_chat.clone(),
-                    s.transcript.clone(),
-                    s.pending_echoes().to_vec(),
-                ),
+                None => {
+                    let replay = if !s.transcript_replayed {
+                        TranscriptReplayState::Pending
+                    } else if s.transcript.is_empty() {
+                        TranscriptReplayState::Empty
+                    } else {
+                        TranscriptReplayState::Populated
+                    };
+                    (
+                        s.selected_chat.clone(),
+                        s.transcript.clone(),
+                        s.pending_echoes().to_vec(),
+                        replay,
+                    )
+                }
             }
         };
 
         let attached = selected != self.chat_id;
         if attached {
+            // Read the incoming snapshot before inserting the outgoing one:
+            // a full bounded cache may evict its oldest entry, which can be
+            // exactly the chat the user is reopening.
+            let saved_viewport = selected
+                .as_ref()
+                .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
+            self.remember_current_viewport();
             let keep_own_turn = self
                 .own_turn
                 .as_ref()
@@ -2340,6 +3381,7 @@ impl Transcript {
             if !keep_own_turn {
                 self.own_turn = None;
                 self.own_turn_kick = false;
+                self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
             self.rows.clear();
@@ -2350,15 +3392,48 @@ impl Transcript {
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
+            self.copied_message = None;
+            self.copied_message_clear = None;
             self.list.reset(0);
-            // A kept own-turn hold (send-created chat) owns the viewport;
-            // otherwise the fresh attach pins to the bottom.
-            self.pinned = self.own_turn.is_none();
+            self.pending_viewport = None;
+            self.viewport_generation = self.viewport_generation.wrapping_add(1);
+            self.viewport_finalize_pending = false;
+            if self.own_turn.is_some() {
+                // A kept own-turn hold (send-created chat) owns the viewport.
+                self.pinned = false;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            } else if let Some(SavedViewport::Anchored {
+                anchor,
+                distance_from_bottom,
+                own_turn,
+            }) = saved_viewport
+            {
+                // Keep a possible runway pending until replay confirms that
+                // its optimistic prompt still exists. Installing it on this
+                // empty attach frame can leave a failed send's stale anchor
+                // intercepting scroll-to-bottom forever.
+                self.pinned = false;
+                self.last_scroll_distance = distance_from_bottom;
+                self.show_jump_button = distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
+                self.pending_viewport = Some(SavedViewport::Anchored {
+                    anchor,
+                    distance_from_bottom,
+                    own_turn,
+                });
+            } else {
+                // New chats and chats that were following their tail retain
+                // the existing open-at-bottom behavior.
+                self.pinned = true;
+                self.last_scroll_distance = 0.0;
+                self.show_jump_button = false;
+            }
             self.spring.reset();
             self.spring_last_tick = None;
             self.spring_settled_at = None;
             self.spring_kick = false;
-            self.show_jump_button = false;
+            self.scroll_anim = None;
+            self.stop_selection_scroll();
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
@@ -2402,12 +3477,31 @@ impl Transcript {
                 .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
         });
 
+        // Capture this before the row splice changes the list's measured end.
+        // When the user is truly live-following, retaining the end anchor
+        // keeps the in-flow working trailer at the same viewport position as
+        // transcript lines grow above it. Nothing about the trailer's layout
+        // or coordinates changes.
+        let live_following = should_anchor_live_stream(
+            self.pinned,
+            self.distance_from_bottom(),
+            entries
+                .last()
+                .is_some_and(|entry| entry.status == Some(MessageStatus::Streaming)),
+        );
         let was_empty = self.rows.is_empty();
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
             None => {
                 self.rows = new_rows;
                 self.refresh_protected_attachments(cx);
+                self.reconcile_own_turn_prompt();
+                // Replay readiness is independent of row content: an empty
+                // reset (or one identical to optimistic rows) still resolves
+                // or retires the pending viewport.
+                if self.restore_pending_viewport(replay) {
+                    cx.notify();
+                }
                 return;
             }
             Some((old_range, count)) => {
@@ -2433,10 +3527,13 @@ impl Transcript {
                 } else {
                     self.list.splice(old_range, count);
                 }
+                self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
             }
         }
         self.rows = new_rows;
         self.refresh_protected_attachments(cx);
+        self.reconcile_own_turn_prompt();
+        self.restore_pending_viewport(replay);
         if self.land_end_pending && !self.rows.is_empty() {
             // First content for an unpinned override tab: land at the end.
             // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
@@ -2458,18 +3555,28 @@ impl Transcript {
             self.own_turn_kick = true;
         }
         if self.pinned {
-            if motion::reduced_motion(cx) || was_empty {
-                // First fill (chat open) lands at the bottom instantly
-                // (mugen initialScroll:'bottom'); reduced motion always snaps.
+            if live_following {
                 self.list.scroll_to_end();
-            } else if self.is_glued() {
-                // A glued offset (`None` / anchored past the end) makes the
-                // upcoming layout hard-snap to the new end — the per-commit
-                // stutter. Materialize a pixel anchor a hair above the bottom
-                // so layout holds position and the spring glides the growth.
-                self.list.scroll_by(px(-0.75));
+                self.spring.reset();
+                self.spring_last_tick = None;
+                self.spring_settled_at = None;
+                self.spring_kick = false;
+                self.last_scroll_distance = 0.0;
+            } else {
+                if motion::reduced_motion(cx) || was_empty {
+                    // First fill (chat open) lands at the bottom instantly
+                    // (mugen initialScroll:'bottom'); reduced motion snaps.
+                    self.list.scroll_to_end();
+                } else if self.is_glued() {
+                    // A glued offset (`None` / anchored past the end) makes
+                    // the upcoming layout hard-snap to the new end — the
+                    // per-commit stutter. Materialize a pixel anchor a hair
+                    // above the bottom so layout holds position and the
+                    // spring glides the growth.
+                    self.list.scroll_by(px(-0.75));
+                }
+                self.spring_kick = true;
             }
-            self.spring_kick = true;
         }
         cx.notify();
     }
@@ -2726,6 +3833,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
+        let glyph = Theme::of(cx).glyph;
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
@@ -2740,15 +3848,33 @@ impl Transcript {
             .pt(px(4.0));
         for (aix, att) in atts.iter().enumerate() {
             let state = self.attachment_state(&device_ids, &att.path, cx);
-            // The in-flight send's upload progress belongs ON the thumbnail:
-            // only the un-refreshed echo carries synthetic `pending/` refs, so
-            // the pair (pending path, upload in flight) is exactly "this image
-            // is crossing the relay right now" (2026-08-18 user request).
-            let uploading = att
+            // The in-flight send's progress belongs ON the thumbnail
+            // (2026-08-18 user request). Two ref shapes mean "still
+            // crossing": the queued flow's `pending://` (bytes ship
+            // engine-side after the send; the host rewrites the ref to an
+            // absolute path once they land and the run starts) and the
+            // legacy echo's synthetic `pending/`. Percent sources, in order:
+            // this attachment's own relay transfer (`WatchTransfers`, by the
+            // uploadId its ref names — the leg that actually takes time),
+            // else the send-wide staging/legacy upload percent. Neither → the
+            // indeterminate spinner (staged-but-waiting, retry backoff, or
+            // committed-awaiting-rewrite), so the ring never shows a number
+            // that isn't a real transfer position (2026-08-20 report: the
+            // staging-only percent blinked out in ~100ms and lied about the
+            // slow part).
+            let sending = att.path.starts_with("pending://") || att.path.starts_with("pending/");
+            let upload_id = att
                 .path
-                .starts_with("pending/")
-                .then(|| self.state.read(cx).upload_progress_percent())
-                .flatten();
+                .strip_prefix("pending://")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(id, _)| id);
+            let uploading = upload_id
+                .and_then(|id| self.state.read(cx).transfer_percent(id))
+                .or_else(|| {
+                    sending
+                        .then(|| self.state.read(cx).upload_progress_percent())
+                        .flatten()
+                });
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
@@ -2775,7 +3901,14 @@ impl Transcript {
                         }))
                         .child(
                             img(image.image.clone())
-                                .size_full()
+                                // EXPLICIT dims, not size_full: img layout
+                                // honors the intrinsic aspect ratio over a
+                                // percent height (gpui f8d8a90 repoint), so
+                                // size_full let a tall photo grow past the
+                                // frame and the rectangular overflow clip
+                                // squared the bottom corners (2026-08-19).
+                                .w(px(ATT_THUMB_W - 2.0))
+                                .h(px(ATT_THUMB_H - 2.0))
                                 // The IMG needs its own radii: the frame's
                                 // rounding only clips rectangularly, so the
                                 // sprite must round its own corners (7 = the
@@ -2783,15 +3916,26 @@ impl Transcript {
                                 .rounded(px(7.0))
                                 .object_fit(ObjectFit::Cover),
                         )
-                        .when_some(uploading, |el, pct| {
+                        .when(sending, |el| {
                             // The pulse read registers this entity for frames,
-                            // so the percent stays live even once the trailer's
+                            // so the overlay stays live even once the trailer's
                             // 30s pending-send bridge has lapsed.
                             let pulse = motion::pulse_wave(motion::pulse_delta(
                                 &motion::ZERON_PULSE,
                                 cx.entity_id(),
                                 cx,
                             ));
+                            let indicator: AnyElement = match uploading {
+                                Some(pct) => crate::loaders::upload_progress_ring(pct, 34.0),
+                                None => crate::loaders::mini_glyph_spinner(
+                                    format!("att-sending-{row_id}-{aix}"),
+                                    3.0,
+                                    glyph,
+                                    cx.entity_id(),
+                                    cx,
+                                )
+                                .into_any_element(),
+                            };
                             el.child(
                                 div()
                                     .absolute()
@@ -2801,7 +3945,7 @@ impl Transcript {
                                     .items_center()
                                     .justify_center()
                                     .bg(gpui::hsla(0.0, 0.0, 0.0, 0.38 + 0.05 * pulse))
-                                    .child(crate::loaders::upload_progress_ring(pct, 34.0)),
+                                    .child(indicator),
                             )
                         })
                         .into_any_element()
@@ -2840,9 +3984,37 @@ impl Transcript {
     /// — user request), so it reads as part of the streaming reply and
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
+    /// The failed-send retry (trailer affordance): re-kick every delivery
+    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
+    /// and restart the grace clock so the trailer returns to Sending/Queued
+    /// while the retry runs.
+    fn retry_send(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let engine = self.state.read(cx).engine().cloned();
+        self.state.update(cx, |s, cx| {
+            s.retry_pending_send(&chat_id, chrono::Utc::now());
+            cx.notify();
+        });
+        if let Some(engine) = engine {
+            cx.spawn(async move |_, _| {
+                let params = serde_json::json!({ "chatId": chat_id });
+                if let Err(err) = engine
+                    .client()
+                    .call(zeron_rpc::methods::RETRY_DELIVERY, params)
+                    .await
+                {
+                    tracing::warn!(error = %err, "delivery retry RPC failed");
+                }
+            })
+            .detach();
+        }
+    }
+
     fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
-        let (sending, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
+        let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
             // doc itself instead: the sink's assistant entry streams until
@@ -2854,38 +4026,38 @@ impl Transcript {
             }
             let state = self.state.read(cx);
             let last = state.sub_transcript(doc_id).last()?;
-            let live = last.status == Some(MessageStatus::Streaming)
-                || last.role == MessageRole::User;
+            let live =
+                last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
             if !live {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, elapsed, flavour_seed(doc_id))
+            (false, false, elapsed, flavour_seed(doc_id))
         } else {
             let chat_id = self.chat_id.clone()?;
-            let (sending, elapsed) = {
+            // Failed-send state first: past the grace window the trailer IS
+            // the retry affordance, whatever the indicator fell back to.
+            if self.state.read(cx).send_undelivered(&chat_id, now) {
+                let theme = Theme::of(cx).clone();
+                return Some(
+                    div()
+                        .id("undelivered-retry")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .pt(px(Theme::SPACE_LG))
+                        .text_size(px(12.0))
+                        .text_color(theme.danger)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                        .child(SharedString::from("Not delivered — click to retry"))
+                        .into_any_element(),
+                );
+            }
+            let (sending, queued, elapsed) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                    // Past the pending-send TTL with no ack, the Working
-                    // overlay has lapsed but the queued command is still
-                    // undelivered (edge link down). Silence here read as a
-                    // hang (2026-08-19) — say what's actually happening.
-                    // Static line, no spinner: nothing is progressing; the
-                    // ack notify clears it.
-                    if state.send_queued_unacked(&chat_id, now) {
-                        let theme = Theme::of(cx).clone();
-                        return Some(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .pt(px(10.0))
-                                .text_size(px(12.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from("Queued — waiting for connection…"))
-                                .into_any_element(),
-                        );
-                    }
                     return None;
                 }
                 // During the send→turn window the session row's `started_at`
@@ -2897,14 +4069,21 @@ impl Transcript {
                 let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
                 let sending =
                     sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
+                // Degraded delivery path: the send is a durable local write
+                // waiting on connectivity — say so instead of faking
+                // progress. (The overlay holds while degraded, so this line
+                // owns the surface until the ack or the failed state.)
+                let queued = sending && state.chat_delivery_degraded(&chat_id);
                 let elapsed = turn_started
                     .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                     .unwrap_or(0);
-                (sending, elapsed)
+                (sending, queued, elapsed)
             };
-            (sending, elapsed, flavour_seed(&chat_id))
+            (sending, queued, elapsed, flavour_seed(&chat_id))
         };
-        let word = if sending {
+        let word = if queued {
+            "Queued — will send automatically"
+        } else if sending {
             "Sending"
         } else {
             flavour_word(seed, elapsed_secs)
@@ -2916,7 +4095,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                .pt(px(10.0))
+                .pt(px(Theme::SPACE_LG))
                 .text_size(px(11.0))
                 .child(crate::loaders::gradient_spinner(
                     "working-indicator",
@@ -2928,8 +4107,16 @@ impl Transcript {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!("{word}…"))),
+                        .text_color(if queued {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(SharedString::from(if queued {
+                            word.to_string()
+                        } else {
+                            format!("{word}…")
+                        })),
                 )
                 .when(!sending, |el| {
                     el.child(
@@ -2954,9 +4141,9 @@ impl Transcript {
         // ordinary turn gap, or the content sits double-chrome low.
         let top_gap = if ix == 0 {
             if self.doc_override.is_some() {
-                GAP_TURN
+                Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + GAP_TURN + 10.0
+                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -3144,27 +4331,65 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
         };
 
-        // Hover-revealed timestamp strip (zeron chat-view.tsx `Timestamp`):
-        // a RESERVED 16px lane under the entry's last row — the label only
-        // flips opacity, so revealing it never shifts the virtualizer's
-        // layout. User entries align end (under the bubble), assistant start.
+        // Hover-revealed metadata strip: a RESERVED 32px lane under the
+        // entry's last row. Timestamp, copy action, and copied feedback only
+        // flip visibility/content, so none of them shifts the virtualizer.
+        // User entries align end (under the bubble), assistant entries start.
+        // Both read timestamp first, then the copy action.
         let is_user_row = matches!(row.kind, RowKind::User { .. });
         let hovered = self
             .hovered_entry
             .as_ref()
             .is_some_and(|(_, entry)| entry == &row.entry_id);
-        // Vertical breathing room from the source: assistant text blocks sit
-        // in a `VStack padding={4}` (chat-view.tsx:183), so the strip starts
-        // 4px below the message text — the native markdown column has no such
-        // bottom padding, so the strip carries it as top inset (grown into the
-        // reserved height: reveal still never shifts layout). User rows are
-        // flush: the Timestamp follows the bubble HStack directly (VStack gap
-        // defaults to 0 in mugen), the label's centering inside the 16px lane
-        // is all the gap the original has.
+        let copied_message = self.copied_message.as_ref() == Some(&row.entry_id);
+        let copy_text = row.copy_text.clone();
+        let copy_entry_id = row.entry_id.clone();
         let strip = row.timestamp.map(|ms| {
+            let timestamp = div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.55))
+                .child(SharedString::from(format_timestamp(ms, &chrono::Local)));
+            let copy = copy_text.map(|text| {
+                let entry_id = copy_entry_id.clone();
+                let fade_key = format!("copy-message-hover-{entry_id}");
+                div()
+                    .id(SharedString::from(format!("copy-message-{entry_id}")))
+                    .size(px(Theme::SPACE_MD * 2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    // Same quiet icon-button treatment as the copy action
+                    // over transcript code blocks.
+                    .bg(motion::hover_blend(
+                        &fade_key,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
+                    .on_hover(motion::hover_listener(fade_key))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.copy_message(entry_id.clone(), text.clone(), cx)
+                    }))
+                    .child(
+                        crate::icons::icon(if copied_message {
+                            crate::icons::CHECK
+                        } else {
+                            crate::icons::COPY
+                        })
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                    )
+            });
+            let metadata = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(Theme::SPACE_SM));
+            let metadata = metadata.child(timestamp).children(copy);
             div()
-                .h(px(if is_user_row { 16.0 } else { 20.0 }))
-                .when(!is_user_row, |el| el.pt(px(4.0)))
+                .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
+                .pt(px(Theme::SPACE_SM))
                 .w_full()
                 .flex()
                 .items_center()
@@ -3178,11 +4403,8 @@ impl Transcript {
                 .when(is_user_row, |el| el.justify_end())
                 .when(hovered, |el| {
                     el.child(motion::fade_quick(
-                        SharedString::from(format!("ts-{}", row.id)),
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.55))
-                            .child(SharedString::from(format_timestamp(ms, &chrono::Local))),
+                        SharedString::from(format!("meta-{}", row.id)),
+                        metadata,
                     ))
                 })
         });
@@ -3232,6 +4454,24 @@ impl Transcript {
                     .children(trailer),
             )
             .into_any_element()
+    }
+
+    fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        self.copied_message = Some(entry_id);
+        self.copied_message_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied_message = None;
+                this.copied_message_clear = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Copy-button wiring for one row's code blocks ([`render::CopyUi`]):
@@ -3344,7 +4584,10 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(auto_open);
+        // Agent/spawn chips never fold: they are their own row, always open,
+        // no "Called N tools" header — a running subagent stays visible.
+        let collapses = tool_group_collapses(tools);
+        let open = !collapses || fold.open.unwrap_or(auto_open);
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -3355,7 +4598,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if tool.subagent_ref.is_some() {
+                if is_spawn_link(tool) {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -3377,11 +4620,7 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| {
-                tool.invocation
-                    .clone()
-                    .filter(|_| tool.subagent_ref.is_none())
-            })
+            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -3456,8 +4695,13 @@ impl Transcript {
             .iter()
             .zip(&invocations)
             .zip(&detail_folds)
-            .map(|((detail, invocation), fold)| {
-                (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(false)
+            .zip(tools.iter())
+            .map(|(((detail, invocation), fold), tool)| {
+                // A STREAMING thought chip defaults open (the live thinking
+                // is the point); settled chips default closed. A user toggle
+                // overrides either way.
+                let default_open = tool.is_thought && !tool.resolved;
+                (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(default_open)
             })
             .collect();
         let detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>> = details
@@ -3503,6 +4747,7 @@ impl Transcript {
             .h(px(26.0))
             .cursor_pointer()
             .text_size(px(12.0))
+            .line_height(px(18.0))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
@@ -3530,6 +4775,9 @@ impl Transcript {
             .child(
                 div()
                     .min_w_0()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
                     .truncate()
                     .child(SharedString::from(summary)),
             );
@@ -3543,9 +4791,8 @@ impl Transcript {
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = &tool.subagent_ref {
+                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
-                    let doc_id = doc_id.clone();
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
@@ -3562,6 +4809,7 @@ impl Transcript {
                                 frozen,
                             });
                         }),
+                        collapses,
                         theme,
                         cx.entity_id(),
                         cx,
@@ -3570,7 +4818,7 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
-                    return tool_chip(tool, theme, cx.entity_id(), cx);
+                    return tool_chip(tool, collapses, theme, cx.entity_id(), cx);
                 }
                 let affordance = affordances[ix].clone();
                 let affordance_h = if affordance.is_some() {
@@ -3606,7 +4854,7 @@ impl Transcript {
                 let group_key = row_id.clone();
                 let mut card = div()
                     .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
-                    .ml(px(12.0))
+                    .when(collapses, |el| el.ml(px(12.0)))
                     .min_w_0()
                     .flex_1()
                     .flex()
@@ -3619,6 +4867,10 @@ impl Transcript {
                     .child(
                         div()
                             .id(key.clone())
+                            .h(px(CHIP_HEADER_HEIGHT))
+                            .flex_none()
+                            .flex()
+                            .items_center()
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let entry =
@@ -3718,14 +4970,17 @@ impl Transcript {
                     .flex()
                     .flex_row()
                     // Guide rail: no fixed height — stretches to the card,
-                    // detail included.
-                    .child(
-                        div()
-                            .ml(px(12.0))
-                            .w(px(1.0))
-                            .flex_none()
-                            .bg(crate::theme::ink(0.08)),
-                    )
+                    // detail included. Agent-only groups skip it (no header
+                    // chevron for the rail to sit under).
+                    .when(collapses, |row| {
+                        row.child(
+                            div()
+                                .ml(px(12.0))
+                                .w(px(1.0))
+                                .flex_none()
+                                .bg(crate::theme::ink(0.08)),
+                        )
+                    })
                     .child(card)
                     .into_any_element()
             }));
@@ -3735,12 +4990,16 @@ impl Transcript {
         // content growth never tween, and a SETTLED fold renders at its static
         // height: leaving the tween armed replayed it on every remount, which
         // in a virtualized list means every scroll-back-into-view (only `open`
-        // toggles animate — composes with the stick spring).
-        let animating = fold.epoch > 0
+        // toggles animate — composes with the stick spring). Agent groups skip
+        // the fold entirely (always open, no header).
+        let animating = collapses
+            && fold.epoch > 0
             && fold
                 .toggled_at
                 .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
-        let body: AnyElement = if animating {
+        let body: AnyElement = if !collapses {
+            chips.into_any_element()
+        } else if animating {
             let from = fold.from;
             div()
                 .overflow_hidden()
@@ -3762,7 +5021,7 @@ impl Transcript {
         div()
             .flex()
             .flex_col()
-            .child(header)
+            .when(collapses, |el| el.child(header))
             .child(body)
             .into_any_element()
     }
@@ -3770,7 +5029,7 @@ impl Transcript {
 
 /// A sent message's text with its file-mention chips. The same recipe as the
 /// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at `code_text` violet, [`StyledText`] supplies wrapped glyph
+/// the mono font at the spectrum's `code_text`, [`StyledText`] supplies wrapped glyph
 /// geometry through its layout handle, and a canvas paints the rounded
 /// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
 /// like the text they decorate.
@@ -3992,11 +5251,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
-        // Subagent spawns (the "Agent[: <description>]" Unknown convention
-        // every native driver uses) carry the bot, matching their tab.
-        ToolCall::Unknown { name, .. } if name == "Agent" || name.starts_with("Agent: ") => {
-            crate::icons::BOT
-        }
+        call if is_agent_call(call) => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
@@ -4077,19 +5332,99 @@ fn detail_body(
                     .child(div().w_full().min_w_0().truncate().child(line.clone()))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(
+                block.child(more_lines_row(*truncated_by, theme))
+            })
+            .into_any_element(),
+        ToolDetail::Thought {
+            lines,
+            truncated_by,
+        } => body
+            .py(px(6.0))
+            .text_size(px(12.0))
+            .children(lines.iter().map(|line| {
+                let row = div()
+                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center();
+                let Some((text, runs)) = thought_line_text(line, theme) else {
+                    return row; // blank separator row
+                };
+                row.child(
                     div()
-                        .h(px(OUTPUT_LINE_HEIGHT))
-                        .px(px(12.0))
-                        .flex()
-                        .items_center()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("… {truncated_by} more lines"))),
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .child(StyledText::new(text).with_runs(runs)),
                 )
+            }))
+            .when(*truncated_by > 0, |block| {
+                block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
     }
+}
+
+/// The counted-tail row under a truncated Output/Thought detail.
+fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(OUTPUT_LINE_HEIGHT))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .text_size(px(10.5))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("… {truncated_by} more lines")))
+}
+
+/// Shape one flattened thought line into gpui text runs — the detail-body
+/// palette: muted foreground prose, semibold for bold, violet mono for code,
+/// underlined links (NOT clickable — a thought is a record, not a surface).
+fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString, Vec<TextRun>)> {
+    let mut text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    for run in line {
+        if run.text.is_empty() {
+            continue;
+        }
+        let mut f = if run.style.code {
+            gpui::font(theme.font_mono.clone())
+        } else {
+            gpui::font(theme.font_sans.clone())
+        };
+        if run.style.bold {
+            f.weight = gpui::FontWeight::SEMIBOLD;
+        }
+        if run.style.italic {
+            f.style = gpui::FontStyle::Italic;
+        }
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: f,
+            color: if run.style.code {
+                render::inline_code_text(theme)
+            } else {
+                theme.text.opacity(0.85)
+            },
+            background_color: None,
+            underline: run.style.link.is_some().then_some(gpui::UnderlineStyle {
+                color: Some(theme.text_muted),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_muted),
+            }),
+        });
+        text.push_str(&run.text);
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((text.into(), runs))
 }
 
 /// The trailing tile on a chip header, when it has one.
@@ -4117,7 +5452,11 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, detail) = tool_chip_content(&tool.call);
+    let (label, detail) = if tool.is_thought {
+        ("Thought process", String::new())
+    } else {
+        tool_chip_content(&tool.call)
+    };
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -4129,7 +5468,7 @@ fn chip_header_row(
         theme.text_muted
     };
     div()
-        .h(px(CHIP_CARD_HEIGHT))
+        .h(px(CHIP_HEADER_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -4138,6 +5477,7 @@ fn chip_header_row(
         .gap(px(8.0))
         .px(px(8.0))
         .text_size(px(12.0))
+        .line_height(px(18.0))
         .child(
             // Icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
             // icon size-3).
@@ -4150,14 +5490,21 @@ fn chip_header_row(
                 .items_center()
                 .justify_center()
                 .child(
-                    crate::icons::icon(tool_icon_path(&tool.call))
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
+                    crate::icons::icon(if tool.is_thought {
+                        crate::icons::CHAT_ROUND_LINE
+                    } else {
+                        tool_icon_path(&tool.call)
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
                 ),
         )
         .child(
             div()
                 .flex_none()
+                .h(px(18.0))
+                .flex()
+                .items_center()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(tint)
                 .child(SharedString::from(label)),
@@ -4166,6 +5513,9 @@ fn chip_header_row(
             div()
                 .flex_1()
                 .min_w_0()
+                .h(px(18.0))
+                .flex()
+                .items_center()
                 .truncate()
                 .text_color(if failed {
                     theme.danger
@@ -4174,22 +5524,43 @@ fn chip_header_row(
                 })
                 .child(SharedString::from(detail)),
         )
-        .when(running, |row| {
-            // The sidebar working-row spinner, in the chip's trailing slot —
-            // paint-local (fixed footprint), so it never moves the layout.
+        .when_some(tool.call.subagent_model(), |row, model| {
+            // Which model the child runs on, when the spawn named one.
+            //
+            // In the trailing slot rather than suffixed onto the detail: the
+            // detail is the truncating slot, and the model is exactly what a
+            // reader scanning a fan-out of spawns wants left once the
+            // descriptions are cut.
+            //
+            // Bare faint text, NOT a filled pill: the tiles either side of it
+            // are AFFORDANCES (the spinner means running, the arrow opens the
+            // subagent), so giving a passive label the same chrome made the
+            // trailing edge read as three buttons — the loudest thing in the
+            // row was the one thing you cannot click.
             row.child(
                 div()
                     .flex_none()
-                    .child(crate::loaders::mini_gradient_spinner(
-                        format!(
-                            "subagent-chip-{}",
-                            tool.subagent_ref.as_deref().unwrap_or_default()
-                        ),
-                        2.0,
-                        view,
-                        cx,
-                    )),
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(model.to_owned())),
             )
+        })
+        .when(running, |row| {
+            // The sidebar working-row spinner, in the chip's trailing slot —
+            // paint-local (fixed footprint), so it never moves the layout.
+            row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                format!(
+                    "subagent-chip-{}",
+                    tool.subagent_ref.as_deref().unwrap_or_default()
+                ),
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            )))
         })
         .when_some(trail, |row, trail| {
             // Trailing tile matching the group header's: a chevron for the
@@ -4288,9 +5659,11 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
     "Subagent".into()
 }
 
-/// A plain (non-expandable) chip: guide rail + bordered card.
+/// A plain (non-expandable) chip: bordered card, plus the group guide rail
+/// when the chip lives under a collapsible header.
 fn tool_chip(
     tool: &ToolItem,
+    rail: bool,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -4302,21 +5675,24 @@ fn tool_chip(
         .flex()
         .flex_row()
         .items_center()
-        // Guide rail: hairline centered under the header's chevron tile.
+        .when(rail, |row| {
+            row.child(
+                div()
+                    .ml(px(12.0))
+                    .h_full()
+                    .w(px(1.0))
+                    .flex_none()
+                    .bg(crate::theme::ink(0.08)),
+            )
+        })
         .child(
             div()
-                .ml(px(12.0))
-                .h_full()
-                .w(px(1.0))
-                .flex_none()
-                .bg(crate::theme::ink(0.08)),
-        )
-        .child(
-            div()
-                .ml(px(12.0))
+                .when(rail, |el| el.ml(px(12.0)))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
@@ -4330,11 +5706,13 @@ fn tool_chip(
 /// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
 /// "open the subagent tab" click (open-arrow tile in the trailing slot).
 /// No accordion — an inline body would only repeat the subagent's own
-/// transcript.
+/// transcript. The group guide rail is omitted for agent-only rows (no
+/// collapse header for it to hang from).
 fn subagent_chip(
     tool: &ToolItem,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    rail: bool,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -4346,22 +5724,25 @@ fn subagent_chip(
         .flex()
         .flex_row()
         .items_center()
-        // Guide rail: hairline centered under the header's chevron tile.
-        .child(
-            div()
-                .ml(px(12.0))
-                .h_full()
-                .w(px(1.0))
-                .flex_none()
-                .bg(crate::theme::ink(0.08)),
-        )
+        .when(rail, |row| {
+            row.child(
+                div()
+                    .ml(px(12.0))
+                    .h_full()
+                    .w(px(1.0))
+                    .flex_none()
+                    .bg(crate::theme::ink(0.08)),
+            )
+        })
         .child(
             div()
                 .id(id)
-                .ml(px(12.0))
+                .when(rail, |el| el.ml(px(12.0)))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
+                .flex()
+                .items_center()
                 .overflow_hidden()
                 .rounded(px(9.0))
                 .border_1()
@@ -4470,6 +5851,39 @@ impl Render for Transcript {
                     .ok();
             });
         }
+        // Programmatic `scroll_to` does not invoke the list's user-scroll
+        // handler. Refresh distance-derived state once layout has measured the
+        // replay, guarded so a stale A callback cannot mutate B (or a newer A).
+        if self.viewport_finalize_pending && !self.viewport_finalize_scheduled {
+            self.viewport_finalize_scheduled = true;
+            let token = ViewportFinalizeToken {
+                generation: self.viewport_generation,
+                layout_revision: self.viewport_layout_revision,
+            };
+            let entity = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                entity
+                    .update(cx, |this: &mut Transcript, cx| {
+                        this.viewport_finalize_scheduled = false;
+                        if !token.still_current(this.viewport_generation) {
+                            if this.viewport_finalize_pending {
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        let distance = this.distance_from_bottom();
+                        this.last_scroll_distance = distance;
+                        this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
+                            && !this.pinned
+                            && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
+                        if token.layout_settled(this.viewport_layout_revision) {
+                            this.viewport_finalize_pending = false;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            });
+        }
         let rail = self.render_rail(cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
@@ -4504,6 +5918,9 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
+            .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             // FIRST child ⇒ paints first: clears the frame's markdown text-
             // selection registry before any row's text elements re-register
             // (document paint order = selection order; see markdown/render.rs).
@@ -4535,6 +5952,24 @@ impl Render for Transcript {
 mod tests {
     use super::*;
     use zeron_doc::MessagePart;
+
+    #[test]
+    fn selection_scroll_ramps_at_viewport_edges() {
+        let bounds = Bounds::new(
+            gpui::point(px(10.0), px(20.0)),
+            gpui::size(px(300.0), px(200.0)),
+        );
+        assert_eq!(
+            selection_scroll_step(bounds, gpui::point(px(20.0), px(120.0))),
+            0.0
+        );
+        assert!(selection_scroll_step(bounds, gpui::point(px(20.0), px(20.0))) < 0.0);
+        assert!(selection_scroll_step(bounds, gpui::point(px(20.0), px(220.0))) > 0.0);
+        assert!(
+            selection_scroll_step(bounds, gpui::point(px(20.0), px(220.0)))
+                > selection_scroll_step(bounds, gpui::point(px(20.0), px(200.0)))
+        );
+    }
 
     // ---- streaming parse wiring (the transcript side, not the parser) ----
 
@@ -4724,6 +6159,20 @@ mod tests {
     }
 
     #[test]
+    fn only_a_stream_at_the_bottom_gets_a_hard_end_anchor() {
+        assert!(should_anchor_live_stream(true, 0.0, true));
+        assert!(should_anchor_live_stream(true, AT_BOTTOM_PX, true));
+
+        // A user who has moved away from the end keeps control of the
+        // viewport, even if the transcript is still streaming.
+        assert!(!should_anchor_live_stream(true, AT_BOTTOM_PX + 0.1, true));
+        assert!(!should_anchor_live_stream(false, 0.0, true));
+
+        // Ordinary transcript updates retain the existing spring behavior.
+        assert!(!should_anchor_live_stream(true, 0.0, false));
+    }
+
+    #[test]
     fn own_turn_reservation_is_a_min_height_for_the_turn() {
         let usable = 700.0;
         // A short turn reserves the rest of the usable viewport below it.
@@ -4734,6 +6183,264 @@ mod tests {
         // over with no height jump).
         assert_eq!(own_turn_reservation(usable, 700.0), 0.0);
         assert_eq!(own_turn_reservation(usable, 1_200.0), 0.0);
+    }
+
+    fn viewport_row(id: &str, entry_id: &str) -> Row {
+        Row {
+            id: id.into(),
+            version: 0,
+            turn_start: true,
+            kind: RowKind::ErrorChip {
+                message: SharedString::default(),
+            },
+            entry_id: entry_id.into(),
+            timestamp: None,
+            copy_text: None,
+        }
+    }
+
+    #[test]
+    fn viewport_anchor_tracks_a_stable_row_across_replay() {
+        let rows = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("c", "entry-c"),
+        ];
+        let anchor = ViewportAnchor::capture(
+            &rows,
+            ListOffset {
+                item_ix: 1,
+                offset_in_item: px(23.0),
+            },
+        )
+        .expect("visible row");
+
+        let replay = vec![
+            viewport_row("new", "entry-new"),
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("c", "entry-c"),
+        ];
+        let restored = anchor.resolve(&replay).expect("restored row");
+        assert_eq!(restored.item_ix, 2);
+        assert_eq!(restored.offset_in_item, px(23.0));
+    }
+
+    #[test]
+    fn viewport_anchor_has_entry_and_index_fallbacks() {
+        let rows = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("old-block", "entry-c"),
+        ];
+        let anchor = ViewportAnchor::capture(
+            &rows,
+            ListOffset {
+                item_ix: 2,
+                offset_in_item: px(31.0),
+            },
+        )
+        .expect("visible row");
+
+        let reshaped = vec![
+            viewport_row("a", "entry-a"),
+            viewport_row("b", "entry-b"),
+            viewport_row("inserted", "entry-new"),
+            viewport_row("new-block", "entry-c"),
+        ];
+        let same_entry = anchor.resolve(&reshaped).expect("entry fallback");
+        assert_eq!(same_entry.item_ix, 3);
+        assert_eq!(same_entry.offset_in_item, px(0.0));
+
+        let entry_removed = vec![viewport_row("a", "entry-a"), viewport_row("b", "entry-b")];
+        let clamped = anchor.resolve(&entry_removed).expect("index fallback");
+        assert_eq!(clamped.item_ix, 1);
+        assert_eq!(clamped.offset_in_item, px(0.0));
+    }
+
+    #[test]
+    fn optimistic_echo_cannot_consume_a_historical_viewport_before_replay() {
+        let history = vec![viewport_row("historical", "historical-entry")];
+        let saved = SavedViewport::capture(&history, ListOffset::default(), false, 480.0, None)
+            .expect("historical viewport");
+        let echo_only = vec![viewport_row("echo", "echo-entry")];
+
+        assert!(
+            saved.resolve(&echo_only, false).is_none(),
+            "an unrelated echo is not an authoritative index fallback"
+        );
+        assert_eq!(
+            saved
+                .resolve(&echo_only, true)
+                .expect("populated replay may use an index fallback")
+                .offset
+                .item_ix,
+            0
+        );
+        assert!(TranscriptReplayState::Empty.authoritative_empty());
+        assert!(!TranscriptReplayState::Empty.allows_fallback());
+        assert!(!TranscriptReplayState::Pending.allows_fallback());
+        assert!(TranscriptReplayState::Populated.allows_fallback());
+
+        let echo_viewport =
+            SavedViewport::capture(&echo_only, ListOffset::default(), false, 0.0, None)
+                .expect("echo viewport");
+        assert!(
+            echo_viewport.resolve(&echo_only, false).is_some(),
+            "the exact optimistic row is safe before replay"
+        );
+    }
+
+    #[test]
+    fn saved_viewport_preserves_and_releases_an_active_turn_runway() {
+        let rows = vec![viewport_row("prompt", "prompt")];
+        let own_turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 640.0,
+            held: true,
+            positioned: true,
+            seen_prompt: true,
+        };
+        let saved = SavedViewport::capture(
+            &rows,
+            ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            },
+            false,
+            0.0,
+            Some(&own_turn),
+        )
+        .expect("active chat viewport");
+        let SavedViewport::Anchored {
+            own_turn: Some(saved_turn),
+            ..
+        } = &saved
+        else {
+            panic!("an active turn must keep its runway with the viewport");
+        };
+        assert_eq!(saved_turn.runway, 640.0);
+        assert!(saved_turn.held);
+        assert!(saved_turn.positioned);
+
+        let restored = saved
+            .resolve(&rows, false)
+            .expect("exact queued echo survives an empty replay");
+        let restored_turn = restored.own_turn.expect("valid restored runway");
+        assert_eq!(restored_turn.runway, 640.0);
+        assert!(!restored_turn.held);
+        assert!(!restored_turn.positioned);
+        assert!(restored_turn.seen_prompt);
+
+        let list_state = ListState::new(rows.len(), ListAlignment::Bottom, px(0.0));
+        list_state.reset(0);
+        list_state.splice(0..0, rows.len());
+        list_state.scroll_to(restored.offset);
+        assert_eq!(list_state.logical_scroll_top().item_ix, 0);
+        assert_eq!(list_state.logical_scroll_top().offset_in_item, px(0.0));
+
+        assert!(
+            SavedViewport::capture(&[], ListOffset::default(), false, 0.0, Some(&own_turn))
+                .is_none(),
+            "an empty rapid-switch replay must not overwrite the older snapshot"
+        );
+    }
+
+    #[test]
+    fn own_turn_waits_for_its_first_echo_then_retires_if_it_disappears() {
+        let mut turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 0.0,
+            held: true,
+            positioned: false,
+            seen_prompt: false,
+        };
+
+        assert!(turn.observe_prompt(false), "fresh send waits one state gap");
+        assert!(turn.observe_prompt(true), "echo activates the runway");
+        assert!(turn.seen_prompt);
+        assert!(
+            !turn.observe_prompt(false),
+            "failed echo retires the activated runway"
+        );
+    }
+
+    #[test]
+    fn restored_viewport_discards_a_failed_optimistic_turn() {
+        let outgoing = vec![viewport_row("prompt", "prompt")];
+        let own_turn = OwnTurnAnchor {
+            chat_id: "chat-a".into(),
+            message_id: "prompt".into(),
+            runway: 640.0,
+            held: true,
+            positioned: true,
+            seen_prompt: true,
+        };
+        let saved = SavedViewport::capture(
+            &outgoing,
+            ListOffset::default(),
+            false,
+            420.0,
+            Some(&own_turn),
+        )
+        .expect("outgoing viewport");
+
+        // The failed echo vanished while A was hidden. The ordinary viewport
+        // still restores by index, but no stale runway may intercept jump.
+        let replay = vec![viewport_row("older", "older")];
+        let restored = saved.resolve(&replay, true).expect("index fallback");
+        assert!(restored.own_turn.is_none());
+        assert_eq!(restored.offset.item_ix, 0);
+        assert_eq!(restored.distance_from_bottom, 420.0);
+    }
+
+    #[test]
+    fn pinned_viewports_follow_tail_and_the_cache_is_bounded() {
+        let rows = vec![viewport_row("row", "entry")];
+        let pinned = SavedViewport::capture(&rows, ListOffset::default(), true, 999.0, None)
+            .expect("pinned viewport");
+        assert!(matches!(pinned, SavedViewport::FollowTail));
+
+        let mut cache = SavedViewportCache::default();
+        for ix in 0..MAX_SAVED_VIEWPORTS + 8 {
+            cache.insert(format!("chat-{ix}"), SavedViewport::FollowTail);
+        }
+        assert_eq!(cache.len(), MAX_SAVED_VIEWPORTS);
+        assert!(cache.get_cloned_and_touch("chat-0").is_none());
+        assert!(
+            cache
+                .get_cloned_and_touch(&format!("chat-{}", MAX_SAVED_VIEWPORTS + 7))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reopening_the_oldest_cached_chat_protects_it_from_the_next_eviction() {
+        let mut cache = SavedViewportCache::default();
+        for ix in 0..MAX_SAVED_VIEWPORTS {
+            cache.insert(format!("chat-{ix}"), SavedViewport::FollowTail);
+        }
+
+        assert!(cache.get_cloned_and_touch("chat-0").is_some());
+        cache.insert("outgoing-new".into(), SavedViewport::FollowTail);
+
+        assert!(cache.by_chat.contains_key("chat-0"));
+        assert!(!cache.by_chat.contains_key("chat-1"));
+        assert!(cache.by_chat.contains_key("outgoing-new"));
+    }
+
+    #[test]
+    fn viewport_finalization_waits_for_current_generation_and_stable_layout() {
+        let token = ViewportFinalizeToken {
+            generation: 7,
+            layout_revision: 11,
+        };
+        assert!(token.still_current(7));
+        assert!(!token.still_current(8));
+        assert!(token.layout_settled(11));
+        assert!(!token.layout_settled(12));
     }
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
@@ -4757,6 +6464,188 @@ mod tests {
             id: id.into(),
             text: text.into(),
         }
+    }
+
+    fn reasoning_part(id: &str, text: &str) -> MessagePart {
+        MessagePart::Reasoning {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn reasoning_joins_the_tool_group_accordion() {
+        // Thought → tool → thought → tool folds into ONE group row (user
+        // request: the thought process lives inside the combined accordion),
+        // and the collapsed summary names the thinking.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                reasoning_part("r0", "planning the first step"),
+                tool_part("t1", "ls"),
+                reasoning_part("r2", "now the second step"),
+                tool_part("t3", "pwd"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1, "one combined accordion row");
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tools.len(), 4);
+        assert!(tools[0].is_thought && tools[2].is_thought);
+        assert!(!tools[1].is_thought && !tools[3].is_thought);
+        // Thought chips carry their text as a styled-line detail with an
+        // ANALYTIC height, so the group's fold tween covers them.
+        assert!(matches!(
+            tools[0].detail.as_deref(),
+            Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
+        ));
+        let summary = tool_group_summary(&tools);
+        assert!(summary.starts_with("Thought 2 times"), "{summary}");
+        assert!(summary.contains("2 commands"), "{summary}");
+
+        // A lone thought is still an accordion (with the group tween), named
+        // plainly.
+        let entry = assistant(
+            "a2",
+            MessageStatus::Complete,
+            vec![reasoning_part("r0", "just thinking")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tool_group_summary(&tools), "Thought process");
+
+        // Empty reasoning renders nothing.
+        let entry = assistant(
+            "a3",
+            MessageStatus::Complete,
+            vec![reasoning_part("r0", "   ")],
+        );
+        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+    }
+
+    #[test]
+    fn live_thought_streams_open_and_settles_closed() {
+        let entry = assistant(
+            "a1",
+            MessageStatus::Streaming,
+            vec![reasoning_part("r0", "thinking hard")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        // The live tail auto-opens the group; the chip itself is unresolved
+        // (defaults open) until the part stops being the tail.
+        assert!(*auto_open);
+        assert!(!tools[0].resolved);
+
+        let entry = assistant(
+            "a2",
+            MessageStatus::Streaming,
+            vec![
+                reasoning_part("r0", "thinking hard"),
+                text_part("t1", "answer"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert!(tools[0].resolved, "a followed thought is settled");
+    }
+
+    fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
+        thought_lines(&parse_full(text))
+    }
+
+    fn line_chars(line: &[InlineRun]) -> usize {
+        line.iter().map(|r| r.text.chars().count()).sum()
+    }
+
+    fn line_string(line: &[InlineRun]) -> String {
+        line.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn thought_wrap_is_word_aware_and_bounded() {
+        let lines = thought_of("one two three");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_string(&lines[0]), "one two three");
+        let long = "word ".repeat(200);
+        let lines = thought_of(&long);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
+        assert!(lines.len() > 5);
+        let pathological = "x".repeat(300);
+        let lines = thought_of(&pathological);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
+        // A word glued across style boundaries wraps as ONE unit — no line
+        // may split inside `**bold**tail`.
+        let glued = format!("{} **bold**tail", "word ".repeat(30));
+        let lines = thought_of(&glued);
+        let joined: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        assert!(joined.iter().any(|l| l.ends_with("boldtail")), "{joined:?}");
+    }
+
+    #[test]
+    fn thought_markdown_styles_instead_of_literal_markers() {
+        // The exact user report: `**bold**` markers showed as glyphs.
+        let lines = thought_of("**Planning rollback** then *checking* `parse` [docs](https://d)");
+        assert_eq!(lines.len(), 1);
+        let flat = line_string(&lines[0]);
+        assert!(
+            !flat.contains('*') && !flat.contains('`') && !flat.contains('['),
+            "{flat}"
+        );
+        let line = &lines[0];
+        assert!(
+            line.iter()
+                .any(|r| r.style.bold && r.text.contains("Planning rollback")),
+            "bold run survives: {line:?}"
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.italic && r.text.contains("checking"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.code && r.text.contains("parse"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.link.is_some() && r.text.contains("docs"))
+        );
+    }
+
+    #[test]
+    fn thought_blocks_flatten_structurally() {
+        let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
+        let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        // Heading renders bold, same size (one 18px row).
+        assert!(
+            lines[0]
+                .iter()
+                .any(|r| r.style.bold && r.text.contains("Head"))
+        );
+        // Blank separator rows between top-level blocks; tight list inside.
+        assert_eq!(flat[1], "");
+        assert_eq!(flat[2], "para");
+        assert_eq!(flat[4], "• one");
+        assert_eq!(flat[5], "• two");
+        // Code lines verbatim, styled as code (mono at render).
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .iter()
+                .any(|r| r.style.code && r.text == "let x = 1;"),
+            "{flat:?}"
+        );
     }
 
     fn tool_part(id: &str, command: &str) -> MessagePart {
@@ -4850,11 +6739,11 @@ mod tests {
         // Sibling markdown blocks from the same part: md block gap.
         assert_eq!(top_gap_for(Some(&rows[0]), &rows[1]), render::MD_BLOCK_GAP);
         assert_eq!(top_gap_for(Some(&rows[1]), &rows[2]), render::MD_BLOCK_GAP);
-        // Markdown → tool group and tool group → next part: block gap.
-        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), GAP_BLOCK);
-        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), GAP_BLOCK);
+        // Markdown → tool group and tool group → next part: larger boundary.
+        assert_eq!(top_gap_for(Some(&rows[2]), &rows[3]), Theme::SPACE_MD);
+        assert_eq!(top_gap_for(Some(&rows[3]), &rows[4]), Theme::SPACE_MD);
         // Turn starts get the turn gap regardless.
-        assert_eq!(top_gap_for(None, &rows[0]), GAP_TURN);
+        assert_eq!(top_gap_for(None, &rows[0]), Theme::SPACE_LG);
     }
 
     #[test]
@@ -4878,6 +6767,174 @@ mod tests {
         };
         assert_eq!(tools.len(), 2);
         assert!(rows[0].turn_start && !rows[1].turn_start);
+    }
+
+    fn agent_part(id: &str, description: &str) -> MessagePart {
+        MessagePart::Tool {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: format!("Agent: {description}"),
+                input: Some(serde_json::json!({ "description": description })),
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some(format!("chat--sub--{id}")),
+            subagent_status: Some(SubagentStatus::Running),
+            subagent_tail: None,
+        }
+    }
+
+    #[test]
+    fn agent_calls_split_out_of_ordinary_tool_groups() {
+        // Agent/spawn chips must not share a collapse with Reads/Runs: a
+        // lone Agent used to hide behind "Called 1 tool", and a mixed
+        // group hid the running subagent until the user opened the fold.
+        let entry = assistant(
+            "m-agent",
+            MessageStatus::Complete,
+            vec![
+                text_part("t0", "before"),
+                tool_part("a", "ls"),
+                tool_part("b", "pwd"),
+                agent_part("s1", "Map URL import ingest path"),
+                tool_part("c", "make"),
+                agent_part("s2", "Audit the fold path"),
+                agent_part("s3", "Verify the commit cadence"),
+                text_part("t1", "after"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(
+            ids,
+            [
+                "m-agent#t0.0",
+                "m-agent#g0",
+                "m-agent#g1",
+                "m-agent#g2",
+                "m-agent#g3",
+                "m-agent#t1.0",
+            ]
+        );
+
+        let RowKind::ToolGroup { tools, auto_open } = &rows[1].kind else {
+            panic!("ordinary group expected")
+        };
+        assert_eq!(tools.len(), 2);
+        assert!(tool_group_collapses(tools));
+        assert!(!*auto_open);
+
+        let RowKind::ToolGroup { tools, .. } = &rows[2].kind else {
+            panic!("agent group expected")
+        };
+        assert_eq!(tools.len(), 1);
+        assert!(!tool_group_collapses(tools));
+        assert!(is_agent_tool(&tools[0]));
+
+        let RowKind::ToolGroup { tools, .. } = &rows[3].kind else {
+            panic!("ordinary group expected")
+        };
+        assert_eq!(tools.len(), 1);
+        assert!(tool_group_collapses(tools));
+
+        let RowKind::ToolGroup { tools, .. } = &rows[4].kind else {
+            panic!("consecutive agents share a group")
+        };
+        assert_eq!(tools.len(), 2);
+        assert!(!tool_group_collapses(tools));
+        assert!(tools.iter().all(is_agent_tool));
+    }
+
+    #[test]
+    fn stray_subagent_ref_on_a_run_chip_stays_an_ordinary_tool() {
+        // Docs written before the claude-driver fix carry subagent refs on
+        // ordinary Run chips (a background shell's task_notification was
+        // mis-tagged as subagent traffic). The ref alone must not change the
+        // chip's genus: it folds with its neighbors and renders as a plain
+        // tool, never as a spawn link to a doc that was never created.
+        let mut stray = tool_part("b", "git clone …");
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            ..
+        } = &mut stray
+        {
+            *subagent_ref = Some("chat--sub--b".into());
+            *subagent_status = Some(SubagentStatus::Done);
+        }
+        let entry = assistant(
+            "m-stray",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1, "one folded group, no agent split");
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("tool group expected")
+        };
+        assert_eq!(tools.len(), 3);
+        assert!(tool_group_collapses(tools));
+        assert!(tools.iter().all(|t| !is_agent_tool(t)));
+        assert!(tools.iter().all(|t| !is_spawn_link(t)));
+    }
+
+    #[test]
+    fn lone_completed_agent_stays_uncollapsed() {
+        let entry = assistant(
+            "m-lone",
+            MessageStatus::Complete,
+            vec![agent_part("s1", "scan repo")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+            panic!("agent group expected")
+        };
+        assert_eq!(tools.len(), 1);
+        assert!(!tool_group_collapses(tools), "no 'Called 1 tool' wrap");
+        assert!(
+            !*auto_open,
+            "auto_open is a streaming flag; agent rows ignore it at paint"
+        );
+    }
+
+    #[test]
+    fn pre_spawn_agent_name_is_enough_to_split() {
+        // Before the engine stamps subagent_ref the chip is already named
+        // "Agent: …" — that genus must split, or the spawn hides until the
+        // first tagged event.
+        let mut part = agent_part("s1", "scan repo");
+        if let MessagePart::Tool {
+            subagent_ref,
+            subagent_status,
+            ..
+        } = &mut part
+        {
+            *subagent_ref = None;
+            *subagent_status = None;
+        }
+        let entry = assistant(
+            "m-pre",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), part],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 2);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!()
+        };
+        assert!(tool_group_collapses(tools));
+        let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
+            panic!()
+        };
+        assert!(!tool_group_collapses(tools));
+        assert!(is_agent_call(&tools[0].call));
     }
 
     #[test]
@@ -4947,6 +7004,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "what color is this?");
+        assert_eq!(rows[0].copy_text.as_deref(), Some("what color is this?"));
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].path, "/data/uploads/ab12-red.png");
         assert_eq!(attachments[0].name, "ab12-red.png");
@@ -4962,6 +7020,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert_eq!(text.as_ref(), "");
+        assert!(rows[0].copy_text.is_none());
         assert_eq!(attachments.len(), 1);
     }
 
@@ -5138,6 +7197,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            is_thought: false,
         };
         let edit = |p: &str| ToolItem {
             call: ToolCall::EditFile {
@@ -5155,6 +7215,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            is_thought: false,
         };
         let tools = vec![
             exec("ls"),
@@ -5188,6 +7249,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
             ToolItem {
                 call: ToolCall::Glob {
@@ -5203,6 +7265,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
             ToolItem {
                 call: ToolCall::WebSearch { query: "q".into() },
@@ -5216,6 +7279,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
@@ -5434,7 +7498,12 @@ mod tests {
         let rows = rows_for_entry(&done, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
+        assert_eq!(
+            rows.last().unwrap().copy_text.as_deref(),
+            Some("one\n\ntwo")
+        );
         assert!(rows[..rows.len() - 1].iter().all(|r| r.timestamp.is_none()));
+        assert!(rows[..rows.len() - 1].iter().all(|r| r.copy_text.is_none()));
 
         // …but never mid-stream (chat-view.tsx: no hover under a moving reply).
         let live = assistant(
@@ -5444,8 +7513,26 @@ mod tests {
         );
         let rows = rows_for_entry(&live, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
+        assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
         assert!(rows.iter().all(|r| r.entry_id.as_ref() == live.id));
+    }
+
+    #[test]
+    fn message_copy_keeps_authored_text_and_excludes_tool_traces() {
+        let entry = assistant(
+            "a-copy",
+            MessageStatus::Complete,
+            vec![
+                text_part("p1", "First **paragraph**."),
+                tool_part("tool", "printf hidden"),
+                text_part("p2", "    indented code\n    stays indented"),
+            ],
+        );
+        assert_eq!(
+            assistant_copy_text(&entry).as_deref(),
+            Some("First **paragraph**.\n\n    indented code\n    stays indented")
+        );
     }
 
     #[test]

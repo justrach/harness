@@ -17,7 +17,7 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -551,18 +551,20 @@ pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
 /// A composer send whose doc command is queued but not yet executed by the
 /// chat's host device — cleared when the host writes the user message back
 /// into the transcript (same client-minted id as the [`AppState::echoes`]
-/// dedup), or after [`PENDING_SEND_TTL_MS`].
+/// dedup); past [`UNDELIVERED_GRACE_MS`] it surfaces as the explicit
+/// failed/retry state instead.
 #[derive(Debug, Clone)]
 struct PendingSend {
     message_id: String,
     started: DateTime<Utc>,
 }
 
-/// How long the send-in-flight overlay may hold before the synced status
-/// shows through again. Covers the queue → nudge → drain → sync round-trip
-/// to a remote host; when the host is offline the dot falls back to the
-/// truth after this.
-pub const PENDING_SEND_TTL_MS: i64 = 30_000;
+/// How long an unadopted send reads as Working/Sending (or Queued when the
+/// path is degraded) before flipping to the EXPLICIT failed state with a
+/// retry affordance. The old 30s overlay silently expired back to Idle with
+/// no visible trace of the send at all — the exact hole the 2026-08-19
+/// incident fell into.
+pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 
 /// A send's attachment-upload leg in flight. `done` is bumped by the upload
 /// task per completed chunk (binary bytes); the working label reads it every
@@ -585,6 +587,9 @@ pub struct AppState {
     /// Auth stream value; `None` until the engine reports one (M4).
     pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
+    /// Live edge posture (WatchConnectivity): drives the connection pill,
+    /// composer honesty ("will queue"), and the Queued send badges.
+    pub connectivity: zeron_proto::Connectivity,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -611,8 +616,14 @@ pub struct AppState {
     /// judge by the empty pre-sync lists.
     pub chats_synced: bool,
     pub spaces_synced: bool,
+    pending_deep_link: Option<crate::links::ConversationDeepLink>,
+    deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
+    /// The selected chat's opening `WatchDocMessages` reset has landed. An
+    /// empty transcript is otherwise indistinguishable from the pre-replay
+    /// gap after selection, where optimistic echoes may already be visible.
+    pub transcript_replayed: bool,
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
@@ -621,6 +632,10 @@ pub struct AppState {
     pending_sends: HashMap<String, PendingSend>,
     /// The in-flight send's attachment upload, when it has one.
     upload_progress: Option<UploadProgress>,
+    /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
+    /// snapshots): real relay-leg progress for the sending thumbnail's
+    /// percent ring, present exactly while bytes are moving.
+    transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
     diff_comments: HashMap<String, Vec<DiffComment>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
@@ -636,6 +651,7 @@ pub struct AppState {
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
+    change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
     /// feed must survive chat switches — the tab itself is what scopes it.
@@ -660,6 +676,7 @@ impl AppState {
             workspace_scope: None,
             auth: None,
             devices: Vec::new(),
+            connectivity: zeron_proto::Connectivity::default(),
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
@@ -668,9 +685,11 @@ impl AppState {
             selected_device: None,
             selected_chat: None,
             transcript: Vec::new(),
+            transcript_replayed: false,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
+            transfers: HashMap::new(),
             diff_comments: HashMap::new(),
             local_device_id: None,
             update: None,
@@ -680,11 +699,14 @@ impl AppState {
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
+            change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            pending_deep_link: None,
+            deep_link_notice: None,
         }
     }
 
@@ -738,6 +760,7 @@ impl AppState {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
             self.selected_chat = None;
             self.transcript.clear();
+            self.transcript_replayed = false;
             self.transcript_task = None;
         }
     }
@@ -778,6 +801,49 @@ impl AppState {
         }
     }
 
+    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
+        self.connectivity = connectivity;
+    }
+
+    /// Is this chat's delivery path degraded — will a send QUEUE rather than
+    /// reach its executor promptly? Locally-hosted chats are never degraded
+    /// (a queued command executes on this device even fully offline). Remote
+    /// chats degrade when the OS says offline, when the chat's own edge room
+    /// is down, or when the host device has gone presence-dark.
+    pub fn chat_delivery_degraded(&self, chat_id: &str) -> bool {
+        use zeron_proto::ConnectivityState as S;
+        if self.connectivity.state == S::Disabled {
+            return false;
+        }
+        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
+            // Unknown chat (a just-minted canvas send): only the global
+            // state can speak.
+            return self.connectivity.state == S::Offline;
+        };
+        if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
+            return false;
+        }
+        if self.connectivity.state == S::Offline {
+            return true;
+        }
+        let room_down = match self
+            .connectivity
+            .chats
+            .iter()
+            .find(|c| c.chat_id == chat_id)
+        {
+            Some(net) => !net.connected,
+            None => self.connectivity.state != S::Connected,
+        };
+        room_down || !self.device_online(&chat.device_id, Utc::now())
+    }
+
+    /// A send is queued: in flight AND its delivery path is degraded — the
+    /// honest badge is "Queued", not a Working spinner.
+    pub fn send_queued(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+        self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
+    }
+
     pub fn apply_devices(&mut self, mut devices: Vec<Device>) {
         // A local-only workspace has no remote device identity to distinguish.
         // Keep the engine's legacy sentinel out of the UI while preserving real
@@ -794,6 +860,19 @@ impl AppState {
                 .clear_unsupported_on_version_change(&device.id, device.version.as_deref());
         }
         self.devices = devices;
+    }
+
+    /// True when `device_id`'s engine (per its registry device row) is at
+    /// least `min`. Unknown devices and unstamped versions are conservatively
+    /// false — feature gates fall back to the legacy path rather than speak a
+    /// protocol the peer may not understand.
+    pub fn device_version_at_least(&self, device_id: &str, min: (u64, u64, u64)) -> bool {
+        self.devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .and_then(|d| d.version.as_deref())
+            .and_then(version_triple)
+            .is_some_and(|v| v >= min)
     }
 
     /// First project on the composer's picked device (falling back through
@@ -843,6 +922,7 @@ impl AppState {
             echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
         }
         self.transcript = entries;
+        self.transcript_replayed = true;
         self.ack_pending_send_from_transcript();
     }
 
@@ -852,7 +932,11 @@ impl AppState {
         &mut self,
         frame: TranscriptFrame,
     ) -> Result<(), TranscriptDesync> {
+        let is_reset = matches!(&frame, TranscriptFrame::Reset { .. });
         zeron_doc::apply_transcript_frame(&mut self.transcript, frame)?;
+        if is_reset {
+            self.transcript_replayed = true;
+        }
         if let Some(chat_id) = self.selected_chat.as_deref()
             && let Some(echoes) = self.echoes.get_mut(chat_id)
         {
@@ -975,24 +1059,56 @@ impl AppState {
         Some(((done * 100) / progress.total).min(99) as u8)
     }
 
-    /// A send whose queued command is PAST the Working-overlay TTL and still
-    /// unacked — almost always undelivered (the edge link is down; the queue
-    /// write itself is local and instant). The overlay must stop faking
-    /// Working after the TTL (its contract), but the total silence that
-    /// followed read as a hang during a network flap (2026-08-19 user
-    /// report) — the trailer shows an honest "Queued" line instead. Cleared
-    /// the moment the host writes the message into the transcript.
-    pub fn send_queued_unacked(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+    /// A `WatchTransfers` snapshot: the engine-side relay leg's in-flight
+    /// queued-attachment transfers, replacing the whole set each frame.
+    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) {
+        self.transfers = transfers
+            .into_iter()
+            .map(|t| (t.upload_id, (t.done, t.total)))
+            .collect();
+    }
+
+    /// Percent of one queued attachment's relay transfer, by the uploadId
+    /// its `pending://{uploadId}/…` ref names. Same 99-clamp as
+    /// [`Self::upload_progress_percent`]: the last point belongs to the
+    /// commit, so "100% but still spinning" never shows. `None` when no
+    /// bytes are moving for that upload (staged-but-waiting, retry backoff,
+    /// or done) — the thumbnail falls back to its indeterminate spinner.
+    pub fn transfer_percent(&self, upload_id: &str) -> Option<u8> {
+        let (done, total) = self.transfers.get(upload_id)?;
+        if *total == 0 {
+            return None;
+        }
+        Some(((done.min(total) * 100) / total).min(99) as u8)
+    }
+
+    /// Is a send still in flight for this chat (unacked)? Inside the grace
+    /// window normally; while the chat's delivery path is degraded the
+    /// overlay holds indefinitely — the truth IS "Queued", and silently
+    /// expiring back to Idle left a queued send with no visible trace at
+    /// all (the 30s→silence hole, 2026-08-19).
+    pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() > PENDING_SEND_TTL_MS
+            now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
+                || self.chat_delivery_degraded(chat_id)
         })
     }
 
-    /// Is a send still in flight for this chat (unacked, inside the TTL)?
-    pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
+    /// The send has sat unadopted past the grace window: surface the
+    /// EXPLICIT failed state ("Not delivered — retry") instead of either
+    /// faking progress or silently forgetting the send ever happened.
+    pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+            now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
         })
+    }
+
+    /// Retry pressed: restart the grace clock so the overlay returns to its
+    /// Sending/Queued phase while the re-kicked delivery runs.
+    pub fn retry_pending_send(&mut self, chat_id: &str, now: DateTime<Utc>) {
+        if let Some(p) = self.pending_sends.get_mut(chat_id) {
+            p.started = now;
+        }
     }
 
     /// When the in-flight send (if any, inside the TTL) was fired — the
@@ -1004,7 +1120,8 @@ impl AppState {
         self.pending_sends
             .get(chat_id)
             .filter(|p| {
-                now.signed_duration_since(p.started).num_milliseconds() <= PENDING_SEND_TTL_MS
+                now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
+                    || self.chat_delivery_degraded(chat_id)
             })
             .map(|p| p.started)
     }
@@ -1172,6 +1289,24 @@ impl AppState {
         rows
     }
 
+    /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
+    /// narrowed to the current project filter. The jump shortcuts and their
+    /// hints both count positions here, so neither can drift from the rows on
+    /// screen.
+    pub fn sidebar_chats(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+    ) -> Vec<(ChatIndicator, &Chat)> {
+        self.overview_chats(now)
+            .into_iter()
+            .filter(|(_, chat)| match space_filter {
+                Some(space_id) => chat.space_id.as_deref() == Some(space_id),
+                None => true,
+            })
+            .collect()
+    }
+
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
@@ -1188,6 +1323,15 @@ impl AppState {
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    /// The chat the Archive session shortcut acts on: the selected one, unless
+    /// it is already archived. The shortcut archives and never unarchives, so
+    /// an archived chat is left alone. Pure.
+    pub fn archivable_selected_chat(&self) -> Option<&str> {
+        self.selected_chat_row()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
     }
 
     /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
@@ -1228,9 +1372,11 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.transcript_replayed = false;
         self.echoes.clear();
         self.pending_sends.clear();
         self.upload_progress = None;
+        self.transfers.clear();
         self.local_device_id = None;
         self.update = None;
         cx.notify();
@@ -1300,6 +1446,18 @@ impl AppState {
             spawn_watch(
                 cx,
                 handle.clone(),
+                methods::WATCH_CONNECTIVITY,
+                AppState::apply_connectivity,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_TRANSFERS,
+                AppState::apply_transfers,
+            ),
+            spawn_watch(
+                cx,
+                handle.clone(),
                 methods::WATCH_SPACES,
                 AppState::apply_spaces,
             ),
@@ -1335,9 +1493,13 @@ impl AppState {
             self.change_request_tasks.clear();
             return;
         };
-        let targets = desired_watch_targets(&self.chats, &self.spaces, |device| {
-            !self.change_requests.is_supported(device)
-        });
+        let targets = if self.change_requests_visible {
+            desired_watch_targets(&self.chats, &self.spaces, |device| {
+                !self.change_requests.is_supported(device)
+            })
+        } else {
+            HashSet::new()
+        };
 
         self.change_request_tasks
             .retain(|target, _| targets.contains(target));
@@ -1358,6 +1520,54 @@ impl AppState {
         }
     }
 
+    pub fn set_change_requests_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.change_requests_visible != visible {
+            self.change_requests_visible = visible;
+            self.reconcile_change_request_watches(cx);
+        }
+    }
+
+    pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        match crate::links::parse_zeron_conversation_link(url) {
+            Ok(link) => {
+                self.pending_deep_link = Some(link);
+                self.apply_pending_deep_link(cx);
+            }
+            Err(error) => self.deep_link_notice = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.pending_deep_link.clone() else {
+            return;
+        };
+        let Some(locator) = crate::links::workspace_locator(
+            self.workspace_scope,
+            self.auth.as_ref(),
+            self.local_device_id.as_deref(),
+        ) else {
+            return;
+        };
+        if locator != link.workspace {
+            self.pending_deep_link = None;
+            self.deep_link_notice =
+                Some("This conversation link belongs to another workspace".into());
+            return;
+        }
+        if self.chats.iter().any(|chat| chat.id == link.chat_id) {
+            self.pending_deep_link = None;
+            self.select_chat(Some(link.chat_id), cx);
+        } else if self.chats_synced {
+            self.pending_deep_link = None;
+            self.deep_link_notice = Some("The linked conversation was not found".into());
+        }
+    }
+
+    pub fn take_deep_link_notice(&mut self) -> Option<String> {
+        self.deep_link_notice.take()
+    }
+
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
     /// dropping the old task drops its stream receiver, which cancels the doc
     /// watch server-side. Selecting a chat also lands in its space and marks it
@@ -1373,6 +1583,7 @@ impl AppState {
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
         self.transcript.clear();
+        self.transcript_replayed = false;
         self.transcript_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
@@ -1524,6 +1735,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 };
                 let alive = this.update(cx, |state, cx| {
                     state.apply_chats(parsed);
+                    state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
                     cx.notify();
                 });
@@ -1539,6 +1751,8 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
         }
     })
 }
+
+pub use zeron_proto::version_triple;
 
 fn spawn_change_request_watch(
     cx: &mut Context<AppState>,
@@ -1668,6 +1882,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     apply(state, parsed);
+                    state.apply_pending_deep_link(cx);
                     if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
                     }
@@ -1706,6 +1921,11 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
         if let Some(id) = id {
             this.update(cx, |state, cx| {
                 state.local_device_id = Some(id);
+                state.apply_pending_deep_link(cx);
+                // Watches opened before this probe conservatively route through
+                // targetDeviceId. Recreate them now that local routing is known.
+                state.change_request_tasks.clear();
+                state.reconcile_change_request_watches(cx);
                 cx.notify();
             })
             .ok();
@@ -2384,6 +2604,7 @@ mod tests {
             cwd: None,
             branch: None,
             checkout_id: None,
+            source_context: None,
             config: None,
             last_message_preview: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
@@ -2469,24 +2690,6 @@ mod tests {
     }
 
     #[test]
-    fn queued_unacked_takes_over_after_the_ttl() {
-        let now = Utc::now();
-        let mut s = AppState::new();
-        assert!(!s.send_queued_unacked("c", now), "no send, no queued line");
-        s.begin_pending_send("c", "m1", now);
-        // Inside the TTL the Working overlay owns the surface.
-        assert!(s.send_pending("c", now));
-        assert!(!s.send_queued_unacked("c", now));
-        // Past it, the overlay lapses and the queued line takes over.
-        let later = now + TimeDelta::milliseconds(PENDING_SEND_TTL_MS + 1);
-        assert!(!s.send_pending("c", later));
-        assert!(s.send_queued_unacked("c", later));
-        // The host ack (or failure cleanup) clears it.
-        s.end_pending_send("c", "m1");
-        assert!(!s.send_queued_unacked("c", later));
-    }
-
-    #[test]
     fn device_version_change_reenables_change_request_capability() {
         let mut state = AppState::new();
         state
@@ -2501,6 +2704,35 @@ mod tests {
         upgraded.version = Some("0.2.3".into());
         state.apply_devices(vec![upgraded]);
         assert!(state.change_requests.is_supported("remote"));
+    }
+
+    #[test]
+    fn transfer_percent_tracks_snapshots_by_upload_id() {
+        let mut s = AppState::new();
+        assert_eq!(s.transfer_percent("u1"), None);
+
+        let frame = |id: &str, done, total| zeron_proto::TransferProgress {
+            upload_id: id.into(),
+            file_name: "a.png".into(),
+            done,
+            total,
+        };
+        s.apply_transfers(vec![frame("u1", 430, 1_000), frame("u2", 0, 400)]);
+        assert_eq!(s.transfer_percent("u1"), Some(43));
+        assert_eq!(s.transfer_percent("u2"), Some(0));
+        assert_eq!(s.transfer_percent("other"), None);
+
+        // The last point belongs to the commit — never a stuck 100%; b64
+        // padding overshoot stays clamped too.
+        s.apply_transfers(vec![frame("u1", 1_000, 1_000), frame("u3", 12, 0)]);
+        assert_eq!(s.transfer_percent("u1"), Some(99));
+        // Zero-total renders indeterminate, not a division blowup.
+        assert_eq!(s.transfer_percent("u3"), None);
+        // Snapshots REPLACE: u2's transfer retired with its entry.
+        assert_eq!(s.transfer_percent("u2"), None);
+
+        s.apply_transfers(Vec::new());
+        assert_eq!(s.transfer_percent("u1"), None);
     }
 
     #[test]
@@ -2531,7 +2763,7 @@ mod tests {
     }
 
     #[test]
-    fn send_pending_overlays_working_until_ttl() {
+    fn send_pending_overlays_working_until_the_grace_window() {
         let now = Utc::now();
         let s_chat = chat("c", 0, Some(10)); // unseen, no session row
         let mut s = AppState::new();
@@ -2540,13 +2772,16 @@ mod tests {
         s.begin_pending_send("c", "m1", now);
         assert_eq!(s.display_status_for(&s_chat, now), ChatIndicator::Working);
         assert_eq!(s.indicator_for("c", now), Indicator::Working);
-        // Time-bounded: an offline host must not leave an eternal spinner.
-        let later = now + TimeDelta::milliseconds(PENDING_SEND_TTL_MS + 1);
+        // Time-bounded: an offline host must not leave an eternal spinner —
+        // past the grace the overlay yields (and `send_undelivered` takes
+        // over with the explicit failed state).
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
         assert_eq!(
             s.display_status_for(&s_chat, later),
             ChatIndicator::Completed
         );
         assert_eq!(s.indicator_for("c", later), Indicator::None);
+        assert!(s.send_undelivered("c", later));
     }
 
     #[test]
@@ -2834,6 +3069,57 @@ mod tests {
     }
 
     #[test]
+    fn jump_slots_count_the_rows_the_sidebar_draws() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_space = chat("a", 0, Some(3));
+        in_space.space_id = Some("s1".into());
+        let mut other_space = chat("b", 1, Some(2));
+        other_space.space_id = Some("s2".into());
+        let mut archived = chat("gone", 2, Some(1));
+        archived.space_id = Some("s1".into());
+        archived.archived = true;
+        state.apply_spaces(vec![
+            space("s1", "d1", "/tmp/s1", 0),
+            space("s2", "d1", "/tmp/s2", 1),
+        ]);
+        state.apply_chats(vec![in_space, other_space, archived]);
+
+        // The archived row is not in the active list, so no slot reaches it.
+        let order: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(order.len(), 2);
+        assert!(!order.contains(&"gone"));
+
+        // A project filter renumbers: the visible rows only.
+        let filtered: Vec<&str> = state
+            .sidebar_chats(now, Some("s2"))
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn archive_shortcut_only_targets_an_open_active_chat() {
+        let mut state = AppState::new();
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        state.apply_chats(vec![archived, chat("b", 1, None)]);
+        // No chat open: nothing to archive.
+        assert_eq!(state.archivable_selected_chat(), None);
+        // The open active chat is the target.
+        state.selected_chat = Some("b".into());
+        assert_eq!(state.archivable_selected_chat(), Some("b"));
+        // An already archived chat stays put — the shortcut never unarchives.
+        state.selected_chat = Some("a".into());
+        assert_eq!(state.archivable_selected_chat(), None);
+    }
+
+    #[test]
     fn echoes_show_until_doc_frame_confirms() {
         let mut state = AppState::new();
         state.selected_chat = Some("c1".into());
@@ -2878,6 +3164,27 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[test]
+    fn transcript_replay_barrier_requires_the_opening_reset() {
+        let mut state = AppState::new();
+        assert!(!state.transcript_replayed);
+
+        state
+            .apply_transcript_frame(TranscriptFrame::Delta {
+                upsert: Vec::new(),
+                append: Vec::new(),
+                remove: Vec::new(),
+                count: 0,
+            })
+            .expect("empty delta");
+        assert!(!state.transcript_replayed);
+
+        state
+            .apply_transcript_frame(TranscriptFrame::Reset { reset: Vec::new() })
+            .expect("empty reset");
+        assert!(state.transcript_replayed);
     }
 
     #[test]
@@ -3096,5 +3403,108 @@ mod tests {
             1
         );
         assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
+    }
+
+    #[test]
+    fn version_triple_parses_and_gates_device_features() {
+        assert_eq!(version_triple("0.2.12"), Some((0, 2, 12)));
+        assert_eq!(version_triple("0.2.12-beta.1"), Some((0, 2, 12)));
+        assert_eq!(version_triple("1.0.0+build7"), Some((1, 0, 0)));
+        assert_eq!(version_triple("0.2"), None);
+        assert_eq!(version_triple("garbage"), None);
+
+        let mut s = AppState::default();
+        assert!(
+            !s.device_version_at_least("d1", (0, 2, 12)),
+            "unknown device conservatively fails the gate"
+        );
+        s.devices = vec![Device {
+            id: "d1".into(),
+            name: "laptop".into(),
+            platform: "macos".into(),
+            last_seen_at: None,
+            created_at: None,
+            version: Some("0.2.12".into()),
+        }];
+        assert!(s.device_version_at_least("d1", (0, 2, 12)));
+        assert!(!s.device_version_at_least("d1", (0, 2, 13)));
+        s.devices[0].version = None;
+        assert!(
+            !s.device_version_at_least("d1", (0, 2, 12)),
+            "unstamped version conservatively fails the gate"
+        );
+    }
+
+    #[test]
+    fn delivery_degradation_and_queued_sends_tell_the_truth() {
+        use zeron_proto::{ChatConnectivity, ConnectivityState};
+        let now = Utc::now();
+        let mut s = AppState::default();
+        s.local_device_id = Some("local".into());
+        let mut remote = chat("c-remote", 0, None);
+        remote.device_id = "remote".into();
+        let mut local = chat("c-local", 0, None);
+        local.device_id = "local".into();
+        s.chats = vec![remote, local];
+        s.devices = vec![Device {
+            id: "remote".into(),
+            name: "vps".into(),
+            platform: "linux".into(),
+            last_seen_at: Some(now),
+            created_at: None,
+            version: None,
+        }];
+        s.connectivity.state = ConnectivityState::Connected;
+        s.connectivity.chats = vec![ChatConnectivity {
+            chat_id: "c-remote".into(),
+            connected: true,
+            pending_pushes: 0,
+        }];
+
+        // Healthy: nothing degraded.
+        assert!(!s.chat_delivery_degraded("c-remote"));
+        assert!(!s.chat_delivery_degraded("c-local"));
+
+        // The chat's own room down → degraded even while globally Connected.
+        s.connectivity.chats[0].connected = false;
+        assert!(s.chat_delivery_degraded("c-remote"));
+        s.connectivity.chats[0].connected = true;
+
+        // Host gone presence-dark → degraded (a send would queue at best).
+        s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
+        assert!(s.chat_delivery_degraded("c-remote"));
+        s.devices[0].last_seen_at = Some(now);
+
+        // OS offline: remote degrades; a locally-hosted chat NEVER does (the
+        // queued command executes on this device even fully offline).
+        s.connectivity.state = ConnectivityState::Offline;
+        assert!(s.chat_delivery_degraded("c-remote"));
+        assert!(!s.chat_delivery_degraded("c-local"));
+
+        // Local profile (Disabled): nothing degrades.
+        s.connectivity.state = ConnectivityState::Disabled;
+        assert!(!s.chat_delivery_degraded("c-remote"));
+
+        // Queued = pending send + degraded path — and degradation HOLDS the
+        // overlay past the grace window instead of silently expiring (the
+        // no-trace hole).
+        s.connectivity.state = ConnectivityState::Offline;
+        s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(200));
+        assert!(s.send_pending("c-remote", now));
+        assert!(s.send_queued("c-remote", now));
+        // Past the grace: the explicit failed state surfaces alongside.
+        assert!(s.send_undelivered("c-remote", now));
+        // Retry restarts the clock: back to Queued, no longer failed.
+        s.retry_pending_send("c-remote", now);
+        assert!(!s.send_undelivered("c-remote", now));
+        assert!(s.send_queued("c-remote", now));
+        // Path healed with a stale unacked send: the overlay expires after
+        // the grace rather than holding forever.
+        s.retry_pending_send("c-remote", now - TimeDelta::seconds(200));
+        s.connectivity.state = ConnectivityState::Connected;
+        assert!(!s.send_pending("c-remote", now));
+        assert!(!s.send_queued("c-remote", now));
+        // …but the explicit undelivered flag still tells the truth.
+        assert!(s.send_undelivered("c-remote", now));
     }
 }

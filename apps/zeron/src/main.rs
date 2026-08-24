@@ -13,6 +13,9 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Open a Zeron conversation URL.
+    #[arg(value_name = "URL")]
+    open_url: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -195,6 +198,7 @@ fn main() -> anyhow::Result<()> {
                 edge_token,
                 org_id: std::env::var("ZERON_ORG_ID").ok(),
                 default_harness: zeron_ui::HarnessId::ClaudeCode,
+                initial_url: cli.open_url,
             });
             Ok(())
         }

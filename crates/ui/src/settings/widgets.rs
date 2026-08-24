@@ -7,6 +7,12 @@ use gpui::{AnyElement, SharedString, div, prelude::*, px};
 
 use crate::theme::{Theme, ink};
 
+/// Shared typography for a settings component's title and description. The
+/// Shortcuts page established this compact rhythm; list-style settings reuse
+/// it instead of drifting by page.
+pub const ROW_TITLE_SIZE: f32 = 13.0;
+pub const ROW_DESCRIPTION_SIZE: f32 = 12.0;
+
 /// Centered page column: `mx-auto w-full max-w-3xl px-6 pb-16 pt-8`.
 pub fn page_column() -> gpui::Div {
     div()
@@ -82,14 +88,11 @@ pub const OPTION_CARD_HEIGHT: f32 = 148.0;
 /// are axis-aligned rectangles, so `overflow_hidden` on the frame clips to its
 /// bounding box and not to its corner radius — a preview that paints its own
 /// background will square off the corners and cover the frame's border with it.
-pub const OPTION_CARD_RADIUS: f32 = 10.0;
-/// Clear space between the frame and the selection ring.
-const RING_GAP: f32 = 2.0;
-/// Thickness of the selection ring.
-const RING_WIDTH: f32 = 2.0;
+pub const OPTION_CARD_RADIUS: f32 = 6.0;
 
-/// One card in an [`option_card_row`]: a fixed-height preview frame that carries
-/// the selection ring, with a caption underneath.
+/// One card in an [`option_card_row`]: a fixed-height preview frame with a quiet
+/// selected edge and caption underneath. There is deliberately no outer card
+/// or ring; the preview itself is the control.
 ///
 /// `preview` fills the frame and **must round its own corners** to
 /// [`OPTION_CARD_RADIUS`] if it paints a background — see that constant.
@@ -103,22 +106,6 @@ pub fn option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
-    let frame = div()
-        .h(px(OPTION_CARD_HEIGHT))
-        .w_full()
-        .rounded(px(OPTION_CARD_RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(theme.border)
-        .child(preview);
-
-    // The ring is a *wrapper border*, not a spread shadow. A shadow's spread
-    // grows the rectangle without growing its corner radius, so the halo's
-    // corners tighten relative to the frame's and the two visibly drift apart by
-    // a pixel at each rounded corner. Concentric borders can't do that: each
-    // element rounds itself, and the outer radius is the inner one plus the gap
-    // it sits behind. Always present, transparent when unselected, so selecting a
-    // card never reflows the row.
     div()
         .flex_1()
         .min_w_0()
@@ -129,22 +116,24 @@ pub fn option_card(
         .cursor_pointer()
         .child(
             div()
+                .h(px(OPTION_CARD_HEIGHT))
                 .w_full()
-                .rounded(px(OPTION_CARD_RADIUS + RING_GAP + RING_WIDTH))
-                .p(px(RING_GAP))
-                .border_2()
-                .border_color(if selected {
-                    theme.accent
-                } else {
-                    gpui::transparent_black()
-                })
-                .child(frame),
+                .rounded(px(OPTION_CARD_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(if selected { theme.accent } else { theme.border })
+                .child(preview),
         )
         .child(
             div()
                 .text_size(px(13.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .text_color(if selected {
-                    theme.text
+                    theme.accent
                 } else {
                     theme.text_muted
                 })
@@ -201,29 +190,30 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
         )
 }
 
-/// Row title: `text-[13.5px] font-medium leading-tight`.
+/// Row title. These metrics intentionally match the Shortcuts rows, whose
+/// title/description rhythm is the reference for the other settings cards.
 pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
     div()
         .min_w_0()
         .truncate()
-        .text_size(px(13.5))
+        .text_size(px(ROW_TITLE_SIZE))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(title.into())
 }
 
-/// The quiet meta line under a row title: `text-[11.5px]
+/// The quiet meta line under a row title: `text-[12px]
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
     let mut line = div()
-        .mt(px(4.0))
+        .mt(px(Theme::TEXT_STACK_GAP))
         .flex()
         .flex_row()
         .flex_wrap()
         .items_center()
         .gap_x(px(8.0))
         .gap_y(px(2.0))
-        .text_size(px(11.5))
+        .text_size(px(ROW_DESCRIPTION_SIZE))
         .text_color(theme.text_muted.opacity(0.65));
     let mut first = true;
     for fragment in fragments {

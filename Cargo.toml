@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/theme",
     "crates/proto",
     "crates/doc",
     "crates/sync",
@@ -14,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.11"
+version = "0.2.27"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -29,6 +30,7 @@ zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
+zeron-theme = { path = "crates/theme" }
 
 # CRDT
 loro = "1.13"
@@ -54,15 +56,17 @@ loro-protocol = "0.3"
 # per-pixel EdgeFade for quads/images (true fade-into-glass), and
 # object-fit Cover cropping via atlas-tile UVs so image corner radii hold;
 # 8a8954c switches the macOS blurred view to UnderWindowBackground (macOS 26
-# stopped vending CABackdropLayer for Selection — window blur went dead).
-gpui = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
-gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d", features = [
+# stopped vending CABackdropLayer for Selection — window blur went dead);
+# b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
+# Linux — the Metal path's snapshot/blur/composite, ported).
+gpui = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a" }
+gpui_platform = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "5d1f83d9f27a19bec1fb241dc33b42238af9cf8d" }
+gpui_tokio = { git = "https://github.com/wingleeio/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a" }
 
 # diffs
 similar = "2"
@@ -79,6 +83,8 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+json5 = "0.4"
+plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # storage
@@ -104,6 +110,7 @@ pulldown-cmark = "0.12"
 unicode-segmentation = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 ignore = "0.4"
+nucleo-matcher = "0.3"
 
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat

@@ -1,6 +1,7 @@
 // Transcript — virtualized block-granularity rows with stick-to-bottom.
 //
-// Desktop parity (transcript.rs): GAP_TURN 14 / GAP_BLOCK 8 / MD_BLOCK_GAP 12,
+// Desktop parity (transcript.rs): global spacing tokens — turn 16, ordinary
+// block 8, tool-group boundaries 12 — plus MD_BLOCK_GAP 12 for sibling blocks;
 // content column max 736, re-engage band 70, jump-button threshold 320,
 // bottom pad 24. Rows are identified by stable ids and versioned by content
 // fingerprints, so a streamed token re-renders exactly one row. SwiftUI's lazy
@@ -32,8 +33,6 @@ struct TranscriptView: View {
         _hydrated = State(initialValue: !store.entries.isEmpty || !store.pendingSends.isEmpty)
     }
 
-    static let gapTurn: CGFloat = 14
-    static let gapBlock: CGFloat = 8
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
     static let jumpThreshold: CGFloat = 320
@@ -495,7 +494,7 @@ final class TranscriptBuilderCache {
     /// does — gate on the revision and hand back the same array.
     func rows(revision: UInt64,
               entries: [MessageEntry],
-              pendingSends: [(messageId: String, text: String, at: Int64)]) -> [TranscriptRow] {
+              pendingSends: [PendingSend]) -> [TranscriptRow] {
         if cachedRevision == revision { return cachedRows }
         cachedRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
                                                parsers: &parsers, completed: &completed)
