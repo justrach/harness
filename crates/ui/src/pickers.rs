@@ -3145,7 +3145,7 @@ impl Pickers {
             .relative()
             .flex_none()
             .h(px(LIST_HEIGHT))
-            .py(px(4.0))
+            .py(px(6.0))
             // A whisper of wash keeps the scrolling band readable between
             // the pinned chrome above and the traits tray below.
             .bg(crate::theme::ink(0.02))
@@ -3185,7 +3185,8 @@ impl Pickers {
                 // growing the card past the viewport.
                 .max_h(px(236.0))
                 .overflow_y_scroll()
-                .p(px(4.0))
+                .px(px(6.0))
+                .pb(px(6.0))
                 .child(sections)
                 .into_any_element()
         });
@@ -3238,8 +3239,8 @@ impl Pickers {
         let mut el = div()
             .id(("model-row", ix))
             .px(px(8.0))
-            .py(px(if compact { 4.0 } else { 6.0 }))
-            .rounded(px(8.0))
+            .py(px(if compact { 5.0 } else { 6.0 }))
+            .rounded(px(6.0))
             .flex()
             .flex_row()
             .items_center()
@@ -3427,6 +3428,9 @@ impl Pickers {
                         let is_default = default_level == Some(level);
                         let mut row =
                             popover::menu_row(&theme, is_active, format!("trait-reasoning-{ix}"))
+                                .py(px(5.0))
+                                .rounded(px(6.0))
+                                .text_size(px(12.5))
                                 .id(("reasoning-row", ix))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_reasoning(level, cx);
@@ -3475,6 +3479,9 @@ impl Pickers {
                                     is_active,
                                     format!("trait-choice-{opt_ix}-{choice_ix}"),
                                 )
+                                .py(px(5.0))
+                                .rounded(px(6.0))
+                                .text_size(px(12.5))
                                 .id(("trait-choice", opt_ix * 32 + choice_ix))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_option(
