@@ -768,7 +768,7 @@ async fn delete_space_cascades_chats_and_sessions() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn diff_sync_publishes_and_updates_chat_branch() {
+async fn diff_sync_publishes_without_rewriting_chat_branch() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo_dir = tmp.path().join("repo");
     init_repo(&repo_dir).await;
@@ -809,13 +809,16 @@ async fn diff_sync_publishes_and_updates_chat_branch() {
     assert!(!diff.checkout_id.is_empty());
     assert!(!diff.checksum.is_empty());
 
-    // Row upkeep: branch + checkoutId stamped on the workspace chat row.
+    // Branch identity is conversation-owned: the checkout watcher must NOT
+    // relabel chat rows with the live branch — only a dispatch stamps it.
+    // Reconcile still stamps checkoutId (row ↔ checkout identity).
     let chat = core
         .workspace
         .chat("chat-diff")
         .expect("read chat")
         .expect("row");
-    assert_eq!(chat.branch.as_deref(), Some("main"));
+    assert_eq!(chat.branch, None);
+    assert_eq!(chat.source_context, None);
     assert_eq!(chat.checkout_id.as_deref(), Some(diff.checkout_id.as_str()));
 
     // File watcher path: another edit re-publishes without a manual kick.
