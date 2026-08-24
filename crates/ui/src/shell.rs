@@ -5260,17 +5260,10 @@ impl Shell {
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
         let no_project = self.state.read(cx).no_project;
-        let space_name: SharedString = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_default()
-            .into();
 
-        // Content outlet: selected chat → transcript; nothing selected → the
-        // "Send a message to start" canvas with a watermark; no spaces at all
-        // → the onboarding card. The composer sits below the first two
+        // Content outlet: selected chat → transcript; nothing selected → a
+        // bare canvas (the composer stack carries the affordances); no spaces
+        // at all → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
         let outlet: AnyElement = if has_selection {
             self.transcript.clone().into_any_element()
@@ -5322,46 +5315,11 @@ impl Shell {
                 ))
                 .into_any_element()
         } else {
-            // New-chat canvas (zeron index.tsx): the zeron mark over the
-            // TARGET selectors (device + project — moved up from the
-            // composer footer, user request) and the helper line.
-            let helper: SharedString = if space_name.is_empty() {
-                "Send a message to start a new session.".into()
-            } else {
-                format!("Send a message to start a session in {space_name}.").into()
-            };
-            let pickers = self.composer.read(cx).pickers().clone();
-            let selectors = pickers.update(cx, |p, cx| p.render_target_selectors(cx));
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "new-chat-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                // 0.09 read as barely-there on the glass
-                                // backdrop (user report).
-                                .text_color(theme.text.opacity(0.2)),
-                        )
-                        .child(div().mt(px(16.0)).child(selectors))
-                        .child(
-                            div()
-                                .mt(px(12.0))
-                                .text_size(px(14.0))
-                                .text_color(theme.text_muted.opacity(0.6))
-                                .child(helper),
-                        ),
-                ))
-                .into_any_element()
+            // New-chat canvas: intentionally bare (user request — no logo, no
+            // helper line). The device + project selectors live above the
+            // composer pill (composer.rs renders them via
+            // `render_target_selectors`).
+            div().size_full().into_any_element()
         };
 
         let status = self.render_status_strip(cx);
@@ -7452,11 +7410,11 @@ impl Render for Shell {
         let root = match self.splash {
             SplashPhase::Visible => {
                 let theme = Theme::of(cx).clone();
-                root.child(loaders::splash_overlay(&theme, false))
+                root.child(loaders::splash_overlay(&theme, false, cx.entity_id(), cx))
             }
             SplashPhase::FadingOut => {
                 let theme = Theme::of(cx).clone();
-                root.child(loaders::splash_overlay(&theme, true))
+                root.child(loaders::splash_overlay(&theme, true, cx.entity_id(), cx))
             }
             SplashPhase::Gone => root,
         };

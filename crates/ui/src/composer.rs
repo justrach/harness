@@ -6267,6 +6267,18 @@ impl Render for Composer {
                         ),
                 )
         };
+        // New sessions: the TARGET row (device + project chips) sits ABOVE
+        // the pill, left-aligned like the checkout toolbar below it (user
+        // request — moved off the canvas). Existing sessions name their
+        // target in the titlebar instead.
+        let container = if new_chat {
+            let selectors = self
+                .pickers
+                .update(cx, |pickers, cx| pickers.render_target_selectors(cx));
+            container.child(selectors)
+        } else {
+            container
+        };
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.

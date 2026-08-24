@@ -2340,9 +2340,9 @@ impl Pickers {
             .child(div().min_w_0().truncate().child(label))
     }
 
-    /// The new-session canvas's target row — device + project selector chips
-    /// under the canvas logo (their popovers anchor BELOW; the composer
-    /// footer carries only checkout + ref now, and sessions show their
+    /// The new-session target row — device + project selector chips rendered
+    /// ABOVE the composer pill, left-aligned like the checkout toolbar (the
+    /// composer footer carries only checkout + ref, and sessions show their
     /// target in the titlebar instead).
     pub fn render_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
@@ -2395,19 +2395,25 @@ impl Pickers {
             &theme,
             cx,
         );
+        // Same left-edge geometry as the checkout toolbar under the pill
+        // (`render_footer`'s row): full-width, 10px inset, chips hugging the
+        // left. The row sits just above the composer pill, so the menus open
+        // UPWARD.
         div()
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .child(attach_overlay_below(
+            .px(px(10.0))
+            .child(attach_overlay(
                 device_chip,
                 &mut overlay,
                 PickerKind::Device,
                 "device-popover",
                 closing,
             ))
-            .child(attach_overlay_below(
+            .child(attach_overlay(
                 project_chip,
                 &mut overlay,
                 PickerKind::Space,
@@ -2419,7 +2425,7 @@ impl Pickers {
 
     /// The composer footer row: checkout-kind + ref, LEFT-aligned, only when
     /// the picked (or session's) project has git. Device + project moved to
-    /// the new-session canvas ([`Self::render_target_selectors`]); sessions
+    /// the row above the pill ([`Self::render_target_selectors`]); sessions
     /// name their target in the titlebar.
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
@@ -2508,8 +2514,8 @@ impl Pickers {
             return Some(row().child(left).child(right).into_any_element());
         }
 
-        // New-session canvas: checkout + ref only, LEFT-aligned (device +
-        // project live under the canvas logo now).
+        // New-session draft: checkout + ref only, LEFT-aligned (device +
+        // project live in the row above the pill now).
         let git = space.as_ref().is_some_and(|s| s.git_detected);
         if !git {
             return None;
@@ -2526,7 +2532,7 @@ impl Pickers {
                 let content = self.render_checkout_popover(cx);
                 Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
             }
-            // Space/Device popovers mount on the canvas selectors
+            // Space/Device popovers mount on the target row above the pill
             // (`render_target_selectors`), not here.
             _ => None,
         };
@@ -3776,23 +3782,6 @@ fn attach_overlay(
         && let Some((_, element)) = overlay.take()
     {
         return chip.child(popover::anchored_menu_above(id, element, closing));
-    }
-    chip
-}
-
-/// [`attach_overlay`] opening DOWNWARD — the canvas target selectors sit
-/// mid-screen, so their menus drop below the chips.
-fn attach_overlay_below(
-    chip: gpui::Stateful<gpui::Div>,
-    overlay: &mut Option<(PickerKind, AnyElement)>,
-    kind: PickerKind,
-    id: &'static str,
-    closing: Option<std::time::Instant>,
-) -> gpui::Stateful<gpui::Div> {
-    if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
-        && let Some((_, element)) = overlay.take()
-    {
-        return chip.child(popover::anchored_menu_below(id, element, closing));
     }
     chip
 }
