@@ -1078,6 +1078,20 @@ pub fn skeleton_rows(
         .into_any_element()
 }
 
+/// One pulsing ghost label — the trigger chip's label slot while the
+/// selected model still resolves (a chip collapsing to its bare icon read
+/// as broken; user report).
+pub fn skeleton_bar(width: f32, view: gpui::EntityId, cx: &mut gpui::App) -> AnyElement {
+    let delta = motion::pulse_delta(&ZERON_PULSE, view, cx);
+    div()
+        .w(px(width))
+        .h(px(11.0))
+        .rounded(px(5.5))
+        .bg(ink(0.08))
+        .opacity(0.35 + 0.4 * motion::pulse_wave(motion::staggered_phase(delta, 0, 0.0)))
+        .into_any_element()
+}
+
 /// [`skeleton_rows`] shaped like a MENU loading: shorter bars of varied
 /// widths reading as ghost labels rather than full-width slabs (the model
 /// picker's loading state — reference design's skeleton). Widths cycle a

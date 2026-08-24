@@ -38,6 +38,17 @@ use crate::settings::composer::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
+/// Dev/testing knob: `ZERON_SLOW_CATALOG_MS=<ms>` delays every harness and
+/// model catalog result app-side — the chip/tab/list loading states are
+/// sub-second against a warm local daemon and unstageable otherwise
+/// (headless-rig captures; same family as `ZERON_OPEN_PICKER`).
+fn slow_catalog_delay() -> Option<std::time::Duration> {
+    std::env::var("ZERON_SLOW_CATALOG_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+}
+
 // ---------------------------------------------------------------------------
 // Catalog invalidation (Settings → Agents toggles)
 // ---------------------------------------------------------------------------
@@ -981,6 +992,9 @@ impl Pickers {
                 .client()
                 .call(methods::LIST_HARNESSES, serde_json::Value::Object(params))
                 .await;
+            if let Some(delay) = slow_catalog_delay() {
+                cx.background_executor().timer(delay).await;
+            }
             this.update(cx, |pickers, cx| {
                 pickers.catalog_rev += 1;
                 pickers.harnesses = match result {
@@ -1075,6 +1089,9 @@ impl Pickers {
                     .await;
                 attempt += 1;
             };
+            if let Some(delay) = slow_catalog_delay() {
+                cx.background_executor().timer(delay).await;
+            }
             this.update(cx, |pickers, cx| {
                 let loaded = match result {
                     Ok(value) => match serde_json::from_value::<Vec<Model>>(value) {
@@ -2073,12 +2090,19 @@ impl Pickers {
 
     // ---- render ----
 
+    #[allow(clippy::too_many_arguments)]
     fn trigger_chip(
         &self,
         kind: PickerKind,
         label: SharedString,
         set: bool,
         chip_icon: Option<(&'static str, Option<gpui::Hsla>)>,
+        // The chip never collapses while identity resolves (user report):
+        // `icon_loading` swaps the brand slot for the pixel-glyph loader
+        // (harness unknown), `label_loading` swaps the text for a ghost bar
+        // (model unknown).
+        icon_loading: bool,
+        label_loading: bool,
         suffix: Option<(SharedString, Option<gpui::Hsla>)>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -2134,14 +2158,33 @@ impl Pickers {
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
-            .when_some(chip_icon, |el, (path, tint)| {
+            .when(icon_loading, |el| {
                 el.child(
-                    crate::icons::icon(path)
-                        .size(px(16.0))
-                        .text_color(tint.unwrap_or(theme.text_muted)),
+                    div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                        "picker-chip-loader",
+                        2.0,
+                        theme.glyph,
+                        cx.entity_id(),
+                        cx,
+                    )),
                 )
             })
-            .child(div().min_w_0().truncate().child(label))
+            .when_some(
+                (!icon_loading).then_some(chip_icon).flatten(),
+                |el, (path, tint)| {
+                    el.child(
+                        crate::icons::icon(path)
+                            .size(px(16.0))
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                },
+            )
+            .when(label_loading, |el| {
+                el.child(popover::skeleton_bar(56.0, cx.entity_id(), cx))
+            })
+            .when(!label_loading, |el| {
+                el.child(div().min_w_0().truncate().child(label))
+            })
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
             // `tint` overrides the muted tone (the offline warning).
@@ -3904,6 +3947,21 @@ impl Render for Pickers {
             });
             label.map(SharedString::from).unwrap_or_default()
         };
+        let catalog_loading = matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
+        let models_loading = self.effective_harness(cx).is_some_and(|harness| {
+            !matches!(
+                self.models.get(&harness),
+                Some(Loadable::Ready(_)) | Some(Loadable::Error(_))
+            )
+        });
+        // Harness unknown while the catalog resolves: the pixel-glyph loader
+        // instead of guessing a brand mark.
+        let chip_icon_loading =
+            self.effective_harness(cx).is_none() && !no_agents && catalog_loading;
+        // Harness known but nothing names the model yet (fresh install, no
+        // remembered pick): a ghost label instead of a bare icon.
+        let chip_label_loading =
+            !no_agents && model_label.is_empty() && (catalog_loading || models_loading);
         let harness_icon: (&'static str, Option<gpui::Hsla>) = match self.effective_harness(cx) {
             Some(harness) => harness_brand_icon(harness),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
@@ -3974,6 +4032,8 @@ impl Render for Pickers {
             model_label,
             true,
             Some(harness_icon),
+            chip_icon_loading,
+            chip_label_loading,
             chip_suffix,
             &theme,
             cx,
