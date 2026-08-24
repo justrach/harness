@@ -1055,6 +1055,40 @@ impl Shell {
             .into_any_element()
     }
 
+    /// Flat top-to-bottom chat ids exactly as [`Self::render_active_rows`]
+    /// draws them — the user's sort, device grouping, and local-device
+    /// promotion applied. The jump shortcuts and session cycling read THIS
+    /// order (not the raw recency list) so keyboard order never drifts from
+    /// the screen.
+    pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
+        let filter = self.settings.space_filter.clone();
+        let state = self.state.read(cx);
+        let mut chats: Vec<zeron_proto::Chat> = state
+            .sidebar_chats(Utc::now(), filter.as_deref())
+            .into_iter()
+            .map(|(_, chat)| chat.clone())
+            .collect();
+        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        if self.settings.sidebar_organization != SidebarOrganization::ByDevice {
+            return chats.into_iter().map(|chat| chat.id).collect();
+        }
+        let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
+        for chat in chats {
+            let key = Some((chat.device_id.clone(), String::new()));
+            if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
+                existing.push(chat);
+            } else {
+                groups.push((key, vec![chat]));
+            }
+        }
+        promote_local_device_group(&mut groups, state.local_device_id.as_deref());
+        groups
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .map(|chat| chat.id)
+            .collect()
+    }
+
     /// The sidebar's Sessions list: every session (idle included) of the
     /// filter space — or all spaces under "All" — attention-sorted. Rows are
     /// keyed for the FLIP resort glide.
@@ -1068,9 +1102,8 @@ impl Shell {
         let mut rows: Vec<ActiveChatRow> = {
             let state = self.state.read(cx);
             let mut chats: Vec<_> = state
-                .overview_chats(now)
+                .sidebar_chats(now, filter.as_deref())
                 .into_iter()
-                .filter(|(_, chat)| super::tabs::in_space_filter(chat, filter.as_deref()))
                 .map(|(status, chat)| (status, chat.clone()))
                 .collect();
             chats.sort_by(|left, right| {
@@ -1143,6 +1176,14 @@ impl Shell {
         }
 
         let selected = self.state.read(cx).selected_chat.clone();
+        // Re-checked at render so the chips drop the FRAME a popover opens,
+        // not on the next modifier event — the jumps are suppressed under it.
+        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
+        let keymap = self.settings.keymap.clone();
+        // Flat top-to-bottom slot across groups: the same order
+        // `sidebar_visible_order` hands the jump shortcuts and cycling, so a
+        // chip always names the key that opens its row.
+        let mut slot = 0usize;
         let mut rendered = Vec::new();
         for (group, rows) in groups {
             let mut rendered_rows = Vec::with_capacity(rows.len());
@@ -1164,6 +1205,15 @@ impl Shell {
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
                 let height = super::chat_row_height(branch.is_some(), change_request.is_some());
+                // Only rows a jump slot can reach wear a chip; row 10 onward
+                // keeps its time-ago.
+                let jump_label: Option<SharedString> = if jump_hints {
+                    let combo = keymap.get(ShortcutId::JumpSession(slot));
+                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
+                } else {
+                    None
+                };
+                slot += 1;
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
@@ -1178,6 +1228,7 @@ impl Shell {
                     status,
                     is_selected,
                     false,
+                    jump_label,
                     theme,
                     cx,
                 );
