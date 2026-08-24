@@ -24,6 +24,7 @@ pub mod edge_fade;
 pub mod frost;
 pub mod history;
 pub mod icons;
+pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
@@ -38,11 +39,13 @@ pub mod state;
 pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
+pub mod theme_library;
 pub mod transcript;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 /// Embedded UI fonts — Geist and Geist Mono (variable), © Vercel Inc.,
@@ -97,6 +100,8 @@ pub struct UiConfig {
     pub workos_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
+    /// Conversation URL passed by the OS on a cold launch.
+    pub initial_url: Option<String>,
 }
 
 impl UiConfig {
@@ -127,6 +132,16 @@ impl gpui::Global for ReopenState {}
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
     let app = gpui_platform::application().with_assets(icons::Assets);
+    let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+    let callback_tx = url_tx.clone();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = callback_tx.unbounded_send(url);
+        }
+    });
+    if let Some(url) = config.initial_url.clone() {
+        let _ = url_tx.unbounded_send(url);
+    }
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).
@@ -147,7 +162,15 @@ pub fn run_app(config: UiConfig) {
         // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
-        appearance::init(ui_settings.appearance, data_dir.clone(), cx);
+        theme_library::init(data_dir.clone(), cx);
+        appearance::init(
+            ui_settings.appearance,
+            ui_settings.theme_selection,
+            ui_settings.accent,
+            ui_settings.surface,
+            data_dir.clone(),
+            cx,
+        );
         history::init(
             ui_settings.git_history_columns,
             ui_settings.git_history_column_widths,
@@ -159,8 +182,16 @@ pub fn run_app(config: UiConfig) {
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);
+        cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|_| state::AppState::new());
+        let url_state = state.clone();
+        cx.spawn(async move |cx| {
+            while let Some(url) = url_rx.next().await {
+                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
+            }
+        })
+        .detach();
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes

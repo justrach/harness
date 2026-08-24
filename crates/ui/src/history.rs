@@ -1607,9 +1607,10 @@ impl Render for GitHistoryFetchButton {
                     })
             })
             .child(if fetching {
-                crate::loaders::mini_gradient_spinner(
+                crate::loaders::mini_glyph_spinner(
                     "history-fetch-all-spinner",
                     1.75,
+                    theme.glyph,
                     cx.entity_id(),
                     cx,
                 )
@@ -1752,8 +1753,14 @@ impl Render for GitHistorySearchControl {
         let closing = self.mode == GitHistorySearchMode::Collapsing;
         let transition_epoch = self.transition_epoch;
         let status_icon = if search_loading {
-            crate::loaders::mini_gradient_spinner("history-search-spinner", 1.5, cx.entity_id(), cx)
-                .into_any_element()
+            crate::loaders::mini_glyph_spinner(
+                "history-search-spinner",
+                1.5,
+                theme.glyph,
+                cx.entity_id(),
+                cx,
+            )
+            .into_any_element()
         } else {
             crate::icons::icon(crate::icons::MAGNIFER)
                 .size(px(11.0))

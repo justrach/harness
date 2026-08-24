@@ -4977,6 +4977,7 @@ rename to new_name.rs
             cwd: cwd.map(Into::into),
             branch: None,
             checkout_id: checkout.map(Into::into),
+            source_context: None,
             config: None,
             last_message_preview: None,
             last_message_at: None,

@@ -262,7 +262,7 @@ pub fn render_block(
                         .min_w(px(18.0))
                         .text_size(px(MD_TEXT_SIZE))
                         .line_height(px(MD_LINE_HEIGHT))
-                        .text_color(theme.accent.opacity(0.85))
+                        .text_color(theme.accent)
                         .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                         .into_any_element(),
                     None => div()
@@ -278,7 +278,7 @@ pub fn render_block(
                                 .w(px(5.0))
                                 .h(px(5.0))
                                 .rounded_full()
-                                .bg(theme.accent.opacity(0.85)),
+                                .bg(theme.accent),
                         )
                         .into_any_element(),
                 };
@@ -499,14 +499,12 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
-/// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
-/// — violet-300 text over a violet-400 wash, readable on the #060606 panel.
+/// Inline-code tint: a text-safe use of the selected accent identity.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text // violet-300
+    theme.code_text
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash // violet-400/12
+    theme.code_wash
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 2px past the glyphs, y insets 2px from the 22px line box).
@@ -559,7 +557,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
         let is_link = run.style.link.is_some();
-        // Inline code reads violet (see `inline_code_text`); everything else
+        // Inline code uses the spectrum's code tone; everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
@@ -730,9 +728,9 @@ fn flat_text_element(
         .into_any_element()
 }
 
-/// Selection tint: the accent hue under the glyphs, dark-panel strength.
+/// Selection tint shared with native inputs and the composer.
 fn selection_wash(theme: &Theme) -> Hsla {
-    theme.accent.opacity(0.35) // indigo-400
+    theme.selection
 }
 
 /// Selection support for a plain (non-markdown) text element — the user

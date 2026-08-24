@@ -17,7 +17,7 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -616,6 +616,8 @@ pub struct AppState {
     /// judge by the empty pre-sync lists.
     pub chats_synced: bool,
     pub spaces_synced: bool,
+    pending_deep_link: Option<crate::links::ConversationDeepLink>,
+    deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's opening `WatchDocMessages` reset has landed. An
@@ -649,6 +651,7 @@ pub struct AppState {
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
+    change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
     /// feed must survive chat switches — the tab itself is what scopes it.
@@ -696,11 +699,14 @@ impl AppState {
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
+            change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             auto_selected: false,
             chats_synced: false,
             spaces_synced: false,
+            pending_deep_link: None,
+            deep_link_notice: None,
         }
     }
 
@@ -1283,6 +1289,24 @@ impl AppState {
         rows
     }
 
+    /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
+    /// narrowed to the current project filter. The jump shortcuts and their
+    /// hints both count positions here, so neither can drift from the rows on
+    /// screen.
+    pub fn sidebar_chats(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+    ) -> Vec<(ChatIndicator, &Chat)> {
+        self.overview_chats(now)
+            .into_iter()
+            .filter(|(_, chat)| match space_filter {
+                Some(space_id) => chat.space_id.as_deref() == Some(space_id),
+                None => true,
+            })
+            .collect()
+    }
+
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
@@ -1299,6 +1323,15 @@ impl AppState {
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    /// The chat the Archive session shortcut acts on: the selected one, unless
+    /// it is already archived. The shortcut archives and never unarchives, so
+    /// an archived chat is left alone. Pure.
+    pub fn archivable_selected_chat(&self) -> Option<&str> {
+        self.selected_chat_row()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
     }
 
     /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
@@ -1460,9 +1493,13 @@ impl AppState {
             self.change_request_tasks.clear();
             return;
         };
-        let targets = desired_watch_targets(&self.chats, &self.spaces, |device| {
-            !self.change_requests.is_supported(device)
-        });
+        let targets = if self.change_requests_visible {
+            desired_watch_targets(&self.chats, &self.spaces, |device| {
+                !self.change_requests.is_supported(device)
+            })
+        } else {
+            HashSet::new()
+        };
 
         self.change_request_tasks
             .retain(|target, _| targets.contains(target));
@@ -1481,6 +1518,54 @@ impl AppState {
             );
             self.change_request_tasks.insert(target, task);
         }
+    }
+
+    pub fn set_change_requests_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.change_requests_visible != visible {
+            self.change_requests_visible = visible;
+            self.reconcile_change_request_watches(cx);
+        }
+    }
+
+    pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        match crate::links::parse_zeron_conversation_link(url) {
+            Ok(link) => {
+                self.pending_deep_link = Some(link);
+                self.apply_pending_deep_link(cx);
+            }
+            Err(error) => self.deep_link_notice = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn apply_pending_deep_link(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = self.pending_deep_link.clone() else {
+            return;
+        };
+        let Some(locator) = crate::links::workspace_locator(
+            self.workspace_scope,
+            self.auth.as_ref(),
+            self.local_device_id.as_deref(),
+        ) else {
+            return;
+        };
+        if locator != link.workspace {
+            self.pending_deep_link = None;
+            self.deep_link_notice =
+                Some("This conversation link belongs to another workspace".into());
+            return;
+        }
+        if self.chats.iter().any(|chat| chat.id == link.chat_id) {
+            self.pending_deep_link = None;
+            self.select_chat(Some(link.chat_id), cx);
+        } else if self.chats_synced {
+            self.pending_deep_link = None;
+            self.deep_link_notice = Some("The linked conversation was not found".into());
+        }
+    }
+
+    pub fn take_deep_link_notice(&mut self) -> Option<String> {
+        self.deep_link_notice.take()
     }
 
     /// Select a chat (or clear). Swaps the per-chat doc-transcript subscription:
@@ -1650,6 +1735,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 };
                 let alive = this.update(cx, |state, cx| {
                     state.apply_chats(parsed);
+                    state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
                     cx.notify();
                 });
@@ -1796,6 +1882,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 };
                 let alive = this.update(cx, |state, cx| {
                     apply(state, parsed);
+                    state.apply_pending_deep_link(cx);
                     if matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
                     }
@@ -1834,6 +1921,11 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
         if let Some(id) = id {
             this.update(cx, |state, cx| {
                 state.local_device_id = Some(id);
+                state.apply_pending_deep_link(cx);
+                // Watches opened before this probe conservatively route through
+                // targetDeviceId. Recreate them now that local routing is known.
+                state.change_request_tasks.clear();
+                state.reconcile_change_request_watches(cx);
                 cx.notify();
             })
             .ok();
@@ -2512,6 +2604,7 @@ mod tests {
             cwd: None,
             branch: None,
             checkout_id: None,
+            source_context: None,
             config: None,
             last_message_preview: None,
             last_message_at: last_msg_min.map(|m| base + TimeDelta::minutes(m)),
@@ -2973,6 +3066,57 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    #[test]
+    fn jump_slots_count_the_rows_the_sidebar_draws() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_space = chat("a", 0, Some(3));
+        in_space.space_id = Some("s1".into());
+        let mut other_space = chat("b", 1, Some(2));
+        other_space.space_id = Some("s2".into());
+        let mut archived = chat("gone", 2, Some(1));
+        archived.space_id = Some("s1".into());
+        archived.archived = true;
+        state.apply_spaces(vec![
+            space("s1", "d1", "/tmp/s1", 0),
+            space("s2", "d1", "/tmp/s2", 1),
+        ]);
+        state.apply_chats(vec![in_space, other_space, archived]);
+
+        // The archived row is not in the active list, so no slot reaches it.
+        let order: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(order.len(), 2);
+        assert!(!order.contains(&"gone"));
+
+        // A project filter renumbers: the visible rows only.
+        let filtered: Vec<&str> = state
+            .sidebar_chats(now, Some("s2"))
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(filtered, ["b"]);
+    }
+
+    #[test]
+    fn archive_shortcut_only_targets_an_open_active_chat() {
+        let mut state = AppState::new();
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        state.apply_chats(vec![archived, chat("b", 1, None)]);
+        // No chat open: nothing to archive.
+        assert_eq!(state.archivable_selected_chat(), None);
+        // The open active chat is the target.
+        state.selected_chat = Some("b".into());
+        assert_eq!(state.archivable_selected_chat(), Some("b"));
+        // An already archived chat stays put — the shortcut never unarchives.
+        state.selected_chat = Some("a".into());
+        assert_eq!(state.archivable_selected_chat(), None);
     }
 
     #[test]

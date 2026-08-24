@@ -42,7 +42,9 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
-use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
+use crate::markdown::parser::{
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
+};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _, RESIZE};
@@ -296,6 +298,13 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    /// A REASONING part riding the tool group as a chip (user request: the
+    /// thought process belongs inside the combined "Ran N commands"
+    /// accordion, opening/closing with the same tween). Synthesized in
+    /// [`rows_for_entry`] — never comes from a doc tool part. The thought
+    /// text is the `detail`; `resolved == false` means it is still
+    /// streaming (the chip then defaults open).
+    pub is_thought: bool,
 }
 
 /// Subagent spawn chips — [`ToolCall::is_subagent_spawn`], the shared genus
@@ -327,6 +336,326 @@ fn tool_group_collapses(tools: &[ToolItem]) -> bool {
     tools.iter().any(|t| !is_agent_tool(t))
 }
 
+/// Column budget for soft-wrapping thought text into detail lines. The
+/// detail body is preformatted (no element wrapping), so the wrap happens
+/// here — conservative enough to fit the card at typical transcript widths.
+const THOUGHT_WRAP_COLS: usize = 96;
+
+/// Flatten a thought's parsed markdown into wrapped, STYLED detail lines —
+/// inline markers render as real styling (bold/italic/code/links) instead of
+/// literal `**` glyphs; blocks flatten structurally (headings bold, list
+/// bullets, quote bars, verbatim code lines). Every line is one fixed-height
+/// row, so the detail height stays analytic (lines × [`OUTPUT_LINE_HEIGHT`])
+/// and the group's fold tween keeps working without measurement.
+fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
+    let mut out: Vec<Vec<InlineRun>> = Vec::new();
+    for top in &tree.blocks {
+        if !out.is_empty() {
+            // One blank separator row between top-level blocks (the old
+            // plain-text wrap kept paragraph gaps the same way).
+            out.push(Vec::new());
+        }
+        thought_block_lines(&top.block, 0, &mut out);
+    }
+    while out
+        .last()
+        .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+    {
+        out.pop();
+    }
+    out
+}
+
+/// The slot-0 indent run every emitted thought line opens with (possibly
+/// empty). List/quote handlers rewrite it in place to plant markers/bars, so
+/// it must exist even at zero indent.
+fn indent_run(indent: usize) -> Vec<InlineRun> {
+    vec![InlineRun {
+        text: " ".repeat(indent),
+        style: InlineStyle::default(),
+    }]
+}
+
+/// Append text to a line's run list, merging into the tail run when styles
+/// match (keeps run counts small for the shaper).
+fn push_styled(line: &mut Vec<InlineRun>, text: &str, style: &InlineStyle) {
+    if text.is_empty() {
+        return;
+    }
+    match line.last_mut() {
+        Some(last) if last.style == *style => last.text.push_str(text),
+        _ => line.push(InlineRun {
+            text: text.to_owned(),
+            style: style.clone(),
+        }),
+    }
+}
+
+/// Close a wrapped line: the slot-0 indent run in front (see [`indent_run`]).
+fn finish_line(indent: usize, mut line: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut full = indent_run(indent);
+    full.append(&mut line);
+    full
+}
+
+/// Word-wrap styled runs at the thought column budget. Char-counted like
+/// every detail wrap — block heights must stay analytic — with words glued
+/// across style boundaries (`**bold**tail` wraps as one unit), separator
+/// spaces riding the preceding run, and pathological overlong tokens
+/// hard-split at the budget. Hard breaks (`\n` runs) split into
+/// separately-wrapped segments.
+fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    let budget = THOUGHT_WRAP_COLS.saturating_sub(indent).max(16);
+    let mut segments: Vec<Vec<InlineRun>> = vec![Vec::new()];
+    for run in runs {
+        for (ix, piece) in run.text.split('\n').enumerate() {
+            if ix > 0 {
+                segments.push(Vec::new());
+            }
+            if !piece.is_empty() {
+                segments.last_mut().unwrap().push(InlineRun {
+                    text: piece.to_owned(),
+                    style: run.style.clone(),
+                });
+            }
+        }
+    }
+    for segment in segments {
+        // Tokens: maximal non-whitespace piece lists, glued across run
+        // boundaries so a word split by styling never wraps mid-word.
+        let mut tokens: Vec<Vec<InlineRun>> = Vec::new();
+        let mut in_token = false;
+        for run in &segment {
+            let text = run.text.as_str();
+            let mut pos = 0;
+            while pos < text.len() {
+                let rest = &text[pos..];
+                let ws = rest.chars().next().is_some_and(char::is_whitespace);
+                let end = rest
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace() != ws)
+                    .map_or(text.len(), |(i, _)| pos + i);
+                if ws {
+                    in_token = false;
+                } else {
+                    if !in_token {
+                        tokens.push(Vec::new());
+                        in_token = true;
+                    }
+                    push_styled(tokens.last_mut().unwrap(), &text[pos..end], &run.style);
+                }
+                pos = end;
+            }
+        }
+        let mut line: Vec<InlineRun> = Vec::new();
+        let mut len = 0usize;
+        for token in tokens {
+            let tok_len: usize = token.iter().map(|r| r.text.chars().count()).sum();
+            if tok_len > budget {
+                // Hard-split a pathological token at the budget.
+                if len > 0 {
+                    out.push(finish_line(indent, std::mem::take(&mut line)));
+                    len = 0;
+                }
+                for piece in token {
+                    let mut chars = piece.text.chars();
+                    loop {
+                        let chunk: String = chars.by_ref().take(budget - len).collect();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        len += chunk.chars().count();
+                        push_styled(&mut line, &chunk, &piece.style);
+                        if len == budget {
+                            out.push(finish_line(indent, std::mem::take(&mut line)));
+                            len = 0;
+                        }
+                    }
+                }
+                continue;
+            }
+            if len > 0 && len + 1 + tok_len > budget {
+                out.push(finish_line(indent, std::mem::take(&mut line)));
+                len = 0;
+            }
+            if len > 0 {
+                if let Some(last) = line.last_mut() {
+                    last.text.push(' ');
+                }
+                len += 1;
+            }
+            for piece in token {
+                push_styled(&mut line, &piece.text, &piece.style);
+            }
+            len += tok_len;
+        }
+        if len > 0 {
+            out.push(finish_line(indent, line));
+        }
+    }
+}
+
+/// One markdown block into thought detail lines, `indent` spaces deep.
+fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    match block {
+        Block::Paragraph { runs } => wrap_styled_runs(runs, indent, out),
+        Block::Heading { runs, .. } => {
+            // Headings keep the detail's single type size — bold is the cue
+            // (an 18px line box can't host display sizes).
+            let bold: Vec<InlineRun> = runs
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r.style.bold = true;
+                    r
+                })
+                .collect();
+            wrap_styled_runs(&bold, indent, out);
+        }
+        Block::CodeBlock { code, .. } => {
+            let style = InlineStyle {
+                code: true,
+                ..InlineStyle::default()
+            };
+            for line in code.lines() {
+                for chunk in wrap_cols(line, THOUGHT_WRAP_COLS.saturating_sub(indent).max(16)) {
+                    let mut row = indent_run(indent);
+                    if !chunk.is_empty() {
+                        row.push(InlineRun {
+                            text: chunk.to_string(),
+                            style: style.clone(),
+                        });
+                    }
+                    out.push(row);
+                }
+            }
+        }
+        Block::List {
+            ordered_start,
+            items,
+        } => {
+            // Tight rendering: no blank rows inside a list.
+            for (ix, item) in items.iter().enumerate() {
+                let marker = match ordered_start {
+                    Some(start) => format!("{}. ", start + ix as u64),
+                    None => "• ".to_string(),
+                };
+                let inner = indent + marker.chars().count();
+                let mark = out.len();
+                for child in item {
+                    thought_block_lines(child, inner, out);
+                }
+                if out.len() == mark {
+                    // An empty item still shows its marker.
+                    out.push(indent_run(inner));
+                }
+                // The item's first line trades its indent spaces for the
+                // marker (the slot-0 run is always the indent).
+                if let Some(first) = out[mark].first_mut() {
+                    first.text = format!("{}{marker}", " ".repeat(indent));
+                }
+            }
+        }
+        Block::BlockQuote { children } => {
+            let mark = out.len();
+            for (ix, child) in children.iter().enumerate() {
+                if ix > 0 {
+                    out.push(Vec::new());
+                }
+                thought_block_lines(child, indent + 2, out);
+            }
+            // Trade the two quote-indent spaces for the bar on every quoted
+            // line — replace, not overwrite: nested list handlers already
+            // planted markers after their own deeper indent.
+            for line in &mut out[mark..] {
+                if let Some(first) = line.first_mut()
+                    && first.text.len() >= indent + 2
+                {
+                    first.text.replace_range(indent..indent + 2, "│ ");
+                }
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            // A thought is a record, not a layout surface: cells joined with
+            // a dot separator, header bold — no column machinery.
+            let join = |cells: &[Vec<InlineRun>], bold: bool| -> Vec<InlineRun> {
+                let mut line: Vec<InlineRun> = Vec::new();
+                for (ix, cell) in cells.iter().enumerate() {
+                    if ix > 0 {
+                        push_styled(&mut line, " · ", &InlineStyle::default());
+                    }
+                    for r in cell {
+                        let mut r = r.clone();
+                        r.style.bold |= bold;
+                        line.push(r);
+                    }
+                }
+                line
+            };
+            wrap_styled_runs(&join(header, true), indent, out);
+            for row in rows {
+                wrap_styled_runs(&join(row, false), indent, out);
+            }
+        }
+        Block::Rule => {
+            let mut row = indent_run(indent);
+            row.push(InlineRun {
+                text: "———".into(),
+                style: InlineStyle::default(),
+            });
+            out.push(row);
+        }
+    }
+}
+
+/// A reasoning part as a tool-group chip: "Thought process" header over the
+/// thought's markdown flattened into styled detail lines (analytic height —
+/// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
+/// outputs, with the counted tail. `live` = the part is still streaming
+/// (chip defaults open).
+fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
+    let mut lines = thought_lines(tree);
+    let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
+    if truncated_by > 0 {
+        // Keep the TAIL while streaming (the fresh thinking is the signal);
+        // settled thoughts keep the head like tool outputs do.
+        if live {
+            lines.drain(..truncated_by);
+            // The cut can land on a block separator — drop the orphan blank.
+            while lines
+                .first()
+                .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+            {
+                lines.remove(0);
+            }
+        } else {
+            lines.truncate(OUTPUT_DETAIL_MAX_LINES);
+        }
+    }
+    ToolItem {
+        call: ToolCall::Unknown {
+            name: "Thought process".into(),
+            input: None,
+        },
+        is_error: false,
+        resolved: !live,
+        detail: (!lines.is_empty()).then(|| {
+            Arc::new(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            })
+        }),
+        invocation: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        subagent_ref: None,
+        subagent_status: None,
+        subagent_tail: None,
+        is_thought: true,
+    }
+}
+
 /// A chip's expandable detail payload.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolDetail {
@@ -334,6 +663,13 @@ pub enum ToolDetail {
     /// intact), capped at [`OUTPUT_DETAIL_MAX_LINES`] with a counted tail.
     Output {
         lines: Vec<SharedString>,
+        truncated_by: usize,
+    },
+    /// A thought's markdown, pre-flattened into wrapped STYLED lines — one
+    /// fixed-height row each, so the height stays analytic like `Output`
+    /// while inline markers render as real styling ([`thought_lines`]).
+    Thought {
+        lines: Vec<Vec<InlineRun>>,
         truncated_by: usize,
     },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
@@ -688,6 +1024,30 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 let bytes: usize = lines.iter().map(|l| l.len()).sum();
                 acc.extend_from_slice(&(bytes as u32).to_le_bytes());
             }
+            Some(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            }) => {
+                // Byte-exact plus style bits: a live mend can restyle runs
+                // without changing the flattened length, and the row must
+                // still re-splice.
+                acc.push(4);
+                acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
+                acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
+                for line in lines {
+                    for run in line {
+                        acc.extend_from_slice(run.text.as_bytes());
+                        acc.push(
+                            run.style.bold as u8
+                                | (run.style.italic as u8) << 1
+                                | (run.style.code as u8) << 2
+                                | (run.style.strikethrough as u8) << 3
+                                | (run.style.link.is_some() as u8) << 4,
+                        );
+                    }
+                    acc.push(b'\n');
+                }
+            }
             Some(ToolDetail::Diff { file, .. }) => {
                 acc.push(2);
                 acc.extend_from_slice(file.path.as_bytes());
@@ -875,6 +1235,7 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
+                    is_thought: false,
                 };
                 // Agent chips don't share a fold with ordinary tools: flush
                 // whenever the genus flips so each group is uniform.
@@ -882,6 +1243,34 @@ pub fn rows_for_entry(
                     .first()
                     .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
                 {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                }
+                pending_group.push(item);
+                group_last_part_ix = part_ix;
+            }
+            // Thinking rides the SAME accordion as the tools around it
+            // (user request) — a thought chip in the group, not its own row.
+            MessagePart::Reasoning { id: part_id, text } => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                // Live only while it is the tail of a streaming reply — once
+                // text or a tool follows, the thought is finished even though
+                // the entry still streams.
+                let live = streaming && part_ix == last_part_ix;
+                // The same parse wiring as text parts: incremental while
+                // streaming, hanging inline markers mended for display, the
+                // settled cache once complete.
+                let tree = parse(&format!("{}#{}", entry.id, part_id), text);
+                let item = thought_item(&tree, live);
+                // Thoughts join ordinary tool groups; agent (spawn-link)
+                // groups stay pure, exactly like the tool genus rule.
+                if pending_group.first().is_some_and(is_agent_tool) {
                     flush_group(
                         &mut rows,
                         &mut pending_group,
@@ -986,8 +1375,9 @@ pub fn rows_for_entry(
                             copy_text: None,
                         });
                     }
-                    // Tools are grouped by the outer arm; nothing reaches here.
-                    MessagePart::Tool { .. } => {}
+                    // Tools and thoughts are grouped by the outer arms;
+                    // nothing reaches here.
+                    MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
                 }
             }
         }
@@ -1183,8 +1573,28 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// The rule lives in `zeron_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
-    let pairs: Vec<(ToolCall, bool)> = tools.iter().map(|t| (t.call.clone(), t.is_error)).collect();
-    zeron_proto::view::tool_group_summary(&pairs)
+    let pairs: Vec<(ToolCall, bool)> = tools
+        .iter()
+        .filter(|t| !t.is_thought)
+        .map(|t| (t.call.clone(), t.is_error))
+        .collect();
+    let thoughts = tools.iter().filter(|t| t.is_thought).count();
+    // The shared summary answers "used 0 tools" for an empty set — a
+    // thought-only group must not inherit that.
+    let base = if pairs.is_empty() {
+        String::new()
+    } else {
+        zeron_proto::view::tool_group_summary(&pairs)
+    };
+    // Thought chips ride the group (they are UI-synthesized, so the shared
+    // view summary never sees them): name them on the collapsed line.
+    match (base.is_empty(), thoughts) {
+        (_, 0) => base,
+        (true, 1) => "Thought process".into(),
+        (true, n) => format!("Thought {n} times"),
+        (false, 1) => format!("Thought · {base}"),
+        (false, n) => format!("Thought {n} times · {base}"),
+    }
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
@@ -1209,6 +1619,13 @@ pub fn chips_height(count: usize) -> f32 {
 pub fn detail_height(detail: &ToolDetail) -> f32 {
     let body = match detail {
         ToolDetail::Output {
+            lines,
+            truncated_by,
+        } => {
+            let rows = lines.len() + usize::from(*truncated_by > 0);
+            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+        }
+        ToolDetail::Thought {
             lines,
             truncated_by,
         } => {
@@ -3416,6 +3833,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
+        let glyph = Theme::of(cx).glyph;
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
@@ -3509,9 +3927,10 @@ impl Transcript {
                             ));
                             let indicator: AnyElement = match uploading {
                                 Some(pct) => crate::loaders::upload_progress_ring(pct, 34.0),
-                                None => crate::loaders::mini_gradient_spinner(
+                                None => crate::loaders::mini_glyph_spinner(
                                     format!("att-sending-{row_id}-{aix}"),
                                     3.0,
+                                    glyph,
                                     cx.entity_id(),
                                     cx,
                                 )
@@ -4276,8 +4695,13 @@ impl Transcript {
             .iter()
             .zip(&invocations)
             .zip(&detail_folds)
-            .map(|((detail, invocation), fold)| {
-                (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(false)
+            .zip(tools.iter())
+            .map(|(((detail, invocation), fold), tool)| {
+                // A STREAMING thought chip defaults open (the live thinking
+                // is the point); settled chips default closed. A user toggle
+                // overrides either way.
+                let default_open = tool.is_thought && !tool.resolved;
+                (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(default_open)
             })
             .collect();
         let detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>> = details
@@ -4605,7 +5029,7 @@ impl Transcript {
 
 /// A sent message's text with its file-mention chips. The same recipe as the
 /// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at `code_text` violet, [`StyledText`] supplies wrapped glyph
+/// the mono font at the spectrum's `code_text`, [`StyledText`] supplies wrapped glyph
 /// geometry through its layout handle, and a canvas paints the rounded
 /// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
 /// like the text they decorate.
@@ -4908,19 +5332,99 @@ fn detail_body(
                     .child(div().w_full().min_w_0().truncate().child(line.clone()))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(
+                block.child(more_lines_row(*truncated_by, theme))
+            })
+            .into_any_element(),
+        ToolDetail::Thought {
+            lines,
+            truncated_by,
+        } => body
+            .py(px(6.0))
+            .text_size(px(12.0))
+            .children(lines.iter().map(|line| {
+                let row = div()
+                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center();
+                let Some((text, runs)) = thought_line_text(line, theme) else {
+                    return row; // blank separator row
+                };
+                row.child(
                     div()
-                        .h(px(OUTPUT_LINE_HEIGHT))
-                        .px(px(12.0))
-                        .flex()
-                        .items_center()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("… {truncated_by} more lines"))),
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .child(StyledText::new(text).with_runs(runs)),
                 )
+            }))
+            .when(*truncated_by > 0, |block| {
+                block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
     }
+}
+
+/// The counted-tail row under a truncated Output/Thought detail.
+fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(OUTPUT_LINE_HEIGHT))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .text_size(px(10.5))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("… {truncated_by} more lines")))
+}
+
+/// Shape one flattened thought line into gpui text runs — the detail-body
+/// palette: muted foreground prose, semibold for bold, violet mono for code,
+/// underlined links (NOT clickable — a thought is a record, not a surface).
+fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString, Vec<TextRun>)> {
+    let mut text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    for run in line {
+        if run.text.is_empty() {
+            continue;
+        }
+        let mut f = if run.style.code {
+            gpui::font(theme.font_mono.clone())
+        } else {
+            gpui::font(theme.font_sans.clone())
+        };
+        if run.style.bold {
+            f.weight = gpui::FontWeight::SEMIBOLD;
+        }
+        if run.style.italic {
+            f.style = gpui::FontStyle::Italic;
+        }
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: f,
+            color: if run.style.code {
+                render::inline_code_text(theme)
+            } else {
+                theme.text.opacity(0.85)
+            },
+            background_color: None,
+            underline: run.style.link.is_some().then_some(gpui::UnderlineStyle {
+                color: Some(theme.text_muted),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_muted),
+            }),
+        });
+        text.push_str(&run.text);
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((text.into(), runs))
 }
 
 /// The trailing tile on a chip header, when it has one.
@@ -4948,7 +5452,11 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, detail) = tool_chip_content(&tool.call);
+    let (label, detail) = if tool.is_thought {
+        ("Thought process", String::new())
+    } else {
+        tool_chip_content(&tool.call)
+    };
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -4982,9 +5490,13 @@ fn chip_header_row(
                 .items_center()
                 .justify_center()
                 .child(
-                    crate::icons::icon(tool_icon_path(&tool.call))
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
+                    crate::icons::icon(if tool.is_thought {
+                        crate::icons::CHAT_ROUND_LINE
+                    } else {
+                        tool_icon_path(&tool.call)
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
                 ),
         )
         .child(
@@ -5039,19 +5551,16 @@ fn chip_header_row(
         .when(running, |row| {
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
-            row.child(
-                div()
-                    .flex_none()
-                    .child(crate::loaders::mini_gradient_spinner(
-                        format!(
-                            "subagent-chip-{}",
-                            tool.subagent_ref.as_deref().unwrap_or_default()
-                        ),
-                        2.0,
-                        view,
-                        cx,
-                    )),
-            )
+            row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                format!(
+                    "subagent-chip-{}",
+                    tool.subagent_ref.as_deref().unwrap_or_default()
+                ),
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            )))
         })
         .when_some(trail, |row, trail| {
             // Trailing tile matching the group header's: a chevron for the
@@ -5957,6 +6466,188 @@ mod tests {
         }
     }
 
+    fn reasoning_part(id: &str, text: &str) -> MessagePart {
+        MessagePart::Reasoning {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn reasoning_joins_the_tool_group_accordion() {
+        // Thought → tool → thought → tool folds into ONE group row (user
+        // request: the thought process lives inside the combined accordion),
+        // and the collapsed summary names the thinking.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                reasoning_part("r0", "planning the first step"),
+                tool_part("t1", "ls"),
+                reasoning_part("r2", "now the second step"),
+                tool_part("t3", "pwd"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1, "one combined accordion row");
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tools.len(), 4);
+        assert!(tools[0].is_thought && tools[2].is_thought);
+        assert!(!tools[1].is_thought && !tools[3].is_thought);
+        // Thought chips carry their text as a styled-line detail with an
+        // ANALYTIC height, so the group's fold tween covers them.
+        assert!(matches!(
+            tools[0].detail.as_deref(),
+            Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
+        ));
+        let summary = tool_group_summary(&tools);
+        assert!(summary.starts_with("Thought 2 times"), "{summary}");
+        assert!(summary.contains("2 commands"), "{summary}");
+
+        // A lone thought is still an accordion (with the group tween), named
+        // plainly.
+        let entry = assistant(
+            "a2",
+            MessageStatus::Complete,
+            vec![reasoning_part("r0", "just thinking")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(rows.len(), 1);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tool_group_summary(&tools), "Thought process");
+
+        // Empty reasoning renders nothing.
+        let entry = assistant(
+            "a3",
+            MessageStatus::Complete,
+            vec![reasoning_part("r0", "   ")],
+        );
+        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+    }
+
+    #[test]
+    fn live_thought_streams_open_and_settles_closed() {
+        let entry = assistant(
+            "a1",
+            MessageStatus::Streaming,
+            vec![reasoning_part("r0", "thinking hard")],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        // The live tail auto-opens the group; the chip itself is unresolved
+        // (defaults open) until the part stops being the tail.
+        assert!(*auto_open);
+        assert!(!tools[0].resolved);
+
+        let entry = assistant(
+            "a2",
+            MessageStatus::Streaming,
+            vec![
+                reasoning_part("r0", "thinking hard"),
+                text_part("t1", "answer"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert!(tools[0].resolved, "a followed thought is settled");
+    }
+
+    fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
+        thought_lines(&parse_full(text))
+    }
+
+    fn line_chars(line: &[InlineRun]) -> usize {
+        line.iter().map(|r| r.text.chars().count()).sum()
+    }
+
+    fn line_string(line: &[InlineRun]) -> String {
+        line.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn thought_wrap_is_word_aware_and_bounded() {
+        let lines = thought_of("one two three");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_string(&lines[0]), "one two three");
+        let long = "word ".repeat(200);
+        let lines = thought_of(&long);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
+        assert!(lines.len() > 5);
+        let pathological = "x".repeat(300);
+        let lines = thought_of(&pathological);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
+        // A word glued across style boundaries wraps as ONE unit — no line
+        // may split inside `**bold**tail`.
+        let glued = format!("{} **bold**tail", "word ".repeat(30));
+        let lines = thought_of(&glued);
+        let joined: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        assert!(joined.iter().any(|l| l.ends_with("boldtail")), "{joined:?}");
+    }
+
+    #[test]
+    fn thought_markdown_styles_instead_of_literal_markers() {
+        // The exact user report: `**bold**` markers showed as glyphs.
+        let lines = thought_of("**Planning rollback** then *checking* `parse` [docs](https://d)");
+        assert_eq!(lines.len(), 1);
+        let flat = line_string(&lines[0]);
+        assert!(
+            !flat.contains('*') && !flat.contains('`') && !flat.contains('['),
+            "{flat}"
+        );
+        let line = &lines[0];
+        assert!(
+            line.iter()
+                .any(|r| r.style.bold && r.text.contains("Planning rollback")),
+            "bold run survives: {line:?}"
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.italic && r.text.contains("checking"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.code && r.text.contains("parse"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.link.is_some() && r.text.contains("docs"))
+        );
+    }
+
+    #[test]
+    fn thought_blocks_flatten_structurally() {
+        let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
+        let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        // Heading renders bold, same size (one 18px row).
+        assert!(
+            lines[0]
+                .iter()
+                .any(|r| r.style.bold && r.text.contains("Head"))
+        );
+        // Blank separator rows between top-level blocks; tight list inside.
+        assert_eq!(flat[1], "");
+        assert_eq!(flat[2], "para");
+        assert_eq!(flat[4], "• one");
+        assert_eq!(flat[5], "• two");
+        // Code lines verbatim, styled as code (mono at render).
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .iter()
+                .any(|r| r.style.code && r.text == "let x = 1;"),
+            "{flat:?}"
+        );
+    }
+
     fn tool_part(id: &str, command: &str) -> MessagePart {
         MessagePart::Tool {
             id: id.into(),
@@ -6506,6 +7197,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            is_thought: false,
         };
         let edit = |p: &str| ToolItem {
             call: ToolCall::EditFile {
@@ -6523,6 +7215,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            is_thought: false,
         };
         let tools = vec![
             exec("ls"),
@@ -6556,6 +7249,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
             ToolItem {
                 call: ToolCall::Glob {
@@ -6571,6 +7265,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
             ToolItem {
                 call: ToolCall::WebSearch { query: "q".into() },
@@ -6584,6 +7279,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                is_thought: false,
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
