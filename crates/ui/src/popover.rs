@@ -1078,6 +1078,53 @@ pub fn skeleton_rows(
         .into_any_element()
 }
 
+/// One pulsing ghost label — the trigger chip's label slot while the
+/// selected model still resolves (a chip collapsing to its bare icon read
+/// as broken; user report).
+pub fn skeleton_bar(width: f32, view: gpui::EntityId, cx: &mut gpui::App) -> AnyElement {
+    let delta = motion::pulse_delta(&ZERON_PULSE, view, cx);
+    div()
+        .w(px(width))
+        .h(px(11.0))
+        .rounded(px(5.5))
+        .bg(ink(0.08))
+        .opacity(0.35 + 0.4 * motion::pulse_wave(motion::staggered_phase(delta, 0, 0.0)))
+        .into_any_element()
+}
+
+/// [`skeleton_rows`] shaped like a MENU loading: shorter bars of varied
+/// widths reading as ghost labels rather than full-width slabs (the model
+/// picker's loading state — reference design's skeleton). Widths cycle a
+/// small deterministic ladder so the stagger reads organic without
+/// randomness (randomness would repaint differently every open).
+pub fn skeleton_menu_rows(
+    _id: &'static str,
+    _theme: &Theme,
+    count: usize,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    const WIDTHS: [f32; 4] = [0.42, 0.58, 0.48, 0.66];
+    let wash = ink(0.05);
+    let delta = motion::pulse_delta(&ZERON_PULSE, view, cx);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .py(px(6.0))
+        .px(px(4.0))
+        .children((0..count).map(move |i| {
+            let phase = motion::staggered_phase(delta, i, 0.08);
+            div()
+                .h(px(14.0))
+                .w(gpui::relative(WIDTHS[i % WIDTHS.len()]))
+                .rounded(px(7.0))
+                .bg(wash)
+                .opacity(0.35 + 0.4 * motion::pulse_wave(phase))
+        }))
+        .into_any_element()
+}
+
 /// Inline error row + Retry affordance (the caller attaches the listener to the
 /// returned id).
 pub fn error_row(theme: &Theme, message: &str) -> gpui::Div {
