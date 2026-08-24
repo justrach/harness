@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, ZERON_PULSE};
-use crate::theme::Theme;
+use crate::theme::{GlyphPalette, Theme};
 
 // Shared with the terminal viewport (`zeron_proto::motion`) so both animate the
 // same loaders from the same numbers.
@@ -147,24 +147,22 @@ pub fn gradient_spinner(
         }))
 }
 
-/// A 2×3 miniature of [`gradient_spinner`] sized for a status-dot slot
-/// (sessions-sidebar working rows): same row tints and pulse timing, but the
-/// brightness SNAKES around the grid's perimeter (every cell of a 2×3 grid is
-/// on the ring) instead of sweeping as a vertical wave — a tiny radial chase.
-/// ~6×10px footprint at the default 2.5px cells.
-pub fn mini_gradient_spinner(
+/// A 2×3 activity glyph sized for compact status slots. Its color is an
+/// explicit accent-preset role supplied by the caller, while brightness snakes
+/// around the grid's perimeter as a tiny radial chase.
+pub fn mini_glyph_spinner(
     key: impl Into<SharedString>,
     cell_px: f32,
+    palette: GlyphPalette,
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    let tints = GSPIN_ROW_TINTS.map(|t| gpui::rgb(t).into());
-    mini_spinner_tinted(key, cell_px, tints, view, cx)
+    mini_spinner_tinted(key, cell_px, palette.rows(), view, cx)
 }
 
-/// [`mini_gradient_spinner`] in a single flat tint — the grayscale take for
-/// surfaces where the brand gradient would pull focus (the sidebar
-/// connection line): same grid, snake, and timing, color left to the caller.
+/// Grayscale variant for surfaces where an accent would pull focus (the
+/// sidebar connection line): same grid, snake, and timing, color left to the
+/// caller.
 pub fn mini_mono_spinner(
     key: impl Into<SharedString>,
     cell_px: f32,

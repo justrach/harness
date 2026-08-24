@@ -3560,6 +3560,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
+        let glyph = Theme::of(cx).glyph;
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
@@ -3653,9 +3654,10 @@ impl Transcript {
                             ));
                             let indicator: AnyElement = match uploading {
                                 Some(pct) => crate::loaders::upload_progress_ring(pct, 34.0),
-                                None => crate::loaders::mini_gradient_spinner(
+                                None => crate::loaders::mini_glyph_spinner(
                                     format!("att-sending-{row_id}-{aix}"),
                                     3.0,
+                                    glyph,
                                     cx.entity_id(),
                                     cx,
                                 )
@@ -4754,7 +4756,7 @@ impl Transcript {
 
 /// A sent message's text with its file-mention chips. The same recipe as the
 /// markdown renderer's inline code (`flat_text_element`): chip ranges shape in
-/// the mono font at `code_text` violet, [`StyledText`] supplies wrapped glyph
+/// the mono font at the spectrum's `code_text`, [`StyledText`] supplies wrapped glyph
 /// geometry through its layout handle, and a canvas paints the rounded
 /// `code_wash` *beneath* the glyphs — so chips wrap, clip, and scroll exactly
 /// like the text they decorate.
@@ -5196,19 +5198,16 @@ fn chip_header_row(
         .when(running, |row| {
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
-            row.child(
-                div()
-                    .flex_none()
-                    .child(crate::loaders::mini_gradient_spinner(
-                        format!(
-                            "subagent-chip-{}",
-                            tool.subagent_ref.as_deref().unwrap_or_default()
-                        ),
-                        2.0,
-                        view,
-                        cx,
-                    )),
-            )
+            row.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                format!(
+                    "subagent-chip-{}",
+                    tool.subagent_ref.as_deref().unwrap_or_default()
+                ),
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            )))
         })
         .when_some(trail, |row, trail| {
             // Trailing tile matching the group header's: a chevron for the

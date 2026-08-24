@@ -2245,13 +2245,15 @@ impl Shell {
             cx.background_executor()
                 .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
                 .await;
-            // Re-stamp the appearance from the global before writing. The View
-            // menu changes it through `appearance::set_mode`, which never touches
-            // this shell's in-memory copy — without this, the next pane resize
-            // would quietly write the boot-time appearance back over the user's
-            // choice.
+            // Re-stamp every appearance-owned value from the globals before
+            // writing. These settings persist independently of the shell, and
+            // correctness must not depend on a Shell render happening before
+            // this debounce fires.
             let Ok(snapshot) = this.update(cx, |shell, cx| {
                 shell.settings.appearance = crate::appearance::mode(cx);
+                shell.settings.theme_selection = crate::appearance::themes(cx);
+                shell.settings.accent = crate::appearance::accent(cx);
+                shell.settings.surface = crate::appearance::surface(cx);
                 shell.settings.clone()
             }) else {
                 return;
@@ -3687,6 +3689,9 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // The sidebar is part of the resolved theme. A second fixed-Zeron
+        // palette here made imported families look split in half and froze
+        // activity/glyph personality independently of the selected variant.
         let theme = Theme::of(cx).clone();
         let inner: AnyElement = match self.route {
             Route::Settings(section) => self.render_settings_nav(section, &theme, cx),
@@ -3883,6 +3888,8 @@ impl Shell {
             }
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
+        let queued = queued && !undelivered;
+        let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
@@ -3950,22 +3957,20 @@ impl Shell {
         } else {
             match status_label {
                 Some(label) => {
-                    // Glyph slot: Working carries its active thread glyph
-                    // beside the accent word; Done wears the check; other
-                    // statuses retain a quiet semantic dot.
+                    // Glyph slot: Working wears the preset's animated pixel
+                    // glyph beside its label, Done wears the check, and the
+                    // remaining statuses use a compact dot.
                     let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
                             .into_any_element()
-                    } else if status == zeron_proto::ChatIndicator::Working
-                        && !queued
-                        && !undelivered
-                    {
-                        loaders::mini_gradient_spinner(
+                    } else if working {
+                        loaders::mini_glyph_spinner(
                             format!("chat-working-{id}"),
                             2.0,
+                            theme.glyph,
                             cx.entity_id(),
                             cx,
                         )
@@ -4479,23 +4484,12 @@ impl Shell {
         };
         let failed = matches!(self.update_flow, UpdateFlow::Failed(_));
         let tone = if failed { theme.danger } else { theme.accent };
-        // Dark-purple GLASS tint (user request), not the 400-level accent as
-        // a fill: deep pigment at partial alpha tints the blur showing
-        // through instead of compositing into the slab that a bright indigo
-        // fill produced (earlier user report). Light chrome gets a lavender
-        // accent wash instead — dark purple under indigo-600 text goes muddy.
+        // Follow the selected spectrum with a low-emphasis glass tint rather
+        // than painting the bright text accent as a solid slab.
         let (chip_bg, chip_bg_hover) = if failed {
             (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
         } else {
-            match theme.appearance {
-                crate::theme::Appearance::Dark => {
-                    let purple = crate::theme::oklch(0.35, 0.12, 277.0);
-                    (purple.opacity(0.45), purple.opacity(0.60))
-                }
-                crate::theme::Appearance::Light => {
-                    (theme.accent.opacity(0.10), theme.accent.opacity(0.16))
-                }
-            }
+            (theme.accent_wash, theme.accent.opacity(0.16))
         };
 
         let mut strip = div()
@@ -6425,9 +6419,10 @@ impl Shell {
                                 .justify_center()
                                 .group_hover(group.clone(), |s| s.opacity(0.0))
                                 .child(if subagent_running {
-                                    loaders::mini_gradient_spinner(
+                                    loaders::mini_glyph_spinner(
                                         format!("subagent-tab-{ix}"),
                                         2.0,
+                                        theme.glyph,
                                         cx.entity_id(),
                                         cx,
                                     )
@@ -7325,6 +7320,12 @@ fn header_icon_button(
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport_width = f32::from(window.viewport_size().width);
+        // Appearance actions persist independently of the shell. Mirror the
+        // globals before any later debounced settings save can overwrite them.
+        self.settings.appearance = crate::appearance::mode(cx);
+        self.settings.theme_selection = crate::appearance::themes(cx);
+        self.settings.accent = crate::appearance::accent(cx);
+        self.settings.surface = crate::appearance::surface(cx);
         let theme = Theme::of(cx);
         // The shell tone (zeron `.frost`): the surface the sidebar sits on and
         // the main panel floats over as an inset rounded card. On macOS the

@@ -2527,7 +2527,7 @@ impl ComposerInput {
         self.line_height = px(INPUT_LINE_HEIGHT);
 
         // Chips read as inline code: the markdown renderer's recipe (mono font
-        // + `code_text` violet) over the rounded `code_wash` painted beneath.
+        // + the spectrum's `code_text`) over the rounded `code_wash` beneath.
         let (chip_font, chip_color) = {
             let theme = Theme::of(cx);
             (gpui::font(theme.font_mono.clone()), theme.code_text)
@@ -2903,7 +2903,7 @@ impl gpui::Element for ComposerTextElement {
         let origin = point(bounds.left(), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
         let caret_color = Theme::of(cx).caret;
-        // The inline-code recipe: chips wash violet like `code` spans do.
+        // The inline-code recipe: chips use the spectrum wash like `code` spans.
         let mention_color = Theme::of(cx).code_wash;
 
         let mut mention_quads = Vec::new();
