@@ -2954,8 +2954,8 @@ impl Pickers {
         }
         let rows = self.model_rows(cx);
 
-        // ── tabs: the favorites star, a thin divider, one brand icon per
-        //    harness — ACROSS THE TOP (user request; was a left rail). The
+        // ── tabs: the favorites star, then one brand icon per harness —
+        //    ACROSS THE TOP (user request; was a left rail). The
         //    viewed tab wears a 2px accent bar sitting on the row's bottom
         //    hairline. Tabs never hide: a live search only filters the
         //    viewed tab's list, so switching tabs re-scopes the same query.
@@ -3003,14 +3003,6 @@ impl Pickers {
                         }),
                 )
                 .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
-        );
-        tabs = tabs.child(
-            div()
-                .flex_none()
-                .w(px(1.0))
-                .h(px(18.0))
-                .mx(px(2.0))
-                .bg(crate::theme::hairline(0.10)),
         );
         for (ix, descriptor) in descriptors.iter().enumerate() {
             let harness = descriptor.id;
