@@ -428,6 +428,38 @@ pub fn anchored_menu_below(
     anchored_menu_below_gap(id, content, closing, 6.0)
 }
 
+/// [`anchored_menu_below`] right-aligned to the trigger's right edge. This is
+/// the dropdown counterpart to [`anchored_menu_above_end`]: trailing sidebar
+/// controls can open a full-width card leftward without leaving the sidebar.
+pub fn anchored_menu_below_end(
+    id: impl Into<SharedString>,
+    content: AnyElement,
+    closing: Option<std::time::Instant>,
+) -> AnyElement {
+    let exit = closing.map(exit_progress);
+    let content = frosted_menu(exit, content);
+    div()
+        .absolute()
+        .bottom_0()
+        .right_0()
+        .size_0()
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(Anchor::TopRight)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(menu_motion(
+                        id.into(),
+                        exit,
+                        div().occlude().pt(px(6.0)).child(content),
+                    )),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
+        .into_any_element()
+}
+
 /// [`anchored_menu_below`] with a caller-chosen trigger→card gap — the
 /// changes-header dropdowns hang off a tight titlebar band and need more
 /// breathing room than the default 6px (user report; t3code sits near 10).

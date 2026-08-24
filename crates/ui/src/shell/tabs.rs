@@ -54,18 +54,10 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
             return;
         }
-        let filter = self.settings.space_filter.clone();
-        let (order, selected) = {
-            let state = self.state.read(cx);
-            // The same list `render_active_rows` draws and the jump shortcuts
-            // count — one function, so neither can drift from the screen.
-            let order = state
-                .sidebar_chats(Utc::now(), filter.as_deref())
-                .into_iter()
-                .map(|(_, chat)| chat.id.clone())
-                .collect::<Vec<_>>();
-            (order, state.selected_chat.clone())
-        };
+        // The same list `render_active_rows` draws and the jump shortcuts
+        // count — one function, so neither can drift from the screen.
+        let order = self.sidebar_visible_order(cx);
+        let selected = self.state.read(cx).selected_chat.clone();
         if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
             self.open_chat(target, cx);
         }

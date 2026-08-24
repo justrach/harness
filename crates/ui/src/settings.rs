@@ -46,6 +46,25 @@ pub const SAVE_DEBOUNCE_MS: u64 = 400;
 
 const FILE_NAME: &str = "ui-settings.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarOrganization {
+    /// Legacy persisted value. Project scope now belongs exclusively to the
+    /// project selector and is normalized to [`Self::InOneList`] on load.
+    ByProject,
+    ByDevice,
+    #[default]
+    InOneList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SidebarSort {
+    #[default]
+    LastUpdated,
+    Created,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -54,6 +73,15 @@ pub struct UiSettings {
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
     /// folder inherently). Kept for file compatibility; no longer read.
     pub sidebar_grouped: bool,
+    /// How active sessions are partitioned in the sidebar.
+    pub sidebar_organization: SidebarOrganization,
+    /// Timestamp used to order active sessions (newest first).
+    pub sidebar_sort: SidebarSort,
+    /// Optional harness branding and repository metadata shown below each
+    /// session title.
+    pub sidebar_show_harness: bool,
+    pub sidebar_show_branch: bool,
+    pub sidebar_show_pull_request: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,6 +135,11 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
+            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_show_harness: true,
+            sidebar_show_branch: true,
+            sidebar_show_pull_request: true,
             last_space_id: None,
             open_tabs: None,
             space_filter: None,
@@ -502,6 +535,9 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
 impl UiSettings {
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
+        if self.sidebar_organization == SidebarOrganization::ByProject {
+            self.sidebar_organization = SidebarOrganization::InOneList;
+        }
         self.sidebar_width = clamp_or(
             self.sidebar_width,
             SIDEBAR_MIN,
@@ -578,6 +614,11 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
+            sidebar_organization: SidebarOrganization::ByDevice,
+            sidebar_sort: SidebarSort::Created,
+            sidebar_show_harness: false,
+            sidebar_show_branch: false,
+            sidebar_show_pull_request: false,
             last_space_id: Some("space-1".into()),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
@@ -602,6 +643,21 @@ mod tests {
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), settings);
+    }
+
+    #[test]
+    fn legacy_project_organization_normalizes_to_one_list() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarOrganization":"byProject"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            UiSettings::load(dir.path()).sidebar_organization,
+            SidebarOrganization::InOneList
+        );
     }
 
     /// A settings file written before light mode existed has no `appearance`

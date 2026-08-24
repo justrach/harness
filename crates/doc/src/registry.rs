@@ -872,6 +872,14 @@ impl RegistryDoc {
             ("cwd", opt_str(chat.cwd.as_deref())),
             ("branch", opt_str(chat.branch.as_deref())),
             ("checkoutId", opt_str(chat.checkout_id.as_deref())),
+            (
+                "sourceContext",
+                chat.source_context
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+            ),
             ("config", config),
             (
                 "lastMessagePreview",
@@ -1012,6 +1020,27 @@ impl RegistryDoc {
             chat_id,
             OpKind::Update,
             fields([("branch", json!(branch))]),
+        );
+        Ok(true)
+    }
+
+    pub fn set_chat_source_context(
+        &mut self,
+        chat_id: &str,
+        context: &zeron_proto::ConversationSourceContext,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([
+                ("sourceContext", serde_json::to_value(context)?),
+                ("branch", json!(context.branch)),
+                ("checkoutId", json!(context.checkout_id)),
+            ]),
         );
         Ok(true)
     }

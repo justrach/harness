@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    Action, AnyElement, App, Context, Empty, Entity, Focusable as _, IntoElement, KeyBinding,
-    Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
-    Render, SharedString, Subscription, Task, Window, WindowControlArea, actions, div, prelude::*,
-    px,
+    Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, Focusable as _, IntoElement,
+    KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point, Render, SharedString, Subscription, Task, Window, WindowControlArea, actions,
+    div, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
@@ -43,8 +43,8 @@ use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     CHAT_PANEL_MIN, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, ShortcutId, TERMINAL_DEFAULT_HEIGHT, UiSettings,
-    badge_combo, jump_hints_visible, platform_combo,
+    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, ShortcutId, SidebarOrganization, SidebarSort,
+    TERMINAL_DEFAULT_HEIGHT, UiSettings, badge_combo, jump_hints_visible, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -71,6 +71,55 @@ actions!(
         ArchiveSession
     ]
 );
+
+#[derive(Clone, Copy)]
+enum ChatMenuPage {
+    Root,
+    Copy,
+}
+
+#[derive(Clone)]
+struct ChatMenuState {
+    chat_id: String,
+    position: Point<Pixels>,
+    page: ChatMenuPage,
+}
+
+/// Interruptible height tween for the sidebar's device/archive disclosures.
+/// The rendered element owns the frame clock; this state preserves the current
+/// interpolated height when a second click reverses an in-flight transition.
+#[derive(Clone, Copy)]
+pub(super) struct SidebarDisclosureMotion {
+    pub(super) epoch: u64,
+    pub(super) from: f32,
+    pub(super) to: f32,
+    started: std::time::Instant,
+}
+
+impl SidebarDisclosureMotion {
+    fn new(epoch: u64, from: f32, to: f32) -> Self {
+        Self {
+            epoch,
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn current(self) -> f32 {
+        let total = motion::COLLAPSE.total().as_secs_f32();
+        let raw = if total > 0.0 {
+            self.started.elapsed().as_secs_f32() / total
+        } else {
+            1.0
+        };
+        motion::lerp(self.from, self.to, motion::COLLAPSE.progress(raw))
+    }
+
+    fn animating(self) -> bool {
+        self.started.elapsed() < motion::COLLAPSE.total() + spaces::SIDEBAR_DISCLOSURE_TWEEN_GRACE
+    }
+}
 
 /// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
 /// the shared constructor makes left/right seams mirror each other and avoids
@@ -510,18 +559,50 @@ pub fn resort_offsets(
     offsets
 }
 
-/// Estimated sidebar row height for the resort diff (title line 17px inside
-/// 6px vertical padding + the location subline's 14px line + 2px gap — Active
-/// rows always carry the folder · device subline).
-/// Session row height (FLIP estimate): space line + title + meta line
-/// (harness mark, plus branch for worktrees).
-const CHAT_ROW_HEIGHT: f32 = 61.0;
+/// Height changes do not constitute a list reorder. In particular, sidebar
+/// disclosures animate their own height and must not also trigger FLIP offsets
+/// on every following keyed section.
+fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|((old_key, _), (new_key, _))| old_key != new_key)
+}
+
+/// Exact active-session row height. Harness identity lives on the title line
+/// and the Working glyph lives in the status corner, so neither adds a third
+/// line. Compact rows omit the metadata line and its preceding gap entirely;
+/// branch / pull-request rows add the exact height of their tallest child.
+/// Keeping this calculation beside the renderer's metrics prevents disclosure
+/// clips when view options alter the row structure.
+pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
+    let mut metadata_height: f32 = 0.0;
+    if shows_branch {
+        metadata_height = metadata_height.max(14.0);
+    }
+    if shows_pull_request {
+        metadata_height = metadata_height.max(16.0);
+    }
+    if metadata_height == 0.0 {
+        45.0
+    } else {
+        47.0 + metadata_height
+    }
+}
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
+/// Harness/title geometry follows the row hierarchy: active multi-line cards
+/// keep identity close on the standard 8px rhythm, while the one-line archived
+/// shelf gives its larger mark a little more separation.
+const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
+const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
+const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
-const SIDEBAR_GLASS_FADE_BAND: f32 = 32.0;
+const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -910,6 +991,11 @@ pub struct Shell {
     /// Unarchive affordance and restores the dimmed harness mark (t3code's
     /// settled-row hover).
     pub(super) archived_hover: Option<String>,
+    /// Ephemeral collapsed project/device sections, keyed by organization + id.
+    pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// In-flight disclosure tweens, shared by device groups and Archived.
+    pub(super) sidebar_disclosure_motion:
+        std::collections::HashMap<String, SidebarDisclosureMotion>,
     /// The jump-hint overlay: true while the held modifiers exactly match a
     /// jump shortcut, which swaps the first nine rows' time-ago for their
     /// key-cap chip (t3code's `showJumpHints`). Frame-transient — window
@@ -955,8 +1041,8 @@ pub struct Shell {
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
-    /// Session-row context menu: (chat id, window position).
-    chat_menu: popover::Popup<(String, Point<Pixels>)>,
+    /// Session-row context menu, including the Copy submenu.
+    chat_menu: popover::Popup<ChatMenuState>,
     rename_dialog: Option<RenameChatDialog>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
@@ -970,6 +1056,10 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
+    /// Persisted organization/sort/metadata controls beside the project filter.
+    sidebar_view_menu: popover::Popup<spaces::SidebarViewMenu>,
+    /// Natural-tab-order focus target for the icon-only view-options button.
+    sidebar_view_trigger_focus: gpui::FocusHandle,
     /// Chat id whose STATUS CORNER is under the pointer — just that corner
     /// swaps to the archive button (t3code's settle-on-hover); hovering the
     /// row body leaves the status readable.
@@ -1150,6 +1240,9 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = UiSettings::load(&data_dir);
+        state.update(cx, |state, cx| {
+            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
+        });
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
@@ -1204,6 +1297,8 @@ impl Shell {
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
+            sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
             right_terminal: None,
@@ -1235,6 +1330,8 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             spaces_menu: popover::Popup::default(),
+            sidebar_view_menu: popover::Popup::default(),
+            sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
@@ -1297,6 +1394,9 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
+            self.sidebar_notice = Some(notice.into());
+        }
         let next_sync_flow = {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())
@@ -1353,8 +1453,7 @@ impl Shell {
             self.debug_upload = None;
             if let Some((pct, img_path)) = spec.split_once(':')
                 && let Ok(pct) = pct.parse::<u64>()
-                && let Ok(att) =
-                    crate::attachments::stage_file(std::path::Path::new(img_path))
+                && let Ok(att) = crate::attachments::stage_file(std::path::Path::new(img_path))
             {
                 let pending_path = format!("pending/{}/{}", att.id, att.name);
                 let device_ids: Vec<String> = {
@@ -2189,6 +2288,65 @@ impl Shell {
         }
     }
 
+    fn open_chat_copy_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.chat_menu.open_mut() {
+            menu.page = ChatMenuPage::Copy;
+            cx.notify();
+        }
+    }
+
+    fn copy_zeron_conversation_link(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let link = {
+            let state = self.state.read(cx);
+            crate::links::workspace_locator(
+                state.workspace_scope,
+                state.auth.as_ref(),
+                state.local_device_id.as_deref(),
+            )
+            .map(|workspace| crate::links::zeron_conversation_link(chat_id, &workspace))
+        };
+        if let Some(link) = link {
+            cx.write_to_clipboard(ClipboardItem::new_string(link));
+            self.sidebar_notice = Some("Zeron conversation link copied".into());
+        } else {
+            self.sidebar_notice = Some("Conversation link is not ready yet".into());
+        }
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
+    fn copy_harness_conversation_link(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let link = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(crate::links::harness_conversation_link);
+        if let Some(link) = link {
+            cx.write_to_clipboard(ClipboardItem::new_string(link.url));
+            self.sidebar_notice = Some(format!("{} copied", link.label).into());
+        }
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
+    fn copy_harness_session_id(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let id = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.harness_session_id.clone());
+        if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(id));
+            self.sidebar_notice = Some("Harness session ID copied".into());
+        }
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
@@ -2448,14 +2606,11 @@ impl Shell {
     }
 
     /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
-    /// a short list does nothing.
+    /// a short list does nothing. Reads the DISPLAYED order — sort and
+    /// grouping view options permute the list, and the chip on a row must
+    /// name the key that opens it.
     fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let filter = self.settings.space_filter.clone();
-        let Some(chat_id) = self
-            .state
-            .read(cx)
-            .jump_target(Utc::now(), filter.as_deref(), slot)
-        else {
+        let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
             return;
         };
         // Same path a click on that row takes.
@@ -3664,10 +3819,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// One session row (zeron session-row.tsx): status rail on the left
-    /// (a live 2×3 mini spinner while working, a dot otherwise), title +
-    /// relative time on the first line, "folder · device" underneath aligned
-    /// to the title. Click selects; right-click opens the context menu.
+    /// One session row: context + status on line one, harness + title on line
+    /// two, and source metadata below. Working uses the live thread glyph in
+    /// the status corner. Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
     fn render_chat_row(
         &self,
@@ -3728,7 +3882,7 @@ impl Shell {
                 zeron_proto::ChatIndicator::Idle => None,
             }
         };
-        let queued = queued && !undelivered;
+        let shows_metadata = branch.is_some() || change_request.is_some();
         let corner_body: AnyElement = if let Some(label) = jump_label {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
@@ -3796,15 +3950,26 @@ impl Shell {
         } else {
             match status_label {
                 Some(label) => {
-                    // Glyph slot: Done wears the check; every other status a
-                    // dot in its color (the Working spinner lives at the
-                    // row's bottom-right, not up here).
+                    // Glyph slot: Working carries its active thread glyph
+                    // beside the accent word; Done wears the check; other
+                    // statuses retain a quiet semantic dot.
                     let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
                             .into_any_element()
+                    } else if status == zeron_proto::ChatIndicator::Working
+                        && !queued
+                        && !undelivered
+                    {
+                        loaders::mini_gradient_spinner(
+                            format!("chat-working-{id}"),
+                            2.0,
+                            cx.entity_id(),
+                            cx,
+                        )
+                        .into_any_element()
                     } else {
                         div()
                             .size(px(6.0))
@@ -3923,7 +4088,11 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.chat_menu.open((menu_id.clone(), event.position));
+                    this.chat_menu.open(ChatMenuState {
+                        chat_id: menu_id.clone(),
+                        position: event.position,
+                        page: ChatMenuPage::Root,
+                    });
                     cx.notify();
                 }),
             )
@@ -3947,78 +4116,76 @@ impl Shell {
                     )
                     .child(div().text_color(subline).child(corner)),
             )
-            // Line 2: the session title, flush left (t3code card line 2).
-            .child(
-                div()
-                    .w_full()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .line_height(px(17.0))
-                    .child(title),
-            )
-            // Line 3 (always): harness brand mark, branch, optional PR badge,
-            // and the working spinner. Branch remains the only shrinking item.
+            // Line 2: harness identity belongs directly with the title,
+            // instead of floating as unrelated metadata below it.
             .child(
                 div()
                     .w_full()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
                             el.child(
                                 icon(path)
-                                    .size(px(11.0))
+                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
                                     .text_color(tint.unwrap_or(subline).opacity(0.8)),
                             )
                         },
                     )
-                    .when_some(branch, |el, branch| {
-                        el.child(
-                            icon(icons::GIT_BRANCH)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(subline),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(11.0))
-                                .line_height(px(14.0))
-                                .text_color(subline)
-                                .child(branch),
-                        )
-                    })
-                    // Stable invisible spring: keeps the optional spinner and
-                    // PR badge pinned right without changing no-PR paint.
-                    .child(div().flex_1().min_w_0())
-                    // Working rows animate the spinner at the row's
-                    // bottom-right (the status word keeps its dot up top).
-                    // Queued/Failed rows don't: a spinner would fake progress.
-                    .when(
-                        status == zeron_proto::ChatIndicator::Working && !queued && !undelivered,
-                        |el| {
-                            el.child(loaders::mini_gradient_spinner(
-                                format!("chat-working-{id}"),
-                                2.0,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                        },
-                    )
-                    .when_some(change_request, |el, summary| {
-                        el.child(crate::change_requests::pull_request_badge(
-                            format!("chat-pr-{id}").into(),
-                            summary,
-                            crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                            theme,
-                        ))
-                    }),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.0))
+                            .line_height(px(17.0))
+                            .child(title),
+                    ),
             )
+            // Line 3 is structural, not reserved whitespace: compact states
+            // omit it completely when both Branch and Pull request are hidden.
+            .when(shows_metadata, |row| {
+                row.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .when_some(branch, |el, branch| {
+                            el.child(
+                                icon(icons::GIT_BRANCH)
+                                    .size(px(11.0))
+                                    .flex_none()
+                                    .text_color(subline),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .line_height(px(14.0))
+                                    .text_color(subline)
+                                    .child(branch),
+                            )
+                        })
+                        // Stable invisible spring keeps the optional PR badge
+                        // pinned right without changing no-PR paint.
+                        .child(div().flex_1().min_w_0())
+                        .when_some(change_request, |el, summary| {
+                            el.child(crate::change_requests::pull_request_badge(
+                                format!("chat-pr-{id}").into(),
+                                summary,
+                                crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                theme,
+                            ))
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -4100,8 +4267,17 @@ impl Shell {
         // don't reorder) never animate.
         let order: Vec<(String, f32)> = keyed.iter().map(|(k, h, _)| (k.clone(), *h)).collect();
         if self.sidebar_prev_order != order {
+            let key_order_changed = sidebar_key_order_changed(&self.sidebar_prev_order, &order);
             if !self.sidebar_prev_order.is_empty() {
-                let offsets = resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP);
+                // A disclosure already animates its own body height. Applying
+                // FLIP offsets when only keyed heights change double-counts
+                // that movement, leaving gaps and momentary overlaps between
+                // the first group, following groups, and Archived.
+                let offsets = if key_order_changed {
+                    resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP)
+                } else {
+                    std::collections::HashMap::new()
+                };
                 let prev_keys: std::collections::HashSet<&str> = self
                     .sidebar_prev_order
                     .iter()
@@ -4112,7 +4288,7 @@ impl Shell {
                     .filter(|(k, _)| !prev_keys.contains(k.as_str()))
                     .map(|(k, _)| k.clone())
                     .collect();
-                if !offsets.is_empty() || !new_keys.is_empty() {
+                if key_order_changed && (!offsets.is_empty() || !new_keys.is_empty()) {
                     self.resort_epoch += 1;
                     self.sidebar_resort = offsets;
                     self.sidebar_new_keys = new_keys;
@@ -4220,7 +4396,6 @@ impl Shell {
                                     .flex()
                                     .flex_col()
                                     .gap(px(2.0))
-                                    .pb(px(Theme::SPACE_SM))
                                     .children(list_items)
                                     .into_any_element()
                             } else {
@@ -5008,58 +5183,166 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
-        if let Some((chat_id, position)) = self.chat_menu.get().cloned() {
+        if let Some(menu_state) = self.chat_menu.get().cloned() {
+            let chat_id = menu_state.chat_id;
+            let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
             let rename_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
-                .w(px(170.0))
+                .w(px(216.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_chat_menu(cx);
                 }))
                 .flex()
-                .flex_col()
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
-                        .id("chat-menu-rename")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_chat(rename_id.clone(), cx)
-                        }))
-                        .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from("Rename…")),
-                )
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
-                        .id("chat-menu-archive")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archive_chat(archive_id.clone(), cx)
-                        }))
-                        .child(
-                            icon(icons::ARCHIVE_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
+                .flex_col();
+            let menu = match menu_state.page {
+                ChatMenuPage::Root => menu
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
+                            .id("chat-menu-rename")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_rename_chat(rename_id.clone(), cx)
+                            }))
+                            .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
+                            .child(SharedString::from("Rename…")),
+                    )
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
+                            .id("chat-menu-archive")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.archive_chat(archive_id.clone(), cx)
+                            }))
+                            .child(
+                                icon(icons::ARCHIVE_MINIMALISTIC)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Archive")),
+                    )
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-copy-{chat_id}"))
+                            .id("chat-menu-copy")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_chat_copy_menu(cx)))
+                            .child(
+                                icon(icons::COPY)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(div().flex_1().child(SharedString::from("Copy")))
+                            .child(
+                                icon(icons::ALT_ARROW_RIGHT)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted.opacity(0.7)),
+                            ),
+                    )
+                    .child(popover::menu_separator())
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
+                            .id("chat-menu-delete")
+                            .text_color(theme.danger)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_chat_menu(cx);
+                                this.delete_confirm = Some(delete_id.clone());
+                                cx.notify();
+                            }))
+                            .child(
+                                icon(icons::TRASH_BIN_MINIMALISTIC)
+                                    .size(px(16.0))
+                                    .text_color(theme.danger),
+                            )
+                            .child(SharedString::from("Delete…")),
+                    ),
+                ChatMenuPage::Copy => {
+                    let chat = self
+                        .state
+                        .read(cx)
+                        .chats
+                        .iter()
+                        .find(|chat| chat.id == chat_id)
+                        .cloned();
+                    let harness_link = chat
+                        .as_ref()
+                        .and_then(crate::links::harness_conversation_link);
+                    let session_id = chat
+                        .as_ref()
+                        .and_then(|chat| chat.harness_session_id.as_deref())
+                        .is_some_and(|id| !id.trim().is_empty());
+                    let zeron_id = chat_id.clone();
+                    let harness_id = chat_id.clone();
+                    let session_chat_id = chat_id.clone();
+                    menu.child(
+                        popover::menu_row(&theme, false, format!("chat-copy-back-{chat_id}"))
+                            .id("chat-copy-back")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(menu) = this.chat_menu.open_mut() {
+                                    menu.page = ChatMenuPage::Root;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(
+                                icon(icons::ALT_ARROW_LEFT)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Back")),
+                    )
+                    .child(popover::menu_separator())
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-copy-zeron-{chat_id}"))
+                            .id("chat-copy-zeron")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_zeron_conversation_link(&zeron_id, cx)
+                            }))
+                            .child(
+                                icon(icons::COPY)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Zeron conversation link")),
+                    )
+                    .when_some(harness_link, |menu, link| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-copy-harness-{chat_id}"),
+                            )
+                            .id("chat-copy-harness")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_harness_conversation_link(&harness_id, cx)
+                            }))
+                            .child(
+                                icon(icons::COPY)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from(link.label)),
                         )
-                        .child(SharedString::from("Archive")),
-                )
-                .child(popover::menu_separator())
-                .child(
-                    popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
-                        .id("chat-menu-delete")
-                        .text_color(theme.danger)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.close_chat_menu(cx);
-                            this.delete_confirm = Some(delete_id.clone());
-                            cx.notify();
-                        }))
-                        .child(
-                            icon(icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(16.0))
-                                .text_color(theme.danger),
+                    })
+                    .when(session_id, |menu| {
+                        menu.child(
+                            popover::menu_row(
+                                &theme,
+                                false,
+                                format!("chat-copy-session-{chat_id}"),
+                            )
+                            .id("chat-copy-session")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_harness_session_id(&session_chat_id, cx)
+                            }))
+                            .child(
+                                icon(icons::COPY)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from("Harness session ID")),
                         )
-                        .child(SharedString::from("Delete…")),
-                )
-                .into_any_element();
+                    })
+                }
+            }
+            .into_any_element();
             overlays.push(popover::menu_at(
                 "chat-context-menu",
                 position,
@@ -8026,6 +8309,31 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_chat_height_tracks_visible_metadata() {
+        assert_eq!(chat_row_height(false, false), 45.0);
+        assert_eq!(chat_row_height(true, false), 61.0);
+        assert_eq!(chat_row_height(false, true), 63.0);
+        assert_eq!(chat_row_height(true, true), 63.0);
+    }
+
+    #[test]
+    fn sidebar_harness_geometry_reflects_row_hierarchy() {
+        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
+        assert!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP < SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP);
+        assert!(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE < SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE);
+    }
+
+    #[test]
+    fn sidebar_height_change_is_not_a_reorder() {
+        let open = keys(&[("first-group", 105.0), ("second-group", 240.0)]);
+        let collapsed = keys(&[("first-group", 40.0), ("second-group", 240.0)]);
+        assert!(!sidebar_key_order_changed(&open, &collapsed));
+
+        let reordered = keys(&[("second-group", 240.0), ("first-group", 40.0)]);
+        assert!(sidebar_key_order_changed(&collapsed, &reordered));
+    }
+
+    #[test]
     fn resort_offsets_empty_when_order_unchanged() {
         let order = keys(&[("a", 29.0), ("b", 29.0), ("c", 45.0)]);
         assert!(resort_offsets(&order, &order, 2.0).is_empty());
@@ -8171,5 +8479,13 @@ mod tests {
             Some(NavEntry::Settings(SettingsSection::Devices))
         );
         assert_eq!(nav.back(), Some(chat("a")));
+    }
+
+    #[test]
+    fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
+        let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0);
+        tween.started = std::time::Instant::now() - motion::COLLAPSE.total().mul_f32(2.0);
+        assert_eq!(tween.current(), 0.0);
+        assert!(!tween.animating());
     }
 }
