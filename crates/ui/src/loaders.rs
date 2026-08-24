@@ -276,11 +276,12 @@ pub fn upload_progress_ring(percent: u8, diameter: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// Full-window boot splash (zeron App.tsx `Splash`): the animated zeron mark
-/// (`h-16`) over the app background with an uppercase tracked "Loading" line.
-/// While `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px
-/// lift); the shell removes it once [`SPLASH_OUT`] has run its course.
-pub fn splash_overlay(theme: &Theme, fading: bool) -> AnyElement {
+/// Full-window boot splash: the app's dot loader (the same [`gradient_spinner`]
+/// the session list and the reconnecting line pulse — user request, replacing
+/// the hero ascii) over the app background with a quiet status line. While
+/// `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px lift); the
+/// shell removes it once [`SPLASH_OUT`] has run its course.
+pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App) -> AnyElement {
     let content = div()
         .absolute()
         .inset_0()
@@ -293,72 +294,19 @@ pub fn splash_overlay(theme: &Theme, fading: bool) -> AnyElement {
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(28.0))
-        .child(hero_ascii(theme))
-        .child(loading_word(theme));
+        .gap(px(16.0))
+        .child(gradient_spinner("boot-splash-spinner", theme, 5.0, view, cx))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_muted.opacity(0.7))
+                .child(SharedString::from("Setting up Zeron environment")),
+        );
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()
     } else {
         content.into_any_element()
     }
-}
-
-/// The landing page's hero comet, monochrome (user request: white instead of
-/// the site's purple gradient). One div per row — gpui has no `white-space:
-/// pre`, and the art's leading/interior spaces carry the shading.
-///
-/// The site masks the rectangle behind a radial gradient; here the same
-/// softening comes from an [`crate::edge_fade`] scope on all four edges, so
-/// the block dissolves into the frost instead of ending on a hard edge.
-fn hero_ascii(theme: &Theme) -> AnyElement {
-    /// Glyph cell: the site runs 7.6px/1.25; a hair smaller keeps the 110-col
-    /// art inside a narrow window.
-    const FONT: f32 = 7.0;
-    const LINE: f32 = 8.75;
-    const FADE_BAND: f32 = 72.0;
-    let art = div()
-        .flex()
-        .flex_col()
-        .font_family(theme.font_mono.clone())
-        // Ligatures OFF, like the terminal grid and the landing page's own
-        // `.hero-ascii` rule: the art is a character grid full of `--`/`::`
-        // runs, and a contextual substitution would collapse cells and bend
-        // the picture (the `codex --yolo` bug, in still life).
-        .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![
-            ("liga".into(), 0),
-            ("calt".into(), 0),
-            ("dlig".into(), 0),
-        ])))
-        .text_size(px(FONT))
-        .line_height(px(LINE))
-        // `theme.text` IS near-white on dark; on light it flips to the ink
-        // tone rather than painting an invisible white block.
-        .text_color(theme.text.opacity(0.55))
-        .children(
-            HERO_ASCII
-                .lines()
-                .map(|line| div().child(SharedString::from(line.to_string()))),
-        );
-    crate::edge_fade::edge_faded(FADE_BAND, true, true, art)
-        .fade_left(true)
-        .fade_right(true)
-        .into_any_element()
-}
-
-/// The landing page's hero comet (apps/landing/public/index.html
-/// `.hero-ascii`), kept as an asset so both surfaces render the same art.
-const HERO_ASCII: &str = include_str!("../assets/hero.txt");
-
-/// "L O A D I N G" — `text-[11px] uppercase tracking-[0.32em]
-/// text-muted-foreground/70`; tracking approximated with thin spaces (gpui has
-/// no letter-spacing at the pinned rev).
-pub fn loading_word(theme: &Theme) -> impl IntoElement {
-    div()
-        .text_size(px(11.0))
-        .text_color(theme.text_muted.opacity(0.7))
-        .child(SharedString::from(
-            "L\u{2009}O\u{2009}A\u{2009}D\u{2009}I\u{2009}N\u{2009}G",
-        ))
 }
 
 // Compile-time proof the specs referenced here stay wired to the catalog.
