@@ -58,6 +58,11 @@ use zeron_syntax::LanguageId as Lang;
 
 pub const FILE_HEADER_HEIGHT: f32 = 36.0;
 const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
+/// Coverage of the theme's content-plane tint over the sticky header blur.
+/// Light needs substantially more coverage: dark text is much more vulnerable
+/// to rows ghosting through the blur than light text is on a dark tint.
+const STICKY_FILE_HEADER_TINT_ALPHA_DARK: f32 = 0.40;
+const STICKY_FILE_HEADER_TINT_ALPHA_LIGHT: f32 = 0.85;
 pub const HUNK_HEADER_HEIGHT: f32 = 28.0;
 pub const DIFF_LINE_HEIGHT: f32 = 21.0;
 pub const NOTICE_HEIGHT: f32 = 24.0;
@@ -1272,6 +1277,38 @@ impl FileHeaderPresentation {
     fn element_id(self, file_ix: usize) -> SharedString {
         let prefix = self.key_prefix();
         SharedString::from(format!("{prefix}-{file_ix}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StickyFileHeaderPaint {
+    rest_bg: gpui::Hsla,
+    hover_bg: gpui::Hsla,
+    border: gpui::Hsla,
+    frost_tint: Option<gpui::Hsla>,
+}
+
+/// Resolve the sticky header from the diff's content plane, not the elevated
+/// overlay plane used by menus and popovers.
+fn sticky_file_header_paint(theme: &Theme) -> StickyFileHeaderPaint {
+    if theme.is_frost() {
+        let tint_alpha = match theme.appearance {
+            crate::theme::Appearance::Dark => STICKY_FILE_HEADER_TINT_ALPHA_DARK,
+            crate::theme::Appearance::Light => STICKY_FILE_HEADER_TINT_ALPHA_LIGHT,
+        };
+        StickyFileHeaderPaint {
+            rest_bg: theme.ink(0.025),
+            hover_bg: theme.glass_hover(),
+            border: theme.border,
+            frost_tint: Some(theme.bg.opacity(tint_alpha)),
+        }
+    } else {
+        StickyFileHeaderPaint {
+            rest_bg: crate::theme::flatten(theme.ink(0.025), theme.bg),
+            hover_bg: crate::theme::flatten(theme.element_hover, theme.bg),
+            border: theme.border,
+            frost_tint: None,
+        }
     }
 }
 
@@ -2953,14 +2990,14 @@ impl Changes {
         let adds = file.additions;
         let dels = file.deletions;
         let sticky = presentation == FileHeaderPresentation::Sticky;
-        let opaque_sticky = sticky && !theme.is_glass();
-        let rest_bg = if opaque_sticky {
-            crate::theme::flatten(theme.ink(0.025), theme.bg)
+        let sticky_paint = sticky.then(|| sticky_file_header_paint(theme));
+        let rest_bg = if let Some(paint) = sticky_paint {
+            paint.rest_bg
         } else {
             theme.ink(0.025)
         };
-        let hover_bg = if opaque_sticky {
-            crate::theme::flatten(theme.ink(0.05), theme.bg)
+        let hover_bg = if let Some(paint) = sticky_paint {
+            paint.hover_bg
         } else {
             theme.ink(0.05)
         };
@@ -3008,7 +3045,7 @@ impl Changes {
             )
             .when(sticky, |el| {
                 el.border_b_1()
-                    .border_color(crate::theme::hairline(0.08))
+                    .border_color(sticky_paint.expect("sticky paint").border)
                     .shadow_sm()
                     .block_mouse_except_scroll()
             })
@@ -3102,21 +3139,16 @@ impl Changes {
             theme,
             cx,
         );
-        // The normal row inherits the right pane's light frost. A floating
-        // header needs to recreate that white material before its dark wash,
-        // otherwise the blurred diff underneath makes light mode look muddy.
-        let header =
-            if theme.is_glass() && matches!(theme.appearance, crate::theme::Appearance::Light) {
-                div()
-                    .w_full()
-                    .bg(theme.glass_overlay())
-                    .child(header)
-                    .into_any_element()
-            } else {
-                header
-            };
-        // Frosted is a pass-through on opaque platforms, where
-        // render_file_header keeps the solid fallback.
+        let paint = sticky_file_header_paint(theme);
+        // The sticky floats over diff rows, but it belongs to the same content
+        // plane. Tint the blur with `theme.bg`; `glass_overlay` is deliberately
+        // reserved for elevated menus/cards and produced the wrong hue here.
+        let header = if let Some(tint) = paint.frost_tint {
+            div().w_full().bg(tint).child(header).into_any_element()
+        } else {
+            header
+        };
+        // Frosted is a pass-through when the resolved surface is opaque.
         let header = crate::frost::frosted(0.0, STICKY_FILE_HEADER_BLUR, header);
 
         Some(
@@ -4769,6 +4801,73 @@ rename to new_name.rs
         assert_eq!(sticky_header_push_offset(Some(FILE_HEADER_HEIGHT)), 0.0);
         assert_eq!(sticky_header_push_offset(Some(24.0)), -12.0);
         assert_eq!(sticky_header_push_offset(Some(0.0)), -FILE_HEADER_HEIGHT);
+    }
+
+    #[test]
+    fn sticky_header_uses_the_content_theme_in_dark_and_light() {
+        use zeron_theme::{AccentSelection, SurfacePreference};
+
+        for (appearance, variant_id) in [
+            (crate::theme::Appearance::Dark, "gruvbox-dark"),
+            (crate::theme::Appearance::Light, "gruvbox-light"),
+        ] {
+            let opaque = Theme::for_selection(
+                appearance,
+                variant_id,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Opaque,
+            );
+            let opaque_paint = sticky_file_header_paint(&opaque);
+            assert_eq!(opaque_paint.frost_tint, None, "{variant_id}");
+            assert_eq!(
+                opaque_paint.rest_bg,
+                crate::theme::flatten(opaque.ink(0.025), opaque.bg),
+                "{variant_id} opaque background"
+            );
+            assert_eq!(
+                opaque_paint.hover_bg,
+                crate::theme::flatten(opaque.element_hover, opaque.bg),
+                "{variant_id} opaque hover"
+            );
+            assert_eq!(opaque_paint.border, opaque.border, "{variant_id} border");
+
+            let frosted = Theme::for_selection(
+                appearance,
+                variant_id,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Frosted,
+            );
+            let frosted_paint = sticky_file_header_paint(&frosted);
+            if frosted.is_frost() {
+                let expected_alpha = match appearance {
+                    crate::theme::Appearance::Dark => STICKY_FILE_HEADER_TINT_ALPHA_DARK,
+                    crate::theme::Appearance::Light => STICKY_FILE_HEADER_TINT_ALPHA_LIGHT,
+                };
+                let tint = frosted.bg.opacity(expected_alpha);
+                assert_eq!(
+                    frosted_paint.frost_tint,
+                    Some(tint),
+                    "{variant_id} content-plane tint"
+                );
+                assert_ne!(
+                    tint,
+                    frosted.glass_overlay(),
+                    "{variant_id} must not borrow the elevated overlay plane"
+                );
+                assert_eq!(tint.a, expected_alpha, "{variant_id} tint coverage");
+                assert_eq!(
+                    frosted_paint.hover_bg,
+                    frosted.glass_hover(),
+                    "{variant_id} themed hover"
+                );
+            } else {
+                assert_eq!(frosted_paint.frost_tint, None, "{variant_id}");
+            }
+            assert_eq!(
+                frosted_paint.border, frosted.border,
+                "{variant_id} frosted border"
+            );
+        }
     }
 
     #[test]
