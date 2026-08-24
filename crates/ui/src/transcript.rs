@@ -42,7 +42,9 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use zeron_proto::ToolCall;
 
-use crate::markdown::parser::{Block, BlockTree, IncrementalParser, parse_full};
+use crate::markdown::parser::{
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
+};
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _, RESIZE};
@@ -339,66 +341,293 @@ fn tool_group_collapses(tools: &[ToolItem]) -> bool {
 /// here — conservative enough to fit the card at typical transcript widths.
 const THOUGHT_WRAP_COLS: usize = 96;
 
-/// Soft-wrap a thought's prose at word boundaries into detail lines.
-/// Overlong single words hard-split at the column budget.
-fn wrap_thought_lines(text: &str) -> Vec<SharedString> {
-    let mut lines: Vec<SharedString> = Vec::new();
-    for paragraph in text.lines() {
-        let paragraph = paragraph.trim_end();
-        if paragraph.is_empty() {
-            if !lines.is_empty() {
-                lines.push(SharedString::default());
-            }
-            continue;
+/// Flatten a thought's parsed markdown into wrapped, STYLED detail lines —
+/// inline markers render as real styling (bold/italic/code/links) instead of
+/// literal `**` glyphs; blocks flatten structurally (headings bold, list
+/// bullets, quote bars, verbatim code lines). Every line is one fixed-height
+/// row, so the detail height stays analytic (lines × [`OUTPUT_LINE_HEIGHT`])
+/// and the group's fold tween keeps working without measurement.
+fn thought_lines(tree: &BlockTree) -> Vec<Vec<InlineRun>> {
+    let mut out: Vec<Vec<InlineRun>> = Vec::new();
+    for top in &tree.blocks {
+        if !out.is_empty() {
+            // One blank separator row between top-level blocks (the old
+            // plain-text wrap kept paragraph gaps the same way).
+            out.push(Vec::new());
         }
-        let mut current = String::new();
-        for word in paragraph.split_whitespace() {
-            if !current.is_empty()
-                && current.chars().count() + 1 + word.chars().count() > THOUGHT_WRAP_COLS
-            {
-                lines.push(SharedString::from(std::mem::take(&mut current)));
+        thought_block_lines(&top.block, 0, &mut out);
+    }
+    while out
+        .last()
+        .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+    {
+        out.pop();
+    }
+    out
+}
+
+/// The slot-0 indent run every emitted thought line opens with (possibly
+/// empty). List/quote handlers rewrite it in place to plant markers/bars, so
+/// it must exist even at zero indent.
+fn indent_run(indent: usize) -> Vec<InlineRun> {
+    vec![InlineRun {
+        text: " ".repeat(indent),
+        style: InlineStyle::default(),
+    }]
+}
+
+/// Append text to a line's run list, merging into the tail run when styles
+/// match (keeps run counts small for the shaper).
+fn push_styled(line: &mut Vec<InlineRun>, text: &str, style: &InlineStyle) {
+    if text.is_empty() {
+        return;
+    }
+    match line.last_mut() {
+        Some(last) if last.style == *style => last.text.push_str(text),
+        _ => line.push(InlineRun {
+            text: text.to_owned(),
+            style: style.clone(),
+        }),
+    }
+}
+
+/// Close a wrapped line: the slot-0 indent run in front (see [`indent_run`]).
+fn finish_line(indent: usize, mut line: Vec<InlineRun>) -> Vec<InlineRun> {
+    let mut full = indent_run(indent);
+    full.append(&mut line);
+    full
+}
+
+/// Word-wrap styled runs at the thought column budget. Char-counted like
+/// every detail wrap — block heights must stay analytic — with words glued
+/// across style boundaries (`**bold**tail` wraps as one unit), separator
+/// spaces riding the preceding run, and pathological overlong tokens
+/// hard-split at the budget. Hard breaks (`\n` runs) split into
+/// separately-wrapped segments.
+fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    let budget = THOUGHT_WRAP_COLS.saturating_sub(indent).max(16);
+    let mut segments: Vec<Vec<InlineRun>> = vec![Vec::new()];
+    for run in runs {
+        for (ix, piece) in run.text.split('\n').enumerate() {
+            if ix > 0 {
+                segments.push(Vec::new());
             }
-            if word.chars().count() > THOUGHT_WRAP_COLS {
-                // Hard-split a pathological token.
-                let mut chunk = String::new();
-                for c in word.chars() {
-                    chunk.push(c);
-                    if chunk.chars().count() == THOUGHT_WRAP_COLS {
-                        lines.push(SharedString::from(std::mem::take(&mut chunk)));
+            if !piece.is_empty() {
+                segments.last_mut().unwrap().push(InlineRun {
+                    text: piece.to_owned(),
+                    style: run.style.clone(),
+                });
+            }
+        }
+    }
+    for segment in segments {
+        // Tokens: maximal non-whitespace piece lists, glued across run
+        // boundaries so a word split by styling never wraps mid-word.
+        let mut tokens: Vec<Vec<InlineRun>> = Vec::new();
+        let mut in_token = false;
+        for run in &segment {
+            let text = run.text.as_str();
+            let mut pos = 0;
+            while pos < text.len() {
+                let rest = &text[pos..];
+                let ws = rest.chars().next().is_some_and(char::is_whitespace);
+                let end = rest
+                    .char_indices()
+                    .find(|(_, c)| c.is_whitespace() != ws)
+                    .map_or(text.len(), |(i, _)| pos + i);
+                if ws {
+                    in_token = false;
+                } else {
+                    if !in_token {
+                        tokens.push(Vec::new());
+                        in_token = true;
+                    }
+                    push_styled(tokens.last_mut().unwrap(), &text[pos..end], &run.style);
+                }
+                pos = end;
+            }
+        }
+        let mut line: Vec<InlineRun> = Vec::new();
+        let mut len = 0usize;
+        for token in tokens {
+            let tok_len: usize = token.iter().map(|r| r.text.chars().count()).sum();
+            if tok_len > budget {
+                // Hard-split a pathological token at the budget.
+                if len > 0 {
+                    out.push(finish_line(indent, std::mem::take(&mut line)));
+                    len = 0;
+                }
+                for piece in token {
+                    let mut chars = piece.text.chars();
+                    loop {
+                        let chunk: String = chars.by_ref().take(budget - len).collect();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        len += chunk.chars().count();
+                        push_styled(&mut line, &chunk, &piece.style);
+                        if len == budget {
+                            out.push(finish_line(indent, std::mem::take(&mut line)));
+                            len = 0;
+                        }
                     }
                 }
-                current = chunk;
                 continue;
             }
-            if current.is_empty() {
-                current = word.to_owned();
-            } else {
-                current.push(' ');
-                current.push_str(word);
+            if len > 0 && len + 1 + tok_len > budget {
+                out.push(finish_line(indent, std::mem::take(&mut line)));
+                len = 0;
+            }
+            if len > 0 {
+                if let Some(last) = line.last_mut() {
+                    last.text.push(' ');
+                }
+                len += 1;
+            }
+            for piece in token {
+                push_styled(&mut line, &piece.text, &piece.style);
+            }
+            len += tok_len;
+        }
+        if len > 0 {
+            out.push(finish_line(indent, line));
+        }
+    }
+}
+
+/// One markdown block into thought detail lines, `indent` spaces deep.
+fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
+    match block {
+        Block::Paragraph { runs } => wrap_styled_runs(runs, indent, out),
+        Block::Heading { runs, .. } => {
+            // Headings keep the detail's single type size — bold is the cue
+            // (an 18px line box can't host display sizes).
+            let bold: Vec<InlineRun> = runs
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r.style.bold = true;
+                    r
+                })
+                .collect();
+            wrap_styled_runs(&bold, indent, out);
+        }
+        Block::CodeBlock { code, .. } => {
+            let style = InlineStyle {
+                code: true,
+                ..InlineStyle::default()
+            };
+            for line in code.lines() {
+                for chunk in wrap_cols(line, THOUGHT_WRAP_COLS.saturating_sub(indent).max(16)) {
+                    let mut row = indent_run(indent);
+                    if !chunk.is_empty() {
+                        row.push(InlineRun {
+                            text: chunk.to_string(),
+                            style: style.clone(),
+                        });
+                    }
+                    out.push(row);
+                }
             }
         }
-        if !current.is_empty() {
-            lines.push(SharedString::from(current));
+        Block::List {
+            ordered_start,
+            items,
+        } => {
+            // Tight rendering: no blank rows inside a list.
+            for (ix, item) in items.iter().enumerate() {
+                let marker = match ordered_start {
+                    Some(start) => format!("{}. ", start + ix as u64),
+                    None => "• ".to_string(),
+                };
+                let inner = indent + marker.chars().count();
+                let mark = out.len();
+                for child in item {
+                    thought_block_lines(child, inner, out);
+                }
+                if out.len() == mark {
+                    // An empty item still shows its marker.
+                    out.push(indent_run(inner));
+                }
+                // The item's first line trades its indent spaces for the
+                // marker (the slot-0 run is always the indent).
+                if let Some(first) = out[mark].first_mut() {
+                    first.text = format!("{}{marker}", " ".repeat(indent));
+                }
+            }
+        }
+        Block::BlockQuote { children } => {
+            let mark = out.len();
+            for (ix, child) in children.iter().enumerate() {
+                if ix > 0 {
+                    out.push(Vec::new());
+                }
+                thought_block_lines(child, indent + 2, out);
+            }
+            // Trade the two quote-indent spaces for the bar on every quoted
+            // line — replace, not overwrite: nested list handlers already
+            // planted markers after their own deeper indent.
+            for line in &mut out[mark..] {
+                if let Some(first) = line.first_mut()
+                    && first.text.len() >= indent + 2
+                {
+                    first.text.replace_range(indent..indent + 2, "│ ");
+                }
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            // A thought is a record, not a layout surface: cells joined with
+            // a dot separator, header bold — no column machinery.
+            let join = |cells: &[Vec<InlineRun>], bold: bool| -> Vec<InlineRun> {
+                let mut line: Vec<InlineRun> = Vec::new();
+                for (ix, cell) in cells.iter().enumerate() {
+                    if ix > 0 {
+                        push_styled(&mut line, " · ", &InlineStyle::default());
+                    }
+                    for r in cell {
+                        let mut r = r.clone();
+                        r.style.bold |= bold;
+                        line.push(r);
+                    }
+                }
+                line
+            };
+            wrap_styled_runs(&join(header, true), indent, out);
+            for row in rows {
+                wrap_styled_runs(&join(row, false), indent, out);
+            }
+        }
+        Block::Rule => {
+            let mut row = indent_run(indent);
+            row.push(InlineRun {
+                text: "———".into(),
+                style: InlineStyle::default(),
+            });
+            out.push(row);
         }
     }
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
-    lines
 }
 
 /// A reasoning part as a tool-group chip: "Thought process" header over the
-/// wrapped thought text as an output-style detail (analytic height — the
-/// group's fold tween needs it). Capped like tool outputs, with the counted
-/// tail. `live` = the part is still streaming (chip defaults open).
-fn thought_item(text: &str, live: bool) -> ToolItem {
-    let mut lines = wrap_thought_lines(text);
+/// thought's markdown flattened into styled detail lines (analytic height —
+/// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
+/// outputs, with the counted tail. `live` = the part is still streaming
+/// (chip defaults open).
+fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
+    let mut lines = thought_lines(tree);
     let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
     if truncated_by > 0 {
         // Keep the TAIL while streaming (the fresh thinking is the signal);
         // settled thoughts keep the head like tool outputs do.
         if live {
             lines.drain(..truncated_by);
+            // The cut can land on a block separator — drop the orphan blank.
+            while lines
+                .first()
+                .is_some_and(|l| l.iter().all(|r| r.text.trim().is_empty()))
+            {
+                lines.remove(0);
+            }
         } else {
             lines.truncate(OUTPUT_DETAIL_MAX_LINES);
         }
@@ -410,10 +639,12 @@ fn thought_item(text: &str, live: bool) -> ToolItem {
         },
         is_error: false,
         resolved: !live,
-        detail: Some(Arc::new(ToolDetail::Output {
-            lines,
-            truncated_by,
-        })),
+        detail: (!lines.is_empty()).then(|| {
+            Arc::new(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            })
+        }),
         invocation: None,
         output_ref: None,
         output_bytes: None,
@@ -432,6 +663,13 @@ pub enum ToolDetail {
     /// intact), capped at [`OUTPUT_DETAIL_MAX_LINES`] with a counted tail.
     Output {
         lines: Vec<SharedString>,
+        truncated_by: usize,
+    },
+    /// A thought's markdown, pre-flattened into wrapped STYLED lines — one
+    /// fixed-height row each, so the height stays analytic like `Output`
+    /// while inline markers render as real styling ([`thought_lines`]).
+    Thought {
+        lines: Vec<Vec<InlineRun>>,
         truncated_by: usize,
     },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
@@ -786,6 +1024,30 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 let bytes: usize = lines.iter().map(|l| l.len()).sum();
                 acc.extend_from_slice(&(bytes as u32).to_le_bytes());
             }
+            Some(ToolDetail::Thought {
+                lines,
+                truncated_by,
+            }) => {
+                // Byte-exact plus style bits: a live mend can restyle runs
+                // without changing the flattened length, and the row must
+                // still re-splice.
+                acc.push(4);
+                acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
+                acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
+                for line in lines {
+                    for run in line {
+                        acc.extend_from_slice(run.text.as_bytes());
+                        acc.push(
+                            run.style.bold as u8
+                                | (run.style.italic as u8) << 1
+                                | (run.style.code as u8) << 2
+                                | (run.style.strikethrough as u8) << 3
+                                | (run.style.link.is_some() as u8) << 4,
+                        );
+                    }
+                    acc.push(b'\n');
+                }
+            }
             Some(ToolDetail::Diff { file, .. }) => {
                 acc.push(2);
                 acc.extend_from_slice(file.path.as_bytes());
@@ -993,7 +1255,7 @@ pub fn rows_for_entry(
             }
             // Thinking rides the SAME accordion as the tools around it
             // (user request) — a thought chip in the group, not its own row.
-            MessagePart::Reasoning { id: _, text } => {
+            MessagePart::Reasoning { id: part_id, text } => {
                 if text.trim().is_empty() {
                     continue;
                 }
@@ -1001,7 +1263,11 @@ pub fn rows_for_entry(
                 // text or a tool follows, the thought is finished even though
                 // the entry still streams.
                 let live = streaming && part_ix == last_part_ix;
-                let item = thought_item(text, live);
+                // The same parse wiring as text parts: incremental while
+                // streaming, hanging inline markers mended for display, the
+                // settled cache once complete.
+                let tree = parse(&format!("{}#{}", entry.id, part_id), text);
+                let item = thought_item(&tree, live);
                 // Thoughts join ordinary tool groups; agent (spawn-link)
                 // groups stay pure, exactly like the tool genus rule.
                 if pending_group.first().is_some_and(is_agent_tool) {
@@ -1353,6 +1619,13 @@ pub fn chips_height(count: usize) -> f32 {
 pub fn detail_height(detail: &ToolDetail) -> f32 {
     let body = match detail {
         ToolDetail::Output {
+            lines,
+            truncated_by,
+        } => {
+            let rows = lines.len() + usize::from(*truncated_by > 0);
+            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+        }
+        ToolDetail::Thought {
             lines,
             truncated_by,
         } => {
@@ -5059,19 +5332,99 @@ fn detail_body(
                     .child(div().w_full().min_w_0().truncate().child(line.clone()))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(
+                block.child(more_lines_row(*truncated_by, theme))
+            })
+            .into_any_element(),
+        ToolDetail::Thought {
+            lines,
+            truncated_by,
+        } => body
+            .py(px(6.0))
+            .text_size(px(12.0))
+            .children(lines.iter().map(|line| {
+                let row = div()
+                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .w_full()
+                    .min_w_0()
+                    .px(px(12.0))
+                    .flex()
+                    .items_center();
+                let Some((text, runs)) = thought_line_text(line, theme) else {
+                    return row; // blank separator row
+                };
+                row.child(
                     div()
-                        .h(px(OUTPUT_LINE_HEIGHT))
-                        .px(px(12.0))
-                        .flex()
-                        .items_center()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(format!("… {truncated_by} more lines"))),
+                        .w_full()
+                        .min_w_0()
+                        .truncate()
+                        .child(StyledText::new(text).with_runs(runs)),
                 )
+            }))
+            .when(*truncated_by > 0, |block| {
+                block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
     }
+}
+
+/// The counted-tail row under a truncated Output/Thought detail.
+fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
+    div()
+        .h(px(OUTPUT_LINE_HEIGHT))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .text_size(px(10.5))
+        .text_color(theme.text_faint)
+        .child(SharedString::from(format!("… {truncated_by} more lines")))
+}
+
+/// Shape one flattened thought line into gpui text runs — the detail-body
+/// palette: muted foreground prose, semibold for bold, violet mono for code,
+/// underlined links (NOT clickable — a thought is a record, not a surface).
+fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString, Vec<TextRun>)> {
+    let mut text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    for run in line {
+        if run.text.is_empty() {
+            continue;
+        }
+        let mut f = if run.style.code {
+            gpui::font(theme.font_mono.clone())
+        } else {
+            gpui::font(theme.font_sans.clone())
+        };
+        if run.style.bold {
+            f.weight = gpui::FontWeight::SEMIBOLD;
+        }
+        if run.style.italic {
+            f.style = gpui::FontStyle::Italic;
+        }
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: f,
+            color: if run.style.code {
+                render::inline_code_text(theme)
+            } else {
+                theme.text.opacity(0.85)
+            },
+            background_color: None,
+            underline: run.style.link.is_some().then_some(gpui::UnderlineStyle {
+                color: Some(theme.text_muted),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_muted),
+            }),
+        });
+        text.push_str(&run.text);
+    }
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some((text.into(), runs))
 }
 
 /// The trailing tile on a chip header, when it has one.
@@ -6143,11 +6496,11 @@ mod tests {
         assert_eq!(tools.len(), 4);
         assert!(tools[0].is_thought && tools[2].is_thought);
         assert!(!tools[1].is_thought && !tools[3].is_thought);
-        // Thought chips carry their text as an output-style detail with an
+        // Thought chips carry their text as a styled-line detail with an
         // ANALYTIC height, so the group's fold tween covers them.
         assert!(matches!(
             tools[0].detail.as_deref(),
-            Some(ToolDetail::Output { lines, .. }) if !lines.is_empty()
+            Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
         ));
         let summary = tool_group_summary(&tools);
         assert!(summary.starts_with("Thought 2 times"), "{summary}");
@@ -6207,17 +6560,92 @@ mod tests {
         assert!(tools[0].resolved, "a followed thought is settled");
     }
 
+    fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
+        thought_lines(&parse_full(text))
+    }
+
+    fn line_chars(line: &[InlineRun]) -> usize {
+        line.iter().map(|r| r.text.chars().count()).sum()
+    }
+
+    fn line_string(line: &[InlineRun]) -> String {
+        line.iter().map(|r| r.text.as_str()).collect()
+    }
+
     #[test]
     fn thought_wrap_is_word_aware_and_bounded() {
-        let lines = wrap_thought_lines("one two three");
+        let lines = thought_of("one two three");
         assert_eq!(lines.len(), 1);
+        assert_eq!(line_string(&lines[0]), "one two three");
         let long = "word ".repeat(200);
-        let lines = wrap_thought_lines(&long);
-        assert!(lines.iter().all(|l| l.chars().count() <= THOUGHT_WRAP_COLS));
+        let lines = thought_of(&long);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
         assert!(lines.len() > 5);
         let pathological = "x".repeat(300);
-        let lines = wrap_thought_lines(&pathological);
-        assert!(lines.iter().all(|l| l.chars().count() <= THOUGHT_WRAP_COLS));
+        let lines = thought_of(&pathological);
+        assert!(lines.iter().all(|l| line_chars(l) <= THOUGHT_WRAP_COLS));
+        // A word glued across style boundaries wraps as ONE unit — no line
+        // may split inside `**bold**tail`.
+        let glued = format!("{} **bold**tail", "word ".repeat(30));
+        let lines = thought_of(&glued);
+        let joined: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        assert!(joined.iter().any(|l| l.ends_with("boldtail")), "{joined:?}");
+    }
+
+    #[test]
+    fn thought_markdown_styles_instead_of_literal_markers() {
+        // The exact user report: `**bold**` markers showed as glyphs.
+        let lines = thought_of("**Planning rollback** then *checking* `parse` [docs](https://d)");
+        assert_eq!(lines.len(), 1);
+        let flat = line_string(&lines[0]);
+        assert!(
+            !flat.contains('*') && !flat.contains('`') && !flat.contains('['),
+            "{flat}"
+        );
+        let line = &lines[0];
+        assert!(
+            line.iter()
+                .any(|r| r.style.bold && r.text.contains("Planning rollback")),
+            "bold run survives: {line:?}"
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.italic && r.text.contains("checking"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.code && r.text.contains("parse"))
+        );
+        assert!(
+            line.iter()
+                .any(|r| r.style.link.is_some() && r.text.contains("docs"))
+        );
+    }
+
+    #[test]
+    fn thought_blocks_flatten_structurally() {
+        let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
+        let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
+        // Heading renders bold, same size (one 18px row).
+        assert!(
+            lines[0]
+                .iter()
+                .any(|r| r.style.bold && r.text.contains("Head"))
+        );
+        // Blank separator rows between top-level blocks; tight list inside.
+        assert_eq!(flat[1], "");
+        assert_eq!(flat[2], "para");
+        assert_eq!(flat[4], "• one");
+        assert_eq!(flat[5], "• two");
+        // Code lines verbatim, styled as code (mono at render).
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .iter()
+                .any(|r| r.style.code && r.text == "let x = 1;"),
+            "{flat:?}"
+        );
     }
 
     fn tool_part(id: &str, command: &str) -> MessagePart {
