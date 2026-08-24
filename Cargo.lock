@@ -3489,6 +3489,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b0db21af676c1ce64250b5f40f3ce2cf27e4e47cb91ed91eb6fe9350b430c1"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "serde",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4958,6 +4969,19 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "plist"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
+dependencies = [
+ "base64",
+ "indexmap",
+ "quick-xml",
+ "serde",
+ "time",
+]
 
 [[package]]
 name = "png"
@@ -6875,6 +6899,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -6882,6 +6907,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tiny-keccak"
@@ -9127,7 +9162,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -9146,7 +9181,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "chrono",
  "loro",
@@ -9160,7 +9195,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9196,7 +9231,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9217,7 +9252,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "chrono",
  "serde",
@@ -9227,7 +9262,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9246,7 +9281,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -9269,7 +9304,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -9302,8 +9337,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-theme"
+version = "0.2.27"
+dependencies = [
+ "anyhow",
+ "clap",
+ "json5",
+ "plist",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "zeron-ui"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -9333,12 +9383,13 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-syntax",
+ "zeron-theme",
  "zeron-update",
 ]
 
 [[package]]
 name = "zeron-update"
-version = "0.2.19"
+version = "0.2.27"
 dependencies = [
  "anyhow",
  "futures",

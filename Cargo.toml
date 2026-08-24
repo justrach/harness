@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/theme",
     "crates/proto",
     "crates/doc",
     "crates/sync",
@@ -14,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.19"
+version = "0.2.27"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -29,6 +30,7 @@ zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
 zeron-syntax = { path = "crates/syntax" }
+zeron-theme = { path = "crates/theme" }
 
 # CRDT
 loro = "1.13"
@@ -81,6 +83,8 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+json5 = "0.4"
+plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # storage

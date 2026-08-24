@@ -376,7 +376,17 @@ pub fn set_family(family: UiFontFamily, cx: &mut App) -> bool {
         state.generation = state.generation.wrapping_add(1);
         crate::theme::bump_style_generation();
         let appearance = crate::theme::current_appearance();
-        crate::theme::Theme::install(appearance, cx);
+        let themes = crate::appearance::themes(cx);
+        crate::theme::Theme::install_selection(
+            appearance,
+            themes.variant_id(match appearance {
+                crate::theme::Appearance::Dark => zeron_theme::Appearance::Dark,
+                crate::theme::Appearance::Light => zeron_theme::Appearance::Light,
+            }),
+            crate::appearance::accent(cx),
+            crate::appearance::surface(cx),
+            cx,
+        );
         cx.refresh_windows();
     }
     settings::update(SavePolicy::Immediate, cx, |settings| {

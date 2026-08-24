@@ -6,6 +6,31 @@
 
 use super::*;
 
+/// The chat one step from `selected` in the sidebar `order`, wrapping at both
+/// ends. Pure.
+///
+/// With nothing selected — the new-session canvas — cycling enters the list at
+/// the end it would have wrapped to: the first row going forward, the last
+/// going back. A selection that has since left the list (archived from another
+/// device mid-cycle) is treated the same way rather than dead-ending.
+pub(super) fn cycle_target(
+    order: &[String],
+    selected: Option<&str>,
+    forward: bool,
+) -> Option<String> {
+    if order.is_empty() {
+        return None;
+    }
+    let at = selected.and_then(|id| order.iter().position(|c| c == id));
+    let next = match (at, forward) {
+        (Some(at), true) => (at + 1) % order.len(),
+        (Some(at), false) => (at + order.len() - 1) % order.len(),
+        (None, true) => 0,
+        (None, false) => order.len() - 1,
+    };
+    Some(order[next].clone())
+}
+
 pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
     if expanded {
         icons::COLLAPSE_ARROWS
@@ -15,6 +40,29 @@ pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
 }
 
 impl Shell {
+    /// Ctrl+Tab / Ctrl+Shift+Tab: step through the sidebar's Sessions list in
+    /// the order it is drawn. Selection is immediate (no MRU overlay held open
+    /// on the modifier) — one press, one session.
+    ///
+    /// Chat-scoped chrome, like the panel toggles: gpui dispatches a matched
+    /// binding before any `on_key_down`, so an unscoped cycle would fire
+    /// underneath Settings (yanking the user off the page mid-record, since
+    /// these are the very keys the shortcuts table invites them to press) or
+    /// underneath the add-space palette, stranding the overlay over a session
+    /// they never picked.
+    pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
+            return;
+        }
+        // The same list `render_active_rows` draws and the jump shortcuts
+        // count — one function, so neither can drift from the screen.
+        let order = self.sidebar_visible_order(cx);
+        let selected = self.state.read(cx).selected_chat.clone();
+        if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
+            self.open_chat(target, cx);
+        }
+    }
+
     /// Boot landing: the most recently active visible chat once the first
     /// chats frame has synced (manual selection wins; no chats → the
     /// new-session canvas shows).
@@ -293,4 +341,71 @@ impl Shell {
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
     }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn order(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn steps_forward_and_back_through_the_list() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, Some("a"), true).as_deref(), Some("b"));
+        assert_eq!(cycle_target(&list, Some("b"), true).as_deref(), Some("c"));
+        assert_eq!(cycle_target(&list, Some("c"), false).as_deref(), Some("b"));
+        assert_eq!(cycle_target(&list, Some("b"), false).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn wraps_at_both_ends() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, Some("c"), true).as_deref(), Some("a"));
+        assert_eq!(cycle_target(&list, Some("a"), false).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_single_session_cycles_to_itself() {
+        // Not a no-op by accident: with one row both directions must resolve,
+        // so the shortcut never looks broken by dead-ending on `None`.
+        let list = order(&["only"]);
+        assert_eq!(
+            cycle_target(&list, Some("only"), true).as_deref(),
+            Some("only")
+        );
+        assert_eq!(
+            cycle_target(&list, Some("only"), false).as_deref(),
+            Some("only")
+        );
+    }
+
+    #[test]
+    fn no_selection_enters_the_list_from_the_matching_end() {
+        let list = order(&["a", "b", "c"]);
+        assert_eq!(cycle_target(&list, None, true).as_deref(), Some("a"));
+        assert_eq!(cycle_target(&list, None, false).as_deref(), Some("c"));
+        assert_eq!(
+            cycle_target(&list, Some("gone"), true).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            cycle_target(&list, Some("gone"), false).as_deref(),
+            Some("c")
+        );
+    }
+
+    #[test]
+    fn an_empty_list_has_nothing_to_select() {
+        assert_eq!(cycle_target(&[], None, true), None);
+        assert_eq!(cycle_target(&[], Some("a"), true), None);
+    }
+
+    // Cycling walks the rows the sidebar is drawing, not every chat: that
+    // guarantee is structural now — `cycle_session` reads the same
+    // `AppState::sidebar_chats` the sidebar and the jump shortcuts read, and
+    // `jump_slots_count_the_rows_the_sidebar_draws` (state.rs) covers the
+    // space-filter behaviour for all of them.
 }
