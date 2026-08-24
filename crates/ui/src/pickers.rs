@@ -38,23 +38,6 @@ use crate::settings::composer::ComposerDefaults;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
-/// Below this measured composer width, the traits summary yields its space to
-/// the prompt and becomes a compact overflow affordance. The model remains
-/// visible so the active agent is still identifiable at a glance.
-const COMPACT_TRAITS_ENTER_WIDTH: f32 = 400.0;
-const COMPACT_TRAITS_EXIT_WIDTH: f32 = 440.0;
-
-fn compact_traits_for_width(width: f32, currently_compact: bool) -> bool {
-    if width <= 0.0 {
-        return currently_compact;
-    }
-    if currently_compact {
-        width < COMPACT_TRAITS_EXIT_WIDTH
-    } else {
-        width < COMPACT_TRAITS_ENTER_WIDTH
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Catalog invalidation (Settings → Agents toggles)
 // ---------------------------------------------------------------------------
@@ -423,8 +406,11 @@ pub enum PickerKind {
     /// The checkout-kind dropdown in the composer footer (Current
     /// checkout/worktree | New worktree).
     Checkout,
+    /// The combined agent/model/traits popover: harness tabs across the top,
+    /// the tab's model list beneath the search, and the pinned traits tray
+    /// (reasoning ladder + model options) at the bottom — one trigger, one
+    /// card (the separate Traits popover folded in here).
     HarnessModel,
-    Traits,
     /// New-session canvas only: which project the session mints into. A pick
     /// re-keys everything project-derived (refs, harness/model catalogs) via
     /// the state observer.
@@ -478,9 +464,6 @@ pub struct Pickers {
     /// [`Self::toggle`]'s programmatic clear (see the subscription).
     search_reset_muted: bool,
     focus: FocusHandle,
-    /// Responsive presentation chosen by the composer from its measured
-    /// width. This changes only the Traits trigger; its popover is unchanged.
-    compact_traits: bool,
     /// `ZERON_OPEN_PICKER` boot: keep claiming focus until it sticks, so
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
@@ -633,7 +616,6 @@ impl Pickers {
             search,
             search_reset_muted: false,
             focus: cx.focus_handle(),
-            compact_traits: false,
             boot_focus_pending: boot_open.is_some(),
             load_task: None,
             refs_task: None,
@@ -645,18 +627,6 @@ impl Pickers {
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
         }
-    }
-
-    /// Feed the composer's live measured width into the actions presentation.
-    /// Notify only on a threshold crossing so continuous resize does not cause
-    /// redundant child renders.
-    pub fn set_composer_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let compact = compact_traits_for_width(width, self.compact_traits);
-        if compact == self.compact_traits {
-            return;
-        }
-        self.compact_traits = compact;
-        cx.notify();
     }
 
     /// Persist the sticky defaults (best-effort; picks are rare and tiny).
@@ -907,7 +877,7 @@ impl Pickers {
                 CheckoutKind::NewWorktree => 1,
             },
             PickerKind::Branch => self.selected_ref_index(cx),
-            PickerKind::HarnessModel | PickerKind::Traits => self.selected_model_index(cx),
+            PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_space_index(cx),
             PickerKind::Device => self.selected_device_index(cx),
         };
@@ -956,7 +926,7 @@ impl Pickers {
             // worktree+branch, terminals switch refs) — every open
             // revalidates, keeping stale rows visible until fresh ones land.
             PickerKind::Branch | PickerKind::Checkout => self.ensure_refs(true, cx),
-            PickerKind::HarnessModel | PickerKind::Traits => {
+            PickerKind::HarnessModel => {
                 // Force: the enabled set moves under us (Settings → Agents,
                 // possibly from another viewer) — every open revalidates,
                 // keeping current rows visible until the fresh catalog lands.
@@ -1531,11 +1501,6 @@ impl Pickers {
         if self.harness_locked(cx) {
             descriptors.retain(|d| Some(d.id) == effective);
         }
-        let row = |descriptor: &HarnessDescriptor, model: &Model| ModelRowData {
-            harness: descriptor.id,
-            harness_name: SharedString::from(descriptor.name.clone()),
-            model: model.clone(),
-        };
         // Favorite lookups are per-row; the Vec scan made the flatten
         // O(models × favorites).
         let favorites: std::collections::HashSet<(HarnessId, &str)> = self
@@ -1545,74 +1510,19 @@ impl Pickers {
             .map(|f| (f.harness, f.model.as_str()))
             .collect();
         let query = self.search.read(cx).text().trim().to_string();
-        if !query.is_empty() {
-            // Rank: label prefix < label substring < harness-name hit;
-            // stars, then input order, break ties (t3 modelPickerSearch's
-            // field ladder + favorite boost, collapsed to our ranks).
-            let mut ranked: Vec<(usize, usize, usize, ModelRowData)> = Vec::new();
-            let mut input_ix = 0usize;
-            for descriptor in &descriptors {
-                let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready()) else {
-                    continue;
-                };
-                for model in models {
-                    let by_label = popover::match_rank(&query, &model.label);
-                    // The wider haystack ranks behind label hits: harness
-                    // name AND the description (opencode's provider
-                    // attribution — "anthropic" must find its models).
-                    let by_harness = popover::match_rank(
-                        &query,
-                        &format!(
-                            "{} {} {}",
-                            descriptor.name,
-                            model.description.as_deref().unwrap_or(""),
-                            model.label
-                        ),
-                    )
-                    .map(|rank| rank + 2);
-                    if let Some(rank) = by_label.into_iter().chain(by_harness).min() {
-                        let starred = !favorites.contains(&(descriptor.id, model.id.as_str()));
-                        ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
-                    }
-                    input_ix += 1;
-                }
-            }
-            ranked.sort_by_key(|(rank, unstarred, ix, _)| (*rank, *unstarred, *ix));
-            return ranked.into_iter().map(|(_, _, _, row)| row).collect();
-        }
-        match self.model_rail {
-            ModelRail::Favorites => {
-                let mut rows = Vec::new();
-                for descriptor in &descriptors {
-                    let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready())
-                    else {
-                        continue;
-                    };
-                    for model in models {
-                        if favorites.contains(&(descriptor.id, model.id.as_str())) {
-                            rows.push(row(descriptor, model));
-                        }
-                    }
-                }
-                rows
-            }
-            ModelRail::Harness => {
-                let Some(descriptor) = descriptors.iter().find(|d| Some(d.id) == effective) else {
-                    return Vec::new();
-                };
-                let Some(models) = self.models.get(&descriptor.id).and_then(|l| l.ready()) else {
-                    return Vec::new();
-                };
-                let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
-                    .iter()
-                    .partition(|m| favorites.contains(&(descriptor.id, m.id.as_str())));
-                starred
-                    .into_iter()
-                    .chain(rest)
-                    .map(|model| row(descriptor, model))
-                    .collect()
-            }
-        }
+        scoped_model_rows(
+            &query,
+            self.model_rail,
+            effective,
+            &descriptors,
+            |harness| {
+                self.models
+                    .get(&harness)
+                    .and_then(|l| l.ready())
+                    .map(|models| models.as_slice())
+            },
+            |harness, model| favorites.contains(&(harness, model)),
+        )
     }
 
     /// The row the keyboard-nav highlight starts on: the resolved selected
@@ -2125,7 +2035,6 @@ impl Pickers {
                     // chips below (reasoning ladder, model options) are
                     // mouse-only.
                     Some(PickerKind::HarnessModel) => self.model_rows_len(cx),
-                    Some(PickerKind::Traits) => 0, // merged into HarnessModel
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len(),
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
                     None => 0,
@@ -2178,7 +2087,6 @@ impl Pickers {
             PickerKind::Branch => "picker-branch",
             PickerKind::Checkout => "picker-checkout",
             PickerKind::HarnessModel => "picker-model",
-            PickerKind::Traits => "picker-traits",
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
         };
@@ -2186,11 +2094,10 @@ impl Pickers {
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
-        let compact_traits = kind == PickerKind::Traits && self.compact_traits;
         div()
             .id(id)
             .h(px(32.0))
-            .max_w(px(208.0))
+            .max_w(px(248.0))
             // Shrinkable under row pressure — four footer chips share one
             // line; without min_w_0 they overflowed and painted overlapped.
             .min_w_0()
@@ -2234,15 +2141,7 @@ impl Pickers {
                         .text_color(tint.unwrap_or(theme.text_muted)),
                 )
             })
-            .when(!compact_traits, |el| {
-                el.child(div().min_w_0().truncate().child(label))
-            })
-            .when(compact_traits, |el| {
-                el.w(px(32.0))
-                    .px_0()
-                    .justify_center()
-                    .child(div().text_size(px(11.0)).child("•••"))
-            })
+            .child(div().min_w_0().truncate().child(label))
             // The effort half of the combined model+effort chip (and the space
             // chip's "@ device" tag): muted, no icon — one button, two tones.
             // `tint` overrides the muted tone (the offline warning).
@@ -2654,7 +2553,7 @@ impl Pickers {
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(move |this, _, _, cx| match kind {
                         PickerKind::Branch | PickerKind::Checkout => this.ensure_refs(true, cx),
-                        PickerKind::HarnessModel | PickerKind::Traits => {
+                        PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
                             this.catalog_rev += 1;
@@ -2972,20 +2871,24 @@ impl Pickers {
     /// with a ⌘N jump chip and a star toggle trailing. Searching hides the
     /// rail and spans every harness.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        const HEIGHT: f32 = 346.0; // t3 max-h-86.5
+        // Compact tabbed layout (user request, modeled on the referenced
+        // picker): the model LIST gets a fixed band of roughly seven compact
+        // rows; the pinned traits tray below sizes to its sections.
+        const LIST_HEIGHT: f32 = 216.0;
 
         let theme = Theme::of(cx).clone();
 
-        // Catalog-level loading/error take over the whole card.
+        // Catalog-level loading/error take over the whole card — the tabs ARE
+        // the catalog, so there is nothing stable to draw above the skeleton.
         match &self.harnesses {
             Loadable::Loading | Loadable::Idle => {
                 return div()
-                    .h(px(HEIGHT))
+                    .h(px(LIST_HEIGHT))
                     .p(px(8.0))
-                    .child(popover::skeleton_rows(
+                    .child(popover::skeleton_menu_rows(
                         "harness-skeleton",
                         &theme,
-                        4,
+                        5,
                         cx.entity_id(),
                         cx,
                     ))
@@ -2994,7 +2897,7 @@ impl Pickers {
             Loadable::Error(message) => {
                 let message = message.clone();
                 return div()
-                    .h(px(HEIGHT))
+                    .h(px(LIST_HEIGHT))
                     .p(px(8.0))
                     .child(self.retry_row(
                         "harness-retry",
@@ -3013,12 +2916,12 @@ impl Pickers {
         let model_scroll = self.model_scroll.clone();
         let query = self.search.read(cx).text().trim().to_string();
         let searching = !query.is_empty();
-        let favorites_view = !searching && self.model_rail == ModelRail::Favorites;
+        let favorites_view = self.model_rail == ModelRail::Favorites;
         let descriptors = self.rail_descriptors(cx);
         // No-agents empty state: the catalog loaded but offers nothing
         // runnable (every enabled harness is missing its CLI, or nothing is
         // enabled) and there's no committed chat harness to force-include —
-        // guidance instead of an empty rail.
+        // guidance instead of an empty tab row.
         if descriptors.is_empty() {
             return div()
                 .p(px(16.0))
@@ -3051,73 +2954,76 @@ impl Pickers {
         }
         let rows = self.model_rows(cx);
 
-        // ── rail: icons only (t3 ModelPickerSidebar) — the favorites star,
-        //    a divider, one brand icon per harness. The selected tab wears a
-        //    3px accent bar hugging the rail's right edge. Hidden while a
-        //    search is live (the query spans every harness).
-        let rail: Option<AnyElement> = (!searching).then(|| {
-            let mut column = div()
-                .w(px(44.0))
-                .flex_none()
-                .p(px(4.0))
+        // ── tabs: the favorites star, a thin divider, one brand icon per
+        //    harness — ACROSS THE TOP (user request; was a left rail). The
+        //    viewed tab wears a 2px accent bar sitting on the row's bottom
+        //    hairline. Tabs never hide: a live search only filters the
+        //    viewed tab's list, so switching tabs re-scopes the same query.
+        let mut tabs = div()
+            .flex_none()
+            .h(px(40.0))
+            .px(px(6.0))
+            .border_b_1()
+            .border_color(crate::theme::hairline(0.08))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0));
+        tabs = tabs.child(
+            div()
+                .id("model-tab-favorites")
+                .relative()
+                .w(px(32.0))
+                .h(px(32.0))
+                .rounded(px(8.0))
                 .flex()
-                .flex_col()
-                .gap(px(4.0));
-            column = column.child(
-                div()
-                    .id("model-rail-favorites")
-                    .relative()
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .when(!favorites_view, |el| {
-                        el.hover(|s| s.bg(crate::theme::ink(0.06)))
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.model_rail = ModelRail::Favorites;
-                        // Anchor on the selected row when it's starred, else
-                        // the top — never a stray second highlight.
-                        this.active = this.selected_model_index(cx);
-                        this.model_scroll_base().set_offset(gpui::Point::default());
-                        this.model_scroll
-                            .scroll_to_item(this.active, gpui::ScrollStrategy::Nearest);
-                        cx.notify();
-                    }))
-                    .child(
-                        crate::icons::icon(crate::icons::STAR_BOLD)
-                            .size(px(17.0))
-                            .text_color(if favorites_view {
-                                theme.text
-                            } else {
-                                theme.text_muted.opacity(0.75)
-                            }),
-                    )
-                    .when(favorites_view, |el| el.child(rail_indicator(theme.accent))),
-            );
-            // Full-bleed divider, aligned with the search row's bottom
-            // hairline (see the height math there) — one line across.
-            column = column.child(
-                div()
-                    .h(px(1.0))
-                    .mx(px(-4.0))
-                    .my(px(1.0))
-                    .bg(crate::theme::hairline(0.08)),
-            );
-            for (ix, descriptor) in descriptors.iter().enumerate() {
-                let harness = descriptor.id;
-                let is_viewed = !favorites_view && effective == Some(harness);
-                let is_disabled = locked && effective != Some(harness);
-                let (icon_path, tint) = harness_brand_icon(harness);
-                column = column.child(
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(!favorites_view, |el| {
+                    el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_rail = ModelRail::Favorites;
+                    // Anchor on the selected row when it's starred, else
+                    // the top — never a stray second highlight.
+                    this.active = this.selected_model_index(cx);
+                    this.model_scroll_base().set_offset(gpui::Point::default());
+                    this.model_scroll
+                        .scroll_to_item(this.active, gpui::ScrollStrategy::Nearest);
+                    cx.notify();
+                }))
+                .child(
+                    crate::icons::icon(crate::icons::STAR_BOLD)
+                        .size(px(15.0))
+                        .text_color(if favorites_view {
+                            theme.text
+                        } else {
+                            theme.text_muted.opacity(0.75)
+                        }),
+                )
+                .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
+        );
+        tabs = tabs.child(
+            div()
+                .flex_none()
+                .w(px(1.0))
+                .h(px(18.0))
+                .mx(px(2.0))
+                .bg(crate::theme::hairline(0.10)),
+        );
+        for (ix, descriptor) in descriptors.iter().enumerate() {
+            let harness = descriptor.id;
+            let is_viewed = !favorites_view && effective == Some(harness);
+            let is_disabled = locked && effective != Some(harness);
+            let (icon_path, tint) = harness_brand_icon(harness);
+            tabs =
+                tabs.child(
                     div()
                         .id(("harness-tab", ix))
                         .relative()
-                        .w(px(36.0))
-                        .h(px(36.0))
+                        .w(px(32.0))
+                        .h(px(32.0))
                         .rounded(px(8.0))
                         .flex()
                         .items_center()
@@ -3132,28 +3038,23 @@ impl Pickers {
                             this.pick_harness(harness, cx);
                             cx.notify();
                         }))
-                        .child(crate::icons::icon(icon_path).size(px(18.0)).text_color(
+                        .child(crate::icons::icon(icon_path).size(px(16.0)).text_color(
                             tint.unwrap_or(if is_viewed {
                                 theme.text
                             } else {
                                 theme.text_muted
                             }),
                         ))
-                        .when(is_viewed, |el| el.child(rail_indicator(theme.accent))),
+                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
                 );
-            }
-            column.into_any_element()
-        });
+        }
 
-        // ── search row: icon + borderless input over a FULL-BLEED hairline
-        //    (it meets the rail's divider at the same y, one line across the
-        //    card — user request; no accent tint). Height matches the rail's
-        //    star tab band exactly: 4px pad + 36px tab + 4px gap + 1px
-        //    divider margin = the hairline at y 45–46, same as this row's
-        //    inside-drawn bottom border at h 46.
+        // ── search row: icon + borderless input over a full-bleed hairline.
+        //    The placeholder names the scope — the query never leaves the
+        //    viewed tab (user request; the old global search hid the rail).
         let search_row = div()
             .flex_none()
-            .h(px(46.0))
+            .h(px(40.0))
             .px(px(10.0))
             .border_b_1()
             .border_color(crate::theme::hairline(0.08))
@@ -3228,10 +3129,10 @@ impl Pickers {
                         cx,
                     )]
                 }
-                _ => vec![popover::skeleton_rows(
+                _ => vec![popover::skeleton_menu_rows(
                     "model-skeleton",
                     &theme,
-                    4,
+                    5,
                     cx.entity_id(),
                     cx,
                 )],
@@ -3239,51 +3140,63 @@ impl Pickers {
         };
 
         let model_scrollbar = self.render_model_scrollbar(&theme, cx);
-        let pane = div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            // A whisper of wash lifts the pane off the rail (t3
-            // `bg-muted/40` + `border-l border-border/70`).
+        let list_host = div()
+            .id("model-list-scroll-host")
+            .relative()
+            .flex_none()
+            .h(px(LIST_HEIGHT))
+            .py(px(4.0))
+            // A whisper of wash keeps the scrolling band readable between
+            // the pinned chrome above and the traits tray below.
             .bg(crate::theme::ink(0.02))
-            .when(rail.is_some(), |el| {
-                el.border_l_1().border_color(crate::theme::hairline(0.07))
+            .on_hover(cx.listener(Self::on_model_list_hover))
+            .child(match model_list {
+                Some(list) => list,
+                // Empty/loading/error notes: a plain static stack.
+                None => div()
+                    .id("model-menu-scroll")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(6.0))
+                    .children(list_children)
+                    .into_any_element(),
             })
-            .child(search_row)
-            .child(
-                div()
-                    .id("model-list-scroll-host")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .py(px(6.0))
-                    .on_hover(cx.listener(Self::on_model_list_hover))
-                    .child(match model_list {
-                        Some(list) => list,
-                        // Empty/loading/error notes: a plain static stack.
-                        None => div()
-                            .id("model-menu-scroll")
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .px(px(6.0))
-                            .children(list_children)
-                            .into_any_element(),
-                    })
-                    // Absolute child: the hit rail and thumb float above the
-                    // scroll content without consuming any list width.
-                    .children(model_scrollbar),
-            );
+            // Absolute child: the hit rail and thumb float above the
+            // scroll content without consuming any list width.
+            .children(model_scrollbar);
+
+        // ── traits tray: the reasoning ladder + model options PINNED under
+        //    the list (the separate Traits popover folded in here — user
+        //    request). Hidden entirely when the selected model has neither.
+        let has_tray = !self.trait_ladder(cx).is_empty()
+            || self
+                .selected_model(cx)
+                .is_some_and(|m| !m.options.is_empty());
+        let tray: Option<AnyElement> = has_tray.then(|| {
+            let sections = self.render_traits_sections(cx);
+            div()
+                .id("model-traits-tray")
+                .flex_none()
+                .border_t_1()
+                .border_color(crate::theme::hairline(0.08))
+                // Long option stacks scroll inside the tray rather than
+                // growing the card past the viewport.
+                .max_h(px(236.0))
+                .overflow_y_scroll()
+                .p(px(4.0))
+                .child(sections)
+                .into_any_element()
+        });
 
         div()
-            .h(px(HEIGHT))
             .flex()
-            .flex_row()
-            .items_stretch()
-            .children(rail)
-            .child(pane)
+            .flex_col()
+            .child(tabs)
+            .child(search_row)
+            .child(list_host)
+            .children(tray)
             .into_any_element()
     }
 
@@ -3321,10 +3234,11 @@ impl Pickers {
             .map(str::trim)
             .filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref()))
             .map(|d| SharedString::from(d.to_owned()));
+        let compact = self.model_rail == ModelRail::Harness;
         let mut el = div()
             .id(("model-row", ix))
             .px(px(8.0))
-            .py(px(6.0))
+            .py(px(if compact { 4.0 } else { 6.0 }))
             .rounded(px(8.0))
             .flex()
             .flex_row()
@@ -3348,66 +3262,103 @@ impl Pickers {
                 cx.notify();
             }
         }));
+        // Compact single-line rows on a harness tab (user request): every
+        // row there shares the tab's harness, so the identity subline is
+        // dead weight — attribution rides inline instead (opencode ships
+        // identically-named models under 64 providers; it must stay
+        // visible). The favorites tab mixes harnesses and keeps the
+        // two-line layout with the brand subline.
+        let body: AnyElement = if compact {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w_full()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(label),
+                )
+                .when_some(attribution, |el, attribution| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(attribution),
+                    )
+                })
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(label),
+                )
+                .child(
+                    // Harness identity subline (t3 `showProvider`), plus
+                    // the model's own attribution when it carries one.
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            crate::icons::icon(icon_path)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7))),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child(harness_name),
+                        )
+                        .when_some(attribution, |el, attribution| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted.opacity(0.45))
+                                    .child(SharedString::from("·")),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted.opacity(0.7))
+                                    .child(attribution),
+                            )
+                        }),
+                )
+                .into_any_element()
+        };
         el = el
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.activate_model_index(ix, cx);
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(px(12.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(label),
-                    )
-                    .child(
-                        // Harness identity subline (t3 `showProvider`), plus
-                        // the model's own attribution when it carries one.
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                crate::icons::icon(icon_path)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(tint.unwrap_or(theme.text_muted.opacity(0.7))),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted.opacity(0.7))
-                                    .child(harness_name),
-                            )
-                            .when_some(attribution, |el, attribution| {
-                                el.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted.opacity(0.45))
-                                        .child(SharedString::from("·")),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted.opacity(0.7))
-                                        .child(attribution),
-                                )
-                            }),
-                    ),
-            );
+            .child(body);
         if ix < 9 {
             el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
         }
@@ -3452,7 +3403,7 @@ impl Pickers {
     fn render_traits_sections(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(model) = self.selected_model(cx).cloned() else {
-            return popover::skeleton_rows("traits-skeleton", &theme, 3, cx.entity_id(), cx);
+            return popover::skeleton_menu_rows("traits-skeleton", &theme, 3, cx.entity_id(), cx);
         };
         let levels = self.trait_ladder(cx);
         // Display the effective level (draft pick or the chat's config), so
@@ -3569,19 +3520,110 @@ fn default_badge(theme: &Theme) -> gpui::Div {
 /// Brand mark + optional tint for a harness (the Claude mark keeps its brand
 /// orange even on the monochrome surface; the mock harness scripts
 /// Claude-flavoured runs, so it wears the Claude mark).
-/// The 3px bar marking the selected rail tab (t3 ModelPickerSidebar
-/// `SELECTED_INDICATOR_CLASS`, `rounded-l-full`): LEFT half-capsule only —
-/// the flat right edge presses against the rail/pane border it hugs.
-fn rail_indicator(tint: gpui::Hsla) -> gpui::Div {
+/// The 2px underline marking the viewed top tab: sits on the tab row's
+/// bottom hairline (the tab is 32px tall inside a 40px row, so -4px lands
+/// exactly on the border), rounded like a capsule.
+fn tab_indicator(tint: gpui::Hsla) -> gpui::Div {
     div()
         .absolute()
-        .right(px(-4.0))
-        .top(px(8.0))
-        .w(px(3.0))
-        .h(px(20.0))
-        .rounded_tl(px(3.0))
-        .rounded_bl(px(3.0))
+        .bottom(px(-4.0))
+        .left(px(6.0))
+        .right(px(6.0))
+        .h(px(2.0))
+        .rounded(px(1.0))
         .bg(tint)
+}
+
+/// Flatten the picker's visible rows for one tab. The QUERY NEVER LEAVES THE
+/// VIEWED TAB (user request; the old global search spanned every harness and
+/// hid the rail): on a harness tab it ranks that harness's models only, on
+/// the favorites tab it ranks the starred set. Without a query, a harness
+/// tab lists its catalog stars-first and the favorites tab lists every star.
+fn scoped_model_rows<'a>(
+    query: &str,
+    rail: ModelRail,
+    effective: Option<HarnessId>,
+    descriptors: &[HarnessDescriptor],
+    models_for: impl Fn(HarnessId) -> Option<&'a [Model]>,
+    is_favorite: impl Fn(HarnessId, &str) -> bool,
+) -> Vec<ModelRowData> {
+    let row = |descriptor: &HarnessDescriptor, model: &Model| ModelRowData {
+        harness: descriptor.id,
+        harness_name: SharedString::from(descriptor.name.clone()),
+        model: model.clone(),
+    };
+    let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
+        ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
+        ModelRail::Harness => Some(descriptor.id) == effective,
+    };
+    if !query.is_empty() {
+        // Rank: label prefix < label substring < description hit; stars,
+        // then input order, break ties (t3 modelPickerSearch's field ladder
+        // + favorite boost, collapsed to our ranks). The description stays
+        // in the haystack — opencode's provider attribution ("anthropic")
+        // must find its models even inside one tab.
+        let mut ranked: Vec<(usize, usize, usize, ModelRowData)> = Vec::new();
+        let mut input_ix = 0usize;
+        for descriptor in descriptors {
+            let Some(models) = models_for(descriptor.id) else {
+                continue;
+            };
+            for model in models {
+                if !in_scope(descriptor, model) {
+                    continue;
+                }
+                let by_label = popover::match_rank(query, &model.label);
+                let by_description = popover::match_rank(
+                    query,
+                    &format!(
+                        "{} {}",
+                        model.description.as_deref().unwrap_or(""),
+                        model.label
+                    ),
+                )
+                .map(|rank| rank + 2);
+                if let Some(rank) = by_label.into_iter().chain(by_description).min() {
+                    let starred = !is_favorite(descriptor.id, &model.id);
+                    ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
+                }
+                input_ix += 1;
+            }
+        }
+        ranked.sort_by_key(|(rank, unstarred, ix, _)| (*rank, *unstarred, *ix));
+        return ranked.into_iter().map(|(_, _, _, row)| row).collect();
+    }
+    match rail {
+        ModelRail::Favorites => {
+            let mut rows = Vec::new();
+            for descriptor in descriptors {
+                let Some(models) = models_for(descriptor.id) else {
+                    continue;
+                };
+                for model in models {
+                    if is_favorite(descriptor.id, &model.id) {
+                        rows.push(row(descriptor, model));
+                    }
+                }
+            }
+            rows
+        }
+        ModelRail::Harness => {
+            let Some(descriptor) = descriptors.iter().find(|d| Some(d.id) == effective) else {
+                return Vec::new();
+            };
+            let Some(models) = models_for(descriptor.id) else {
+                return Vec::new();
+            };
+            let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
+                .iter()
+                .partition(|m| is_favorite(descriptor.id, &m.id));
+            starred
+                .into_iter()
+                .chain(rest)
+                .map(|model| row(descriptor, model))
+                .collect()
+        }
+    }
 }
 
 /// Centered muted note filling an empty model list ("No models found").
@@ -3883,11 +3925,6 @@ impl Render for Pickers {
             &self.trait_ladder(cx),
             &explicit_options,
         );
-        let traits_label: SharedString = traits_set
-            .clone()
-            .map(SharedString::from)
-            .unwrap_or_else(|| SharedString::from("Traits"));
-
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
@@ -3902,18 +3939,9 @@ impl Render for Pickers {
                 let content = self.render_harness_model_popover(cx);
                 Some((
                     PickerKind::HarnessModel,
-                    // t3 ModelPickerContent `max-w-90` — 360px.
-                    self.popover_frame_flush(360.0, content, cx),
-                ))
-            }
-            Some(PickerKind::Traits) => {
-                let content = div()
-                    .p(px(4.0))
-                    .child(self.render_traits_sections(cx))
-                    .into_any_element();
-                Some((
-                    PickerKind::Traits,
-                    self.popover_frame_flush(240.0, content, cx),
+                    // Compact single-harness pane (t3 ModelPickerContent
+                    // shrunk to its tabbed layout).
+                    self.popover_frame_flush(304.0, content, cx),
                 ))
             }
             None => None,
@@ -3930,37 +3958,27 @@ impl Render for Pickers {
             .items_center()
             .min_w_0()
             .gap(px(4.0));
-        // Model chip (brand icon + model name) beside a separate Traits chip
-        // (t3code TraitsPicker arrangement): the trigger label is the joined
-        // effective summary ("High · 1M · Fast", "Agent · Balance") so the
-        // run's traits read without opening; it brightens only when something
-        // departs from its default. No chip at all when the model has neither
-        // a ladder nor options (e.g. Hermes today) — a dead trigger reads as
-        // broken.
+        // ONE chip for the whole run identity (user request): brand icon +
+        // model name, then the joined traits summary ("Medium", "High · 1M ·
+        // Fast", "Agent · Balance") as the chip's muted second tone — the
+        // run's configuration reads without opening anything, and the suffix
+        // brightens only when something departs from its default. No suffix
+        // when the model has neither a ladder nor options (e.g. Hermes).
+        let chip_suffix = traits_set.map(|summary| {
+            (
+                SharedString::from(summary),
+                traits_active.then(|| theme.text.opacity(0.85)),
+            )
+        });
         let model_chip = self.trigger_chip(
             PickerKind::HarnessModel,
             model_label,
             true,
             Some(harness_icon),
-            None,
+            chip_suffix,
             &theme,
             cx,
         );
-        let has_traits = !self.trait_ladder(cx).is_empty()
-            || self
-                .selected_model(cx)
-                .is_some_and(|m| !m.options.is_empty());
-        let traits_chip = has_traits.then(|| {
-            self.trigger_chip(
-                PickerKind::Traits,
-                traits_label,
-                traits_active,
-                None,
-                None,
-                &theme,
-                cx,
-            )
-        });
         let right = div()
             .flex()
             .flex_row()
@@ -3975,16 +3993,7 @@ impl Render for Pickers {
                 PickerKind::HarnessModel,
                 "model-popover",
                 closing,
-            ))
-            .children(traits_chip.map(|chip| {
-                attach_overlay_end(
-                    chip,
-                    &mut overlay,
-                    PickerKind::Traits,
-                    "traits-popover",
-                    closing,
-                )
-            }));
+            ));
         div()
             .w_full()
             .min_w_0()
@@ -4006,24 +4015,6 @@ mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
-    #[test]
-    fn traits_trigger_compacts_only_at_narrow_measured_widths() {
-        assert!(!compact_traits_for_width(0.0, false));
-        assert!(compact_traits_for_width(
-            COMPACT_TRAITS_ENTER_WIDTH - 1.0,
-            false
-        ));
-        assert!(!compact_traits_for_width(COMPACT_TRAITS_ENTER_WIDTH, false));
-        // The small gap between entry and exit prevents chatter if the divider
-        // jitters around the boundary, without delaying restoration on a wide
-        // composer.
-        assert!(compact_traits_for_width(
-            COMPACT_TRAITS_EXIT_WIDTH - 1.0,
-            true
-        ));
-        assert!(!compact_traits_for_width(COMPACT_TRAITS_EXIT_WIDTH, true));
-    }
-
     fn bare_model(id: &str, label: &str) -> Model {
         Model {
             id: id.into(),
@@ -4032,6 +4023,127 @@ mod tests {
             reasoning_levels: Vec::new(),
             options: Vec::new(),
         }
+    }
+
+    fn descriptor(id: HarnessId, name: &str) -> HarnessDescriptor {
+        HarnessDescriptor {
+            id,
+            name: name.into(),
+            installed: true,
+            enabled: Some(true),
+            reasoning_levels: Vec::new(),
+            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            supports_steering: false,
+        }
+    }
+
+    #[test]
+    fn tab_search_never_leaves_the_viewed_harness() {
+        let descriptors = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ];
+        let claude = vec![bare_model("fable-5", "Fable 5")];
+        let codex = vec![bare_model("gpt-fable", "Fable (Codex)")];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            match harness {
+                HarnessId::ClaudeCode => Some(claude.as_slice()),
+                HarnessId::Codex => Some(codex.as_slice()),
+                _ => None,
+            }
+        };
+        // Both catalogs match "fable", but the viewed tab is Claude — the
+        // Codex hit must not appear.
+        let rows = scoped_model_rows(
+            "fable",
+            ModelRail::Harness,
+            Some(HarnessId::ClaudeCode),
+            &descriptors,
+            models_for,
+            |_, _| false,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].harness, HarnessId::ClaudeCode);
+        assert_eq!(rows[0].model.id, "fable-5");
+    }
+
+    #[test]
+    fn favorites_tab_search_ranks_only_starred_rows() {
+        let descriptors = vec![
+            descriptor(HarnessId::ClaudeCode, "Claude Code"),
+            descriptor(HarnessId::Codex, "Codex"),
+        ];
+        let claude = vec![bare_model("fable-5", "Fable 5")];
+        let codex = vec![bare_model("gpt-fable", "Fable (Codex)")];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            match harness {
+                HarnessId::ClaudeCode => Some(claude.as_slice()),
+                HarnessId::Codex => Some(codex.as_slice()),
+                _ => None,
+            }
+        };
+        let starred =
+            |harness: HarnessId, model: &str| harness == HarnessId::Codex && model == "gpt-fable";
+        let rows = scoped_model_rows(
+            "fable",
+            ModelRail::Favorites,
+            Some(HarnessId::ClaudeCode),
+            &descriptors,
+            models_for,
+            starred,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].harness, HarnessId::Codex);
+
+        // Empty query on the favorites tab: the starred set, nothing else.
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Favorites,
+            Some(HarnessId::ClaudeCode),
+            &descriptors,
+            models_for,
+            starred,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.id, "gpt-fable");
+    }
+
+    #[test]
+    fn harness_tab_lists_stars_first_and_description_still_matches() {
+        let descriptors = vec![descriptor(HarnessId::Opencode, "opencode")];
+        let mut provider_a = bare_model("glm-5.2-a", "GLM-5.2");
+        provider_a.description = Some("Anthropic".into());
+        let mut provider_b = bare_model("glm-5.2-b", "GLM-5.2");
+        provider_b.description = Some("Baseten".into());
+        let models = vec![provider_a, provider_b];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            (harness == HarnessId::Opencode).then_some(models.as_slice())
+        };
+        let starred = |harness: HarnessId, model: &str| {
+            harness == HarnessId::Opencode && model == "glm-5.2-b"
+        };
+        // No query: catalog order with the star floated to the top.
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Harness,
+            Some(HarnessId::Opencode),
+            &descriptors,
+            models_for,
+            starred,
+        );
+        assert_eq!(rows[0].model.id, "glm-5.2-b");
+        assert_eq!(rows[1].model.id, "glm-5.2-a");
+        // Provider attribution stays searchable inside the tab.
+        let rows = scoped_model_rows(
+            "baseten",
+            ModelRail::Harness,
+            Some(HarnessId::Opencode),
+            &descriptors,
+            models_for,
+            starred,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.id, "glm-5.2-b");
     }
 
     #[test]
