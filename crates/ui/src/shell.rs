@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    AnyElement, App, Context, Empty, Entity, Focusable as _, IntoElement, KeyBinding, Keystroke,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Subscription,
-    Task, Window, WindowControlArea, actions, div, prelude::*, px,
+    Action, AnyElement, App, Context, Empty, Entity, Focusable as _, IntoElement, KeyBinding,
+    Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
+    Render, SharedString, Subscription, Task, Window, WindowControlArea, actions, div, prelude::*,
+    px,
 };
 
 use gpui_tokio::Tokio;
@@ -41,8 +42,9 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    CHAT_PANEL_MIN, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, TERMINAL_DEFAULT_HEIGHT, UiSettings, platform_combo,
+    CHAT_PANEL_MIN, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, SAVE_DEBOUNCE_MS,
+    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, ShortcutId, TERMINAL_DEFAULT_HEIGHT, UiSettings,
+    badge_combo, jump_hints_visible, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -65,7 +67,8 @@ actions!(
         AddSpacePalette,
         NewSession,
         NextSession,
-        PrevSession
+        PrevSession,
+        ArchiveSession
     ]
 );
 
@@ -97,6 +100,12 @@ fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f
         0.0
     }
 }
+
+/// Open the session at `slot` (zero-based) of the sidebar's active list. One
+/// action carrying the slot, rather than nine near-identical action types.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct JumpSession(pub usize);
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -234,10 +243,30 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             PrevSession,
             None,
         ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.archive_session, "mod-shift-a"),
+            ArchiveSession,
+            None,
+        ),
         // Fixed: ⌘K summons the add-space palette (the ⌘K chip in its search
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
     ]);
+    // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
+    // combo in a hand-edited file) binds nothing rather than falling back —
+    // the user cleared it on purpose.
+    cx.bind_keys((0..JUMP_SLOTS).filter_map(|slot| {
+        let id = ShortcutId::JumpSession(slot);
+        let combo = keymap.get(id);
+        if combo.is_empty() {
+            return None;
+        }
+        Some(KeyBinding::new(
+            &valid_or_default(combo, id.default_combo()),
+            JumpSession(slot),
+            None,
+        ))
+    }));
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -881,6 +910,12 @@ pub struct Shell {
     /// Unarchive affordance and restores the dimmed harness mark (t3code's
     /// settled-row hover).
     pub(super) archived_hover: Option<String>,
+    /// The jump-hint overlay: true while the held modifiers exactly match a
+    /// jump shortcut, which swaps the first nine rows' time-ago for their
+    /// key-cap chip (t3code's `showJumpHints`). Frame-transient — window
+    /// deactivation clears it, so a chip cannot stick after an app switch
+    /// swallows the key-up.
+    pub(super) jump_hints: bool,
     /// Lazy panes: no entity (and no RPC) until first opened.
     terminal: Option<Entity<TerminalPanel>>,
     /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
@@ -1049,6 +1084,9 @@ pub struct Shell {
     /// with nothing focused they go dead. Initial focus lands on the composer
     /// and focus lost with no successor routes back there.
     focus_sub: Option<Subscription>,
+    /// Clears the jump hints when the window deactivates: a Cmd+Tab away
+    /// swallows the key-up, so without this the chips stay on screen for good.
+    activation_sub: Option<Subscription>,
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
@@ -1166,6 +1204,7 @@ impl Shell {
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
+            jump_hints: false,
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
@@ -1247,6 +1286,7 @@ impl Shell {
             splash_task: None,
             save_task: None,
             focus_sub: None,
+            activation_sub: None,
             _ticker: ticker,
             _state_observation: observation,
             _composer_events: composer_events,
@@ -2378,6 +2418,21 @@ impl Shell {
         self.set_chat_archived(chat_id, true, cx);
     }
 
+    /// The Archive session shortcut. With no chat open, or with an already
+    /// archived one, it does nothing — the shortcut archives, it never
+    /// unarchives.
+    fn archive_selected_chat(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self
+            .state
+            .read(cx)
+            .archivable_selected_chat()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.archive_chat(chat_id, cx);
+    }
+
     pub(super) fn set_chat_archived(
         &mut self,
         chat_id: String,
@@ -2390,6 +2445,55 @@ impl Shell {
             cx,
         );
         cx.notify();
+    }
+
+    /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
+    /// a short list does nothing.
+    fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let filter = self.settings.space_filter.clone();
+        let Some(chat_id) = self
+            .state
+            .read(cx)
+            .jump_target(Utc::now(), filter.as_deref(), slot)
+        else {
+            return;
+        };
+        // Same path a click on that row takes.
+        self.open_chat(chat_id, cx);
+    }
+
+    /// Whether an overlay that owns the keyboard is up — the add-space
+    /// palette or a composer picker popover (model selector, traits, repo,
+    /// branch…). Session-nav shortcuts (cycle/jump/archive) go quiet
+    /// underneath one: gpui runs a matched binding before any `on_key_down`,
+    /// so an unguarded jump would switch sessions UNDER the open popover,
+    /// stranding it over a session the user never picked.
+    pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
+        self.add_space.is_some() || self.composer.read(cx).pickers().read(cx).is_open()
+    }
+
+    /// Track the held modifiers so the sidebar can show its jump hints. Only a
+    /// change in visibility repaints — modifier traffic is otherwise constant.
+    fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
+        let mods = &event.modifiers;
+        let primary = if cfg!(target_os = "macos") {
+            mods.platform
+        } else {
+            mods.control
+        };
+        // No hints while an overlay owns the keyboard — the jumps they
+        // advertise are suppressed there.
+        let visible = matches!(self.route, Route::Chat)
+            && !self.overlay_owns_keyboard(cx)
+            && jump_hints_visible(&self.settings.keymap, primary, mods.alt, mods.shift);
+        self.set_jump_hints(visible, cx);
+    }
+
+    pub(super) fn set_jump_hints(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.jump_hints != visible {
+            self.jump_hints = visible;
+            cx.notify();
+        }
     }
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
@@ -3577,6 +3681,11 @@ impl Shell {
         status: zeron_proto::ChatIndicator,
         selected: bool,
         archived: bool,
+        // This row's jump combo while the hint overlay is up. It takes the
+        // corner outright — above hover and above the status word — so all
+        // nine chips appear together instead of leaving a hole on whichever
+        // row is busy or under the pointer.
+        jump_label: Option<SharedString>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -3620,7 +3729,32 @@ impl Shell {
             }
         };
         let queued = queued && !undelivered;
-        let corner_body: AnyElement = if corner_hovered {
+        let corner_body: AnyElement = if let Some(label) = jump_label {
+            // The jump hint replaces the status/time corner while the modifier
+            // is held, cut to the sidebar PR badge's exact cloth
+            // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
+            // rounded 4, borderless 0.08-fill with 0.85 text of one tone —
+            // neutral here — and the label in the badge's mono at 10 MEDIUM.
+            // Any other geometry reads as a second badge system on the row.
+            {
+                let tone = theme.text_muted;
+                div()
+                    .h(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(tone.opacity(0.08))
+                    .text_size(px(10.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(tone.opacity(0.85))
+                    .font_family(theme.font_mono.clone())
+                    .child(label)
+                    .into_any_element()
+            }
+        } else if corner_hovered {
             div()
                 .flex()
                 .flex_row()
@@ -6993,6 +7127,17 @@ impl Render for Shell {
         self.reduced_motion = motion::reduced_motion(cx);
         self.motion_active.set(false);
 
+        if self.activation_sub.is_none() {
+            self.activation_sub = Some(cx.observe_window_activation(
+                window,
+                |this: &mut Shell, window, cx| {
+                    if !window.is_window_active() {
+                        this.set_jump_hints(false, cx);
+                    }
+                },
+            ));
+        }
+
         // Keyboard shortcuts (mod-s/b/j) dispatch through the window focus
         // chain — with nothing focused they go dead. Land initial focus on the
         // composer, and whenever focus is lost with no successor (e.g. the
@@ -7052,6 +7197,25 @@ impl Render for Shell {
                     this.toggle_right_pane(cx)
                 }
             }))
+            // Chat-scoped like the panel toggles: Settings has no current
+            // session to archive. Quiet under an open popover, like the other
+            // session-nav shortcuts.
+            .on_action(cx.listener(|this, _: &ArchiveSession, _, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    this.archive_selected_chat(cx)
+                }
+            }))
+            // A jump routes back to chat itself, so Settings is not a dead
+            // spot — the same call a click on that sidebar row makes. But an
+            // open picker/palette owns the keyboard: no jumping underneath it.
+            .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
+                if !this.overlay_owns_keyboard(cx) {
+                    this.jump_to_session(jump.0, cx)
+                }
+            }))
+            .on_modifiers_changed(
+                cx.listener(|this, event, _, cx| this.on_modifiers_changed(event, cx)),
+            )
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
                     this.add_space = None;

@@ -1283,6 +1283,38 @@ impl AppState {
         rows
     }
 
+    /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
+    /// narrowed to the current project filter. The jump shortcuts and their
+    /// hints both count positions here, so neither can drift from the rows on
+    /// screen.
+    pub fn sidebar_chats(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+    ) -> Vec<(ChatIndicator, &Chat)> {
+        self.overview_chats(now)
+            .into_iter()
+            .filter(|(_, chat)| match space_filter {
+                Some(space_id) => chat.space_id.as_deref() == Some(space_id),
+                None => true,
+            })
+            .collect()
+    }
+
+    /// The chat a jump shortcut opens: the row at `slot` (zero-based) of the
+    /// sidebar's active list. A slot past the end of a short list opens
+    /// nothing. Pure.
+    pub fn jump_target(
+        &self,
+        now: DateTime<Utc>,
+        space_filter: Option<&str>,
+        slot: usize,
+    ) -> Option<String> {
+        self.sidebar_chats(now, space_filter)
+            .get(slot)
+            .map(|(_, chat)| chat.id.clone())
+    }
+
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
@@ -1299,6 +1331,15 @@ impl AppState {
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    /// The chat the Archive session shortcut acts on: the selected one, unless
+    /// it is already archived. The shortcut archives and never unarchives, so
+    /// an archived chat is left alone. Pure.
+    pub fn archivable_selected_chat(&self) -> Option<&str> {
+        self.selected_chat_row()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
     }
 
     /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
@@ -2973,6 +3014,56 @@ mod tests {
         state.apply_chats(vec![archived, chat("b", 1, None)]);
         let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
         assert_eq!(visible, ["b"]);
+    }
+
+    #[test]
+    fn jump_slots_count_the_rows_the_sidebar_draws() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_space = chat("a", 0, Some(3));
+        in_space.space_id = Some("s1".into());
+        let mut other_space = chat("b", 1, Some(2));
+        other_space.space_id = Some("s2".into());
+        let mut archived = chat("gone", 2, Some(1));
+        archived.space_id = Some("s1".into());
+        archived.archived = true;
+        state.apply_spaces(vec![
+            space("s1", "d1", "/tmp/s1", 0),
+            space("s2", "d1", "/tmp/s2", 1),
+        ]);
+        state.apply_chats(vec![in_space, other_space, archived]);
+
+        let order: Vec<&str> = state
+            .sidebar_chats(now, None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        assert_eq!(state.jump_target(now, None, 0).as_deref(), Some(order[0]));
+        assert_eq!(state.jump_target(now, None, 1).as_deref(), Some(order[1]));
+        // The archived row is not in the active list, so no slot reaches it.
+        assert_eq!(order.len(), 2);
+        assert_eq!(state.jump_target(now, None, 2), None);
+        assert_eq!(state.jump_target(now, None, 8), None);
+
+        // A project filter renumbers: slot 1 counts the visible rows only.
+        assert_eq!(state.jump_target(now, Some("s2"), 0).as_deref(), Some("b"));
+        assert_eq!(state.jump_target(now, Some("s2"), 1), None);
+    }
+
+    #[test]
+    fn archive_shortcut_only_targets_an_open_active_chat() {
+        let mut state = AppState::new();
+        let mut archived = chat("a", 0, None);
+        archived.archived = true;
+        state.apply_chats(vec![archived, chat("b", 1, None)]);
+        // No chat open: nothing to archive.
+        assert_eq!(state.archivable_selected_chat(), None);
+        // The open active chat is the target.
+        state.selected_chat = Some("b".into());
+        assert_eq!(state.archivable_selected_chat(), Some("b"));
+        // An already archived chat stays put — the shortcut never unarchives.
+        state.selected_chat = Some("a".into());
+        assert_eq!(state.archivable_selected_chat(), None);
     }
 
     #[test]
