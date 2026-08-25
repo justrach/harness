@@ -295,10 +295,16 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
         .gap(px(12.0))
         // Cell 2.5 — the size every other surface runs this spinner at (the
         // "Sending…" strip, the transcript working trailer).
-        .child(gradient_spinner("boot-splash-spinner", theme, 2.5, view, cx))
+        .child(gradient_spinner(
+            "boot-splash-spinner",
+            theme,
+            2.5,
+            view,
+            cx,
+        ))
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.7))
                 .child(SharedString::from("Setting up Zeron environment")),
         );

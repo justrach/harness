@@ -1851,7 +1851,7 @@ impl Pickers {
             if rows.is_empty() {
                 div()
                     .p(px(Theme::SPACE_SM))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from("No devices match."))
                     .into_any_element()
@@ -1886,7 +1886,7 @@ impl Pickers {
                                 el.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(10.0))
+                                        .text_size(crate::typography::ui_rems(10.0))
                                         .text_color(theme.text_muted.opacity(0.45))
                                         .child(SharedString::from("You")),
                                 )
@@ -1935,7 +1935,7 @@ impl Pickers {
             };
             div()
                 .p(px(Theme::SPACE_SM))
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(empty.to_string()))
                 .into_any_element()
@@ -2146,7 +2146,7 @@ impl Pickers {
             .gap(px(6.0))
             .px(px(10.0))
             .rounded(px(8.0))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
             // and text brighten fade over 150ms.
@@ -2174,15 +2174,13 @@ impl Pickers {
             )
             .on_click(cx.listener(move |this, _, window, cx| this.toggle(kind, window, cx)))
             .when(icon_loading, |el| {
-                el.child(
-                    div().flex_none().child(crate::loaders::mini_glyph_spinner(
-                        "picker-chip-loader",
-                        2.0,
-                        theme.glyph,
-                        cx.entity_id(),
-                        cx,
-                    )),
-                )
+                el.child(div().flex_none().child(crate::loaders::mini_glyph_spinner(
+                    "picker-chip-loader",
+                    2.0,
+                    theme.glyph,
+                    cx.entity_id(),
+                    cx,
+                )))
             })
             .when_some(
                 (!icon_loading).then_some(chip_icon).flatten(),
@@ -2236,7 +2234,7 @@ impl Pickers {
             .gap(px(6.0))
             .px(px(8.0))
             .rounded(px(6.0))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(motion::hover_blend(
                 id,
@@ -2286,7 +2284,7 @@ impl Pickers {
             .items_center()
             .gap(px(6.0))
             .px(px(8.0))
-            .text_size(px(12.0))
+            .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text_muted.opacity(0.6))
             .child(
@@ -2729,7 +2727,7 @@ impl Pickers {
         if self.state.read(cx).selected_space_row().is_none() {
             return div()
                 .p(px(Theme::SPACE_SM))
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
                 .child(SharedString::from("No project selected"))
                 .into_any_element();
@@ -2757,7 +2755,7 @@ impl Pickers {
                 }
                 Loadable::Ready(_) if rows.is_empty() => div()
                     .p(px(Theme::SPACE_SM))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_faint)
                     .child(SharedString::from("No refs found."))
                     .into_any_element(),
@@ -2801,7 +2799,7 @@ impl Pickers {
                                     el.child(
                                         div()
                                             .flex_none()
-                                            .text_size(px(10.0))
+                                            .text_size(crate::typography::ui_rems(10.0))
                                             .text_color(theme.text_muted.opacity(0.6))
                                             .child(SharedString::from("switching…")),
                                     )
@@ -2810,7 +2808,7 @@ impl Pickers {
                                     el.child(
                                         div()
                                             .flex_none()
-                                            .text_size(px(10.0))
+                                            .text_size(crate::typography::ui_rems(10.0))
                                             .text_color(theme.text_muted.opacity(0.45))
                                             .child(SharedString::from(tag)),
                                     )
@@ -2833,7 +2831,7 @@ impl Pickers {
                     div()
                         .px(px(Theme::SPACE_SM))
                         .py(px(4.0))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.danger.opacity(0.9))
                         .child(SharedString::from(error.clone())),
                 ),
@@ -2845,7 +2843,7 @@ impl Pickers {
                     div()
                         .px(px(Theme::SPACE_SM))
                         .py(px(4.0))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(format!(
                             "Showing {shown} of {total} refs"
@@ -2994,13 +2992,13 @@ impl Pickers {
                 )
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(crate::typography::ui_rems(13.0))
                         .text_color(theme.text)
                         .child(SharedString::from("No agents available")),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .text_center()
                         .child(SharedString::from(
@@ -3122,7 +3120,7 @@ impl Pickers {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.0))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .child(self.search.clone()),
             );
 
@@ -3332,7 +3330,7 @@ impl Pickers {
                         .flex_none()
                         .max_w_full()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(crate::typography::ui_rems(12.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(label),
@@ -3342,7 +3340,7 @@ impl Pickers {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted.opacity(0.7))
                             .child(attribution),
                     )
@@ -3359,7 +3357,7 @@ impl Pickers {
                     div()
                         .w_full()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(crate::typography::ui_rems(12.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(label),
@@ -3381,7 +3379,7 @@ impl Pickers {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.0))
+                                .text_size(crate::typography::ui_rems(11.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(harness_name),
                         )
@@ -3389,7 +3387,7 @@ impl Pickers {
                             el.child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.0))
+                                    .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_muted.opacity(0.45))
                                     .child(SharedString::from("·")),
                             )
@@ -3397,7 +3395,7 @@ impl Pickers {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_muted.opacity(0.7))
                                     .child(attribution),
                             )
@@ -3480,7 +3478,7 @@ impl Pickers {
                             popover::menu_row(&theme, is_active, format!("trait-reasoning-{ix}"))
                                 .py(px(5.0))
                                 .rounded(px(6.0))
-                                .text_size(px(12.5))
+                                .text_size(crate::typography::ui_rems(12.5))
                                 .id(("reasoning-row", ix))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_reasoning(level, cx);
@@ -3531,7 +3529,7 @@ impl Pickers {
                                 )
                                 .py(px(5.0))
                                 .rounded(px(6.0))
-                                .text_size(px(12.5))
+                                .text_size(crate::typography::ui_rems(12.5))
                                 .id(("trait-choice", opt_ix * 32 + choice_ix))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_option(
@@ -3568,7 +3566,7 @@ impl Pickers {
 fn default_badge(theme: &Theme) -> gpui::Div {
     div()
         .flex_none()
-        .text_size(px(10.0))
+        .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text_muted.opacity(0.6))
         .child(SharedString::from("Default"))
@@ -3688,7 +3686,7 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
     div()
         .px(px(8.0))
         .py(px(24.0))
-        .text_size(px(12.0))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_muted.opacity(0.6))
         .text_center()
         .child(SharedString::from(copy.to_string()))

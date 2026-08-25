@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
@@ -21,6 +21,7 @@ use crate::popover::{self, Popup};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
 use crate::theme_library;
+use crate::typography::{self, FontAvailability, UiFontFamily, UiFontSize};
 
 struct ImportDialog {
     input: Entity<ComposerInput>,
@@ -35,6 +36,14 @@ struct ImportDialog {
 }
 
 pub struct AppearancePage {
+    selected_font: UiFontFamily,
+    selected_size: UiFontSize,
+    font_focus: FocusHandle,
+    size_focus: FocusHandle,
+    font_menu: Popup<()>,
+    size_menu: Popup<()>,
+    font_menu_dismissed_at: Option<std::time::Instant>,
+    size_menu_dismissed_at: Option<std::time::Instant>,
     light_theme_menu: Popup<()>,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
@@ -43,13 +52,201 @@ pub struct AppearancePage {
 }
 
 impl AppearancePage {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            selected_font: typography::effective(cx),
+            selected_size: typography::font_size(cx),
+            font_focus: cx.focus_handle(),
+            size_focus: cx.focus_handle(),
+            font_menu: Popup::default(),
+            size_menu: Popup::default(),
+            font_menu_dismissed_at: None,
+            size_menu_dismissed_at: None,
             light_theme_menu: Popup::default(),
             dark_theme_menu: Popup::default(),
             import_dialog: None,
             review_entry: None,
             library_error: None,
+        }
+    }
+
+    fn commit_font(&mut self, cx: &mut Context<Self>) {
+        if typography::is_available(&self.selected_font, cx) {
+            typography::set_family(self.selected_font.clone(), cx);
+            self.selected_font = typography::effective(cx);
+            self.close_font_menu(cx);
+            cx.notify();
+        }
+    }
+
+    fn commit_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        typography::set_font_size(self.selected_size, window, cx);
+        self.selected_size = typography::font_size(cx);
+        self.close_size_menu(cx);
+        cx.notify();
+    }
+
+    fn close_font_menu(&mut self, cx: &mut Context<Self>) {
+        if self.font_menu.begin_close() {
+            popover::reap_popup(cx, |page| &mut page.font_menu);
+        }
+    }
+
+    fn close_size_menu(&mut self, cx: &mut Context<Self>) {
+        if self.size_menu.begin_close() {
+            popover::reap_popup(cx, |page| &mut page.size_menu);
+        }
+    }
+
+    fn dismiss_font_menu(&mut self, cx: &mut Context<Self>) {
+        self.font_menu_dismissed_at = Some(std::time::Instant::now());
+        self.close_font_menu(cx);
+    }
+
+    fn dismiss_size_menu(&mut self, cx: &mut Context<Self>) {
+        self.size_menu_dismissed_at = Some(std::time::Instant::now());
+        self.close_size_menu(cx);
+    }
+
+    fn toggle_font_menu(&mut self, cx: &mut Context<Self>) {
+        self.close_size_menu(cx);
+        let just_dismissed = self
+            .font_menu_dismissed_at
+            .take()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if self.font_menu.is_open() {
+            self.close_font_menu(cx);
+        } else if !just_dismissed {
+            self.selected_font = typography::effective(cx);
+            self.font_menu.open(());
+        }
+        cx.notify();
+    }
+
+    fn toggle_size_menu(&mut self, cx: &mut Context<Self>) {
+        self.close_font_menu(cx);
+        let just_dismissed = self
+            .size_menu_dismissed_at
+            .take()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400));
+        if self.size_menu.is_open() {
+            self.close_size_menu(cx);
+        } else if !just_dismissed {
+            self.selected_size = typography::font_size(cx);
+            self.size_menu.open(());
+        }
+        cx.notify();
+    }
+
+    fn on_font_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let availability = typography::availability(cx);
+        match event.keystroke.key.as_str() {
+            "up" | "left" => {
+                if !self.font_menu.is_open() {
+                    self.font_menu_dismissed_at = None;
+                    self.toggle_font_menu(cx);
+                }
+                self.selected_font = step_font(&self.selected_font, -1, &availability);
+                cx.notify();
+            }
+            "down" | "right" => {
+                if !self.font_menu.is_open() {
+                    self.font_menu_dismissed_at = None;
+                    self.toggle_font_menu(cx);
+                }
+                self.selected_font = step_font(&self.selected_font, 1, &availability);
+                cx.notify();
+            }
+            "home" => {
+                if !self.font_menu.is_open() {
+                    self.font_menu_dismissed_at = None;
+                    self.toggle_font_menu(cx);
+                }
+                self.selected_font = first_available(&availability);
+                cx.notify();
+            }
+            "end" => {
+                if !self.font_menu.is_open() {
+                    self.font_menu_dismissed_at = None;
+                    self.toggle_font_menu(cx);
+                }
+                self.selected_font = last_available(&availability);
+                cx.notify();
+            }
+            "enter" | "space" => {
+                if self.font_menu.is_open() {
+                    self.commit_font(cx);
+                } else {
+                    self.font_menu_dismissed_at = None;
+                    self.toggle_font_menu(cx);
+                }
+            }
+            "escape" => {
+                self.selected_font = typography::effective(cx);
+                self.close_font_menu(cx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_size_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = UiFontSize::ALL
+            .iter()
+            .position(|size| *size == self.selected_size)
+            .unwrap_or(4);
+        match event.keystroke.key.as_str() {
+            "up" | "left" => {
+                if !self.size_menu.is_open() {
+                    self.size_menu_dismissed_at = None;
+                    self.toggle_size_menu(cx);
+                }
+                self.selected_size = UiFontSize::ALL[current.saturating_sub(1)];
+                cx.notify();
+            }
+            "down" | "right" => {
+                if !self.size_menu.is_open() {
+                    self.size_menu_dismissed_at = None;
+                    self.toggle_size_menu(cx);
+                }
+                self.selected_size = UiFontSize::ALL[(current + 1).min(UiFontSize::ALL.len() - 1)];
+                cx.notify();
+            }
+            "home" => {
+                if !self.size_menu.is_open() {
+                    self.size_menu_dismissed_at = None;
+                    self.toggle_size_menu(cx);
+                }
+                self.selected_size = UiFontSize::ALL[0];
+                cx.notify();
+            }
+            "end" => {
+                if !self.size_menu.is_open() {
+                    self.size_menu_dismissed_at = None;
+                    self.toggle_size_menu(cx);
+                }
+                self.selected_size = UiFontSize::ALL[UiFontSize::ALL.len() - 1];
+                cx.notify();
+            }
+            "enter" | "space" => {
+                if self.size_menu.is_open() {
+                    self.commit_size(window, cx);
+                } else {
+                    self.size_menu_dismissed_at = None;
+                    self.toggle_size_menu(cx);
+                }
+            }
+            "escape" => {
+                self.selected_size = typography::font_size(cx);
+                self.close_size_menu(cx);
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -225,6 +422,46 @@ fn slug(value: &str) -> String {
     }
 }
 
+fn step_font(
+    current: &UiFontFamily,
+    delta: isize,
+    availability: &FontAvailability,
+) -> UiFontFamily {
+    let choices = availability.choices();
+    let current = choices
+        .iter()
+        .position(|family| family == current)
+        .unwrap_or_default() as isize;
+    let mut ix = current + delta.signum();
+    while (0..choices.len() as isize).contains(&ix) {
+        let candidate = &choices[ix as usize];
+        if availability.is_available(candidate) {
+            return candidate.clone();
+        }
+        ix += delta.signum();
+    }
+    choices[current as usize].clone()
+}
+
+fn first_available(availability: &FontAvailability) -> UiFontFamily {
+    availability
+        .choices()
+        .iter()
+        .find(|family| availability.is_available(family))
+        .cloned()
+        .unwrap_or(UiFontFamily::System)
+}
+
+fn last_available(availability: &FontAvailability) -> UiFontFamily {
+    availability
+        .choices()
+        .iter()
+        .rev()
+        .find(|family| availability.is_available(family))
+        .cloned()
+        .unwrap_or(UiFontFamily::System)
+}
+
 fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
     div()
         .h(px(5.0))
@@ -287,7 +524,7 @@ fn surface_choice(
         } else {
             theme.surface_raised.opacity(0.28)
         })
-        .text_size(px(11.5))
+        .text_size(crate::typography::ui_rems(11.5))
         .font_weight(if selected {
             gpui::FontWeight::MEDIUM
         } else {
@@ -449,7 +686,7 @@ fn compact_action(
         .bg(theme.surface_raised.opacity(0.34))
         .flex()
         .items_center()
-        .text_size(px(11.5))
+        .text_size(crate::typography::ui_rems(11.5))
 }
 
 fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
@@ -488,7 +725,7 @@ fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
                 .gap(px(6.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(10.0))
                         .font_family(theme.font_mono.clone())
                         .child(
                             div()
@@ -500,7 +737,7 @@ fn import_scene_preview(variant: &zeron_theme::ThemeVariant) -> AnyElement {
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(10.0))
                         .font_family(theme.font_mono.clone())
                         .text_color(theme.syntax.string)
                         .child("  \"Theme mapping\""),
@@ -575,7 +812,7 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .border_color(theme.border)
         .bg(theme.surface_raised.opacity(0.35))
         .p(px(10.0))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .line_height(px(16.0))
         .text_color(theme.text_muted)
         .child(div().text_color(theme.text).child(summary))
@@ -793,7 +1030,7 @@ impl AppearancePage {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(crate::typography::ui_rems(12.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(SharedString::from(selected_variant.name.clone())),
@@ -956,7 +1193,7 @@ impl AppearancePage {
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(if active { theme.text } else { theme.text_muted })
                                 .child(label),
@@ -966,7 +1203,7 @@ impl AppearancePage {
                     div()
                         .mt(px(4.0))
                         .ml(px(23.0))
-                        .text_size(px(10.5))
+                        .text_size(crate::typography::ui_rems(10.5))
                         .text_color(theme.text_muted.opacity(0.68))
                         .child(description),
                 )
@@ -975,7 +1212,7 @@ impl AppearancePage {
         let section_label = |label: &'static str| {
             div()
                 .mb(px(7.0))
-                .text_size(px(11.0))
+                .text_size(crate::typography::ui_rems(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
                 .child(label)
@@ -1046,7 +1283,7 @@ impl AppearancePage {
                     .child(section_label("Detected themes").mb(px(0.0)))
                     .child(
                         div()
-                            .text_size(px(10.5))
+                            .text_size(crate::typography::ui_rems(10.5))
                             .text_color(theme.text_muted.opacity(0.65))
                             .child(SharedString::from(format!(
                                 "{} variant{}",
@@ -1142,14 +1379,14 @@ impl AppearancePage {
                                         .min_w_0()
                                         .child(
                                             div()
-                                                .text_size(px(12.5))
+                                                .text_size(crate::typography::ui_rems(12.5))
                                                 .font_weight(gpui::FontWeight::MEDIUM)
                                                 .text_color(theme.text)
                                                 .child(SharedString::from(variant.name.clone())),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
+                                                .text_size(crate::typography::ui_rems(11.0))
                                                 .text_color(theme.text_muted.opacity(0.65))
                                                 .child(appearance),
                                         ),
@@ -1202,7 +1439,7 @@ impl AppearancePage {
                         .p(px(10.0))
                         .rounded(px(8.0))
                         .bg(theme.warning.opacity(0.08))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning)
                         .child(SharedString::from(format!(
                             "{} could not be compiled · {}",
@@ -1217,7 +1454,7 @@ impl AppearancePage {
                     .flex()
                     .items_start()
                     .gap(px(7.0))
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .line_height(px(16.0))
                     .text_color(theme.text_muted.opacity(0.72))
                     .child(
@@ -1240,7 +1477,7 @@ impl AppearancePage {
                     .flex()
                     .items_start()
                     .gap(px(7.0))
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .line_height(px(16.0))
                     .text_color(theme.danger)
                     .child(
@@ -1417,7 +1654,7 @@ impl AppearancePage {
                 .child(
                     div()
                         .mt(px(14.0))
-                        .text_size(px(12.5))
+                        .text_size(crate::typography::ui_rems(12.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .child(SharedString::from(variant.name.clone())),
                 )
@@ -1489,7 +1726,7 @@ impl AppearancePage {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(
                                 if matches!(entry.status, CustomThemeStatus::Warning { .. }) {
                                     theme.warning
@@ -1629,7 +1866,7 @@ impl AppearancePage {
                     .pb(px(4.0))
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(px(10.5))
+                    .text_size(crate::typography::ui_rems(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
                     .child("IMPORTED")
@@ -1649,7 +1886,7 @@ impl AppearancePage {
                     .pb(px(4.0))
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(px(10.5))
+                    .text_size(crate::typography::ui_rems(10.5))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
                     .child("LINKED")
@@ -1668,6 +1905,10 @@ impl AppearancePage {
 impl Render for AppearancePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let effective_font = typography::effective(cx);
+        let requested_font = typography::requested(cx);
+        let availability = typography::availability(cx);
+        let fixed = theme.font_sans_fixed.clone();
         let current_mode = appearance::mode(cx);
         let current_themes = appearance::themes(cx);
         let current_accent = appearance::accent(cx);
@@ -1818,6 +2059,187 @@ impl Render for AppearancePage {
             .render_import_dialog(window.viewport_size(), &theme, window, cx)
             .or_else(|| self.render_review_dialog(window.viewport_size(), &theme, cx));
 
+        let font_rows: Vec<AnyElement> = availability
+            .choices()
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(ix, family)| {
+                let available = availability.is_available(&family);
+                let selected = family == effective_font;
+                let focused = family == self.selected_font;
+                let label = SharedString::from(family.label().to_owned());
+                popover::menu_row_nav(
+                    &theme,
+                    selected,
+                    focused,
+                    format!("interface-font-option-{ix}"),
+                )
+                .id(("interface-font-option", ix))
+                .when(available, |row| {
+                    row.on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.selected_font = family.clone();
+                        this.commit_font(cx);
+                    }))
+                })
+                .when(!available, |row| row.opacity(0.45))
+                .child(div().flex_1().min_w_0().truncate().child(label))
+                .child(div().w(px(18.0)).flex_none().when(selected, |slot| {
+                    slot.child(
+                        icons::icon(icons::CHECK)
+                            .size(px(14.0))
+                            .text_color(theme.accent),
+                    )
+                }))
+                .into_any_element()
+            })
+            .collect();
+
+        let font_menu = popover::popover_card(&theme)
+            .id("interface-font-scroll")
+            .w(px(220.0))
+            .font_family(fixed.clone())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_font_menu(cx)))
+            .max_h(px(320.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(font_rows)
+            .into_any_element();
+
+        let font_trigger = div()
+            .id("interface-font-dropdown")
+            .relative()
+            .w(px(220.0))
+            .h(px(36.0))
+            .px(px(11.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(if self.font_menu.is_open() {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(crate::theme::ink(0.025))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .track_focus(&self.font_focus)
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.on_font_key_down(event, cx)),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                window.focus(&this.font_focus, cx);
+                this.toggle_font_menu(cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(effective_font.label().to_owned())),
+            )
+            .child(
+                icons::icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .when_some(self.font_menu.get(), |trigger, _| {
+                trigger.child(popover::anchored_menu_below(
+                    "interface-font-menu",
+                    font_menu,
+                    self.font_menu.closing_since(),
+                ))
+            });
+
+        let size_rows: Vec<AnyElement> = UiFontSize::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(ix, size)| {
+                popover::menu_row_nav(
+                    &theme,
+                    size == typography::font_size(cx),
+                    size == self.selected_size,
+                    format!("interface-font-size-option-{ix}"),
+                )
+                .id(("interface-font-size-option", ix))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.selected_size = size;
+                    this.commit_size(window, cx);
+                }))
+                .child(div().flex_1().child(size.label()))
+                .child(div().w(px(18.0)).flex_none().when(
+                    size == typography::font_size(cx),
+                    |slot| {
+                        slot.child(
+                            icons::icon(icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                    },
+                ))
+                .into_any_element()
+            })
+            .collect();
+
+        let size_menu = popover::popover_card(&theme)
+            .w(px(128.0))
+            .font_family(fixed.clone())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_size_menu(cx)))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(size_rows)
+            .into_any_element();
+
+        let size_trigger = div()
+            .id("interface-font-size-dropdown")
+            .relative()
+            .w(px(128.0))
+            .h(px(36.0))
+            .px(px(11.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(if self.size_menu.is_open() {
+                theme.border_strong
+            } else {
+                theme.border
+            })
+            .bg(crate::theme::ink(0.025))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .cursor_pointer()
+            .track_focus(&self.size_focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_size_key_down(event, window, cx)
+            }))
+            .on_click(cx.listener(|this, _, window, cx| {
+                window.focus(&this.size_focus, cx);
+                this.toggle_size_menu(cx);
+            }))
+            .child(div().flex_1().child(typography::font_size(cx).label()))
+            .child(
+                icons::icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .when_some(self.size_menu.get(), |trigger, _| {
+                trigger.child(popover::anchored_menu_below(
+                    "interface-font-size-menu",
+                    size_menu,
+                    self.size_menu.closing_since(),
+                ))
+            });
+
         div()
             .id("appearance-page")
             .size_full()
@@ -1843,11 +2265,65 @@ impl Render for AppearancePage {
                             .child(widgets::option_card_row().children(cards)),
                     )
                     .child(widgets::section_card(&theme).children(settings_rows))
+                    .child(
+                        div()
+                            .mt(px(36.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.0))
+                            .font_family(fixed.clone())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(24.0))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.0))
+                                            .child(widgets::field_label(&theme, "Interface font"))
+                                            .child(
+                                                div()
+                                                    .max_w(px(520.0))
+                                                    .text_size(typography::ui_rems(12.0))
+                                                    .line_height(px(18.0))
+                                                    .text_color(theme.text_muted)
+                                                    .child(SharedString::from(
+                                                        "Used across the interface and conversations. Code, diffs, and terminal keep their current fonts and sizes.",
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(font_trigger)
+                                            .child(size_trigger),
+                                    ),
+                            )
+                            .when(requested_font != effective_font, |section| {
+                                section.child(
+                                    widgets::error_strip(
+                                        &theme,
+                                        "This font could not be loaded. Comet is using Geist.",
+                                    )
+                                    .font_family(fixed.clone()),
+                                )
+                            }),
+                    )
                     .when_some(library_warning, |page, warning| {
                         page.child(
                             div()
                                 .mt(px(8.0))
-                                .text_size(px(11.5))
+                                .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.warning)
                                 .child(warning),
                         )
@@ -1904,5 +2380,43 @@ mod tests {
             surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted)
                 .contains("every theme")
         );
+    }
+
+    #[test]
+    fn font_options_appear_once_in_stable_order() {
+        let catalog = FontAvailability::all();
+        let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
+        assert_eq!(labels.len(), 5);
+        assert_eq!(
+            labels,
+            ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]
+        );
+        let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 5);
+    }
+
+    #[test]
+    fn font_keyboard_navigation_stops_at_edges_and_skips_unavailable() {
+        let all = FontAvailability::all();
+        assert_eq!(
+            step_font(&UiFontFamily::Geist, -1, &all),
+            UiFontFamily::Geist
+        );
+        assert_eq!(
+            step_font(&UiFontFamily::Installed("Menlo".into()), 1, &all),
+            UiFontFamily::Installed("Menlo".into())
+        );
+        let without_arial = all.without(&UiFontFamily::Installed("Arial".into()));
+        assert_eq!(
+            step_font(&UiFontFamily::System, 1, &without_arial),
+            UiFontFamily::Installed("Menlo".into())
+        );
+    }
+
+    #[test]
+    fn font_size_options_are_ordered_and_include_the_default() {
+        let values = UiFontSize::ALL.map(UiFontSize::pixels);
+        assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(UiFontSize::ALL.contains(&UiFontSize::default()));
     }
 }
