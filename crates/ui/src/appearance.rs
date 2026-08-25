@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{App, Global, Subscription, Window};
 use serde::{Deserialize, Serialize};
+use zeron_theme::{AccentSelection, SurfacePreference, ThemeSelection};
 
 use crate::settings::UiSettings;
 use crate::theme::{Appearance, Theme};
@@ -59,6 +60,9 @@ impl AppearanceMode {
 pub struct AppearanceState {
     pub mode: AppearanceMode,
     pub system: Appearance,
+    pub themes: ThemeSelection,
+    pub accent: AccentSelection,
+    pub surface: SurfacePreference,
     /// Where `ui-settings.json` lives, so a menu action can persist the choice
     /// without routing through the shell entity that normally owns settings.
     pub data_dir: PathBuf,
@@ -78,22 +82,57 @@ pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
 /// Install the appearance globals and the matching theme. Call once at boot,
 /// before any window opens, so the first frame is already the right palette
 /// (installing later produces a visible dark-to-light flash).
-pub fn init(mode: AppearanceMode, data_dir: impl Into<PathBuf>, cx: &mut App) {
+pub fn init(
+    mode: AppearanceMode,
+    themes: ThemeSelection,
+    accent: AccentSelection,
+    surface: SurfacePreference,
+    data_dir: impl Into<PathBuf>,
+    cx: &mut App,
+) {
     let system = Appearance::from_window(cx.window_appearance());
     tracing::debug!(?mode, ?system, "appearance: initial");
     cx.set_global(AppearanceState {
         mode,
         system,
+        themes: themes.clone(),
+        accent,
+        surface,
         data_dir: data_dir.into(),
     });
     sync_ns_appearance(mode);
-    Theme::install(resolve(mode, system), cx);
+    let appearance = resolve(mode, system);
+    Theme::install_selection(
+        appearance,
+        themes.variant_id(model_appearance(appearance)),
+        accent,
+        surface,
+        cx,
+    );
 }
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
 pub fn mode(cx: &App) -> AppearanceMode {
     cx.try_global::<AppearanceState>()
         .map(|s| s.mode)
+        .unwrap_or_default()
+}
+
+pub fn themes(cx: &App) -> ThemeSelection {
+    cx.try_global::<AppearanceState>()
+        .map(|state| state.themes.clone())
+        .unwrap_or_default()
+}
+
+pub fn accent(cx: &App) -> AccentSelection {
+    cx.try_global::<AppearanceState>()
+        .map(|state| state.accent)
+        .unwrap_or_default()
+}
+
+pub fn surface(cx: &App) -> SurfacePreference {
+    cx.try_global::<AppearanceState>()
+        .map(|state| state.surface)
         .unwrap_or_default()
 }
 
@@ -113,6 +152,54 @@ pub fn set_mode(mode: AppearanceMode, cx: &mut App) {
     persist(mode, &data_dir);
 }
 
+/// Change the interactive accent without changing any semantic theme roles.
+pub fn set_theme(appearance: Appearance, variant_id: impl Into<String>, cx: &mut App) {
+    if !cx.has_global::<AppearanceState>() {
+        return;
+    }
+    let variant_id = variant_id.into();
+    let state = cx.global_mut::<AppearanceState>();
+    if state.themes.variant_id(model_appearance(appearance)) == variant_id {
+        return;
+    }
+    state
+        .themes
+        .set_variant(model_appearance(appearance), variant_id);
+    let data_dir = state.data_dir.clone();
+    let themes = state.themes.clone();
+    apply(cx);
+    persist_themes(themes, &data_dir);
+}
+
+pub fn set_accent(accent: AccentSelection, cx: &mut App) {
+    if !cx.has_global::<AppearanceState>() {
+        return;
+    }
+    let state = cx.global_mut::<AppearanceState>();
+    if state.accent == accent {
+        return;
+    }
+    state.accent = accent;
+    let data_dir = state.data_dir.clone();
+    apply(cx);
+    persist_accent(accent, &data_dir);
+}
+
+/// Change glass independently from appearance, theme, and accent selections.
+pub fn set_surface(surface: SurfacePreference, cx: &mut App) {
+    if !cx.has_global::<AppearanceState>() {
+        return;
+    }
+    let state = cx.global_mut::<AppearanceState>();
+    if state.surface == surface {
+        return;
+    }
+    state.surface = surface;
+    let data_dir = state.data_dir.clone();
+    apply(cx);
+    persist_surface(surface, &data_dir);
+}
+
 /// Read-modify-write `ui-settings.json` for just the appearance key.
 ///
 /// Deliberately a fresh load rather than a write of some cached struct: the
@@ -124,6 +211,30 @@ fn persist(mode: AppearanceMode, data_dir: &Path) {
     settings.appearance = mode;
     if let Err(err) = settings.save(data_dir) {
         tracing::warn!(error = %err, "could not persist appearance");
+    }
+}
+
+fn persist_themes(themes: ThemeSelection, data_dir: &Path) {
+    let mut settings = UiSettings::load(data_dir);
+    settings.theme_selection = themes;
+    if let Err(err) = settings.save(data_dir) {
+        tracing::warn!(error = %err, "could not persist themes");
+    }
+}
+
+fn persist_accent(accent: AccentSelection, data_dir: &Path) {
+    let mut settings = UiSettings::load(data_dir);
+    settings.accent = accent;
+    if let Err(err) = settings.save(data_dir) {
+        tracing::warn!(error = %err, "could not persist accent color");
+    }
+}
+
+fn persist_surface(surface: SurfacePreference, data_dir: &Path) {
+    let mut settings = UiSettings::load(data_dir);
+    settings.surface = surface;
+    if let Err(err) = settings.save(data_dir) {
+        tracing::warn!(error = %err, "could not persist surface preference");
     }
 }
 
@@ -172,12 +283,18 @@ pub fn apply(cx: &mut App) {
     };
     sync_ns_appearance(state.mode);
     let wanted = resolve(state.mode, state.system);
-    let changed = !cx
-        .try_global::<Theme>()
-        .is_some_and(|t| t.appearance == wanted);
+    let accent = state.accent;
+    let surface = state.surface;
+    let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
+    let changed = !cx.try_global::<Theme>().is_some_and(|theme| {
+        theme.appearance == wanted
+            && theme.variant_id.as_ref() == variant_id
+            && theme.accent_selection == accent
+            && theme.surface_preference == surface
+    });
     if changed {
-        tracing::debug!(?wanted, "appearance: installing palette");
-        Theme::install(wanted, cx);
+        tracing::debug!(?wanted, %variant_id, "appearance: installing palette");
+        Theme::install_selection(wanted, &variant_id, accent, surface, cx);
         cx.refresh_windows();
     }
     // Unconditional, even when the palette did not move: this is the only thing
@@ -188,6 +305,29 @@ pub fn apply(cx: &mut App) {
     // opaque, which is exactly how the frost died. zed runs the same loop on
     // every settings change (`crates/zed/src/main.rs`).
     reapply_window_background(cx);
+}
+
+/// Rebuild the current palette after the installed custom registry changes.
+/// Unlike [`apply`], this deliberately reinstalls even when the selected id is
+/// unchanged because a linked theme may have recompiled under that same id.
+pub fn apply_registry_change(cx: &mut App) {
+    let Some(state) = cx.try_global::<AppearanceState>() else {
+        return;
+    };
+    let wanted = resolve(state.mode, state.system);
+    let accent = state.accent;
+    let surface = state.surface;
+    let variant_id = state.themes.variant_id(model_appearance(wanted)).to_owned();
+    Theme::reinstall_selection(wanted, &variant_id, accent, surface, cx);
+    cx.refresh_windows();
+    reapply_window_background(cx);
+}
+
+fn model_appearance(appearance: Appearance) -> zeron_theme::Appearance {
+    match appearance {
+        Appearance::Dark => zeron_theme::Appearance::Dark,
+        Appearance::Light => zeron_theme::Appearance::Light,
+    }
 }
 
 /// Tell AppKit which appearance the app's windows use, so the chrome *it*

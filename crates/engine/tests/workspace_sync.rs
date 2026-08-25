@@ -154,6 +154,7 @@ fn run_request(prompt: &str) -> RunRequest {
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
+        worktree: None,
         resume: None,
     }
 }
@@ -654,6 +655,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 cwd: Some("/tmp/legacy".into()),
                 branch: Some("main".into()),
                 checkout_id: None,
+                source_context: None,
                 config: None,
                 last_message_preview: Some("old preview".into()),
                 last_message_at: Some(now),

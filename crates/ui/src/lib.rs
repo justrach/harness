@@ -15,12 +15,16 @@
 pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
+pub mod badges;
+pub mod change_requests;
 pub mod changes;
+pub mod comments;
 pub mod composer;
 pub mod edge_fade;
 pub mod frost;
 pub mod history;
 pub mod icons;
+pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
@@ -35,11 +39,13 @@ pub mod state;
 pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
+pub mod theme_library;
 pub mod transcript;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 /// Embedded UI fonts — Geist and Geist Mono (variable), © Vercel Inc.,
@@ -94,6 +100,8 @@ pub struct UiConfig {
     pub workos_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
+    /// Conversation URL passed by the OS on a cold launch.
+    pub initial_url: Option<String>,
 }
 
 impl UiConfig {
@@ -124,6 +132,16 @@ impl gpui::Global for ReopenState {}
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
     let app = gpui_platform::application().with_assets(icons::Assets);
+    let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
+    let callback_tx = url_tx.clone();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = callback_tx.unbounded_send(url);
+        }
+    });
+    if let Some(url) = config.initial_url.clone() {
+        let _ = url_tx.unbounded_send(url);
+    }
     // Dock-icon click with no window (⌘W closed it): rebuild the main window
     // around the still-running engine — zed does the same via `on_reopen`
     // (crates/zed/src/main.rs `app.on_reopen`).
@@ -143,16 +161,29 @@ pub fn run_app(config: UiConfig) {
         // final one on the very first frame, or the window flashes the wrong
         // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
+        let ui_settings = settings::UiSettings::load(&data_dir);
+        theme_library::init(data_dir.clone(), cx);
         appearance::init(
-            settings::UiSettings::load(&data_dir).appearance,
+            ui_settings.appearance,
+            ui_settings.theme_selection,
+            ui_settings.accent,
+            ui_settings.surface,
             data_dir,
             cx,
         );
         composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);
+        cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|_| state::AppState::new());
+        let url_state = state.clone();
+        cx.spawn(async move |cx| {
+            while let Some(url) = url_rx.next().await {
+                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
+            }
+        })
+        .detach();
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
@@ -223,6 +254,18 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             // Drag + start_window_move) — mark the content view app-owned
             // so AppKit neither dead-zones the strip nor delays clicks.
             app_owns_titlebar_drag: true,
+            // Linux: request client-side decorations — zeron draws its own
+            // unified titlebar and (under CSD) its own caption buttons
+            // (shell.rs `render_linux_caption_controls`). Leaving this unset
+            // requests SERVER decorations, which stacked a compositor
+            // titlebar on top of the app's chrome under sway/KDE, while
+            // compositors without SSD support (GNOME) went client-side
+            // anyway — frameless, and before the shell drew caption buttons,
+            // with no window controls at all. The compositor can still
+            // override via xdg-decoration negotiation; the shell re-resolves
+            // what to draw every frame.
+            window_decorations: cfg!(target_os = "linux")
+                .then_some(gpui::WindowDecorations::Client),
             // Frosted shell (macOS): blur the desktop behind the window; the
             // shell paints its frost surface translucent so the sidebar reads
             // as glass (shell.rs root). Elsewhere blur support is compositor

@@ -262,7 +262,7 @@ pub fn render_block(
                         .min_w(px(18.0))
                         .text_size(px(MD_TEXT_SIZE))
                         .line_height(px(MD_LINE_HEIGHT))
-                        .text_color(theme.accent.opacity(0.85))
+                        .text_color(theme.accent)
                         .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                         .into_any_element(),
                     None => div()
@@ -278,7 +278,7 @@ pub fn render_block(
                                 .w(px(5.0))
                                 .h(px(5.0))
                                 .rounded_full()
-                                .bg(theme.accent.opacity(0.85)),
+                                .bg(theme.accent),
                         )
                         .into_any_element(),
                 };
@@ -499,14 +499,12 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
-/// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
-/// — violet-300 text over a violet-400 wash, readable on the #060606 panel.
+/// Inline-code tint: a text-safe use of the selected accent identity.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text // violet-300
+    theme.code_text
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash // violet-400/12
+    theme.code_wash
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 2px past the glyphs, y insets 2px from the 22px line box).
@@ -559,7 +557,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
         let is_link = run.style.link.is_some();
-        // Inline code reads violet (see `inline_code_text`); everything else
+        // Inline code uses the spectrum's code tone; everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
@@ -730,9 +728,9 @@ fn flat_text_element(
         .into_any_element()
 }
 
-/// Selection tint: the accent hue under the glyphs, dark-panel strength.
+/// Selection tint shared with native inputs and the composer.
 fn selection_wash(theme: &Theme) -> Hsla {
-    theme.accent.opacity(0.35) // indigo-400
+    theme.selection
 }
 
 /// Selection support for a plain (non-markdown) text element — the user
@@ -826,21 +824,28 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
     })
 }
 
-/// Resolve the anchor + head into document-ordered spans over the frame's
-/// registry and store them; true if the selection changed.
-fn resolve_drag(anchor_key: &str, anchor_ix: usize, head: (usize, usize)) -> bool {
+/// Resolve the drag head into document-ordered spans over the frame's registry
+/// and store them; true if the selection changed. The selection model retains
+/// spans across overlapping virtualized frames once its anchor scrolls away.
+fn resolve_drag(head: (usize, usize)) -> bool {
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        let Some(anchor_ei) = reg.iter().position(|e| e.key.as_ref() == anchor_key) else {
-            return false; // anchor scrolled out of the frame — keep spans
-        };
         let elements: Vec<(&str, &str)> = reg
             .iter()
             .map(|e| (e.key.as_ref(), e.text.as_ref()))
             .collect();
-        let spans = super::selection::resolve_spans(&elements, (anchor_ei, anchor_ix), head);
-        super::selection::update_spans(spans)
+        super::selection::update_drag(&elements, head)
     })
+}
+
+/// Continue the active drag at a window position. The transcript's edge-scroll
+/// driver calls this between scroll steps, so a stationary pointer keeps
+/// extending through newly painted rows.
+pub(crate) fn update_drag_at(position: gpui::Point<gpui::Pixels>) -> bool {
+    let Some(head) = registry_point(position) else {
+        return false;
+    };
+    resolve_drag(head)
 }
 
 /// Register this frame's window-level mouse listeners for one text element's
@@ -886,13 +891,10 @@ fn register_selection_listeners(
                 return;
             }
             // Only the anchor element's listener drives the drag.
-            let Some(anchor_ix) = super::selection::drag_anchor(&key) else {
+            if super::selection::drag_anchor(&key).is_none() {
                 return;
-            };
-            let Some(head) = registry_point(e.position) else {
-                return;
-            };
-            if resolve_drag(&key, anchor_ix, head) {
+            }
+            if update_drag_at(e.position) {
                 window.refresh();
             }
         });
@@ -923,21 +925,48 @@ pub(crate) fn range_rects(
     pad_x: f32,
     inset_y: f32,
 ) -> Vec<Bounds<gpui::Pixels>> {
+    range_rects_with_positions(
+        layout.bounds(),
+        layout.line_height(),
+        range,
+        pad_x,
+        inset_y,
+        |ix| layout.position_for_index(ix),
+    )
+}
+
+fn range_rects_with_positions(
+    bounds: Bounds<gpui::Pixels>,
+    line_height: gpui::Pixels,
+    range: &Range<usize>,
+    pad_x: f32,
+    inset_y: f32,
+    position_for_index: impl Fn(usize) -> Option<gpui::Point<gpui::Pixels>>,
+) -> Vec<Bounds<gpui::Pixels>> {
     let mut rects = Vec::new();
-    let line_height = layout.line_height();
     let mut cur = range.start;
     // Walk the range one visual row at a time: find the furthest index that
     // still sits on the current row (binary search over glyph positions).
     let mut guard = 0;
     while cur < range.end && guard < 256 {
         guard += 1;
-        let Some(p1) = layout.position_for_index(cur) else {
+        let Some(mut p1) = position_for_index(cur) else {
             break;
         };
+        // GPUI gives a soft-wrap boundary upstream affinity: the boundary
+        // index is reported at the end of the preceding visual row. When the
+        // following byte advances to a lower row, `cur` is also the start of
+        // that row; use its downstream position for the range start.
+        if let Some(after) = position_for_index(cur.saturating_add(1))
+            && after.y > p1.y
+        {
+            p1 = point(bounds.left(), after.y);
+        }
         // `seg_end` closes the wash on this row; `next` is the first index on
-        // the following row (strict progress even though a row-end index's
-        // position still reports the earlier row).
-        let (seg_end, next) = match layout.position_for_index(range.end) {
+        // the following row. A soft-wrap boundary belongs to both rows, so it
+        // closes this rectangle with upstream affinity and starts the next
+        // rectangle with the downstream correction above.
+        let (seg_end, next) = match position_for_index(range.end) {
             Some(pe) if pe.y == p1.y => (range.end, range.end),
             _ => {
                 // Largest ix on this row (probes stay on char boundaries only
@@ -945,15 +974,15 @@ pub(crate) fn range_rects(
                 let (mut lo, mut hi) = (cur, range.end);
                 while hi - lo > 1 {
                     let mid = lo + (hi - lo) / 2;
-                    match layout.position_for_index(mid) {
+                    match position_for_index(mid) {
                         Some(pm) if pm.y == p1.y => lo = mid,
                         _ => hi = mid,
                     }
                 }
-                (lo, hi)
+                (lo, lo)
             }
         };
-        if let Some(p2) = layout.position_for_index(seg_end)
+        if let Some(p2) = position_for_index(seg_end)
             && p2.x > p1.x
         {
             rects.push(Bounds::new(
@@ -1209,6 +1238,48 @@ pub fn runs_for_syntax_line_with_plain(
 mod tests {
     use super::*;
     use crate::markdown::parser::InlineStyle;
+
+    /// Model GPUI's upstream affinity at a soft-wrap boundary: byte 5 is
+    /// reported at the end of row 0, while byte 6 is after the first glyph on
+    /// row 1.
+    fn wrapped_position(ix: usize) -> Option<gpui::Point<gpui::Pixels>> {
+        (ix <= 9).then(|| {
+            if ix <= 5 {
+                point(px(ix as f32 * 10.0), px(0.0))
+            } else {
+                point(px((ix - 5) as f32 * 10.0), px(22.0))
+            }
+        })
+    }
+
+    fn wrapped_range_rects(range: Range<usize>) -> Vec<Bounds<gpui::Pixels>> {
+        range_rects_with_positions(
+            Bounds::new(point(px(0.0), px(0.0)), size(px(50.0), px(44.0))),
+            px(22.0),
+            &range,
+            0.0,
+            0.0,
+            wrapped_position,
+        )
+    }
+
+    #[test]
+    fn range_starting_at_soft_wrap_includes_first_glyph() {
+        let rects = wrapped_range_rects(5..9);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].origin, point(px(0.0), px(22.0)));
+        assert_eq!(rects[0].size, size(px(40.0), px(22.0)));
+    }
+
+    #[test]
+    fn range_crossing_soft_wrap_includes_first_continuation_glyph() {
+        let rects = wrapped_range_rects(2..9);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].origin, point(px(20.0), px(0.0)));
+        assert_eq!(rects[0].size, size(px(30.0), px(22.0)));
+        assert_eq!(rects[1].origin, point(px(0.0), px(22.0)));
+        assert_eq!(rects[1].size, size(px(40.0), px(22.0)));
+    }
 
     #[test]
     fn code_line_runs_cover_exactly() {
