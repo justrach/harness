@@ -221,6 +221,20 @@ impl Repos {
         })
     }
 
+    /// Commit checked out at `path`, or `None` for a repository without an
+    /// initial commit.
+    pub async fn head_sha(&self, path: &Path) -> Result<Option<String>, EngineError> {
+        match self
+            .git(&["rev-parse", "--verify", "HEAD^{commit}"], Some(path))
+            .await
+        {
+            Ok(sha) if !sha.is_empty() => Ok(Some(sha)),
+            Ok(_) => Ok(None),
+            Err(_) if self.is_repo(path).await => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Fetch every configured remote without pruning or integrating anything
     /// into the active branch. This intentionally updates refs only.
     pub async fn fetch_all(&self, repo_path: &Path) -> Result<(), EngineError> {

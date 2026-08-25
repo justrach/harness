@@ -135,8 +135,11 @@ struct RepoPathParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CheckoutChangeRequestParams {
     cwd: String,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1292,6 +1295,7 @@ impl RpcService for EngineRpc {
                 fn room_json(s: &zeron_sync::RoomStatsSnapshot) -> serde_json::Value {
                     serde_json::json!({
                         "connected": s.connected,
+                        "synced": s.synced,
                         "lastPushedMs": s.last_pushed_ms,
                         "lastAckMs": s.last_ack_ms,
                         "rejoins": s.rejoins,
@@ -1420,7 +1424,7 @@ impl RpcService for EngineRpc {
                 let cwd = self.change_request_root(&p.cwd).await?;
                 let stream = self
                     .change_requests
-                    .watch(&cwd)
+                    .watch_for_branch(&cwd, p.branch.as_deref())
                     .await
                     .map_err(|error| RpcError::Failed(error.to_string()))?
                     .filter_map(|status| async move { serde_json::to_value(status).ok() });

@@ -142,6 +142,8 @@ zeron/
     rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)
+    theme/        zeron-theme    # source-neutral theme schema + built-in/custom registry,
+                                 # validation, provenance, and local VS Code compiler
     ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
@@ -199,8 +201,13 @@ feature spec `docs/research/feature-inventory.md` §1.
   ease-out width/height transitions for sidebar/panes, sidebar-resort **slide animation**
   (we own the list, so animate row positions directly — the View Transitions equivalent, 260ms
   cubic-bezier(0.22,1,0.36,1)), reduced-motion switch.
-- **Theme**: always-dark monochrome, oklch-derived neutral scale precomputed to Hsla, hairline
-  borders, Geist/Geist Mono bundled fonts.
+- **Theme**: independent light/dark resolved variants, theme-owned semantic/syntax/terminal
+  palettes, optional interaction-accent overlays, and a device-local surface preference that
+  resolves each variant's recommended frost/opaque treatment without changing theme selection.
+  Forced frost derives contrast-checked tints from mapped theme surfaces. Local VS Code
+  file/package compilation and imported/linked custom families retain last-known-good
+  persistence. Colors remain paint-only; hairline borders and bundled Geist/Geist Mono remain
+  shared presentation foundations.
 
 ## 5. Engine plan
 

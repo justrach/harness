@@ -83,6 +83,23 @@ pub struct ChatConfig {
     pub sandbox: SandboxLevel,
 }
 
+/// Immutable-at-run-start repository context owned by one conversation.
+///
+/// This is deliberately separate from the live checkout snapshot: another
+/// chat may change the branch at the same checkout without changing which
+/// branch this conversation belongs to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSourceContext {
+    pub checkout_id: String,
+    pub repo_root: String,
+    pub cwd: String,
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
@@ -95,6 +112,11 @@ pub struct Chat {
     pub branch: Option<String>,
     /// Canonical id of the repo checkout/worktree this chat operates in.
     pub checkout_id: Option<String>,
+    /// Repository identity captured for this conversation immediately before
+    /// its harness run. Unlike `branch`, this is never inferred from another
+    /// chat sharing the same checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<ConversationSourceContext>,
     pub config: Option<ChatConfig>,
     pub last_message_preview: Option<String>,
     pub last_message_at: Option<DateTime<Utc>>,
