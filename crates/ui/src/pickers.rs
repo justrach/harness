@@ -839,6 +839,21 @@ impl Pickers {
 
     /// Capture knob (`ZERON_OPEN_DIALOG=model`): open the combined
     /// harness/model menu programmatically.
+    /// A jump-slot press while the model menu is open. The shell's session
+    /// bindings (Mod+1…9) win the dispatch race — gpui runs a matched
+    /// binding before any key handler — so the shell forwards the slot here
+    /// instead of going quiet and eating the very chips the rows advertise
+    /// (macOS field report: "cmd shortcuts do nothing in the model
+    /// selector"). Returns whether the menu was open and the slot consumed.
+    pub fn jump_model_slot(&mut self, slot: usize, cx: &mut Context<Self>) -> bool {
+        if self.open_kind() != Some(PickerKind::HarnessModel) {
+            return false;
+        }
+        self.activate_model_index(slot, cx);
+        cx.notify();
+        true
+    }
+
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);
