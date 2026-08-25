@@ -41,42 +41,12 @@ pub mod terminal;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
+pub mod typography;
 
-use std::borrow::Cow;
 use std::path::PathBuf;
 
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-
-/// Embedded UI fonts — Geist and Geist Mono (variable), © Vercel Inc.,
-/// licensed under the SIL Open Font License 1.1 (https://openfontlicense.org).
-/// Bundled so the type ships with the binary instead of depending on what the
-/// host system happens to have installed.
-static FONT_GEIST: &[u8] = include_bytes!("../assets/fonts/Geist.ttf");
-static FONT_GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono.ttf");
-/// Static Geist weights alongside the variable file: gpui's cosmic-text path
-/// (Linux) rasterizes variable fonts at their default instance only — it never
-/// applies `wght` coordinates — so medium/semibold/bold text silently paints
-/// at 400 with just the variable TTF registered. The statics give the face
-/// matcher real 500/600/700 faces (macOS/CoreText applies the variable axis
-/// natively and simply never falls through to these).
-static FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Geist-Medium.ttf");
-static FONT_GEIST_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Geist-SemiBold.ttf");
-static FONT_GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
-
-/// Register the embedded fonts with the gpui text system. Failure is non-fatal:
-/// the theme's system fallbacks take over (same families the CSS stack names).
-fn register_fonts(cx: &App) {
-    if let Err(err) = cx.text_system().add_fonts(vec![
-        Cow::Borrowed(FONT_GEIST),
-        Cow::Borrowed(FONT_GEIST_MONO),
-        Cow::Borrowed(FONT_GEIST_MEDIUM),
-        Cow::Borrowed(FONT_GEIST_SEMIBOLD),
-        Cow::Borrowed(FONT_GEIST_BOLD),
-    ]) {
-        tracing::warn!(error = %err, "failed to register embedded Geist fonts");
-    }
-}
 
 pub use state::EngineBootConfig;
 pub use zeron_proto::HarnessId;
@@ -156,19 +126,24 @@ pub fn run_app(config: UiConfig) {
     app.run(move |cx: &mut App| {
         // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
         gpui_tokio::init(cx);
-        register_fonts(cx);
-        // Appearance before anything paints: the theme global has to be the
-        // final one on the very first frame, or the window flashes the wrong
-        // palette while settings load.
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
+        settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        let font_availability = typography::register_fonts(cx);
+        // Typography first: theme installation reads the effective family, so
+        // the first frame has the final font and palette without a flash.
+        typography::init(
+            ui_settings.ui_font_family.clone(),
+            ui_settings.ui_font_size,
+            font_availability,
+            cx,
+        );
         theme_library::init(data_dir.clone(), cx);
         appearance::init(
             ui_settings.appearance,
             ui_settings.theme_selection,
             ui_settings.accent,
             ui_settings.surface,
-            data_dir.clone(),
             cx,
         );
         history::init(
@@ -176,7 +151,6 @@ pub fn run_app(config: UiConfig) {
             ui_settings.git_history_column_widths,
             ui_settings.git_history_column_order,
             ui_settings.git_history_author_display,
-            data_dir,
             cx,
         );
         composer::init(cx);
@@ -198,6 +172,7 @@ pub fn run_app(config: UiConfig) {
         // doc snapshots before the process exits (remote engines outlive us).
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
+            settings::flush(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
                     gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
@@ -286,6 +261,7 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             ..Default::default()
         },
         move |window, cx| {
+            window.set_rem_size(px(typography::font_size(cx).pixels()));
             // React to the user flipping macOS between light and dark. Detached:
             // the subscription lives as long as the window does, and the window
             // owns nothing that would drop it early.

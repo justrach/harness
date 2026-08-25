@@ -5,7 +5,6 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,8 +26,8 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion::AnimationExt;
 use crate::popover::{self, Popup};
 use crate::settings::{
-    GitHistoryAuthorDisplay, GitHistoryColumn, GitHistoryColumnOrder, GitHistoryColumnWidths,
-    GitHistoryColumns, SAVE_DEBOUNCE_MS, UiSettings,
+    self, GitHistoryAuthorDisplay, GitHistoryColumn, GitHistoryColumnOrder, GitHistoryColumnWidths,
+    GitHistoryColumns, SavePolicy,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -358,7 +357,6 @@ struct HistoryColumnPreferences {
     widths: GitHistoryColumnWidths,
     order: GitHistoryColumnOrder,
     author_display: GitHistoryAuthorDisplay,
-    data_dir: PathBuf,
 }
 
 impl gpui::Global for HistoryColumnPreferences {}
@@ -433,7 +431,6 @@ pub fn init(
     widths: GitHistoryColumnWidths,
     order: GitHistoryColumnOrder,
     author_display: GitHistoryAuthorDisplay,
-    data_dir: PathBuf,
     cx: &mut App,
 ) {
     cx.set_global(HistoryColumnPreferences {
@@ -441,7 +438,6 @@ pub fn init(
         widths,
         order,
         author_display,
-        data_dir,
     });
 }
 
@@ -1369,7 +1365,6 @@ pub struct GitHistory {
     graph_hover_clear_task: Option<Task<()>>,
     column_drag_anchor: Option<HistoryColumnDragAnchor>,
     column_drag: Option<HistoryColumnDragState>,
-    column_save_task: Option<Task<()>>,
     avatar_images: HashMap<String, Arc<Image>>,
     column_menu: Popup<gpui::Point<gpui::Pixels>>,
     author_menu: Popup<gpui::Point<gpui::Pixels>>,
@@ -2014,7 +2009,6 @@ impl GitHistory {
             graph_hover_clear_task: None,
             column_drag_anchor: None,
             column_drag: None,
-            column_save_task: None,
             avatar_images: HashMap::new(),
             column_menu: Popup::default(),
             author_menu: Popup::default(),
@@ -2896,7 +2890,7 @@ impl GitHistory {
     }
 
     fn toggle_column(&mut self, column: GitHistoryColumn, cx: &mut Context<Self>) {
-        let (columns, widths, order, data_dir) = {
+        let (columns, widths, order) = {
             let preferences = cx.global_mut::<HistoryColumnPreferences>();
             match column {
                 GitHistoryColumn::Author => {
@@ -2909,10 +2903,9 @@ impl GitHistory {
                 preferences.columns,
                 preferences.widths,
                 preferences.order.clone(),
-                preferences.data_dir.clone(),
             )
         };
-        Self::persist_column_layout(columns, widths, &order, &data_dir);
+        Self::persist_column_layout(columns, widths, &order, SavePolicy::Immediate, cx);
         cx.refresh_windows();
         cx.notify();
     }
@@ -2921,14 +2914,13 @@ impl GitHistory {
         let columns = GitHistoryColumns::default();
         let widths = GitHistoryColumnWidths::default();
         let order = GitHistoryColumnOrder::default();
-        let data_dir = {
+        {
             let preferences = cx.global_mut::<HistoryColumnPreferences>();
             preferences.columns = columns;
             preferences.widths = widths;
             preferences.order = order.clone();
-            preferences.data_dir.clone()
-        };
-        Self::persist_column_layout(columns, widths, &order, &data_dir);
+        }
+        Self::persist_column_layout(columns, widths, &order, SavePolicy::Immediate, cx);
         cx.refresh_windows();
         cx.notify();
     }
@@ -2937,35 +2929,27 @@ impl GitHistory {
         columns: GitHistoryColumns,
         widths: GitHistoryColumnWidths,
         order: &GitHistoryColumnOrder,
-        data_dir: &std::path::Path,
+        policy: SavePolicy,
+        cx: &mut Context<Self>,
     ) {
-        // Reload before writing because Shell and Appearance own other fields
-        // in this same file and may have persisted them since boot.
-        let mut settings = UiSettings::load(data_dir);
-        settings.git_history_columns = columns;
-        settings.git_history_column_widths = widths;
-        settings.git_history_column_order = order.clone();
-        if let Err(error) = settings.save(data_dir) {
-            tracing::warn!(%error, "could not persist Git history column layout");
-        }
+        let order = order.clone();
+        settings::update(policy, cx, move |settings| {
+            settings.git_history_columns = columns;
+            settings.git_history_column_widths = widths;
+            settings.git_history_column_order = order;
+        });
     }
 
     fn schedule_column_layout_save(&mut self, cx: &mut Context<Self>) {
-        self.column_save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
-                .await;
-            this.update(cx, |_, cx| {
-                let preferences = cx.global::<HistoryColumnPreferences>();
-                Self::persist_column_layout(
-                    preferences.columns,
-                    preferences.widths,
-                    &preferences.order,
-                    &preferences.data_dir,
-                );
-            })
-            .ok();
-        }));
+        let (columns, widths, order) = {
+            let preferences = cx.global::<HistoryColumnPreferences>();
+            (
+                preferences.columns,
+                preferences.widths,
+                preferences.order.clone(),
+            )
+        };
+        Self::persist_column_layout(columns, widths, &order, SavePolicy::Debounced, cx);
     }
 
     fn begin_column_resize(
@@ -3210,19 +3194,17 @@ impl GitHistory {
     }
 
     fn toggle_author_display(&mut self, cx: &mut Context<Self>) {
-        let (display, data_dir) = {
+        let display = {
             let preferences = cx.global_mut::<HistoryColumnPreferences>();
             preferences.author_display = match preferences.author_display {
                 GitHistoryAuthorDisplay::Avatar => GitHistoryAuthorDisplay::Name,
                 GitHistoryAuthorDisplay::Name => GitHistoryAuthorDisplay::Avatar,
             };
-            (preferences.author_display, preferences.data_dir.clone())
+            preferences.author_display
         };
-        let mut settings = UiSettings::load(&data_dir);
-        settings.git_history_author_display = display;
-        if let Err(error) = settings.save(&data_dir) {
-            tracing::warn!(%error, "could not persist Git history author display");
-        }
+        settings::update(SavePolicy::Immediate, cx, |settings| {
+            settings.git_history_author_display = display;
+        });
         if display == GitHistoryAuthorDisplay::Avatar {
             self.resolve_loaded_avatars(cx);
         }

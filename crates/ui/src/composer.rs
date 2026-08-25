@@ -3216,7 +3216,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .w_full()
-            .text_size(px(self.text_size))
+            .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(px(self.configured_line_height))
             .text_color(text_color)
             .font_family(theme.font_sans.clone())
@@ -3480,14 +3480,9 @@ impl Composer {
     }
 
     /// Feed the stable conversation-column width into responsive composer
-    /// controls. The text input's own width is unsuitable here because it
-    /// changes when the Traits label is replaced by the overflow dots.
+    /// controls.
     pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
         let composer_width = width.clamp(0.0, COMPOSER_MAX_WIDTH);
-        let inner_width = (composer_width - 2.0 * Theme::SPACE_LG).max(0.0);
-        self.pickers.update(cx, |pickers, cx| {
-            pickers.set_composer_width(inner_width, cx);
-        });
         if composer_width_changed(self.last_available_width, composer_width) {
             self.last_available_width = Some(composer_width);
             // The shell renders before this child, so this queues one more
@@ -4087,7 +4082,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger_muted)
                     .child(error),
             );
@@ -4096,7 +4091,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(if token.query.is_empty() {
                         "No files available"
@@ -4404,7 +4399,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger_muted)
                     .child(error),
             );
@@ -4413,7 +4408,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(if commands.is_empty() {
                         "This agent has no slash commands"
@@ -4459,7 +4454,7 @@ impl Composer {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(12.5))
+                                        .text_size(crate::typography::ui_rems(12.5))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text)
                                         .child(name),
@@ -4470,7 +4465,7 @@ impl Composer {
                                         .flex_1()
                                         .overflow_hidden()
                                         .truncate()
-                                        .text_size(px(12.0))
+                                        .text_size(crate::typography::ui_rems(12.0))
                                         .text_color(theme.text_muted)
                                         .child(description),
                                 ),
@@ -5579,7 +5574,7 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.5))
+                        .text_size(crate::typography::ui_rems(13.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(if picked {
                             theme.text
@@ -5603,7 +5598,7 @@ impl Composer {
                             } else {
                                 crate::theme::ink(0.05)
                             })
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(if picked {
                                 theme.text
                             } else {
@@ -5642,7 +5637,7 @@ impl Composer {
                             .gap(px(10.0))
                             .child(
                                 div()
-                                    .text_size(px(10.5))
+                                    .text_size(crate::typography::ui_rems(10.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
                                     .child(SharedString::from(crate::popover::tracked_upper(
@@ -5658,7 +5653,7 @@ impl Composer {
                                         .items_center()
                                         .rounded(px(6.0))
                                         .bg(crate::theme::ink(0.06))
-                                        .text_size(px(10.0))
+                                        .text_size(crate::typography::ui_rems(10.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text_muted.opacity(0.6))
                                         .child(SharedString::from(counter)),
@@ -5668,7 +5663,7 @@ impl Composer {
                     .child(
                         div()
                             .mt(px(6.0))
-                            .text_size(px(15.0))
+                            .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
@@ -5678,7 +5673,7 @@ impl Composer {
                         el.child(
                             div()
                                 .mt(px(4.0))
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted.opacity(0.65))
                                 .child(SharedString::from("Select one or more options.")),
                         )
@@ -5996,7 +5991,7 @@ impl Render for Composer {
                         .bg(wash)
                         .px(px(12.0))
                         .py(px(8.0))
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .line_height(px(16.0))
                         .text_color(text_c)
                         .cursor_pointer()
@@ -6054,7 +6049,7 @@ impl Render for Composer {
                 div()
                     .mt(px(6.0))
                     .px(px(12.0))
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .line_height(px(15.0))
                     .text_color(theme.text_muted.opacity(0.8))
                     .child("This agent can't be steered mid-turn — your message will be queued and sent when the current turn finishes."),

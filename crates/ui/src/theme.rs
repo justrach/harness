@@ -253,7 +253,7 @@ static CURRENT_APPEARANCE: AtomicU8 = AtomicU8::new(0);
 /// the theme was a compile-time constant, so their validity keys cover content
 /// only. Rather than thread the palette through every key, they compare this
 /// counter and drop everything when it moves.
-static THEME_GENERATION: AtomicU32 = AtomicU32::new(0);
+static STYLE_GENERATION: AtomicU32 = AtomicU32::new(0);
 
 /// The appearance the context-free paint helpers are painting for.
 pub fn current_appearance() -> Appearance {
@@ -263,9 +263,14 @@ pub fn current_appearance() -> Appearance {
     }
 }
 
-/// Monotonic id of the current palette — see [`THEME_GENERATION`].
-pub fn theme_generation() -> u32 {
-    THEME_GENERATION.load(Ordering::Relaxed)
+/// Monotonic id of the current resolved style (palette + UI typography).
+pub fn style_generation() -> u32 {
+    STYLE_GENERATION.load(Ordering::Relaxed)
+}
+
+/// Invalidate caches that bake resolved text styles.
+pub(crate) fn bump_style_generation() {
+    STYLE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 fn model_appearance(appearance: zeron_theme::Appearance) -> Appearance {
@@ -341,7 +346,7 @@ pub fn set_current_appearance(appearance: Appearance) {
         Appearance::Light => 1,
     };
     if CURRENT_APPEARANCE.swap(encoded, Ordering::Relaxed) != encoded {
-        THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+        bump_style_generation();
     }
 }
 
@@ -702,6 +707,8 @@ pub struct Theme {
     /// UI font family (bundling of Geist lands with asset work; until then the
     /// text system falls back to the system sans when the family is missing).
     pub font_sans: SharedString,
+    /// Fixed Geist chrome for code-adjacent surfaces and recovery controls.
+    pub font_sans_fixed: SharedString,
     /// Monospace family for code/terminal.
     pub font_mono: SharedString,
     /// Explicit system fallbacks, for callers that want to skip the lookup.
@@ -1008,6 +1015,7 @@ impl Theme {
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
             terminal: TerminalColors::zeron(Appearance::Dark),
             font_sans: "Geist".into(),
+            font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
@@ -1103,6 +1111,7 @@ impl Theme {
             diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
             terminal: TerminalColors::zeron(Appearance::Light),
             font_sans: "Geist".into(),
+            font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
@@ -1119,6 +1128,11 @@ impl Theme {
             Appearance::Dark => Self::dark_with_accent(accent),
             Appearance::Light => Self::light_with_accent(accent),
         }
+    }
+
+    fn with_font_sans(mut self, family: SharedString) -> Self {
+        self.font_sans = family;
+        self
     }
 
     /// Resolve one complete registered variant and then apply the narrowly
@@ -1256,11 +1270,13 @@ impl Theme {
             .try_global::<Theme>()
             .is_some_and(|theme| theme.accent_color != accent);
         set_current_appearance(appearance);
-        cx.set_global(Self::for_preferences(appearance, accent));
+        let next = Self::for_preferences(appearance, accent)
+            .with_font_sans(crate::typography::effective_family_name(cx));
+        cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
         // resolved colors still need to be discarded for the next frame.
         if accent_changed {
-            THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+            bump_style_generation();
         }
     }
 
@@ -1311,7 +1327,8 @@ impl Theme {
         cx: &mut App,
     ) {
         let next =
-            Self::for_selection(appearance, variant_id, accent_selection, surface_preference);
+            Self::for_selection(appearance, variant_id, accent_selection, surface_preference)
+                .with_font_sans(crate::typography::effective_family_name(cx));
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
@@ -1321,7 +1338,7 @@ impl Theme {
         set_current_appearance(appearance);
         cx.set_global(next);
         if changed || force_generation {
-            THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
+            bump_style_generation();
         }
     }
 
@@ -2502,6 +2519,16 @@ mod tests {
         assert_eq!(current_appearance(), Appearance::Light);
         set_current_appearance(Appearance::Dark);
         assert_eq!(current_appearance(), Appearance::Dark);
+    }
+
+    #[test]
+    fn appearance_rebuild_preserves_selected_ui_family() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::for_appearance(appearance).with_font_sans("Inter".into());
+            assert_eq!(theme.font_sans.as_ref(), "Inter");
+            assert_eq!(theme.font_sans_fixed.as_ref(), "Geist");
+            assert_eq!(theme.font_mono.as_ref(), "Geist Mono");
+        }
     }
 
     #[test]
