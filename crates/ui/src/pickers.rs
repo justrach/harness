@@ -1335,7 +1335,9 @@ impl Pickers {
     }
 
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
-        self.animate_close(cx);
+        // The card stays open on a pick (user request): model and traits
+        // share one popover now, and adjusting the tray right after choosing
+        // a model is the expected flow. Esc, click-out, or the chip close it.
         if self.state.read(cx).selected_chat.is_some() {
             // Existing chat: persist to the chat row (Mutate setChatConfig) —
             // survives restarts and syncs; next runs in this chat use it.
