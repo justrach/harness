@@ -19,13 +19,11 @@
 //! per-view prepaint cache for the frame, which is the only thing that forces
 //! already-laid-out elements to re-run their paint with the new palette.
 
-use std::path::{Path, PathBuf};
-
 use gpui::{App, Global, Subscription, Window};
 use serde::{Deserialize, Serialize};
 use zeron_theme::{AccentSelection, SurfacePreference, ThemeSelection};
 
-use crate::settings::UiSettings;
+use crate::settings::{self, SavePolicy};
 use crate::theme::{Appearance, Theme};
 
 /// The user's appearance preference. Persisted in `ui-settings.json`.
@@ -63,9 +61,6 @@ pub struct AppearanceState {
     pub themes: ThemeSelection,
     pub accent: AccentSelection,
     pub surface: SurfacePreference,
-    /// Where `ui-settings.json` lives, so a menu action can persist the choice
-    /// without routing through the shell entity that normally owns settings.
-    pub data_dir: PathBuf,
 }
 
 impl Global for AppearanceState {}
@@ -87,7 +82,6 @@ pub fn init(
     themes: ThemeSelection,
     accent: AccentSelection,
     surface: SurfacePreference,
-    data_dir: impl Into<PathBuf>,
     cx: &mut App,
 ) {
     let system = Appearance::from_window(cx.window_appearance());
@@ -98,7 +92,6 @@ pub fn init(
         themes: themes.clone(),
         accent,
         surface,
-        data_dir: data_dir.into(),
     });
     sync_ns_appearance(mode);
     let appearance = resolve(mode, system);
@@ -147,9 +140,10 @@ pub fn set_mode(mode: AppearanceMode, cx: &mut App) {
         return;
     }
     state.mode = mode;
-    let data_dir = state.data_dir.clone();
     apply(cx);
-    persist(mode, &data_dir);
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.appearance = mode;
+    });
 }
 
 /// Change the interactive accent without changing any semantic theme roles.
@@ -165,10 +159,11 @@ pub fn set_theme(appearance: Appearance, variant_id: impl Into<String>, cx: &mut
     state
         .themes
         .set_variant(model_appearance(appearance), variant_id);
-    let data_dir = state.data_dir.clone();
     let themes = state.themes.clone();
     apply(cx);
-    persist_themes(themes, &data_dir);
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.theme_selection = themes;
+    });
 }
 
 pub fn set_accent(accent: AccentSelection, cx: &mut App) {
@@ -180,9 +175,10 @@ pub fn set_accent(accent: AccentSelection, cx: &mut App) {
         return;
     }
     state.accent = accent;
-    let data_dir = state.data_dir.clone();
     apply(cx);
-    persist_accent(accent, &data_dir);
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.accent = accent;
+    });
 }
 
 /// Change glass independently from appearance, theme, and accent selections.
@@ -195,47 +191,10 @@ pub fn set_surface(surface: SurfacePreference, cx: &mut App) {
         return;
     }
     state.surface = surface;
-    let data_dir = state.data_dir.clone();
     apply(cx);
-    persist_surface(surface, &data_dir);
-}
-
-/// Read-modify-write `ui-settings.json` for just the appearance key.
-///
-/// Deliberately a fresh load rather than a write of some cached struct: the
-/// shell holds its own `UiSettings` and saves it debounced, so writing a stale
-/// snapshot from here would silently roll back a pane resize the user made
-/// seconds earlier. Reloading keeps this to the one field we own.
-fn persist(mode: AppearanceMode, data_dir: &Path) {
-    let mut settings = UiSettings::load(data_dir);
-    settings.appearance = mode;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist appearance");
-    }
-}
-
-fn persist_themes(themes: ThemeSelection, data_dir: &Path) {
-    let mut settings = UiSettings::load(data_dir);
-    settings.theme_selection = themes;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist themes");
-    }
-}
-
-fn persist_accent(accent: AccentSelection, data_dir: &Path) {
-    let mut settings = UiSettings::load(data_dir);
-    settings.accent = accent;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist accent color");
-    }
-}
-
-fn persist_surface(surface: SurfacePreference, data_dir: &Path) {
-    let mut settings = UiSettings::load(data_dir);
-    settings.surface = surface;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist surface preference");
-    }
+    settings::update(SavePolicy::Immediate, cx, |settings| {
+        settings.surface = surface;
+    });
 }
 
 /// Subscribe a window to OS appearance changes. The returned [`Subscription`]
