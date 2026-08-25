@@ -178,6 +178,38 @@ fn input_scroll_offset_for_cursor(
     next.clamp(0.0, input_max_scroll(content_height, viewport_height))
 }
 
+/// What a mouse press in a text field asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressIntent {
+    /// Take the whole field.
+    SelectAll,
+    /// Grow the current selection to the pressed position.
+    ExtendSelection,
+    /// Put the caret at the pressed position.
+    PlaceCaret,
+}
+
+impl PressIntent {
+    /// Whether the press starts a drag selection. A select-all must not, or
+    /// the next mouse move shrinks it back to a drag from the press position.
+    fn arms_drag(self) -> bool {
+        !matches!(self, Self::SelectAll)
+    }
+}
+
+/// Read the intent from the press. Two clicks or more take the whole field,
+/// and every further click keeps it, so holding the button through a third
+/// click does not change what is selected.
+fn press_intent(click_count: usize, shift: bool) -> PressIntent {
+    if click_count >= 2 {
+        PressIntent::SelectAll
+    } else if shift {
+        PressIntent::ExtendSelection
+    } else {
+        PressIntent::PlaceCaret
+    }
+}
+
 /// Per-frame drag-selection scroll. Distance increases speed, capped at one
 /// text row per frame so crossing the input boundary never causes a jump.
 fn input_drag_scroll_delta(
@@ -2191,13 +2223,6 @@ impl ComposerInput {
         self.point_for_display_index(self.projection.raw_to_display(index))
     }
 
-    fn visible_point_for_index(&self, index: usize) -> Option<Point<Pixels>> {
-        let point = self.point_for_index(index)?;
-        let height = self.last_bounds?.size.height;
-        let y = point.y - px(self.scroll_top);
-        (y >= px(0.0) && y + self.line_height <= height).then_some(gpui::point(point.x, y))
-    }
-
     /// Content-local point for a shaped projection byte index. The icon layer
     /// uses this to occupy its explicit projection slot without inventing a
     /// second coordinate system beside the custom text editor.
@@ -2317,15 +2342,24 @@ impl ComposerInput {
     ) {
         self.invalidate_mention_tooltip();
         window.focus(&self.focus_handle, cx);
-        self.is_selecting = true;
-        self.drag_position = Some(event.position);
+        let intent = press_intent(event.click_count, event.modifiers.shift);
+        self.is_selecting = intent.arms_drag();
+        self.drag_position = intent.arms_drag().then_some(event.position);
         self.drag_generation = self.drag_generation.wrapping_add(1);
         self.drag_autoscroll_active = false;
-        let index = self.index_for_mouse_position(event.position);
-        if event.modifiers.shift {
-            self.select_to(index, cx);
-        } else {
-            self.move_to(index, cx);
+        match intent {
+            PressIntent::SelectAll => {
+                self.move_to(0, cx);
+                self.select_to(self.content.len(), cx);
+            }
+            PressIntent::ExtendSelection => {
+                let index = self.index_for_mouse_position(event.position);
+                self.select_to(index, cx);
+            }
+            PressIntent::PlaceCaret => {
+                let index = self.index_for_mouse_position(event.position);
+                self.move_to(index, cx);
+            }
         }
     }
 
@@ -2513,7 +2547,7 @@ impl ComposerInput {
         self.line_height = px(INPUT_LINE_HEIGHT);
 
         // Chips read as inline code: the markdown renderer's recipe (mono font
-        // + `code_text` violet) over the rounded `code_wash` painted beneath.
+        // + the spectrum's `code_text`) over the rounded `code_wash` beneath.
         let (chip_font, chip_color) = {
             let theme = Theme::of(cx);
             (gpui::font(theme.font_mono.clone()), theme.code_text)
@@ -2889,7 +2923,7 @@ impl gpui::Element for ComposerTextElement {
         let origin = point(bounds.left(), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
         let caret_color = Theme::of(cx).caret;
-        // The inline-code recipe: chips wash violet like `code` spans do.
+        // The inline-code recipe: chips use the spectrum wash like `code` spans.
         let mention_color = Theme::of(cx).code_wash;
 
         let mut mention_quads = Vec::new();
@@ -3188,7 +3222,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .w_full()
-            .text_size(px(INPUT_TEXT_SIZE))
+            .text_size(crate::typography::ui_rems(INPUT_TEXT_SIZE))
             .line_height(px(INPUT_LINE_HEIGHT))
             .text_color(text_color)
             .font_family(theme.font_sans.clone())
@@ -3251,6 +3285,11 @@ fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
         range: at..end,
         query: text[at + 1..cursor].to_string(),
     })
+}
+
+/// Restart a popup's row stack at the top (fresh open / query / result set).
+fn reset_scroll_offset(scroll: &gpui::ScrollHandle) {
+    scroll.set_offset(gpui::Point::new(px(0.0), px(0.0)));
 }
 
 /// The `/` must open the input: slash commands are whole-prompt prefixes
@@ -3372,6 +3411,14 @@ pub struct Composer {
     /// Advertised commands per harness (one `ListCommands` per harness per
     /// composer lifetime; the engine caches discovery on its side too).
     slash_cache: HashMap<HarnessId, Vec<SlashCommand>>,
+    /// Slash-popup row scroll — the stack overflows into a wheel/keyboard-
+    /// scrollable list once it outgrows the card.
+    slash_scroll: gpui::ScrollHandle,
+    /// File-mention popup row scroll (same treatment).
+    mention_scroll: gpui::ScrollHandle,
+    /// Shared scrollbar hover/drag state for both popups' floating rails —
+    /// they never show at once (mutually exclusive by token shape).
+    popup_bar: crate::popover::MenuScrollbarState,
     current_key: String,
     sending: bool,
     failure: Option<SharedString>,
@@ -3443,14 +3490,9 @@ impl Composer {
     }
 
     /// Feed the stable conversation-column width into responsive composer
-    /// controls. The text input's own width is unsuitable here because it
-    /// changes when the Traits label is replaced by the overflow dots.
+    /// controls.
     pub fn set_available_width(&mut self, width: f32, cx: &mut Context<Self>) {
         let composer_width = width.clamp(0.0, COMPOSER_MAX_WIDTH);
-        let inner_width = (composer_width - 2.0 * Theme::SPACE_LG).max(0.0);
-        self.pickers.update(cx, |pickers, cx| {
-            pickers.set_composer_width(inner_width, cx);
-        });
         if composer_width_changed(self.last_available_width, composer_width) {
             self.last_available_width = Some(composer_width);
             // The shell renders before this child, so this queues one more
@@ -3528,6 +3570,9 @@ impl Composer {
             slash_task: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
+            slash_scroll: gpui::ScrollHandle::new(),
+            mention_scroll: gpui::ScrollHandle::new(),
+            popup_bar: crate::popover::MenuScrollbarState::default(),
             current_key,
             sending: false,
             failure: None,
@@ -3883,6 +3928,8 @@ impl Composer {
         if !refining {
             self.mention.results.clear();
             self.mention.active = None;
+            // Fresh open: the row stack restarts at the top.
+            reset_scroll_offset(&self.mention_scroll);
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
@@ -3958,6 +4005,8 @@ impl Composer {
                             composer.mention.error = None;
                             composer.mention.active = (!results.is_empty()).then_some(0);
                             composer.mention.results = results;
+                            // New result set: the row stack restarts at the top.
+                            reset_scroll_offset(&composer.mention_scroll);
                         }
                         Err(err) => tracing::warn!(%err, "file mention response decode failed"),
                     },
@@ -3979,6 +4028,10 @@ impl Composer {
     fn move_mention(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.mention.active =
             crate::popover::menu_step(self.mention.active, self.mention.results.len(), delta);
+        if let Some(active) = self.mention.active {
+            // Keep the keyboard cursor visible in the scrolled row stack.
+            self.mention_scroll.scroll_to_item(active);
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -4024,6 +4077,9 @@ impl Composer {
             .w_full()
             .max_h(px(320.0))
             .overflow_hidden()
+            // GPUI dispatches this captured stream while the thumb is
+            // dragged, including when the pointer has left the popup.
+            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && self.mention.results.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -4038,7 +4094,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger_muted)
                     .child(error),
             );
@@ -4047,7 +4103,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(if token.query.is_empty() {
                         "No files available"
@@ -4056,13 +4112,14 @@ impl Composer {
                     }),
             );
         } else {
+            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.mention.results.len());
             for (ix, result) in self.mention.results.iter().enumerate() {
                 let selected = self.mention.active == Some(ix);
                 let (directory, name) = match result.path.rsplit_once('/') {
                     Some((directory, name)) => (directory.to_string(), name.to_string()),
                     None => (String::new(), result.path.clone()),
                 };
-                card = card.child(
+                rows.push(
                     crate::popover::menu_row(theme, selected, format!("file-mention-result-{ix}"))
                         .id(("file-mention-result", ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -4105,9 +4162,34 @@ impl Composer {
                                             .child(directory),
                                     )
                                 }),
-                        ),
+                        )
+                        .into_any_element(),
                 );
             }
+            // Overflowing rows wheel-scroll inside a bounded viewport; the
+            // floating rail mirrors the model-list scrollbar treatment.
+            card = card.child(
+                div()
+                    .id("mention-scroll-host")
+                    .relative()
+                    .on_hover(cx.listener(Self::on_popup_list_hover))
+                    .child(
+                        div()
+                            .id("mention-list")
+                            .max_h(px(312.0))
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.mention_scroll)
+                            .children(rows),
+                    )
+                    .children(self.popup_scrollbar(
+                        "mention-scrollbar",
+                        &self.mention_scroll,
+                        theme,
+                        cx,
+                    )),
+            );
         }
         Some(crate::popover::full_width_menu_above(
             "file-mention-popup",
@@ -4116,11 +4198,8 @@ impl Composer {
         ))
     }
 
-    fn render_input_with_completion(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        div()
-            .relative()
-            .child(self.input.clone())
-            .children(self.render_slash_popup(theme, cx))
+    fn render_input_with_completion(&self) -> gpui::Div {
+        div().relative().child(self.input.clone())
     }
 
     // ---- slash commands ---------------------------------------------------
@@ -4229,6 +4308,8 @@ impl Composer {
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         self.slash.filtered = crate::popover::filter_indices(&query, &names);
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
+        // A fresh query/reopen restarts the row stack at the top.
+        reset_scroll_offset(&self.slash_scroll);
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -4236,6 +4317,10 @@ impl Composer {
     fn move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
         self.slash.active =
             crate::popover::menu_step(self.slash.active, self.slash.filtered.len(), delta);
+        if let Some(active) = self.slash.active {
+            // Keep the keyboard cursor visible in the scrolled row stack.
+            self.slash_scroll.scroll_to_item(active);
+        }
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -4295,17 +4380,23 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let token = self.slash.token.as_ref()?;
+        // Only while a slash token is active.
+        self.slash.token.as_ref()?;
         let commands = self
             .slash
             .harness
             .and_then(|h| self.slash_cache.get(&h))
             .map(Vec::as_slice)
             .unwrap_or_default();
+        // Full pill width at the mention card's height budget — both composer
+        // completions share the same surface shape.
         let mut card = crate::popover::popover_card(theme)
-            .w(px(380.0))
-            .max_h(px(280.0))
+            .w_full()
+            .max_h(px(320.0))
             .overflow_hidden()
+            // GPUI dispatches this captured stream while the thumb is
+            // dragged, including when the pointer has left the popup.
+            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         if self.slash.loading && commands.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -4320,7 +4411,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.danger_muted)
                     .child(error),
             );
@@ -4329,7 +4420,7 @@ impl Composer {
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(if commands.is_empty() {
                         "This agent has no slash commands"
@@ -4338,6 +4429,7 @@ impl Composer {
                     }),
             );
         } else {
+            let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len());
             for (row_ix, &cmd_ix) in self.slash.filtered.iter().enumerate() {
                 let Some(command) = commands.get(cmd_ix) else {
                     continue;
@@ -4353,7 +4445,7 @@ impl Composer {
                     }
                 }
                 let description: SharedString = description.into();
-                card = card.child(
+                rows.push(
                     crate::popover::menu_row(theme, selected, format!("slash-result-{row_ix}"))
                         .id(("slash-result", row_ix))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -4374,7 +4466,7 @@ impl Composer {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(12.5))
+                                        .text_size(crate::typography::ui_rems(12.5))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text)
                                         .child(name),
@@ -4385,24 +4477,150 @@ impl Composer {
                                         .flex_1()
                                         .overflow_hidden()
                                         .truncate()
-                                        .text_size(px(12.0))
+                                        .text_size(crate::typography::ui_rems(12.0))
                                         .text_color(theme.text_muted)
                                         .child(description),
                                 ),
-                        ),
+                        )
+                        .into_any_element(),
                 );
             }
+            // Overflowing rows wheel-scroll inside a bounded viewport; the
+            // floating rail mirrors the model-list scrollbar treatment.
+            card = card.child(
+                div()
+                    .id("slash-scroll-host")
+                    .relative()
+                    .on_hover(cx.listener(Self::on_popup_list_hover))
+                    .child(
+                        div()
+                            .id("slash-list")
+                            .max_h(px(312.0))
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.slash_scroll)
+                            .children(rows),
+                    )
+                    .children(self.popup_scrollbar(
+                        "slash-scrollbar",
+                        &self.slash_scroll,
+                        theme,
+                        cx,
+                    )),
+            );
         }
-        let anchor = self
-            .input
-            .read(cx)
-            .visible_point_for_index(token.range.start)?;
-        Some(crate::popover::anchored_menu_above_at(
+        // Full pill width above the composer, matching the file-mention popup.
+        Some(crate::popover::full_width_menu_above(
             "slash-popup",
-            anchor,
             card.into_any_element(),
             None,
         ))
+    }
+
+    /// The floating scrollbar rail for a composer popup's scroll host (the
+    /// model-list treatment). Callers pass the id and that popup's scroll
+    /// handle; the hover/drag interaction state is shared.
+    fn popup_scrollbar(
+        &self,
+        id: &'static str,
+        scroll: &gpui::ScrollHandle,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let metrics = self.popup_bar.metrics(scroll)?;
+        Some(
+            self.popup_bar
+                .render_rail(theme, metrics)?
+                .id(id)
+                .on_hover(cx.listener(Self::on_popup_bar_hover))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(Self::on_popup_bar_mouse_down),
+                )
+                .on_drag(crate::popover::MenuScrollbarDrag, |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| crate::popover::MenuScrollbarDragGhost)
+                })
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    cx.listener(Self::on_popup_bar_mouse_up),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(Self::on_popup_bar_mouse_up),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The popup whose rows a scrollbar drag is moving — the tokens are
+    /// mutually exclusive, so at most one exists.
+    fn active_popup_scroll(&self) -> Option<gpui::ScrollHandle> {
+        if self.slash.token.is_some() {
+            Some(self.slash_scroll.clone())
+        } else if self.mention.token.is_some() {
+            Some(self.mention_scroll.clone())
+        } else {
+            None
+        }
+    }
+
+    fn on_popup_list_hover(
+        &mut self,
+        hovered: &bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup_bar.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
+    fn on_popup_bar_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup_bar.set_bar_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
+    fn on_popup_bar_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.active_popup_scroll() else {
+            return;
+        };
+        if !self.popup_bar.begin_press(&scroll, event.position.y) {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn on_popup_bar_drag_move(
+        &mut self,
+        event: &gpui::DragMoveEvent<crate::popover::MenuScrollbarDrag>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scroll) = self.active_popup_scroll() else {
+            return;
+        };
+        if self.popup_bar.drag_to(&scroll, event.event.position.y) {
+            cx.notify();
+        }
+    }
+
+    fn on_popup_bar_mouse_up(
+        &mut self,
+        _event: &gpui::MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.popup_bar.end_press();
+        cx.notify();
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -5309,8 +5527,12 @@ impl Composer {
         let input_focused = self.input.read(cx).focus_handle.is_focused(window);
         let input_empty = self.input.read(cx).is_empty();
         let key = event.keystroke.key.as_str();
+        // A BARE digit picks an option. With a modifier held the keystroke
+        // belongs to an app shortcut — ⌘1..⌘9 jump to a sidebar row — and the
+        // panel must not also consume it as a selection.
         if let Ok(digit) = key.parse::<usize>()
             && (1..=9).contains(&digit)
+            && !event.keystroke.modifiers.modified()
         {
             if !input_focused || input_empty {
                 self.wizard_select(digit - 1, cx);
@@ -5388,7 +5610,7 @@ impl Composer {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.5))
+                        .text_size(crate::typography::ui_rems(13.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(if picked {
                             theme.text
@@ -5412,7 +5634,7 @@ impl Composer {
                             } else {
                                 crate::theme::ink(0.05)
                             })
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(if picked {
                                 theme.text
                             } else {
@@ -5451,7 +5673,7 @@ impl Composer {
                             .gap(px(10.0))
                             .child(
                                 div()
-                                    .text_size(px(10.5))
+                                    .text_size(crate::typography::ui_rems(10.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
                                     .child(SharedString::from(crate::popover::tracked_upper(
@@ -5467,7 +5689,7 @@ impl Composer {
                                         .items_center()
                                         .rounded(px(6.0))
                                         .bg(crate::theme::ink(0.06))
-                                        .text_size(px(10.0))
+                                        .text_size(crate::typography::ui_rems(10.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text_muted.opacity(0.6))
                                         .child(SharedString::from(counter)),
@@ -5477,7 +5699,7 @@ impl Composer {
                     .child(
                         div()
                             .mt(px(6.0))
-                            .text_size(px(15.0))
+                            .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
@@ -5487,7 +5709,7 @@ impl Composer {
                         el.child(
                             div()
                                 .mt(px(4.0))
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted.opacity(0.65))
                                 .child(SharedString::from("Select one or more options.")),
                         )
@@ -5805,7 +6027,7 @@ impl Render for Composer {
                         .bg(wash)
                         .px(px(12.0))
                         .py(px(8.0))
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .line_height(px(16.0))
                         .text_color(text_c)
                         .cursor_pointer()
@@ -5863,7 +6085,7 @@ impl Render for Composer {
                 div()
                     .mt(px(6.0))
                     .px(px(12.0))
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .line_height(px(15.0))
                     .text_color(theme.text_muted.opacity(0.8))
                     .child("This agent can't be steered mid-turn — your message will be queued and sent when the current turn finishes."),
@@ -5993,7 +6215,7 @@ impl Render for Composer {
                         .px(px(16.0))
                         .pt(px(text_pt))
                         .pb(px(4.0))
-                        .child(self.render_input_with_completion(&theme, cx)),
+                        .child(self.render_input_with_completion()),
                 )
                 .child(
                     div()
@@ -6061,7 +6283,7 @@ impl Render for Composer {
                                 .pr(px(8.0))
                                 .relative()
                                 .top(px(-text_glide))
-                                .child(self.render_input_with_completion(&theme, cx)),
+                                .child(self.render_input_with_completion()),
                         )
                         .child(
                             div()
@@ -6090,6 +6312,18 @@ impl Render for Composer {
                         ),
                 )
         };
+        // New sessions: the TARGET row (device + project chips) sits ABOVE
+        // the pill, left-aligned like the checkout toolbar below it (user
+        // request — moved off the canvas). Existing sessions name their
+        // target in the titlebar instead.
+        let container = if new_chat {
+            let selectors = self
+                .pickers
+                .update(cx, |pickers, cx| pickers.render_target_selectors(cx));
+            container.child(selectors)
+        } else {
+            container
+        };
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
@@ -6103,7 +6337,10 @@ impl Render for Composer {
                     16.0,
                     motion::fade_quick("composer-input", body),
                 ))
-                .children(self.render_file_mention_popup(&theme, cx)),
+                // Both completion popups span the full pill width above it —
+                // the file-mention and slash tokens are mutually exclusive.
+                .children(self.render_file_mention_popup(&theme, cx))
+                .children(self.render_slash_popup(&theme, cx)),
         );
         // Branch/worktree toolbar under the pill (t3code BranchToolbar): the
         // checkout-kind selector + ref picker for new sessions, read-only
@@ -6145,6 +6382,27 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The press intent is judged by eye everywhere except here: that a
+    /// multi-click leaves the drag disarmed is invisible until a selection
+    /// collapses under the pointer.
+    #[test]
+    fn a_press_of_two_or_more_clicks_takes_the_whole_field_and_leaves_the_drag_disarmed() {
+        assert_eq!(press_intent(1, false), PressIntent::PlaceCaret);
+        assert_eq!(press_intent(1, true), PressIntent::ExtendSelection);
+        assert_eq!(press_intent(2, false), PressIntent::SelectAll);
+        // A triple click keeps the whole field, so holding the button down
+        // through a third click does not change what is selected.
+        assert_eq!(press_intent(3, false), PressIntent::SelectAll);
+        // The whole field wins over the shift modifier: shift has nothing
+        // left to extend once everything is selected.
+        assert_eq!(press_intent(2, true), PressIntent::SelectAll);
+        // Only a caret press arms the drag. A select-all that armed it would
+        // collapse to a drag selection on the next mouse move.
+        assert!(press_intent(1, false).arms_drag());
+        assert!(press_intent(1, true).arms_drag());
+        assert!(!press_intent(2, false).arms_drag());
+    }
 
     #[test]
     fn stable_outer_width_only_schedules_reflow_on_real_changes() {

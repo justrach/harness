@@ -117,12 +117,12 @@ impl RenderOptions {
 /// Cached runs carry a resolved [`gpui::Hsla`] per span, so an entry is only
 /// valid for the palette that produced it — content-only keys silently serve
 /// dark-mode text onto a light background after an appearance switch.
-/// [`RenderCache::sync_palette`] drops everything when the palette moves.
+/// [`RenderCache::sync_style`] drops everything when color or typography moves.
 #[derive(Default)]
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
     code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
-    /// The [`crate::theme::theme_generation`] these entries were shaped under.
+    /// The [`crate::theme::style_generation`] these entries were shaped under.
     generation: u32,
 }
 
@@ -146,10 +146,14 @@ impl RenderCache {
         self.code.clear();
     }
 
-    /// Drop every entry if the palette changed since they were shaped. Cheap
+    /// Drop every entry if the resolved text style changed since shaping. Cheap
     /// enough (one relaxed atomic load) to call on every cache access.
-    fn sync_palette(&mut self) {
-        let generation = crate::theme::theme_generation();
+    fn sync_style(&mut self) {
+        let generation = crate::theme::style_generation();
+        self.sync_generation(generation);
+    }
+
+    fn sync_generation(&mut self, generation: u32) {
         if self.generation != generation {
             self.clear();
             self.generation = generation;
@@ -260,9 +264,9 @@ pub fn render_block(
                     Some(start) => div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .text_size(px(MD_TEXT_SIZE))
-                        .line_height(px(MD_LINE_HEIGHT))
-                        .text_color(theme.accent.opacity(0.85))
+                        .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
+                        .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
+                        .text_color(theme.accent)
                         .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                         .into_any_element(),
                     None => div()
@@ -278,7 +282,7 @@ pub fn render_block(
                                 .w(px(5.0))
                                 .h(px(5.0))
                                 .rounded_full()
-                                .bg(theme.accent.opacity(0.85)),
+                                .bg(theme.accent),
                         )
                         .into_any_element(),
                 };
@@ -457,8 +461,8 @@ fn render_table(
                 .flex_basis(px(0.0))
                 .min_w(px(geo.minimums[c]))
                 .p(px(TABLE_CELL_PADDING))
-                .text_size(px(MD_TEXT_SIZE))
-                .line_height(px(MD_LINE_HEIGHT));
+                .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
+                .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT));
             cell = match align.get(c).copied().unwrap_or_default() {
                 TableAlign::Left => cell,
                 TableAlign::Center => cell.text_center(),
@@ -499,14 +503,12 @@ pub struct FlatText {
     pub code_ranges: Vec<Range<usize>>,
 }
 
-/// Inline-code tint (round 9): the original is neutral (chat-view.tsx mdTheme
-/// `inlineCode: #f0f0f0 on white/8%`), but the user asked for "a nice purple"
-/// — violet-300 text over a violet-400 wash, readable on the #060606 panel.
+/// Inline-code tint: a text-safe use of the selected accent identity.
 pub fn inline_code_text(theme: &Theme) -> Hsla {
-    theme.code_text // violet-300
+    theme.code_text
 }
 pub fn inline_code_wash(theme: &Theme) -> Hsla {
-    theme.code_wash // violet-400/12
+    theme.code_wash
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 2px past the glyphs, y insets 2px from the 22px line box).
@@ -559,7 +561,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
         let is_link = run.style.link.is_some();
-        // Inline code reads violet (see `inline_code_text`); everything else
+        // Inline code uses the spectrum's code tone; everything else
         // stays the monochrome foreground.
         let color = if run.style.code {
             inline_code_text(theme)
@@ -628,7 +630,7 @@ fn flatten_cached(
     match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_style();
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -730,9 +732,9 @@ fn flat_text_element(
         .into_any_element()
 }
 
-/// Selection tint: the accent hue under the glyphs, dark-panel strength.
+/// Selection tint shared with native inputs and the composer.
 fn selection_wash(theme: &Theme) -> Hsla {
-    theme.accent.opacity(0.35) // indigo-400
+    theme.selection
 }
 
 /// Selection support for a plain (non-markdown) text element — the user
@@ -1022,8 +1024,8 @@ fn text_element(
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
     let inner = flat_text_element(&flat, ix, opts, theme);
     div()
-        .text_size(px(size))
-        .line_height(px(line_height))
+        .text_size(crate::typography::ui_rems(size))
+        .line_height(crate::typography::ui_rems(line_height))
         .child(inner)
         .into_any_element()
 }
@@ -1066,7 +1068,7 @@ fn render_code_block(
     let cached: Rc<CachedCode> = match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
-            cache.sync_palette();
+            cache.sync_style();
             let entry = cache
                 .code
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -1477,5 +1479,30 @@ mod tests {
         ];
         let flat = flatten_runs(&runs, &theme, false);
         assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_string())]);
+    }
+
+    #[test]
+    fn style_generation_change_invalidates_cached_runs() {
+        let mut cache = RenderCache {
+            generation: 10,
+            ..Default::default()
+        };
+        cache.flats.insert(
+            ("row".into(), 0, 0),
+            Rc::new(FlatText {
+                text: "cached".into(),
+                runs: Vec::new(),
+                links: Vec::new(),
+                code_ranges: Vec::new(),
+            }),
+        );
+        cache.sync_generation(10);
+        assert_eq!(cache.flats.len(), 1, "same style is idempotent");
+        cache.sync_generation(11);
+        assert!(
+            cache.flats.is_empty(),
+            "font or color changes invalidate runs"
+        );
+        assert!(cache.code.is_empty());
     }
 }
