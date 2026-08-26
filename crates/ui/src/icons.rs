@@ -98,6 +98,8 @@ icon_assets![
     // The changes pane's unified/split toggle: a rounded frame halved by a
     // centre rule (Solar Linear weight).
     (SPLIT_COLUMNS, "split-columns"),
+    // The changes pane's long-line wrapping toggle.
+    (WRAP_TEXT, "wrap-text"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),

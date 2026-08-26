@@ -11,9 +11,9 @@
 //!   hunk header, and diff line is its own row (the flat model Zed's editor
 //!   uses for its project diff: only the visible slice materializes, and a
 //!   collapsed file's body rows are removed from the list outright, not
-//!   hidden); each section collapses with a 180 ms height tween on a
+//!   hidden); nowrap sections collapse with a 180 ms height tween on a
 //!   clipped stand-in row (analytic heights, capped to what the clip can
-//!   reveal) and a 200 ms chevron transition;
+//!   reveal), while variable-height wrapped sections settle immediately;
 //! - syntax highlight reuses the markdown tokenizer per diff line, computed
 //!   time-sliced on the background executor and applied as paint-only run
 //!   colors (layout never changes);
@@ -28,6 +28,9 @@
 //!   Its left column is inert: notes are cited against the post-change file,
 //!   so only the right column takes a `+` (already-staged old-side notes
 //!   still show their cards).
+//! - long-line wrapping is a persisted toolbar choice. It only changes the
+//!   code plane: gutters, comment affordances, and sticky headers stay fixed,
+//!   while the virtual list measures each logical row's resulting height.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -110,18 +113,6 @@ impl DiffMode {
             Self::Unified => Self::Split,
             Self::Split => Self::Unified,
         }
-    }
-}
-
-/// Read-modify-write `ui-settings.json` for just the split-diff key — a fresh
-/// load, for the reason [`crate::appearance`] documents: the shell holds its
-/// own `UiSettings` and saves it debounced, so writing a cached snapshot from
-/// here would roll back a pane resize made seconds earlier.
-fn persist_split(split: bool, data_dir: &std::path::Path) {
-    let mut settings = crate::settings::UiSettings::load(data_dir);
-    settings.diff_split = split;
-    if let Err(err) = settings.save(data_dir) {
-        tracing::warn!(error = %err, "could not persist diff layout");
     }
 }
 
@@ -350,6 +341,8 @@ enum DiffCodeWidth {
     Clipped,
     /// Changes rows expose a stable intrinsic code width.
     Scrollable(DiffHorizontalMetrics),
+    /// Changes rows consume their viewport width and grow vertically.
+    Wrapped,
 }
 
 #[derive(Clone)]
@@ -1154,7 +1147,8 @@ struct ParsedDiff {
 /// its own row (Zed's editor draws exactly the visible line range the same
 /// way): scrolling a 10k-line file materializes ~50 line rows per frame, not
 /// one 10k-line element, and a collapsed file contributes no body rows at
-/// all. Heights are the analytic constants above — no measurement.
+/// all. Nowrap heights use the analytic constants above; wrapped line rows
+/// are measured by the list at the current pane width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffRow {
     FileHeader {
@@ -1548,6 +1542,8 @@ pub struct Changes {
     scope: DiffScope,
     /// Unified or side-by-side (toolbar toggle, persisted per user).
     mode: DiffMode,
+    /// Wrap long source lines instead of exposing the horizontal code plane.
+    wrap_lines: bool,
     /// Comparison ref for [`DiffScope::Branch`] — preset to the repo's
     /// default branch once the branch list lands.
     base_ref: Option<String>,
@@ -1586,19 +1582,34 @@ pub enum ChangesEvent {
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
 
+struct DiffHeaderTooltip(&'static str);
+
+impl Render for DiffHeaderTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(theme.text)
+            .child(self.0)
+    }
+}
+
 impl Changes {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
-        let mode = DiffMode::from_split(
-            state
-                .read(cx)
-                .data_dir
-                .as_deref()
-                .is_some_and(|dir| crate::settings::UiSettings::load(dir).diff_split),
-        );
+        let settings = crate::settings::current(cx);
+        let mode = DiffMode::from_split(settings.diff_split);
         Self {
             state,
             mode,
+            wrap_lines: settings.diff_wrap,
             diffs: Vec::new(),
             started: false,
             error: None,
@@ -2208,6 +2219,29 @@ impl Changes {
         let Some(file) = parsed.files.get(file_ix) else {
             return;
         };
+        if self.wrap_lines {
+            let collapsed = !self
+                .folds
+                .get(&file.path)
+                .is_some_and(|fold| fold.collapsed);
+            let body = if collapsed {
+                Vec::new()
+            } else {
+                body_rows(
+                    file_ix as u32,
+                    file,
+                    &self.comments_for(&file.path, cx),
+                    self.draft_anchor_in(&file.path),
+                    self.mode,
+                )
+            };
+            let fold = self.folds.entry(file.path.clone()).or_default();
+            fold.collapsed = collapsed;
+            fold.toggled_at = None;
+            self.replace_file_body(file_ix, body);
+            cx.notify();
+            return;
+        }
         let expanded_height = body_height_with(
             file,
             &self.comments_for(&file.path, cx),
@@ -2382,15 +2416,40 @@ impl Changes {
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = self.mode.toggled();
         reset_horizontal_scroll(&self.horizontal_scroll);
-        if let Some(dir) = self.state.read(cx).data_dir.clone() {
-            let split = self.mode.is_split();
-            cx.background_executor()
-                .spawn(async move { persist_split(split, &dir) })
-                .detach();
-        }
+        let split = self.mode.is_split();
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            settings.diff_split = split;
+        });
         // A draft's `+` sits in a column that may not exist after the swap.
         self.hover = None;
         self.reflatten(cx);
+    }
+
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.wrap_lines = !self.wrap_lines;
+        reset_horizontal_scroll(&self.horizontal_scroll);
+        let wrap = self.wrap_lines;
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            settings.diff_wrap = wrap;
+        });
+
+        // A folding stand-in has an analytic fixed-line height. Settle it
+        // before switching to variable-height rows; steady rows can then be
+        // measured by the virtual list at the current pane width.
+        let folding = self
+            .rows
+            .iter()
+            .any(|row| matches!(row, DiffRow::FoldingBody { .. }));
+        if folding {
+            self.fold_settle = None;
+            for fold in self.folds.values_mut() {
+                fold.toggled_at = None;
+            }
+            self.reflatten(cx);
+        } else {
+            self.list.remeasure();
+            cx.notify();
+        }
     }
 
     fn reflatten(&mut self, cx: &mut Context<Self>) {
@@ -2875,8 +2934,11 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let code_width =
-            DiffCodeWidth::Scrollable(parsed.horizontal_geometry.resolve(&theme, window));
+        let code_width = if self.wrap_lines {
+            DiffCodeWidth::Wrapped
+        } else {
+            DiffCodeWidth::Scrollable(parsed.horizontal_geometry.resolve(&theme, window))
+        };
         let code_scroll = DiffCodeScrollContext {
             handle: self.horizontal_scroll.clone(),
             prefix: SharedString::from(format!("changes-code-row-{ix}")),
@@ -3055,7 +3117,7 @@ impl Changes {
                     (Some(cell), None) => cell.into_any_element(),
                     (None, _) => split_filler().into_any_element(),
                 };
-                split_row(left, right).into_any_element()
+                split_row(left, right, self.wrap_lines).into_any_element()
             }
             DiffRow::CommentCard { file, card } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -3393,6 +3455,22 @@ impl Changes {
         .into_any_element()
     }
 
+    fn wrap_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        Self::header_toggle(
+            "changes-wrap",
+            crate::icons::WRAP_TEXT,
+            self.wrap_lines,
+            theme,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_wrap(cx);
+        }))
+        .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Wrap long lines")).into())
+        .tooltip_show_delay(Duration::from_millis(350))
+        .into_any_element()
+    }
+
     /// The pane-header controls: scope dropdown, `{branch} → {base ⌄}` ref
     /// selector (branch scope), fold-all. Rendered BY THE SHELL inside the
     /// session titlebar's trailing section (the band above the pane) — the
@@ -3436,6 +3514,7 @@ impl Changes {
                         .child(SharedString::from(commit.subject.clone())),
                 )
                 .child(self.split_toggle(&theme, cx))
+                .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -3531,6 +3610,7 @@ impl Changes {
                 .items_center()
                 .gap(px(2.0))
                 .child(self.split_toggle(&theme, cx))
+                .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -3897,9 +3977,11 @@ fn code_text_viewport(
     theme: &Theme,
     padding_left: f32,
     content_width: Option<f32>,
+    wrapped: bool,
     scroll: Option<DiffCodeScroll>,
 ) -> AnyElement {
     let content = div()
+        .when(wrapped, |el| el.w_full().min_w_0())
         .when_some(content_width, |el, width| {
             // Keep every tracked row's scroll extent identical. The width
             // already includes shaping slack on the right, so clipping here
@@ -3909,9 +3991,24 @@ fn code_text_viewport(
         .pl(px(padding_left))
         .font_family(theme.font_mono.clone())
         .text_size(px(DIFF_TEXT_SIZE))
-        .whitespace_nowrap()
+        .line_height(px(DIFF_LINE_HEIGHT))
+        .map(|el| {
+            if wrapped {
+                el.whitespace_normal()
+            } else {
+                el.whitespace_nowrap()
+            }
+        })
         .child(gpui::StyledText::new(text).with_runs(runs));
-    let viewport = div().flex_1().min_w_0().overflow_hidden().child(content);
+    let viewport = div()
+        .flex_1()
+        .min_w_0()
+        .min_h(px(DIFF_LINE_HEIGHT))
+        .overflow_hidden()
+        .child(content);
+    if wrapped {
+        return viewport.into_any_element();
+    }
     match scroll {
         Some(scroll) => {
             let mut viewport = viewport
@@ -3981,6 +4078,7 @@ fn diff_line_row(
             .flex_none()
             .font_family(theme.font_mono.clone())
             .text_size(px(11.0))
+            .line_height(px(DIFF_LINE_HEIGHT))
             .text_color(color)
             .flex()
             .justify_end()
@@ -4000,21 +4098,29 @@ fn diff_line_row(
     let content_width = match code_width {
         DiffCodeWidth::Clipped => None,
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.unified_content_width(gutter_px)),
+        DiffCodeWidth::Wrapped => None,
     };
+    let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     div()
-        .h(px(DIFF_LINE_HEIGHT))
+        .map(|el| {
+            if wrapped {
+                el.min_h(px(DIFF_LINE_HEIGHT))
+            } else {
+                el.h(px(DIFF_LINE_HEIGHT))
+            }
+        })
         .w_full()
         .flex_none()
         .flex()
         .flex_row()
-        .items_center()
+        .items_start()
         .when_some(row_bg, |el, bg| el.bg(bg))
         // Accent bar: solid colour on +/− rows, invisible spacer on
         // context rows so columns always align.
         .child(
             div()
                 .w(px(ACCENT_BAR_WIDTH))
-                .h_full()
+                .self_stretch()
                 .flex_none()
                 .when_some(accent, |el, color| el.bg(color)),
         )
@@ -4041,6 +4147,7 @@ fn diff_line_row(
                 .flex()
                 .justify_center()
                 .text_size(px(DIFF_TEXT_SIZE))
+                .line_height(px(DIFF_LINE_HEIGHT))
                 .text_color(marker_color)
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
@@ -4051,6 +4158,7 @@ fn diff_line_row(
             theme,
             UNIFIED_CODE_PADDING_LEFT,
             content_width,
+            wrapped,
             scroll,
         ))
         .into_any_element()
@@ -4137,20 +4245,22 @@ fn split_line_cell(
     let content_width = match code_width {
         DiffCodeWidth::Clipped => None,
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.split_content_width(gutter_px)),
+        DiffCodeWidth::Wrapped => None,
     };
+    let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     div()
         .flex_1()
         .min_w_0()
-        .h_full()
+        .self_stretch()
         .overflow_hidden()
         .flex()
         .flex_row()
-        .items_center()
+        .items_start()
         .when_some(row_bg, |el, bg| el.bg(bg))
         .child(
             div()
                 .w(px(ACCENT_BAR_WIDTH))
-                .h_full()
+                .self_stretch()
                 .flex_none()
                 .when_some(accent, |el, color| el.bg(color)),
         )
@@ -4160,6 +4270,7 @@ fn split_line_cell(
                 .flex_none()
                 .font_family(theme.font_mono.clone())
                 .text_size(px(11.0))
+                .line_height(px(DIFF_LINE_HEIGHT))
                 .text_color(number_color)
                 .flex()
                 .justify_end()
@@ -4175,6 +4286,7 @@ fn split_line_cell(
                 .flex()
                 .justify_center()
                 .text_size(px(DIFF_TEXT_SIZE))
+                .line_height(px(DIFF_LINE_HEIGHT))
                 .text_color(marker_color)
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
@@ -4185,6 +4297,7 @@ fn split_line_cell(
             theme,
             SPLIT_CODE_PADDING_LEFT,
             content_width,
+            wrapped,
             scroll,
         ))
 }
@@ -4196,14 +4309,20 @@ fn split_filler() -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
-        .h_full()
+        .self_stretch()
         .bg(crate::theme::ink(0.03))
 }
 
 /// Compose the two halves with the centre hairline.
-fn split_row(left: AnyElement, right: AnyElement) -> gpui::Div {
+fn split_row(left: AnyElement, right: AnyElement, wrapped: bool) -> gpui::Div {
     div()
-        .h(px(DIFF_LINE_HEIGHT))
+        .map(|el| {
+            if wrapped {
+                el.min_h(px(DIFF_LINE_HEIGHT))
+            } else {
+                el.h(px(DIFF_LINE_HEIGHT))
+            }
+        })
         .w_full()
         .flex_none()
         .flex()
@@ -4213,7 +4332,7 @@ fn split_row(left: AnyElement, right: AnyElement) -> gpui::Div {
         .child(
             div()
                 .w(px(SPLIT_DIVIDER_WIDTH))
-                .h_full()
+                .self_stretch()
                 .flex_none()
                 .bg(crate::theme::hairline(0.06)),
         )
@@ -4541,6 +4660,7 @@ fn render_file_body_upto(
     let mut children: Vec<AnyElement> = Vec::new();
     let mut y = 0.0f32;
     let gutter_px = gutter_width(file);
+    let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     let spans_for = |line: &DiffLine| {
         highlight
             .as_deref()
@@ -4624,9 +4744,8 @@ fn render_file_body_upto(
                                 theme,
                                 2.0 * (ACCENT_BAR_WIDTH + gutter_px),
                             ),
-                            None => {
-                                split_row(cell(left, true), cell(right, false)).into_any_element()
-                            }
+                            None => split_row(cell(left, true), cell(right, false), wrapped)
+                                .into_any_element(),
                         });
                         y += DIFF_LINE_HEIGHT;
                     }
