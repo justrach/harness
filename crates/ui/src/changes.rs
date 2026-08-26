@@ -348,9 +348,33 @@ impl DiffHorizontalMetrics {
 enum DiffCodeWidth {
     /// Inline tool diffs keep their existing local clipping behavior.
     Clipped,
-    /// Changes rows expose a stable intrinsic code width. Commit 2 connects
-    /// these viewports to the shared horizontal scroll state.
+    /// Changes rows expose a stable intrinsic code width.
     Scrollable(DiffHorizontalMetrics),
+}
+
+#[derive(Clone)]
+struct DiffCodeScroll {
+    handle: gpui::ScrollHandle,
+    id: SharedString,
+}
+
+#[derive(Clone)]
+struct DiffCodeScrollContext {
+    handle: gpui::ScrollHandle,
+    prefix: SharedString,
+}
+
+impl DiffCodeScrollContext {
+    fn slot(&self, suffix: impl std::fmt::Display) -> DiffCodeScroll {
+        DiffCodeScroll {
+            handle: self.handle.clone(),
+            id: SharedString::from(format!("{}-{suffix}", self.prefix)),
+        }
+    }
+}
+
+fn reset_horizontal_scroll(handle: &gpui::ScrollHandle) {
+    handle.set_offset(gpui::Point::default());
 }
 
 fn strip_git_prefix(path: &str) -> &str {
@@ -1517,6 +1541,9 @@ pub struct Changes {
     /// once their tween window elapses.
     fold_settle: Option<Task<()>>,
     list: ListState,
+    /// Shared by every code viewport; row chrome stays outside these tracked
+    /// scrollers so virtualization never moves gutters or headers on x.
+    horizontal_scroll: gpui::ScrollHandle,
     /// What the pane diffs against (toolbar dropdown).
     scope: DiffScope,
     /// Unified or side-by-side (toolbar toggle, persisted per user).
@@ -1587,6 +1614,7 @@ impl Changes {
             // Rows are single lines now — a deep overdraw is cheap and keeps
             // fast wheel flicks from outrunning measurement.
             list: ListState::new(0, ListAlignment::Top, px(1024.0)),
+            horizontal_scroll: gpui::ScrollHandle::new(),
             scope: DiffScope::default(),
             base_ref: None,
             branches: Vec::new(),
@@ -1962,6 +1990,7 @@ impl Changes {
     fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
+            reset_horizontal_scroll(&self.horizontal_scroll);
             if scope == DiffScope::History {
                 self.history_pane(cx)
                     .update(cx, |history, cx| history.ensure_loaded(cx));
@@ -2055,6 +2084,7 @@ impl Changes {
         self.ensure_scoped(cx);
         let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
+                reset_horizontal_scroll(&self.horizontal_scroll);
                 self.rows.clear();
                 self.row_ranges.clear();
                 self.list.reset(0);
@@ -2114,6 +2144,7 @@ impl Changes {
                     .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
                 changes.rows = rows;
                 changes.row_ranges = ranges;
+                reset_horizontal_scroll(&changes.horizontal_scroll);
                 changes.parsed = Some(ParsedDiff {
                     key,
                     truncated,
@@ -2350,6 +2381,7 @@ impl Changes {
     /// indices do not survive the re-pairing).
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = self.mode.toggled();
+        reset_horizontal_scroll(&self.horizontal_scroll);
         if let Some(dir) = self.state.read(cx).data_dir.clone() {
             let split = self.mode.is_split();
             cx.background_executor()
@@ -2845,6 +2877,10 @@ impl Changes {
         let theme = Theme::of(cx).clone();
         let code_width =
             DiffCodeWidth::Scrollable(parsed.horizontal_geometry.resolve(&theme, window));
+        let code_scroll = DiffCodeScrollContext {
+            handle: self.horizontal_scroll.clone(),
+            prefix: SharedString::from(format!("changes-code-row-{ix}")),
+        };
         match row {
             DiffRow::FileHeader { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -2892,7 +2928,14 @@ impl Changes {
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
-                let row = diff_line_row(line, spans, &theme, gutter_px, code_width);
+                let row = diff_line_row(
+                    line,
+                    spans,
+                    &theme,
+                    gutter_px,
+                    code_width,
+                    Some(code_scroll.slot("unified")),
+                );
                 let Some((side, line_no)) = line_anchor(line) else {
                     return row;
                 };
@@ -2967,7 +3010,15 @@ impl Changes {
                             .clone()
                             .unwrap_or_else(|| line_runs(line, highlight.as_deref(), &theme));
                         let number = if old { line.old_no } else { line.new_no };
-                        split_line_cell(line, number, runs, &theme, gutter_px, code_width)
+                        split_line_cell(
+                            line,
+                            number,
+                            runs,
+                            &theme,
+                            gutter_px,
+                            code_width,
+                            Some(code_scroll.slot(if old { "old" } else { "new" })),
+                        )
                     })
                 };
                 // The left column is inert. It shows the pre-change file, and
@@ -3048,8 +3099,21 @@ impl Changes {
                 // Only the revealable slice is built — the tween never pays
                 // for lines it cannot show.
                 let cap = from.max(to).min(FOLD_TWEEN_MAX_PX);
-                let body =
-                    render_file_body_upto(file_diff, highlight, &theme, cap, self.mode, code_width);
+                let body = render_file_body_upto(
+                    file_diff,
+                    highlight,
+                    &theme,
+                    cap,
+                    self.mode,
+                    code_width,
+                    Some(DiffCodeScrollContext {
+                        handle: self.horizontal_scroll.clone(),
+                        prefix: SharedString::from(format!(
+                            "changes-fold-code-{file}-{}",
+                            fold.epoch
+                        )),
+                    }),
+                );
                 let clipped = div().w_full().overflow_hidden().child(body);
                 if fold.animating() {
                     clipped
@@ -3826,27 +3890,41 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
 
 /// The only part of a diff row allowed to exceed its viewport. The outer
 /// element keeps row chrome fixed; the inner element owns the intrinsic code
-/// width that commit 2 will move with a shared scroll handle.
+/// width and is the only plane moved by the shared horizontal scroll handle.
 fn code_text_viewport(
     text: String,
     runs: Vec<gpui::TextRun>,
     theme: &Theme,
     padding_left: f32,
     content_width: Option<f32>,
+    scroll: Option<DiffCodeScroll>,
 ) -> AnyElement {
     let content = div()
-        .when_some(content_width, |el, width| el.w(px(width)).flex_none())
+        .when_some(content_width, |el, width| {
+            // Keep every tracked row's scroll extent identical. The width
+            // already includes shaping slack on the right, so clipping here
+            // only prevents a child from redefining the shared maximum.
+            el.w(px(width)).flex_none().overflow_hidden()
+        })
         .pl(px(padding_left))
         .font_family(theme.font_mono.clone())
         .text_size(px(DIFF_TEXT_SIZE))
         .whitespace_nowrap()
         .child(gpui::StyledText::new(text).with_runs(runs));
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .child(content)
-        .into_any_element()
+    let viewport = div().flex_1().min_w_0().overflow_hidden().child(content);
+    match scroll {
+        Some(scroll) => {
+            let mut viewport = viewport
+                .id(scroll.id)
+                .overflow_x_scroll()
+                .track_scroll(&scroll.handle);
+            // Without this GPUI maps a vertical-only wheel delta onto x for
+            // an x-only scroller, starving the virtualized list underneath.
+            viewport.style().restrict_scroll_to_axis = Some(true);
+            viewport.into_any_element()
+        }
+        None => viewport.into_any_element(),
+    }
 }
 
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
@@ -3858,6 +3936,7 @@ fn diff_line_row(
     theme: &Theme,
     gutter_px: f32,
     code_width: DiffCodeWidth,
+    scroll: Option<DiffCodeScroll>,
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
         return meta_line_row(
@@ -3972,6 +4051,7 @@ fn diff_line_row(
             theme,
             UNIFIED_CODE_PADDING_LEFT,
             content_width,
+            scroll,
         ))
         .into_any_element()
 }
@@ -4025,6 +4105,7 @@ fn split_line_cell(
     theme: &Theme,
     gutter_px: f32,
     code_width: DiffCodeWidth,
+    scroll: Option<DiffCodeScroll>,
 ) -> gpui::Div {
     let mut add_bg = add_color(theme);
     add_bg.a = 0.055;
@@ -4104,6 +4185,7 @@ fn split_line_cell(
             theme,
             SPLIT_CODE_PADDING_LEFT,
             content_width,
+            scroll,
         ))
 }
 
@@ -4433,6 +4515,7 @@ pub(crate) fn render_file_body_with_syntax(
                 theme,
                 gutter_px,
                 DiffCodeWidth::Clipped,
+                None,
             ));
         }
     }
@@ -4453,6 +4536,7 @@ fn render_file_body_upto(
     max_px: f32,
     mode: DiffMode,
     code_width: DiffCodeWidth,
+    scroll: Option<DiffCodeScrollContext>,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
     let mut y = 0.0f32;
@@ -4472,7 +4556,7 @@ fn render_file_body_upto(
             children.push(notice_row(notice, theme));
             y += NOTICE_HEIGHT;
         }
-        for hunk in &file.hunks {
+        for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
             if y >= max_px {
                 break 'build;
             }
@@ -4480,7 +4564,7 @@ fn render_file_body_upto(
             y += HUNK_HEADER_HEIGHT;
             match mode {
                 DiffMode::Unified => {
-                    for line in &hunk.lines {
+                    for (line_ix, line) in hunk.lines.iter().enumerate() {
                         if y >= max_px {
                             break 'build;
                         }
@@ -4490,6 +4574,9 @@ fn render_file_body_upto(
                             theme,
                             gutter_px,
                             code_width,
+                            scroll
+                                .as_ref()
+                                .map(|scroll| scroll.slot(format_args!("{hunk_ix}-{line_ix}"))),
                         ));
                         y += DIFF_LINE_HEIGHT;
                     }
@@ -4499,7 +4586,10 @@ fn render_file_body_upto(
                     // arm breaks out of a lazy walk, so the split arm must not
                     // materialize the whole hunk first.
                     let budget = ((max_px - y) / DIFF_LINE_HEIGHT).ceil().max(0.0) as usize;
-                    for (left, right) in split_pairs_upto(&hunk.lines, budget) {
+                    for (pair_ix, (left, right)) in split_pairs_upto(&hunk.lines, budget)
+                        .into_iter()
+                        .enumerate()
+                    {
                         if y >= max_px {
                             break 'build;
                         }
@@ -4513,6 +4603,12 @@ fn render_file_body_upto(
                                 theme,
                                 gutter_px,
                                 code_width,
+                                scroll.as_ref().map(|scroll| {
+                                    scroll.slot(format_args!(
+                                        "{hunk_ix}-{pair_ix}-{}",
+                                        if old { "old" } else { "new" }
+                                    ))
+                                }),
                             )
                             .into_any_element(),
                             None => split_filler().into_any_element(),
@@ -5340,6 +5436,31 @@ rename to new_name.rs
             ACCENT_BAR_WIDTH + gutter + SPLIT_MARKER_WIDTH + metrics.split_content_width(gutter)
         };
         assert_eq!(split_total(narrow), split_total(wide));
+    }
+
+    #[test]
+    fn horizontal_scroll_reset_returns_to_origin() {
+        let handle = gpui::ScrollHandle::new();
+        handle.set_offset(gpui::Point::new(px(-120.0), px(-18.0)));
+
+        reset_horizontal_scroll(&handle);
+
+        assert_eq!(handle.offset(), gpui::Point::default());
+    }
+
+    #[test]
+    fn horizontal_scroll_slots_share_offset_but_keep_unique_ids() {
+        let context = DiffCodeScrollContext {
+            handle: gpui::ScrollHandle::new(),
+            prefix: "row-7".into(),
+        };
+        let old = context.slot("old");
+        let new = context.slot("new");
+
+        old.handle.set_offset(gpui::Point::new(px(-96.0), px(0.0)));
+
+        assert_eq!(new.handle.offset(), old.handle.offset());
+        assert_ne!(old.id, new.id);
     }
 
     #[test]
