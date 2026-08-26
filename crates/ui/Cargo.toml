@@ -27,6 +27,7 @@ pulldown-cmark.workspace = true
 alacritty_terminal.workspace = true
 base64 = "0.22"
 unicode-segmentation.workspace = true
+unicode-width.workspace = true
 fontdb.workspace = true
 ttf-parser.workspace = true
 uuid.workspace = true

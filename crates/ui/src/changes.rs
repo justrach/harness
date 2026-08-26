@@ -38,6 +38,7 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
     SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
 };
+use unicode_width::UnicodeWidthChar as _;
 
 use zeron_proto::{Chat, CheckoutDiff, GitHistoryCommit};
 use zeron_rpc::methods;
@@ -79,6 +80,11 @@ pub const SPLIT_MARKER_WIDTH: f32 = 18.0;
 /// Hairline between the two split columns.
 pub const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
 const DIFF_TEXT_SIZE: f32 = 12.0;
+const DIFF_TAB_SIZE: usize = 4;
+const UNIFIED_CODE_PADDING_LEFT: f32 = 12.0;
+const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
+/// Breathing room after the widest source line when scrolled fully right.
+const CODE_PADDING_RIGHT: f32 = 24.0;
 
 /// How the diff is laid out. Persisted in `ui-settings.json` (`diffSplit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -258,6 +264,93 @@ impl FileDiff {
 pub fn gutter_width(file: &FileDiff) -> f32 {
     let digits = file.max_line.max(1).ilog10() + 1;
     (digits as f32 * 6.6 + 8.0 + 6.0).max(GUTTER_WIDTH)
+}
+
+/// Width inputs that are independent of the active window's font metrics.
+/// They are computed once with the parsed patch, off the render path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DiffHorizontalGeometry {
+    max_code_columns: usize,
+    max_gutter_width: f32,
+}
+
+impl DiffHorizontalGeometry {
+    fn from_files(files: &[FileDiff]) -> Self {
+        let max_code_columns = files
+            .iter()
+            .flat_map(|file| &file.hunks)
+            .flat_map(|hunk| &hunk.lines)
+            .map(|line| visual_columns(&line.text))
+            .max()
+            .unwrap_or(0);
+        let max_gutter_width = files.iter().map(gutter_width).fold(GUTTER_WIDTH, f32::max);
+        Self {
+            max_code_columns,
+            max_gutter_width,
+        }
+    }
+
+    fn resolve(self, theme: &Theme, window: &Window) -> DiffHorizontalMetrics {
+        let mono = font(theme.font_mono.clone());
+        let font_id = window.text_system().resolve_font(&mono);
+        let column_width = window
+            .text_system()
+            .ch_advance(font_id, px(DIFF_TEXT_SIZE))
+            .unwrap_or(px(DIFF_TEXT_SIZE * 0.6))
+            .as_f32();
+        DiffHorizontalMetrics {
+            max_text_width: self.max_code_columns as f32 * column_width,
+            max_gutter_width: self.max_gutter_width,
+        }
+    }
+}
+
+/// Count terminal-style display columns, including tab stops and wide
+/// Unicode glyphs. Syntax runs only recolour the shared mono font, so this is
+/// the stable width input for every virtualized row.
+fn visual_columns(text: &str) -> usize {
+    text.chars().fold(0usize, |columns, ch| {
+        if ch == '\t' {
+            columns + (DIFF_TAB_SIZE - columns % DIFF_TAB_SIZE)
+        } else {
+            columns + ch.width().unwrap_or(0)
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DiffHorizontalMetrics {
+    max_text_width: f32,
+    max_gutter_width: f32,
+}
+
+impl DiffHorizontalMetrics {
+    /// Compensating for the file-local gutter keeps every unified code
+    /// viewport's effective scroll range identical.
+    fn unified_content_width(self, gutter_width: f32) -> f32 {
+        self.max_text_width
+            + UNIFIED_CODE_PADDING_LEFT
+            + CODE_PADDING_RIGHT
+            + 2.0 * (self.max_gutter_width - gutter_width)
+    }
+
+    /// Split has one gutter per half. Both halves use this same extent so old
+    /// and new remain synchronized even when one side is a filler.
+    fn split_content_width(self, gutter_width: f32) -> f32 {
+        self.max_text_width
+            + SPLIT_CODE_PADDING_LEFT
+            + CODE_PADDING_RIGHT
+            + (self.max_gutter_width - gutter_width)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DiffCodeWidth {
+    /// Inline tool diffs keep their existing local clipping behavior.
+    Clipped,
+    /// Changes rows expose a stable intrinsic code width. Commit 2 connects
+    /// these viewports to the shared horizontal scroll state.
+    Scrollable(DiffHorizontalMetrics),
 }
 
 fn strip_git_prefix(path: &str) -> &str {
@@ -1025,6 +1118,7 @@ struct ParsedDiff {
     additions: u32,
     deletions: u32,
     file_count: usize,
+    horizontal_geometry: DiffHorizontalGeometry,
     files: Arc<Vec<FileDiff>>,
 }
 
@@ -1997,6 +2091,7 @@ impl Changes {
                 } else {
                     files.len()
                 };
+                let horizontal_geometry = DiffHorizontalGeometry::from_files(&files);
                 changes.folds.clear();
                 changes.highlights.clear();
                 let staged = changes.staged_comments(cx);
@@ -2025,6 +2120,7 @@ impl Changes {
                     additions,
                     deletions,
                     file_count,
+                    horizontal_geometry,
                     files: Arc::new(files),
                 });
                 cx.notify();
@@ -2737,12 +2833,7 @@ impl Changes {
 
     // ---- rendering ----
 
-    fn render_row(
-        &mut self,
-        ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(parsed) = &self.parsed else {
             return gpui::Empty.into_any_element();
         };
@@ -2752,6 +2843,8 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
+        let code_width =
+            DiffCodeWidth::Scrollable(parsed.horizontal_geometry.resolve(&theme, window));
         match row {
             DiffRow::FileHeader { file } => {
                 let Some(file_diff) = files.get(file as usize) else {
@@ -2799,7 +2892,7 @@ impl Changes {
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
-                let row = diff_line_row(line, spans, &theme, gutter_px);
+                let row = diff_line_row(line, spans, &theme, gutter_px, code_width);
                 let Some((side, line_no)) = line_anchor(line) else {
                     return row;
                 };
@@ -2874,7 +2967,7 @@ impl Changes {
                             .clone()
                             .unwrap_or_else(|| line_runs(line, highlight.as_deref(), &theme));
                         let number = if old { line.old_no } else { line.new_no };
-                        split_line_cell(line, number, runs, &theme, gutter_px)
+                        split_line_cell(line, number, runs, &theme, gutter_px, code_width)
                     })
                 };
                 // The left column is inert. It shows the pre-change file, and
@@ -2955,7 +3048,8 @@ impl Changes {
                 // Only the revealable slice is built — the tween never pays
                 // for lines it cannot show.
                 let cap = from.max(to).min(FOLD_TWEEN_MAX_PX);
-                let body = render_file_body_upto(file_diff, highlight, &theme, cap, self.mode);
+                let body =
+                    render_file_body_upto(file_diff, highlight, &theme, cap, self.mode, code_width);
                 let clipped = div().w_full().overflow_hidden().child(body);
                 if fold.animating() {
                     clipped
@@ -3730,6 +3824,31 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The only part of a diff row allowed to exceed its viewport. The outer
+/// element keeps row chrome fixed; the inner element owns the intrinsic code
+/// width that commit 2 will move with a shared scroll handle.
+fn code_text_viewport(
+    text: String,
+    runs: Vec<gpui::TextRun>,
+    theme: &Theme,
+    padding_left: f32,
+    content_width: Option<f32>,
+) -> AnyElement {
+    let content = div()
+        .when_some(content_width, |el, width| el.w(px(width)).flex_none())
+        .pl(px(padding_left))
+        .font_family(theme.font_mono.clone())
+        .text_size(px(DIFF_TEXT_SIZE))
+        .whitespace_nowrap()
+        .child(gpui::StyledText::new(text).with_runs(runs));
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .child(content)
+        .into_any_element()
+}
+
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
 /// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
 /// paint-only syntax runs.
@@ -3738,6 +3857,7 @@ fn diff_line_row(
     spans: &[zeron_syntax::HighlightSpan],
     theme: &Theme,
     gutter_px: f32,
+    code_width: DiffCodeWidth,
 ) -> AnyElement {
     if line.kind == LineKind::Meta {
         return meta_line_row(
@@ -3798,6 +3918,10 @@ fn diff_line_row(
         theme.text.opacity(0.92),
         theme,
     );
+    let content_width = match code_width {
+        DiffCodeWidth::Clipped => None,
+        DiffCodeWidth::Scrollable(metrics) => Some(metrics.unified_content_width(gutter_px)),
+    };
     div()
         .h(px(DIFF_LINE_HEIGHT))
         .w_full()
@@ -3842,17 +3966,13 @@ fn diff_line_row(
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .pl(px(12.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(px(DIFF_TEXT_SIZE))
-                .whitespace_nowrap()
-                .child(gpui::StyledText::new(line.text.clone()).with_runs(runs)),
-        )
+        .child(code_text_viewport(
+            line.text.clone(),
+            runs,
+            theme,
+            UNIFIED_CODE_PADDING_LEFT,
+            content_width,
+        ))
         .into_any_element()
 }
 
@@ -3904,6 +4024,7 @@ fn split_line_cell(
     runs: Vec<gpui::TextRun>,
     theme: &Theme,
     gutter_px: f32,
+    code_width: DiffCodeWidth,
 ) -> gpui::Div {
     let mut add_bg = add_color(theme);
     add_bg.a = 0.055;
@@ -3931,6 +4052,10 @@ fn split_line_cell(
             None,
             theme.text_faint.opacity(0.8),
         ),
+    };
+    let content_width = match code_width {
+        DiffCodeWidth::Clipped => None,
+        DiffCodeWidth::Scrollable(metrics) => Some(metrics.split_content_width(gutter_px)),
     };
     div()
         .flex_1()
@@ -3973,17 +4098,13 @@ fn split_line_cell(
                 .font_family(theme.font_mono.clone())
                 .child(SharedString::from(marker)),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .pl(px(6.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(px(DIFF_TEXT_SIZE))
-                .whitespace_nowrap()
-                .child(gpui::StyledText::new(line.text.clone()).with_runs(runs)),
-        )
+        .child(code_text_viewport(
+            line.text.clone(),
+            runs,
+            theme,
+            SPLIT_CODE_PADDING_LEFT,
+            content_width,
+        ))
 }
 
 /// The empty half of a one-sided split row — a pure-insert row has no old
@@ -4306,7 +4427,13 @@ pub(crate) fn render_file_body_with_syntax(
                 .as_deref()
                 .map(|highlights| highlights.spans(line))
                 .unwrap_or(&[]);
-            children.push(diff_line_row(line, spans, theme, gutter_px));
+            children.push(diff_line_row(
+                line,
+                spans,
+                theme,
+                gutter_px,
+                DiffCodeWidth::Clipped,
+            ));
         }
     }
     div()
@@ -4325,6 +4452,7 @@ fn render_file_body_upto(
     theme: &Theme,
     max_px: f32,
     mode: DiffMode,
+    code_width: DiffCodeWidth,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
     let mut y = 0.0f32;
@@ -4356,7 +4484,13 @@ fn render_file_body_upto(
                         if y >= max_px {
                             break 'build;
                         }
-                        children.push(diff_line_row(line, spans_for(line), theme, gutter_px));
+                        children.push(diff_line_row(
+                            line,
+                            spans_for(line),
+                            theme,
+                            gutter_px,
+                            code_width,
+                        ));
                         y += DIFF_LINE_HEIGHT;
                     }
                 }
@@ -4378,6 +4512,7 @@ fn render_file_body_upto(
                                 line_runs(line, highlight.as_deref(), theme),
                                 theme,
                                 gutter_px,
+                                code_width,
                             )
                             .into_any_element(),
                             None => split_filler().into_any_element(),
@@ -5173,6 +5308,38 @@ rename to new_name.rs
         let mut file = files[0].clone();
         truncate_file_lines(&mut file, 3);
         assert_eq!(file.max_line, 2);
+    }
+
+    #[test]
+    fn horizontal_geometry_counts_tabs_and_unicode_columns() {
+        assert_eq!(visual_columns("ab\tc"), 5);
+        assert_eq!(visual_columns("界"), 2);
+        assert_eq!(visual_columns("e\u{301}"), 1);
+
+        let files = parse_patch("diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+ab\t界\n");
+        let geometry = DiffHorizontalGeometry::from_files(&files);
+        assert_eq!(geometry.max_code_columns, 6);
+        assert_eq!(geometry.max_gutter_width, GUTTER_WIDTH);
+    }
+
+    #[test]
+    fn horizontal_content_width_compensates_for_local_gutters() {
+        let metrics = DiffHorizontalMetrics {
+            max_text_width: 240.0,
+            max_gutter_width: 52.0,
+        };
+        let narrow = 36.0;
+        let wide = 52.0;
+
+        let unified_total = |gutter| {
+            ACCENT_BAR_WIDTH + 2.0 * gutter + MARKER_WIDTH + metrics.unified_content_width(gutter)
+        };
+        assert_eq!(unified_total(narrow), unified_total(wide));
+
+        let split_total = |gutter| {
+            ACCENT_BAR_WIDTH + gutter + SPLIT_MARKER_WIDTH + metrics.split_content_width(gutter)
+        };
+        assert_eq!(split_total(narrow), split_total(wide));
     }
 
     #[test]
