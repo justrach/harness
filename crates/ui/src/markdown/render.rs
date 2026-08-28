@@ -1328,6 +1328,28 @@ mod tests {
     }
 
     #[test]
+    fn composed_typescript_roles_flow_through_markdown_paint_only() {
+        let line = "export function derive(name: string) { return call(name); }";
+        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+            source: line,
+            path: None,
+            fence_tag: Some("typescript"),
+        })
+        .unwrap();
+        for theme in [Theme::dark(), Theme::light()] {
+            let mono = font(theme.font_mono.clone());
+            let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
+            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
+            assert!(runs.iter().all(|run| run.font == mono));
+            let colors = runs.iter().map(|run| run.color).collect::<Vec<_>>();
+            assert!(colors.contains(&theme.syntax.keyword));
+            assert!(colors.contains(&theme.syntax.function));
+            assert!(colors.contains(&theme.syntax.parameter));
+            assert!(colors.contains(&theme.syntax.type_builtin));
+        }
+    }
+
+    #[test]
     fn code_line_runs_with_no_tokens_are_one_plain_run() {
         let theme = Theme::dark();
         let mono = font(theme.font_mono.clone());

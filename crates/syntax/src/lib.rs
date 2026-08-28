@@ -312,7 +312,10 @@ pub fn highlight_with_limits(
 
     let mut primary_configuration = configuration(language)?;
     primary_configuration.configure(CAPTURE_NAMES);
-    let injected = if matches!(language, LanguageId::Html | LanguageId::Markdown) {
+    let injected = if matches!(
+        language,
+        LanguageId::Html | LanguageId::Markdown | LanguageId::Dockerfile
+    ) {
         injected_languages(language)
             .into_iter()
             .filter_map(|language| {
@@ -372,6 +375,7 @@ fn injected_languages(parent: LanguageId) -> Vec<LanguageId> {
             Rust, JavaScript, Jsx, TypeScript, Tsx, Python, Go, Json, Jsonc, Bash, Toml, Html, Css,
             Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Dockerfile, Nix, Make,
         ],
+        Dockerfile => vec![Bash, Json, Yaml, Toml],
         _ => Vec::new(),
     }
 }
@@ -413,42 +417,70 @@ fn make_configuration(
         .map_err(|error| HighlightError::Parser(error.to_string()))
 }
 
+fn javascript_family_highlights(language: LanguageId) -> String {
+    use LanguageId::*;
+
+    let queries = match language {
+        JavaScript => &[tree_sitter_javascript::HIGHLIGHT_QUERY][..],
+        Jsx => &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        ][..],
+        TypeScript => &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ][..],
+        Tsx => &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ][..],
+        _ => unreachable!("JavaScript query composition requires a JavaScript-family language"),
+    };
+    queries.join("\n")
+}
+
+fn javascript_family_configuration(
+    language: LanguageId,
+) -> Result<HighlightConfiguration, HighlightError> {
+    use LanguageId::*;
+
+    let highlights = javascript_family_highlights(language);
+    let (grammar, name, injections, locals) = match language {
+        JavaScript => (
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+            tree_sitter_javascript::INJECTIONS_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        ),
+        Jsx => (
+            tree_sitter_javascript::LANGUAGE.into(),
+            "jsx",
+            tree_sitter_javascript::INJECTIONS_QUERY,
+            tree_sitter_javascript::LOCALS_QUERY,
+        ),
+        TypeScript => (
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        Tsx => (
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            "tsx",
+            "",
+            tree_sitter_typescript::LOCALS_QUERY,
+        ),
+        _ => unreachable!("JavaScript configuration requires a JavaScript-family language"),
+    };
+    make_configuration(grammar, name, &highlights, injections, locals)
+}
+
 fn configuration(language: LanguageId) -> Result<HighlightConfiguration, HighlightError> {
     use LanguageId::*;
     match language {
         Rust => rust_configuration(),
-        JavaScript => make_configuration(
-            tree_sitter_javascript::LANGUAGE.into(),
-            "javascript",
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            tree_sitter_javascript::LOCALS_QUERY,
-        ),
-        Jsx => make_configuration(
-            tree_sitter_javascript::LANGUAGE.into(),
-            "jsx",
-            &format!(
-                "{}\n{}",
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
-            ),
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            tree_sitter_javascript::LOCALS_QUERY,
-        ),
-        TypeScript => make_configuration(
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            "typescript",
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            "",
-            tree_sitter_typescript::LOCALS_QUERY,
-        ),
-        Tsx => make_configuration(
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            "tsx",
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            "",
-            tree_sitter_typescript::LOCALS_QUERY,
-        ),
+        JavaScript | Jsx | TypeScript | Tsx => javascript_family_configuration(language),
         Python => make_configuration(
             tree_sitter_python::LANGUAGE.into(),
             "python",
@@ -547,7 +579,7 @@ fn configuration(language: LanguageId) -> Result<HighlightConfiguration, Highlig
         Kotlin => make_configuration(
             tree_sitter_kotlin_ng::LANGUAGE.into(),
             "kotlin",
-            "[(line_comment) (block_comment)] @comment [(string_literal) (multiline_string_literal)] @string [(number_literal) (float_literal)] @number",
+            include_str!("../queries/kotlin/highlights.scm"),
             "",
             "",
         ),
@@ -604,7 +636,7 @@ fn configuration(language: LanguageId) -> Result<HighlightConfiguration, Highlig
             tree_sitter_containerfile::LANGUAGE.into(),
             "dockerfile",
             tree_sitter_containerfile::HIGHLIGHTS_QUERY,
-            "",
+            tree_sitter_containerfile::INJECTIONS_QUERY,
             "",
         ),
     }
@@ -1011,7 +1043,7 @@ fn build(value: usize) -> Widget {
     }
 
     #[test]
-    fn every_registered_grammar_loads_and_highlights_a_fixture() {
+    fn every_registered_grammar_and_query_loads_for_the_bundled_abi() {
         let fixtures = [
             (LanguageId::JavaScript, "app.js", "const value = call(42);"),
             (
@@ -1082,6 +1114,23 @@ fn build(value: usize) -> Widget {
             assert!(
                 document.lines.iter().flatten().next().is_some(),
                 "{language:?} fixture has no structural spans"
+            );
+        }
+    }
+
+    #[test]
+    fn affected_composed_and_project_queries_load_for_pinned_grammars() {
+        for language in [
+            LanguageId::TypeScript,
+            LanguageId::Tsx,
+            LanguageId::Kotlin,
+            LanguageId::Dockerfile,
+        ] {
+            let configuration = configuration(language)
+                .unwrap_or_else(|error| panic!("{language:?} query failed to load: {error}"));
+            assert!(
+                !configuration.names().is_empty(),
+                "{language:?} query has no captures"
             );
         }
     }

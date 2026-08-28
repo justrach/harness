@@ -5397,13 +5397,13 @@ rename to new_name.rs
 
     #[test]
     fn full_diff_highlights_map_old_new_and_context_by_source_line() {
-        let old_source = "fn old() {\n    let value = 1;\n}\n";
-        let new_source = "fn new() {\n    let value = 2;\n}\n";
+        let old_source = "export function old(value: string) {\n    return value.trim();\n}\n";
+        let new_source = "export function new(value: string) {\n    return value.trim();\n}\n";
         let parse = |source| {
             Arc::new(
                 zeron_syntax::highlight(zeron_syntax::HighlightRequest {
                     source,
-                    path: Some("src/lib.rs"),
+                    path: Some("src/derive.ts"),
                     fence_tag: None,
                 })
                 .unwrap(),
@@ -5417,19 +5417,19 @@ rename to new_name.rs
             kind: LineKind::Del,
             old_no: Some(1),
             new_no: None,
-            text: "fn old() {".into(),
+            text: "export function old(value: string) {".into(),
         };
         let added = DiffLine {
             kind: LineKind::Add,
             old_no: None,
             new_no: Some(1),
-            text: "fn new() {".into(),
+            text: "export function new(value: string) {".into(),
         };
         let context = DiffLine {
             kind: LineKind::Context,
             old_no: Some(2),
             new_no: Some(2),
-            text: "    let value = 2;".into(),
+            text: "    return value.trim();".into(),
         };
         assert_eq!(
             highlights.source_ref(&deleted),
