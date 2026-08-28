@@ -141,7 +141,9 @@ fn kotlin_project_query_covers_structural_roles() {
 
 // Structural Kotlin fixture
 @Deprecated("old")
-data class Greeter(private val prefix: String) {
+@Marker
+open class Parent
+data class Greeter(private val prefix: String) : Parent() {
     val version: Int = 1
 
     suspend fun greet(name: String, enabled: Boolean): String {
@@ -153,6 +155,14 @@ data class Greeter(private val prefix: String) {
 val greeter = Greeter("Hello")
 val enabled = true
 val missing = null
+
+fun exercise(receiver: Greeter) {
+    genericCall<String>()
+    lambdaCall { value -> value }
+    receiver.genericMethod<String>()
+    receiver.lambdaMethod { value -> value }
+    Uppercase()
+}
 "#;
     assert_fragments(
         source,
@@ -161,9 +171,11 @@ val missing = null
             ("package", HighlightKind::Keyword),
             ("// Structural Kotlin fixture", HighlightKind::Comment),
             ("Deprecated", HighlightKind::Attribute),
+            ("Marker", HighlightKind::Attribute),
             ("data", HighlightKind::Keyword),
             ("Greeter", HighlightKind::Type),
-            ("Greeter", HighlightKind::Constructor),
+            ("Greeter", HighlightKind::Function),
+            ("Parent", HighlightKind::Constructor),
             ("prefix", HighlightKind::Property),
             ("String", HighlightKind::TypeBuiltin),
             ("version", HighlightKind::Property),
@@ -178,13 +190,29 @@ val missing = null
             ("\"$prefix, $name\"", HighlightKind::String),
             ("true", HighlightKind::Boolean),
             ("null", HighlightKind::Constant),
+            ("greeter", HighlightKind::Property),
+            ("genericCall", HighlightKind::Function),
+            ("lambdaCall", HighlightKind::Function),
+            ("genericMethod", HighlightKind::Function),
+            ("lambdaMethod", HighlightKind::Function),
+            ("Uppercase", HighlightKind::Function),
             ("(", HighlightKind::Punctuation),
         ],
+    );
+    assert!(
+        !fragments(source, "src/Greeter.kt")
+            .contains(&("Uppercase".into(), HighlightKind::Constructor)),
+        "capitalized function calls must not be guessed to be constructors"
+    );
+    assert!(
+        !fragments(source, "src/Greeter.kt")
+            .contains(&("receiver".into(), HighlightKind::Function)),
+        "only the terminal navigation member is a function call"
     );
 }
 
 #[test]
-fn dockerfile_uses_bounded_shell_and_json_injections() {
+fn dockerfile_uses_bounded_shell_and_structured_data_injections() {
     let source = r#"FROM alpine
 ENV NAME=World
 RUN echo "hello $NAME" && printf '%s\n' "$NAME"
@@ -193,6 +221,12 @@ touch /tmp/ready
 SCRIPT
 COPY <<EOF config.json
 {"enabled": true}
+EOF
+COPY <<EOF config.yaml
+yaml_enabled: true
+EOF
+COPY <<EOF config.toml
+toml_enabled = true
 EOF
 COPY <<EOF config.xml
 <root />
@@ -209,6 +243,8 @@ EOF
             ("'%s\\n'", HighlightKind::String),
             ("touch", HighlightKind::Function),
             ("true", HighlightKind::Constant),
+            ("yaml_enabled", HighlightKind::Property),
+            ("toml_enabled = true", HighlightKind::Property),
             ("<root />", HighlightKind::String),
         ],
     );

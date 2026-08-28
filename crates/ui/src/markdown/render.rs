@@ -1328,24 +1328,74 @@ mod tests {
     }
 
     #[test]
-    fn composed_typescript_roles_flow_through_markdown_paint_only() {
-        let line = "export function derive(name: string) { return call(name); }";
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
-            source: line,
-            path: None,
-            fence_tag: Some("typescript"),
-        })
-        .unwrap();
-        for theme in [Theme::dark(), Theme::light()] {
-            let mono = font(theme.font_mono.clone());
-            let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
-            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
-            assert!(runs.iter().all(|run| run.font == mono));
-            let colors = runs.iter().map(|run| run.color).collect::<Vec<_>>();
-            assert!(colors.contains(&theme.syntax.keyword));
-            assert!(colors.contains(&theme.syntax.function));
-            assert!(colors.contains(&theme.syntax.parameter));
-            assert!(colors.contains(&theme.syntax.type_builtin));
+    fn affected_language_roles_flow_through_markdown_paint_only() {
+        let cases: &[(&str, &str, &[HighlightKind])] = &[
+            (
+                "typescript",
+                "export function derive(name: string) { return call(name); }",
+                &[
+                    HighlightKind::Keyword,
+                    HighlightKind::Function,
+                    HighlightKind::Parameter,
+                    HighlightKind::TypeBuiltin,
+                ],
+            ),
+            (
+                "tsx",
+                "function card(props: Props): JSX.Element { return <main id={props.id} />; }",
+                &[
+                    HighlightKind::Tag,
+                    HighlightKind::Attribute,
+                    HighlightKind::Type,
+                ],
+            ),
+            (
+                "kotlin",
+                "fun greet(name: String) = println(name)",
+                &[
+                    HighlightKind::Keyword,
+                    HighlightKind::Function,
+                    HighlightKind::Parameter,
+                    HighlightKind::TypeBuiltin,
+                ],
+            ),
+            (
+                "dockerfile",
+                "RUN echo \"hello\"",
+                &[
+                    HighlightKind::Keyword,
+                    HighlightKind::Function,
+                    HighlightKind::String,
+                ],
+            ),
+        ];
+        for &(fence_tag, line, required) in cases {
+            let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+                source: line,
+                path: None,
+                fence_tag: Some(fence_tag),
+            })
+            .unwrap();
+            let kinds = document.lines[0]
+                .iter()
+                .map(|span| span.kind)
+                .collect::<Vec<_>>();
+            for &kind in required {
+                assert!(kinds.contains(&kind), "missing {kind:?} for {fence_tag}");
+            }
+            for theme in [Theme::dark(), Theme::light()] {
+                let mono = font(theme.font_mono.clone());
+                let runs = runs_for_syntax_line(line, &document.lines[0], &mono, &theme);
+                assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), line.len());
+                assert!(runs.iter().all(|run| run.font == mono));
+                let colors = runs.iter().map(|run| run.color).collect::<Vec<_>>();
+                for &kind in required {
+                    assert!(
+                        colors.contains(&token_color(kind, &theme)),
+                        "missing {kind:?} color for {fence_tag}"
+                    );
+                }
+            }
         }
     }
 

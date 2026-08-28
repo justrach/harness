@@ -61,21 +61,15 @@
   name: (identifier) @function)
 
 (call_expression
-  (identifier) @function.call
   .
-  (value_arguments))
+  (identifier) @function.call)
 
 (call_expression
+  .
   (navigation_expression
-    (identifier) @function.call)
-  .
-  (value_arguments))
-
-((call_expression
-  (identifier) @constructor
-  .
-  (value_arguments))
-  (#match? @constructor "^[A-Z]"))
+    (_)
+    .
+    (identifier) @function.call))
 
 (constructor_invocation
   (user_type
@@ -106,6 +100,11 @@
     (variable_declaration
       (identifier) @property)))
 
+(source_file
+  (property_declaration
+    (variable_declaration
+      (identifier) @property)))
+
 (value_argument
   (identifier) @property
   "=")
@@ -128,6 +127,10 @@
   (constructor_invocation
     (user_type
       (identifier) @attribute)))
+
+(annotation
+  (user_type
+    (identifier) @attribute))
 
 (label) @label
 
