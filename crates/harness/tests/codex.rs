@@ -579,17 +579,31 @@ async fn missing_binary_is_not_installed() {
 }
 
 #[tokio::test]
-async fn models_returns_curated_catalog() {
+async fn models_discovers_visible_catalog_with_pagination() {
     let models = harness().models().await.expect("models");
-    assert_eq!(models.len(), 8);
-    assert_eq!(models[0].id, "gpt-5.6-sol");
+    assert_eq!(models.len(), 3);
+    assert_eq!(models[0].id, "gpt-6-astra");
+    assert_eq!(models[1].id, "gpt-5.6-terra");
+    assert_eq!(models[2].id, "gpt-5.6-sol");
     assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-    assert!(
-        models
-            .iter()
-            .filter(|m| m.id != "gpt-daybreak-blue-latest")
-            .all(|m| m.options.iter().any(|o| o.id == "serviceTier"))
-    );
+    assert!(models.iter().any(|m| m.id == "gpt-5.6-sol"));
+    let tier = models[0]
+        .options
+        .iter()
+        .find(|option| option.id == "serviceTier")
+        .expect("Astra service tier");
+    assert_eq!(tier.choices[0].id, "default");
+    assert_eq!(tier.choices[1].id, "fast");
+    assert_eq!(tier.choices.len(), 2, "priority and fast dedupe");
+
+    // A failed probe stays useful and includes the new model in the fallback.
+    let fallback = CodexHarness::new()
+        .with_executable("/bin/false")
+        .models()
+        .await
+        .expect("fallback models");
+    assert_eq!(fallback.len(), 9);
+    assert_eq!(fallback[0].id, "gpt-6-astra");
 
     let missing = CodexHarness::new().with_executable("/nonexistent/codex-nowhere");
     // models() requires a resolvable binary… but with_executable trusts the
