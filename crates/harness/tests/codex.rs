@@ -581,12 +581,13 @@ async fn missing_binary_is_not_installed() {
 #[tokio::test]
 async fn models_returns_curated_catalog() {
     let models = harness().models().await.expect("models");
-    assert_eq!(models.len(), 7);
+    assert_eq!(models.len(), 8);
     assert_eq!(models[0].id, "gpt-5.6-sol");
     assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
     assert!(
         models
             .iter()
+            .filter(|m| m.id != "gpt-daybreak-blue-latest")
             .all(|m| m.options.iter().any(|o| o.id == "serviceTier"))
     );
 
