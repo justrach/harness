@@ -5804,13 +5804,13 @@ rename to new_name.rs
 
     #[test]
     fn full_diff_highlights_map_old_new_and_context_by_source_line() {
-        let old_source = "fn old() {\n    let value = 1;\n}\n";
-        let new_source = "fn new() {\n    let value = 2;\n}\n";
+        let old_source = "export function old(value: string) {\n    return value.trim();\n}\n";
+        let new_source = "export function new(value: string) {\n    return value.trim();\n}\n";
         let parse = |source| {
             Arc::new(
                 zeron_syntax::highlight(zeron_syntax::HighlightRequest {
                     source,
-                    path: Some("src/lib.rs"),
+                    path: Some("src/derive.ts"),
                     fence_tag: None,
                 })
                 .unwrap(),
@@ -5824,19 +5824,19 @@ rename to new_name.rs
             kind: LineKind::Del,
             old_no: Some(1),
             new_no: None,
-            text: "fn old() {".into(),
+            text: "export function old(value: string) {".into(),
         };
         let added = DiffLine {
             kind: LineKind::Add,
             old_no: None,
             new_no: Some(1),
-            text: "fn new() {".into(),
+            text: "export function new(value: string) {".into(),
         };
         let context = DiffLine {
             kind: LineKind::Context,
             old_no: Some(2),
             new_no: Some(2),
-            text: "    let value = 2;".into(),
+            text: "    return value.trim();".into(),
         };
         assert_eq!(
             highlights.source_ref(&deleted),
@@ -5871,6 +5871,72 @@ rename to new_name.rs
                 .iter()
                 .any(|span| span.kind == zeron_syntax::HighlightKind::Function)
         );
+    }
+
+    #[test]
+    fn split_line_runs_use_affected_old_and_new_documents() {
+        let theme = Theme::dark();
+        for (path, source, required) in [
+            (
+                "src/card.tsx",
+                "const view: JSX.Element = <main id=\"app\" />;",
+                zeron_syntax::HighlightKind::Tag,
+            ),
+            (
+                "src/Greeter.kt",
+                "fun greet(name: String) = println(name)",
+                zeron_syntax::HighlightKind::Function,
+            ),
+            (
+                "Dockerfile",
+                "RUN echo \"hello\"",
+                zeron_syntax::HighlightKind::Function,
+            ),
+        ] {
+            let document = Arc::new(
+                zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+                    source,
+                    path: Some(path),
+                    fence_tag: None,
+                })
+                .unwrap(),
+            );
+            let highlights = DiffHighlights {
+                old: Some(document.clone()),
+                new: Some(document),
+            };
+            for line in [
+                DiffLine {
+                    kind: LineKind::Del,
+                    old_no: Some(1),
+                    new_no: None,
+                    text: source.into(),
+                },
+                DiffLine {
+                    kind: LineKind::Add,
+                    old_no: None,
+                    new_no: Some(1),
+                    text: source.into(),
+                },
+            ] {
+                assert!(
+                    highlights
+                        .spans(&line)
+                        .iter()
+                        .any(|span| span.kind == required),
+                    "missing {required:?} for {path} on {:?}",
+                    line.kind
+                );
+                let runs = line_runs(&line, Some(&highlights), &theme);
+                assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), source.len());
+                assert!(
+                    runs.iter()
+                        .any(|run| run.color == render::token_color(required, &theme)),
+                    "split runs dropped {required:?} for {path} on {:?}",
+                    line.kind
+                );
+            }
+        }
     }
 
     #[test]
