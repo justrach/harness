@@ -278,6 +278,8 @@ pub struct UiSettings {
     pub theme_selection: zeron_theme::ThemeSelection,
     /// Changes pane: side-by-side diffs instead of the unified stack.
     pub diff_split: bool,
+    /// Changes pane: wrap long source lines instead of scrolling horizontally.
+    pub diff_wrap: bool,
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
@@ -320,6 +322,7 @@ impl Default for UiSettings {
             ui_font_size: crate::typography::UiFontSize::default(),
             theme_selection: zeron_theme::ThemeSelection::default(),
             diff_split: false,
+            diff_wrap: false,
             code_fences_fit_content: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
@@ -826,14 +829,16 @@ mod tests {
                 dark: "catppuccin-mocha".into(),
             },
             diff_split: true,
+            diff_wrap: true,
             code_fences_fit_content: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
-        assert_eq!(UiSettings::load(dir.path()), settings);
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        assert!(json.contains(r#""diffWrap": true"#));
+        assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
     }
 
@@ -964,6 +969,7 @@ mod tests {
         );
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
+        assert!(!loaded.diff_wrap);
         assert_eq!(
             loaded.ui_font_size,
             crate::typography::UiFontSize::default()
