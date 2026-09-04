@@ -29,10 +29,10 @@
         keepalive: true,
         body: JSON.stringify({
           api_key: "phc_yAQTUdUM9vQMcHpGmMcNJom6vfrN3r3eo5avDSnt8S9R",
-          distinct_id: distinctId,
           event,
           timestamp: new Date().toISOString(),
           properties: {
+            distinct_id: distinctId,
             $process_person_profile: false,
             $geoip_disable: true,
             $session_id: sessionId,
