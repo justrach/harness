@@ -7440,7 +7440,9 @@ impl Render for Shell {
             // forward the slot instead of eating it.
             .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
                 let pickers = this.composer.read(cx).pickers().clone();
-                let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
+                let handled = pickers.update(cx, |pickers, cx| {
+                    pickers.jump_model_slot(jump.0, cx)
+                });
                 if !handled && !this.overlay_owns_keyboard(cx) {
                     this.jump_to_session(jump.0, cx)
                 }
