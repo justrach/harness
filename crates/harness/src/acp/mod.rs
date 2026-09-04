@@ -27,6 +27,7 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod devin_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
@@ -289,8 +290,8 @@ fn devin_spec() -> AcpAgentSpec {
              `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
              `brew install --cask devin-cli`, then `devin auth login`; set \
              DEVIN_EXECUTABLE to override)",
-        // Fallback only: session/new advertises the account's models (~200
-        // flat ids, effort baked into the suffix) and the wire always wins.
+        // Legacy metadata only: discovery uses `devin models list` because
+        // session/new starts with a stale catalog. Effort is baked into ids.
         // These ids were live-verified with CLI 3000.6.14; `swe-1-7-medium`
         // is the session default the server reports.
         models: || {
@@ -528,6 +529,7 @@ pub struct AcpHarness {
     /// Coalesce concurrent picker/title probes. Starting several OpenCode
     /// processes at once makes cold plugin loading slower and wastes memory.
     models_probe: tokio::sync::Mutex<()>,
+    devin_models: devin_models::Catalog,
 }
 
 impl AcpHarness {
@@ -546,6 +548,7 @@ impl AcpHarness {
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::OnceCell::new(),
             models_probe: tokio::sync::Mutex::new(()),
+            devin_models: devin_models::Catalog::default(),
         }
     }
 
@@ -1143,14 +1146,18 @@ impl Harness for AcpHarness {
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
     }
 
-    /// ACP is the source of truth: a short-lived probe reads the agent's
-    /// advertised model list (cached on success). The spec's static catalog
-    /// answers when the agent advertises nothing. Most legacy ACP adapters also
-    /// use it when probing fails; OpenCode does not, because presenting two
-    /// static Zen models as a successful load permanently hides a slow or
-    /// failed plugin-backed catalog from the picker.
+    /// Devin refreshes through its native catalog command on each request.
+    /// Other ACP agents use a cached session probe, with the spec's static
+    /// catalog as fallback when they advertise nothing or probing fails.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
+        if self.spec.id == HarnessId::Devin {
+            let (exe, _) = self.resolve_program(false).await?;
+            return self
+                .devin_models
+                .refresh(&exe, self.model_discovery_timeout)
+                .await;
+        }
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
@@ -1811,15 +1818,35 @@ async fn request_draining(
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
+    let loading_session = matches!(method, "session/new" | "session/load");
+    let requested_session = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut config_updates = std::collections::HashMap::new();
+    let mut handle_incoming = |inc| match inc {
+        Incoming::Request { id, method, params } => {
+            handle_server_request(client, id, &method, &params);
+        }
+        Incoming::Notification { method, params }
+            if loading_session
+                && method == "session/update"
+                && params["update"]["sessionUpdate"] == "config_option_update" =>
+        {
+            if let Some(id) = params.get("sessionId").and_then(Value::as_str)
+                && params["update"]["configOptions"].is_array()
+            {
+                config_updates.insert(id.to_owned(), params["update"]["configOptions"].clone());
+            }
+        }
+        _ => {}
+    };
     let mut fut = prompt_like_request(client.clone(), method, params);
     let res = loop {
         tokio::select! {
             res = &mut fut => break res,
             inc = incoming.recv() => match inc {
-                Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request(client, id, &method, &params);
-                }
-                Some(_) => {}
+                Some(inc) => handle_incoming(inc),
                 None => {
                     return Err(HarnessError::Protocol(format!(
                         "{method}: agent exited during setup"
@@ -1832,11 +1859,21 @@ async fn request_draining(
     // replay updates the reader forwarded BEFORE the response line may still
     // sit in the buffer — flush them now or they'd leak into the live turn.
     while let Ok(inc) = incoming.try_recv() {
-        if let Incoming::Request { id, method, params } = inc {
-            handle_server_request(client, id, &method, &params);
-        }
+        handle_incoming(inc);
     }
-    res
+    // Keep config refreshes even when they race the session response. They
+    // are session state, not replayed transcript, and dropping them can lose
+    // the only notification advertising a newly released Devin model.
+    res.map(|mut response| {
+        let id = response
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .or(requested_session.as_deref());
+        if let Some(options) = id.and_then(|id| config_updates.remove(id)) {
+            response["configOptions"] = options;
+        }
+        response
+    })
 }
 
 fn prompt_like_request(
@@ -1923,7 +1960,7 @@ async fn run_session(session: Session) {
         let init_commands = scan_available_commands(&init);
 
         let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
-        let (session_id, session_response) = if let Some(resume) = &request.resume {
+        let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
@@ -1965,6 +2002,18 @@ async fn run_session(session: Session) {
             return Err(HarnessError::Protocol(
                 "session/new returned no sessionId".into(),
             ));
+        }
+        if harness == HarnessId::Devin
+            && let Some(model) = request.model.as_deref()
+        {
+            devin_models::wait_for_model(
+                &client,
+                &mut incoming,
+                &session_id,
+                &mut session_response,
+                model,
+            )
+            .await?;
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
@@ -2017,6 +2066,19 @@ async fn run_session(session: Session) {
             )
             .await
             {
+                if harness == HarnessId::Devin
+                    && options_snapshot["configOptions"]
+                        .as_array()
+                        .is_some_and(|options| {
+                            options
+                                .iter()
+                                .any(|o| o["id"] == config_id && o["category"] == "model")
+                        })
+                {
+                    return Err(HarnessError::Protocol(format!(
+                        "Devin rejected requested model {requested_model:?}: {e}"
+                    )));
+                }
                 tracing::debug!(
                     target: "zeron_harness::acp",
                     "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
