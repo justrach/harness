@@ -34,6 +34,7 @@ enum HarnessCatalog {
     static let knownLabels: [String: String] = [
         "claude-code": "Claude Code",
         "codex": "Codex",
+        "devin": "Devin",
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
@@ -59,6 +60,15 @@ enum HarnessCatalog {
                 ModelInfo(id: "grok-4.5", label: "Grok 4.5",
                           description: "xAI's coding model — 500k context",
                           reasoningLevels: ["low", "medium", "high"]),
+            ]
+        case "devin":
+            return [
+                ModelInfo(id: "swe-1-7-medium", label: "SWE-1.7 Medium",
+                          description: "Devin's default coding model", reasoningLevels: []),
+                ModelInfo(id: "claude-fable-5-1-high", label: "Claude Fable 5.1 High",
+                          description: "Anthropic's frontier model through Devin", reasoningLevels: []),
+                ModelInfo(id: "adaptive", label: "Adaptive",
+                          description: "Devin picks the model per request", reasoningLevels: []),
             ]
         case "hermes":
             return [
