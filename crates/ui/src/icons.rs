@@ -98,6 +98,8 @@ icon_assets![
     // The changes pane's unified/split toggle: a rounded frame halved by a
     // centre rule (Solar Linear weight).
     (SPLIT_COLUMNS, "split-columns"),
+    // Agent Markdown fences: fit/wrap long lines to the available width.
+    (WRAP_TEXT, "wrap-text"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),

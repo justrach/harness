@@ -26,7 +26,7 @@
 //! whole turn is already visible, so there is nothing to scroll to.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels,
-    Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window, canvas,
-    div, img, list, prelude::*, px, quad,
+    Point, ScrollHandle, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun,
+    Window, canvas, div, img, list, prelude::*, px, quad,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -2125,6 +2125,12 @@ struct SavedViewportCache {
     recency: VecDeque<String>,
 }
 
+#[derive(Default)]
+struct CodeFenceRuntime {
+    scroll: ScrollHandle,
+    scrollbar: crate::popover::HorizontalScrollbarState,
+}
+
 impl SavedViewportCache {
     fn insert(&mut self, chat_id: String, viewport: SavedViewport) {
         if self.by_chat.contains_key(&chat_id) {
@@ -2224,6 +2230,10 @@ pub struct Transcript {
     /// Family and size changes can alter prose wrapping without changing row
     /// identity, so the virtual list must explicitly discard cached heights.
     typography_generation: u32,
+    /// Last global code-fence layout generation applied to this transcript.
+    /// Each instance owns separate scroll handles and list measurements, so
+    /// every one must reset itself after a global Fit-mode transition.
+    code_fences_generation: u64,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -2277,6 +2287,11 @@ pub struct Transcript {
     /// the companion task after ~1.2s.
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
+    /// Per-visible-fence horizontal offsets and scrollbar hover/drag state.
+    /// Keys use the transcript's stable row identity, so streaming → settled
+    /// rerenders keep their local scroll position without leaking state for
+    /// blocks no longer present in the selected chat.
+    code_fences: HashMap<SharedString, CodeFenceRuntime>,
     /// Entry whose hover action is showing transient copied-check feedback.
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
@@ -2417,6 +2432,7 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             typography_generation: crate::typography::generation(cx),
+            code_fences_generation: crate::settings::code_fences_generation(cx),
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -2439,6 +2455,7 @@ impl Transcript {
             hovered_entry: None,
             copied_code: None,
             copied_clear: None,
+            code_fences: HashMap::new(),
             copied_message: None,
             copied_message_clear: None,
             attachment_preview: None,
@@ -3449,6 +3466,29 @@ impl Transcript {
             new_rows.extend(self.rows_for(echo, true));
         }
 
+        // Runtime scroll handles follow the stable code rows exactly. A live
+        // block keeps its handle through completion; deleted/reindexed tail
+        // blocks and the previous chat cannot accumulate stale handles.
+        let active_code_fences: HashSet<SharedString> = new_rows
+            .iter()
+            .flat_map(|row| match &row.kind {
+                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+                    tree.blocks
+                        .get(*block_ix)
+                        .map(|top| {
+                            render::code_block_indices(&top.block, *block_ix)
+                                .into_iter()
+                                .map(|ix| format!("{}#code{ix}", row.id).into())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        self.code_fences
+            .retain(|key, _| active_code_fences.contains(key));
+
         // Text already streamed before this (re)attach is the veil BASELINE:
         // its rows' veils seed instead of fading (render creates them from
         // this set), so only post-switch appends animate. Captured from the
@@ -4244,17 +4284,19 @@ impl Transcript {
                 column.into_any_element()
             }
             RowKind::Markdown { tree, block_ix } => {
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
                 render::render_block(
                     &top.block,
                     *block_ix,
@@ -4269,6 +4311,10 @@ impl Transcript {
                 )
             }
             RowKind::LiveMarkdown { tree, block_ix } => {
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 // Per-appended-chunk fade veil (opacity only — layout commits
                 // instantly). Reduced motion renders with no veil at all.
                 // Baseline rows (text already streamed when the transcript
@@ -4292,11 +4338,9 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
-                let Some(top) = tree.blocks.get(*block_ix) else {
-                    return gpui::Empty.into_any_element();
-                };
                 let timer = frame_stats_enabled().then(Instant::now);
                 let el = render::render_block(
                     &top.block,
@@ -4513,6 +4557,148 @@ impl Transcript {
                     .ok();
             });
         render::CopyUi { handler, copied_ix }
+    }
+
+    /// Interactive layout/scroll plumbing for one agent Markdown fence. The
+    /// persisted Fit choice is global, while each block retains only its own
+    /// ephemeral horizontal offset and hover/drag state.
+    fn code_ui_for(
+        &mut self,
+        row_id: &SharedString,
+        block_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> render::CodeUi {
+        let key: SharedString = format!("{row_id}#code{block_ix}").into();
+        let runtime = self.code_fences.entry(key.clone()).or_default();
+        let scroll = runtime.scroll.clone();
+        let fit_content = crate::settings::current(cx).code_fences_fit_content;
+        let scrollbar = (!fit_content)
+            .then(|| runtime.scrollbar.metrics(&scroll))
+            .flatten()
+            .filter(|_| runtime.scrollbar.visible())
+            .map(|metrics| render::CodeScrollbarUi {
+                metrics,
+                active: runtime.scrollbar.active(),
+                hover: {
+                    let entity = cx.weak_entity();
+                    let key = key.clone();
+                    Rc::new(move |hovered, _window, cx| {
+                        entity
+                            .update(cx, |this, cx| {
+                                let Some(runtime) = this.code_fences.get_mut(&key) else {
+                                    return;
+                                };
+                                if runtime.scrollbar.set_bar_hovered(hovered) {
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+                },
+                press: {
+                    let entity = cx.weak_entity();
+                    let key = key.clone();
+                    Rc::new(move |pointer_x, _window, cx| {
+                        entity
+                            .update(cx, |this, cx| {
+                                let Some(runtime) = this.code_fences.get_mut(&key) else {
+                                    return;
+                                };
+                                let scroll = runtime.scroll.clone();
+                                if runtime.scrollbar.begin_press(&scroll, pointer_x) {
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+                },
+                release: {
+                    let entity = cx.weak_entity();
+                    let key = key.clone();
+                    Rc::new(move |_window, cx| {
+                        entity
+                            .update(cx, |this, cx| {
+                                let Some(runtime) = this.code_fences.get_mut(&key) else {
+                                    return;
+                                };
+                                runtime.scrollbar.end_press();
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+                },
+            });
+
+        render::CodeUi {
+            key: key.clone(),
+            fit_content,
+            scroll,
+            scrollbar,
+            toggle_fit: {
+                Rc::new(move |_window, cx| {
+                    let fit = !crate::settings::current(cx).code_fences_fit_content;
+                    crate::settings::update(
+                        crate::settings::SavePolicy::Immediate,
+                        cx,
+                        |settings| settings.code_fences_fit_content = fit,
+                    );
+                    // Every Transcript observes the generation change during
+                    // its next render and resets its own local runtime state.
+                    cx.refresh_windows();
+                })
+            },
+            viewport_hover: {
+                let entity = cx.weak_entity();
+                let key = key.clone();
+                Rc::new(move |hovered, _window, cx| {
+                    entity
+                        .update(cx, |this, cx| {
+                            let Some(runtime) = this.code_fences.get_mut(&key) else {
+                                return;
+                            };
+                            if runtime.scrollbar.set_viewport_hovered(hovered) {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+            },
+            drag_move: {
+                let entity = cx.weak_entity();
+                Rc::new(move |pointer_x, _window, cx| {
+                    entity
+                        .update(cx, |this, cx| {
+                            let Some(runtime) = this.code_fences.get_mut(&key) else {
+                                return;
+                            };
+                            let scroll = runtime.scroll.clone();
+                            if runtime.scrollbar.drag_to(&scroll, pointer_x) {
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+            },
+        }
+    }
+
+    /// Provision independent interaction state for every fence nested below
+    /// one virtualized Markdown row (top-level, quoted, or listed).
+    fn code_uis_for(
+        &mut self,
+        row_id: &SharedString,
+        block: &Block,
+        block_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<HashMap<usize, render::CodeUi>> {
+        let indices = render::code_block_indices(block, block_ix);
+        (!indices.is_empty()).then(|| {
+            indices
+                .into_iter()
+                .map(|ix| (ix, self.code_ui_for(row_id, ix, cx)))
+                .collect()
+        })
     }
 
     /// Request highlights for the code blocks of a tree. `only` limits to one
@@ -5819,6 +6005,24 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let code_fences_generation = crate::settings::code_fences_generation(cx);
+        if self.code_fences_generation != code_fences_generation {
+            self.code_fences_generation = code_fences_generation;
+            // Horizontal positions are ephemeral. Reset every block owned by
+            // this Transcript even when the toggle originated in another one.
+            for runtime in self.code_fences.values() {
+                runtime.scroll.set_offset(Point::default());
+            }
+            // Fit changes every code row from analytic to measured height (or
+            // back), including virtual rows outside the current viewport.
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+            if self.own_turn.is_some() {
+                self.own_turn_kick = true;
+            }
+        }
         let typography_generation = crate::typography::generation(cx);
         if self.typography_generation != typography_generation {
             self.typography_generation = typography_generation;
