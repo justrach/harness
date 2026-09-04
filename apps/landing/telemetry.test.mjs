@@ -89,6 +89,44 @@ for (const now of [0x000123456789, Date.UTC(2026, 8, 4)]) {
   });
 }
 
+for (const [elapsed, rotates] of [[86400000 - 1, false], [86400000, true], [86400000 + 1, true], [3 * 86400000, true], [-1, true]]) {
+  test(`maintains valid sessions after a clock change of ${elapsed} ms`, () => {
+    let now = Date.UTC(2026, 8, 4);
+    const clock = class extends Date {
+      constructor(value = now) { super(value); }
+      static now() { return now; }
+    };
+    const { requests, links } = load({ clock });
+    const first = requests[0].payload;
+    now += elapsed;
+    links["hero-download"].activate();
+    assert.equal(requests.length, 2);
+    const sessionId = requests[1].payload.properties.$session_id;
+    if (rotates) assert.notEqual(sessionId, first.properties.$session_id);
+    else assert.equal(sessionId, first.properties.$session_id);
+    if (rotates) {
+      assert.equal(Number.parseInt(sessionId.slice(0, 13).replace("-", ""), 16), now);
+    }
+    links["hero-download"].activate();
+    assert.equal(requests[2].payload.properties.$session_id, sessionId);
+    now += 86400000;
+    links["hero-download"].activate();
+    assert.equal(requests.length, 4);
+    assert.notEqual(requests[3].payload.properties.$session_id, sessionId);
+    assert.equal(Date.parse(requests[3].payload.timestamp), now);
+    for (const [index, { payload }] of requests.entries()) {
+      const id = payload.properties.$session_id;
+      assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      const startedAt = Number.parseInt(id.slice(0, 13).replace("-", ""), 16);
+      const eventTime = Date.parse(payload.timestamp);
+      assert.ok(startedAt <= eventTime);
+      assert.ok(eventTime < startedAt + 86400000);
+      assert.equal(payload.properties.distinct_id, first.properties.distinct_id);
+      assert.equal(payload.event, index === 0 ? "$pageview" : "download_clicked");
+    }
+  });
+}
+
 test("drops query strings, fragments, and referrer paths and credentials", () => {
   const { requests } = load({
     url: "https://zeron.sh/?email=private%40example.invalid#secret",

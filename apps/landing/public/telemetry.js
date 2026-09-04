@@ -8,8 +8,7 @@
   ) return;
 
   const distinctId = crypto.randomUUID();
-  const sessionTimestamp = Date.now().toString(16).padStart(12, "0");
-  const sessionId = `${sessionTimestamp.slice(0, 8)}-${sessionTimestamp.slice(8)}-7${crypto.randomUUID().slice(15)}`;
+  let sessionId, sessionStartedAt;
   let referrer = "$direct", referringDomain = "$direct";
   try {
     const url = new URL(document.referrer);
@@ -22,6 +21,12 @@
   const capture = (event, properties = {}) => {
     if (optedOut()) return;
     try {
+      const now = Date.now();
+      if (!sessionId || now < sessionStartedAt || now - sessionStartedAt >= 24 * 60 * 60 * 1000) {
+        const sessionTimestamp = now.toString(16).padStart(12, "0");
+        sessionId = `${sessionTimestamp.slice(0, 8)}-${sessionTimestamp.slice(8)}-7${crypto.randomUUID().slice(15)}`;
+        sessionStartedAt = now;
+      }
       fetch("https://us.i.posthog.com/i/v0/e/?ip=0", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -31,7 +36,7 @@
         body: JSON.stringify({
           api_key: "phc_yAQTUdUM9vQMcHpGmMcNJom6vfrN3r3eo5avDSnt8S9R",
           event,
-          timestamp: new Date().toISOString(),
+          timestamp: new Date(now).toISOString(),
           properties: {
             distinct_id: distinctId,
             $process_person_profile: false,
