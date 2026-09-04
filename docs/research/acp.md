@@ -63,6 +63,14 @@
   thoughts and tools into a nested transcript. The separate
   `cognition.ai/subagentControl` extension stays disabled until Zeron has a
   foreground/background control surface.
+  Resume quirks verified live (3000.6.14): `session/load` replays the full
+  history (dropped, the doc has it) and then continues normally; a turn that
+  was cancelled leaves its user message in Devin's history with no reply, so
+  the next prompt after a resume may answer BOTH the new prompt and the stale
+  one (SWE-1.7 did exactly that). `session/load` also refuses with
+  `-32015 "already open in another process"` while a previous `devin acp`
+  still holds the session — the shared driver's fresh-session fallback covers
+  that, at the cost of Devin-side context.
 - **ACP is the source of truth for model lists** (2026-08-08; preference
   order inverted 2026-08-09): `models()` runs a short-lived probe
   (initialize → `session/new`, the `discover_commands` pattern) and reads
