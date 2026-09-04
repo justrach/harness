@@ -73,10 +73,9 @@ const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 /// Transcript column max width (zeron 46rem).
 pub const MAX_CONTENT_WIDTH: f32 = 736.0;
-/// Tool chip row height / gap — analytic, so fold heights need no measurement.
-/// A row is the guide rail + a 30px chip card centered in it (zeron
-/// tool-chip.tsx: `TOOL_CHIP_HEIGHT = 38`, card `h-[30px]`); rows stack with no
-/// gap so the rail reads continuous.
+/// Activity row height / gap — analytic, so fold heights need no measurement.
+/// Ordinary tools place their icon on the rail; subagents retain a 30px card.
+/// Rows stack without a gap so the rail continues alongside expanded output.
 pub const CHIP_HEIGHT: f32 = 38.0;
 pub const CHIP_GAP: f32 = 0.0;
 pub const CHIP_CARD_HEIGHT: f32 = 30.0;
@@ -85,6 +84,10 @@ pub const CHIP_CARD_HEIGHT: f32 = 30.0;
 /// header inside a 30px bordered card clips 2px off the bottom and every
 /// glyph/icon reads high (user report).
 const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
+/// Shared columns keep the group summary, tool labels, and expanded text aligned.
+const ACTIVITY_GUTTER_WIDTH: f32 = 26.0;
+const ACTIVITY_TEXT_GAP: f32 = 4.0;
+const TOOL_TEXT_SIZE: f32 = 12.0;
 
 /// Signed list scroll step for a pointer near a viewport edge.
 ///
@@ -4926,18 +4929,18 @@ impl Transcript {
         let summary = tool_group_summary(tools);
 
         let toggle_id = row_id.clone();
-        // Header (zeron tool-group.tsx): a small chevron tile centered over the
-        // chips' guide rail, then the quiet 12px summary.
+        // A quiet summary sits above the activity rail; its chevron has the
+        // same footprint as the tool icons below it.
         let header = div()
             .id(SharedString::from(format!("{row_id}-hdr")))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
-            .px(px(4.0))
+            .gap(px(ACTIVITY_TEXT_GAP))
+            .pr(px(4.0))
             .h(px(26.0))
             .cursor_pointer()
-            .text_size(px(12.0))
+            .text_size(px(TOOL_TEXT_SIZE))
             .line_height(px(18.0))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
@@ -4952,16 +4955,21 @@ impl Transcript {
             }))
             .child(
                 div()
-                    .size(px(18.0))
+                    .w(px(ACTIVITY_GUTTER_WIDTH))
+                    .h(px(18.0))
                     .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.06))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(10.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(if open { "▾" } else { "▸" })),
+                    .child(
+                        crate::icons::icon(if open {
+                            crate::icons::ALT_ARROW_DOWN
+                        } else {
+                            crate::icons::ALT_ARROW_RIGHT
+                        })
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                    ),
             )
             .child(
                 div()
@@ -5009,7 +5017,14 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
-                    return tool_chip(tool, collapses, theme, cx.entity_id(), cx);
+                    return tool_chip(
+                        tool,
+                        collapses,
+                        ix + 1 < tools.len(),
+                        theme,
+                        cx.entity_id(),
+                        cx,
+                    );
                 }
                 let affordance = affordances[ix].clone();
                 let affordance_h = if affordance.is_some() {
@@ -5020,17 +5035,9 @@ impl Transcript {
                 let open = detail_opens[ix];
                 let dfold = detail_folds[ix];
                 let key = SharedString::from(format!("{row_id}#d{ix}"));
-                // Expandable chip: ONE card whose header row is the chip and
-                // whose body is the detail — not a floating card below it.
-                // The guide rail stretches with the row, so an open detail
-                // never breaks the rail.
-                //
-                // The card's height is EXPLICIT (border-box), not intrinsic:
-                // an auto-height card adds its 2px of borders on top of the
-                // 30px header, and with N chips that overflowed the group's
-                // analytic height by 2N px — the last chips rendered clipped
-                // (user report: "tool calls cut off at the bottom"). The
-                // explicit height is also what the open/close tween animates.
+                // Ordinary tools expand into muted text along the same column.
+                // Subagent fallbacks retain their card; explicit heights keep
+                // the row and group fold animations in sync.
                 let closed_h = CHIP_CARD_HEIGHT;
                 let open_h = CHIP_CARD_HEIGHT
                     + invocation.as_deref().map_or(0.0, detail_height)
@@ -5045,20 +5052,26 @@ impl Transcript {
                 let group_key = row_id.clone();
                 let mut card = div()
                     .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
-                    .when(collapses, |el| el.ml(px(12.0)))
+                    .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
                     .min_w_0()
                     .flex_1()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .rounded(px(9.0))
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.07))
-                    .bg(crate::theme::ink(0.03))
+                    .when(!collapses, |card| {
+                        card.rounded(px(9.0))
+                            .border_1()
+                            .border_color(crate::theme::hairline(0.07))
+                            .bg(crate::theme::ink(0.03))
+                    })
                     .child(
                         div()
                             .id(key.clone())
-                            .h(px(CHIP_HEADER_HEIGHT))
+                            .h(px(if collapses {
+                                CHIP_CARD_HEIGHT
+                            } else {
+                                CHIP_HEADER_HEIGHT
+                            }))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -5066,7 +5079,7 @@ impl Transcript {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let entry =
                                     this.tool_details.entry(toggle_key.clone()).or_default();
-                                let currently_open = entry.open.unwrap_or(false);
+                                let currently_open = entry.open.unwrap_or(open);
                                 entry.from = if currently_open { open_h } else { closed_h };
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
@@ -5094,25 +5107,31 @@ impl Transcript {
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
-                // came back), each under its own hairline.
+                // came back), separated by a small gap.
                 if open || animating {
+                    let mut panel = div()
+                        .flex_none()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden();
                     if let Some(invocation) = invocation.as_deref() {
-                        card = card
+                        panel = panel
                             .child(
                                 div()
                                     .h(px(DETAIL_SEPARATOR))
                                     .flex_none()
-                                    .bg(crate::theme::hairline(0.06)),
+                                    .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
                             .child(detail_body(invocation, None, theme));
                     }
                     if let Some(detail) = detail.as_deref() {
-                        card = card
+                        panel = panel
                             .child(
                                 div()
                                     .h(px(DETAIL_SEPARATOR))
                                     .flex_none()
-                                    .bg(crate::theme::hairline(0.06)),
+                                    .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
                             .child(detail_body(detail, detail_highlights[ix].clone(), theme));
                     }
@@ -5125,10 +5144,9 @@ impl Transcript {
                             .id(SharedString::from(format!("{key}-blob")))
                             .h(px(BLOB_AFFORDANCE_HEIGHT))
                             .flex_none()
-                            .px(px(12.0))
                             .flex()
                             .items_center()
-                            .text_size(px(10.5))
+                            .text_size(px(TOOL_TEXT_SIZE))
                             .text_color(theme.text_faint)
                             .child(label);
                         if !loading {
@@ -5140,8 +5158,9 @@ impl Transcript {
                                     cx.notify();
                                 }));
                         }
-                        card = card.child(row);
+                        panel = panel.child(row);
                     }
+                    card = card.child(panel);
                 }
                 let card: AnyElement = if animating {
                     let from = dfold.from;
@@ -5160,17 +5179,9 @@ impl Transcript {
                     .flex_none()
                     .flex()
                     .flex_row()
-                    // Guide rail: no fixed height — stretches to the card,
-                    // detail included. Agent-only groups skip it (no header
-                    // chevron for the rail to sit under).
+                    // Stretch the line alongside the expanded text.
                     .when(collapses, |row| {
-                        row.child(
-                            div()
-                                .ml(px(12.0))
-                                .w(px(1.0))
-                                .flex_none()
-                                .bg(crate::theme::ink(0.08)),
-                        )
+                        row.child(activity_rail(tool, ix + 1 < tools.len(), theme))
                     })
                     .child(card)
                     .into_any_element()
@@ -5437,7 +5448,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
-        ToolCall::Exec { .. } => crate::icons::COMMAND,
+        ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
         ToolCall::WriteFile { .. } => crate::icons::DOCUMENT_ADD,
         ToolCall::EditFile { .. } => crate::icons::PEN,
@@ -5475,13 +5486,12 @@ fn detail_body(
         ToolDetail::Stats { stats } => body
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
-            .text_size(px(11.5))
+            .text_size(px(TOOL_TEXT_SIZE))
             .children(stats.iter().map(|stat| {
                 div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
-                    .px(px(12.0))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
@@ -5490,7 +5500,7 @@ fn detail_body(
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_color(theme.text.opacity(0.85))
+                            .text_color(theme.text_faint)
                             .child(SharedString::from(stat.path.clone())),
                     )
                     .child(
@@ -5513,16 +5523,15 @@ fn detail_body(
         } => body
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
-            .text_size(px(11.5))
+            .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().map(|line| {
                 div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
-                    .px(px(12.0))
                     .flex()
                     .items_center()
-                    .text_color(theme.text.opacity(0.85))
+                    .text_color(theme.text_faint)
                     .child(div().w_full().min_w_0().truncate().child(line.clone()))
             }))
             .when(*truncated_by > 0, |block| {
@@ -5534,13 +5543,12 @@ fn detail_body(
             truncated_by,
         } => body
             .py(px(6.0))
-            .text_size(px(12.0))
+            .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().map(|line| {
                 let row = div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
-                    .px(px(12.0))
                     .flex()
                     .items_center();
                 let Some((text, runs)) = thought_line_text(line, theme) else {
@@ -5565,16 +5573,15 @@ fn detail_body(
 fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
     div()
         .h(px(OUTPUT_LINE_HEIGHT))
-        .px(px(12.0))
         .flex()
         .items_center()
-        .text_size(px(10.5))
+        .text_size(px(TOOL_TEXT_SIZE))
         .text_color(theme.text_faint)
         .child(SharedString::from(format!("… {truncated_by} more lines")))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body
-/// palette: muted foreground prose, semibold for bold, violet mono for code,
+/// palette: faint foreground prose, semibold for bold, mono for code,
 /// underlined links (NOT clickable — a thought is a record, not a surface).
 fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString, Vec<TextRun>)> {
     let mut text = String::new();
@@ -5586,7 +5593,7 @@ fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString,
         let mut f = if run.style.code {
             gpui::font(theme.font_mono.clone())
         } else {
-            gpui::font(theme.font_sans.clone())
+            gpui::font(theme.font_sans_fixed.clone())
         };
         if run.style.bold {
             f.weight = gpui::FontWeight::SEMIBOLD;
@@ -5597,20 +5604,16 @@ fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString,
         runs.push(TextRun {
             len: run.text.len(),
             font: f,
-            color: if run.style.code {
-                render::inline_code_text(theme)
-            } else {
-                theme.text.opacity(0.85)
-            },
+            color: theme.text_faint,
             background_color: None,
             underline: run.style.link.is_some().then_some(gpui::UnderlineStyle {
-                color: Some(theme.text_muted),
+                color: Some(theme.text_faint),
                 thickness: px(1.0),
                 wavy: false,
             }),
             strikethrough: run.style.strikethrough.then_some(gpui::StrikethroughStyle {
                 thickness: px(1.0),
-                color: Some(theme.text_muted),
+                color: Some(theme.text_faint),
             }),
         });
         text.push_str(&run.text);
@@ -5651,6 +5654,14 @@ fn chip_header_row(
     } else {
         tool_chip_content(&tool.call)
     };
+    let activity = !is_agent_tool(tool);
+    let file_path = match &tool.call {
+        ToolCall::ReadFile { path }
+        | ToolCall::WriteFile { path, .. }
+        | ToolCall::EditFile { path, .. }
+        | ToolCall::ApplyPatch { path: Some(path) } => Some(path.as_str()),
+        _ => None,
+    };
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -5662,44 +5673,52 @@ fn chip_header_row(
         theme.text_muted
     };
     div()
-        .h(px(CHIP_HEADER_HEIGHT))
+        .h(px(if activity {
+            CHIP_CARD_HEIGHT
+        } else {
+            CHIP_HEADER_HEIGHT
+        }))
         .w_full()
         .min_w_0()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .px(px(8.0))
-        .text_size(px(12.0))
+        .px(px(if activity { 0.0 } else { 8.0 }))
+        .text_size(px(TOOL_TEXT_SIZE))
         .line_height(px(18.0))
-        .child(
-            // Icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
-            // icon size-3).
-            div()
-                .size(px(18.0))
-                .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.08))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    crate::icons::icon(if tool.is_thought {
-                        crate::icons::CHAT_ROUND_LINE
-                    } else {
-                        tool_icon_path(&tool.call)
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-                ),
-        )
+        .when(!activity, |row| {
+            row.child(
+                // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
+                // icon size-3).
+                div()
+                    .size(px(18.0))
+                    .flex_none()
+                    .rounded(px(5.0))
+                    .bg(crate::theme::ink(0.08))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(if tool.is_thought {
+                            crate::icons::CHAT_ROUND_LINE
+                        } else {
+                            tool_icon_path(&tool.call)
+                        })
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                    ),
+            )
+        })
         .child(
             div()
                 .flex_none()
                 .h(px(18.0))
                 .flex()
                 .items_center()
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .when(!activity, |label| {
+                    label.font_weight(gpui::FontWeight::MEDIUM)
+                })
                 .text_color(tint)
                 .child(SharedString::from(label)),
         )
@@ -5707,16 +5726,46 @@ fn chip_header_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .h(px(18.0))
+                .h(px(if file_path.is_some() { 24.0 } else { 18.0 }))
                 .flex()
                 .items_center()
                 .truncate()
                 .text_color(if failed {
                     theme.danger
+                } else if activity {
+                    theme.text_muted
                 } else {
                     theme.text.opacity(0.85)
                 })
-                .child(SharedString::from(detail)),
+                .child(if let Some(path) = file_path {
+                    let badge = div()
+                        .min_w_0()
+                        .h(px(22.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .px(px(6.0))
+                        .rounded(px(5.0))
+                        .bg(crate::theme::ink(0.06))
+                        .text_color(if failed {
+                            theme.danger
+                        } else {
+                            theme.text.opacity(0.85)
+                        })
+                        .child(
+                            crate::icons::icon(crate::icons::for_file(path))
+                                .size(px(14.0))
+                                .text_color(tint),
+                        )
+                        .child(div().min_w_0().truncate().child(SharedString::from(detail)));
+                    crate::frost::frosted(5.0, 16.0, badge).into_any_element()
+                } else {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(detail))
+                        .into_any_element()
+                }),
         )
         .when_some(tool.call.subagent_model(), |row, model| {
             // Which model the child runs on, when the spawn named one.
@@ -5762,16 +5811,23 @@ fn chip_header_row(
             let tile = div()
                 .size(px(18.0))
                 .flex_none()
-                .rounded(px(5.0))
-                .bg(crate::theme::ink(0.06))
+                .when(!activity, |tile| {
+                    tile.rounded(px(5.0)).bg(crate::theme::ink(0.06))
+                })
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(theme.text_muted.opacity(0.8));
             row.child(match trail {
-                ChipTrail::Chevron { open } => tile
-                    .text_size(px(10.0))
-                    .child(SharedString::from(if open { "▾" } else { "▸" })),
+                ChipTrail::Chevron { open } => tile.child(
+                    crate::icons::icon(if open {
+                        crate::icons::ALT_ARROW_DOWN
+                    } else {
+                        crate::icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_faint),
+                ),
                 ChipTrail::OpenArrow => tile.child(
                     crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
                         .size(px(11.0))
@@ -5853,11 +5909,58 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
     "Subagent".into()
 }
 
-/// A plain (non-expandable) chip: bordered card, plus the group guide rail
-/// when the chip lives under a collapsible header.
+/// The icon interrupts the rail, leaving a small breathing gap on each side.
+/// Absolute line segments stretch with the row, including expanded output.
+/// The final row ends at its icon instead of leaving a dangling line.
+fn activity_rail(tool: &ToolItem, continues: bool, theme: &Theme) -> gpui::Div {
+    let tint = if tool.is_error {
+        theme.danger
+    } else {
+        theme.text_muted
+    };
+    div()
+        .relative()
+        .w(px(ACTIVITY_GUTTER_WIDTH))
+        .flex_none()
+        .child(
+            div()
+                .absolute()
+                .left(px(12.5))
+                .top_0()
+                .w(px(1.0))
+                .h(px(7.0))
+                .bg(crate::theme::hairline(0.12)),
+        )
+        .when(continues, |rail| {
+            rail.child(
+                div()
+                    .absolute()
+                    .left(px(12.5))
+                    .top(px(31.0))
+                    .bottom_0()
+                    .w(px(1.0))
+                    .bg(crate::theme::hairline(0.12)),
+            )
+        })
+        .child(
+            crate::icons::icon(if tool.is_thought {
+                crate::icons::CHAT_ROUND_LINE
+            } else {
+                tool_icon_path(&tool.call)
+            })
+            .absolute()
+            .left(px(6.0))
+            .top(px(12.0))
+            .size(px(14.0))
+            .text_color(tint),
+        )
+}
+
+/// A plain activity row, or a card for a subagent without a linked document.
 fn tool_chip(
     tool: &ToolItem,
     rail: bool,
+    continues: bool,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -5868,30 +5971,23 @@ fn tool_chip(
         .flex_none()
         .flex()
         .flex_row()
-        .items_center()
-        .when(rail, |row| {
-            row.child(
-                div()
-                    .ml(px(12.0))
-                    .h_full()
-                    .w(px(1.0))
-                    .flex_none()
-                    .bg(crate::theme::ink(0.08)),
-            )
-        })
+        .when(rail, |row| row.child(activity_rail(tool, continues, theme)))
         .child(
             div()
-                .when(rail, |el| el.ml(px(12.0)))
+                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(crate::theme::hairline(0.07))
-                .bg(crate::theme::ink(0.03))
+                .when(!rail, |card| {
+                    card.rounded(px(9.0))
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.07))
+                        .bg(crate::theme::ink(0.03))
+                })
                 .child(chip_header_row(tool, None, theme, view, cx)),
         )
         .into_any_element()
@@ -6792,6 +6888,30 @@ mod tests {
 
     fn line_string(line: &[InlineRun]) -> String {
         line.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn codex_summary_paragraphs_render_as_separate_styled_lines() {
+        let lines = thought_of("**Implementing file badges**\n\n**Preparing fixture screenshots**");
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line_string(line))
+                .collect::<Vec<_>>(),
+            [
+                "Implementing file badges",
+                "",
+                "Preparing fixture screenshots"
+            ]
+        );
+        for ix in [0, 2] {
+            assert!(
+                lines[ix]
+                    .iter()
+                    .filter(|run| !run.text.is_empty())
+                    .all(|run| run.style.bold)
+            );
+        }
     }
 
     #[test]
