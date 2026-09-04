@@ -8,7 +8,8 @@
   ) return;
 
   const distinctId = crypto.randomUUID();
-  const sessionId = crypto.randomUUID();
+  const sessionTimestamp = Date.now().toString(16).padStart(12, "0");
+  const sessionId = `${sessionTimestamp.slice(0, 8)}-${sessionTimestamp.slice(8)}-7${crypto.randomUUID().slice(15)}`;
   let referrer = "$direct", referringDomain = "$direct";
   try {
     const url = new URL(document.referrer);

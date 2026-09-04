@@ -8,7 +8,7 @@ const source = readFileSync(new URL("./public/telemetry.js", import.meta.url), "
 const html = readFileSync(new URL("./public/index.html", import.meta.url), "utf8");
 const placements = { "nav-download": "nav", "hero-download": "hero", "closing-download": "closing" };
 
-function load({ url = "https://zeron.sh/", referrer = "", navigator = {}, transport } = {}) {
+function load({ url = "https://zeron.sh/", referrer = "", navigator = {}, transport, clock = Date } = {}) {
   const requests = [];
   const links = Object.fromEntries(Object.keys(placements).map((id) => {
     const href = html.match(new RegExp(`id="${id}" href="([^"]+)"`))[1];
@@ -27,6 +27,7 @@ function load({ url = "https://zeron.sh/", referrer = "", navigator = {}, transp
     navigator,
     document,
     crypto: { randomUUID },
+    Date: clock,
     URL,
     fetch: (endpoint, options) => {
       requests.push({ endpoint, ...options, payload: JSON.parse(options.body) });
@@ -60,12 +61,33 @@ test("captures one anonymous pageview using the US ingestion endpoint", () => {
   assert.equal(request.referrerPolicy, "no-referrer");
   assert.match(request.payload.api_key, /^phc_[A-Za-z0-9]+$/);
   assert.equal(request.payload.event, "$pageview");
-  assert.match(request.payload.distinct_id, /^[0-9a-f-]{36}$/);
+  assert.match(request.payload.properties.distinct_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(request.payload.properties.$process_person_profile, false);
   assert.equal(request.payload.properties.$geoip_disable, true);
   assert.equal(request.payload.properties.$current_url, "https://zeron.sh/");
   assert.equal(request.payload.properties.$referring_domain, "$direct");
 });
+
+for (const now of [0x000123456789, Date.UTC(2026, 8, 4)]) {
+  test(`uses a timestamped UUIDv7 session ID at ${now}`, () => {
+    const clock = class extends Date {
+      constructor() { super(now); }
+      static now() { return now; }
+    };
+    const { requests, links } = load({ clock });
+    const sessionId = requests[0].payload.properties.$session_id;
+    assert.match(sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    const timestamp = Number.parseInt(sessionId.slice(0, 13).replace("-", ""), 16);
+    assert.equal(timestamp, now);
+    links["hero-download"].activate();
+    for (const { payload } of requests) {
+      assert.equal(payload.properties.$session_id, sessionId);
+      assert.ok(timestamp <= Date.parse(payload.timestamp));
+      assert.ok(Date.parse(payload.timestamp) < timestamp + 24 * 60 * 60 * 1000);
+    }
+    assert.notEqual(load({ clock }).requests[0].payload.properties.$session_id, sessionId);
+  });
+}
 
 test("drops query strings, fragments, and referrer paths and credentials", () => {
   const { requests } = load({
@@ -95,7 +117,7 @@ for (const [id, placement] of Object.entries(placements)) {
     assert.equal(requests.length, 2);
     const { payload } = requests[1];
     assert.equal(payload.event, "download_clicked");
-    assert.equal(payload.distinct_id, requests[0].payload.distinct_id);
+    assert.equal(payload.properties.distinct_id, requests[0].payload.properties.distinct_id);
     assert.equal(payload.properties.$session_id, requests[0].payload.properties.$session_id);
     assert.equal(payload.properties.placement, placement);
     assert.equal(payload.properties.version, "1.2.3");
@@ -156,7 +178,7 @@ test("respects privacy preferences enabled after page load", () => {
 });
 
 test("does not persist visitor identifiers across page loads", () => {
-  assert.notEqual(load().requests[0].payload.distinct_id, load().requests[0].payload.distinct_id);
+  assert.notEqual(load().requests[0].payload.properties.distinct_id, load().requests[0].payload.properties.distinct_id);
 });
 
 test("network rejection does not break downloads or create an unhandled rejection", async () => {
