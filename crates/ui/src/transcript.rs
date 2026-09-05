@@ -133,9 +133,9 @@ pub const USER_LINE_HEIGHT: f32 = 22.0;
 /// fallback lets clearly long prompts render their affordance immediately
 /// before that first layout has completed.
 pub const USER_COLLAPSE_CHARS: usize = 400;
-/// The expander strip under a clipped prompt: a right-aligned labeled button
-/// inside the bubble, on its own row so it never paints over the last line.
-const USER_TOGGLE_HEIGHT: f32 = 26.0;
+/// The chevron's hit target sits in the transcript gutter next to the bubble;
+/// it adds no height or text padding to the message.
+const USER_TOGGLE_SIZE: f32 = 24.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a FIXED-height strip (load-state flips never shift the virtualizer).
 pub const ATT_THUMB_W: f32 = 112.0;
@@ -4247,8 +4247,9 @@ impl Transcript {
             .into_any_element()
     }
 
-    /// A labeled toggle in the bubble's footer. The row participates in
-    /// layout so the control cannot cover the fifth line or a file mention.
+    /// Keep the toggle beside the bubble's last line, inside the existing
+    /// 48px transcript gutter. The icon stays clear of text at every width
+    /// without adding a footer or changing the bubble's proportions.
     fn render_user_expander(
         &mut self,
         row_id: &SharedString,
@@ -4265,8 +4266,7 @@ impl Transcript {
         } else {
             crate::icons::ALT_ARROW_DOWN
         };
-        let label = if expanded { "Show less" } else { "Show more" };
-        let button = div()
+        div()
             .id(SharedString::from(format!("{row_id}-expander")))
             .group("user-message-toggle")
             .role(gpui::Role::Button)
@@ -4276,23 +4276,22 @@ impl Transcript {
                 "Expand message"
             })
             .aria_expanded(expanded)
-            .min_h(px(USER_TOGGLE_HEIGHT))
-            .px(px(8.0))
+            .absolute()
+            // Text ends 16px before the bubble edge. Leave a 4px gap, then
+            // give the 12px chevron a 24px target in the existing gutter.
+            .right(px(-44.0))
+            .bottom(px(0.0))
+            .size(px(USER_TOGGLE_SIZE))
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(4.0))
             .rounded(px(6.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .line_height(crate::typography::ui_rems(18.0))
-            .text_color(theme.text_muted)
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.08)).text_color(theme.text))
-            .child(label)
+            .hover(|s| s.bg(crate::theme::ink(0.06)))
             .child(
                 crate::icons::icon(glyph)
                     .size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.text_muted.opacity(0.65))
                     .group_hover("user-message-toggle", |s| s.text_color(theme.text)),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -4304,13 +4303,7 @@ impl Transcript {
                     motion::reduced_motion(cx),
                 );
                 cx.notify();
-            }));
-        div()
-            .w_full()
-            .mt(px(6.0))
-            .flex()
-            .justify_end()
-            .child(button)
+            }))
             .into_any_element()
     }
 
