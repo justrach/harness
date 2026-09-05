@@ -12,6 +12,10 @@ do not predict native Metal usage.
   replay readiness, optimistic echo insertion/removal, transcript deltas and
   subagent content invalidate the cache. Live entries also skip an unused
   serialized fingerprint.
+- The primary transcript reuses its GPUI scene on unrelated sidebar animation
+  and caret frames. Transcript updates, explicit shell notifications, scrolling,
+  geometry changes and full refreshes still invalidate it. This retains live
+  session status and elapsed labels while avoiding redundant layout and paint.
 - The native frame loop parks clean-window callbacks and wakes for content,
   input or animations. It keeps the existing display clock and lifecycle
   protections. The timing thread still runs while the window is subscribed.
@@ -37,19 +41,49 @@ real animation clocks; its completed transcript is rendered to `complete.png`.
 The profiling feature and its benchmark dependencies are not enabled in normal
 application builds.
 
-The Mac's display was locked during this work. Native offscreen rendering is
-valid for checking pixels and isolated rendering cost. It cannot verify native
-window presentation, desktop background blur, display pacing, interactive input
-or foreground whole-app CPU/memory savings. The user's reported memory swings
-are not yet conclusively attributed. RSS alone is insufficient for comparison
-because the native physical-footprint counter also accounts for charged
-compressed and GPU memory.
+The final completed native replay image is pixel-identical to the baseline.
+With `ZERON_VERIFY_CACHE=1`, the example also compares the reused scene with a
+forced fresh render after settling, hiding/restoring the sidebar and scrolling;
+all four comparisons are pixel-identical. A precompiled-shader experiment also
+produced identical pixels but no meaningful foreground memory improvement, so
+the existing runtime-shader build configuration is retained.
 
-Before merge, repeat foreground baseline/candidate runs and check typing,
-selection/copy, scrolling, streaming/completion, menus, resizing, occlusion and
-display reconnection with the Mac unlocked. This is a draft pending those checks.
+## Native foreground measurements
 
-## Repeated native offscreen comparison
+The display was subsequently unlocked for native-window replay. One valid run
+of the earlier PR head (`f10ef38c`) and two of the final application changes used
+the same sanitized 80-section Rust reply, real engine/Claude adapter/RPC, default
+dark appearance, and 1320×880 logical window at 2× scale. Builds and sampling
+profilers were stopped during measurement. The helper verified foreground
+activation and window visibility throughout every retained run. Interrupted
+runs and runs with diagnostic sampling are excluded.
+[Raw counters, executable hashes and source identity](performance/resource-macos-foreground.json).
+
+| Native metric | Earlier PR head | Updated, two runs |
+| --- | ---: | ---: |
+| Empty-chat UI CPU | 1.25% | 0.59–0.61% |
+| Streaming UI CPU | 15.16% | 12.48–13.31% |
+| Streaming UI + engine CPU | 16.06% | 13.26–14.09% |
+| Empty-chat peak UI physical footprint | 306.38 MiB | 302.11–303.50 MiB |
+| Streaming peak UI physical footprint | 328.84 MiB | 323.11–325.99 MiB |
+
+Mean streaming UI CPU is 12.90%, about 15% below the earlier PR head in this
+workload. The native memory reduction is modest. The final 10-second settled
+observations averaged 0.83–0.87% UI CPU and ended at 323.31–326.25 MiB; the
+baseline used a longer 30-second observation, so those settled averages are
+not a matched-duration before/after claim. All completed replies have the same
+52,624-byte combined text/reasoning digest.
+
+CPU uses 100% per core. Physical footprint includes memory charged by macOS,
+including compressed and GPU allocations; RSS alone cannot represent this.
+These are short replay measurements on one Apple Silicon Mac, not a guarantee
+for every model, transcript length, display or interaction. They do not prove
+that every reported idle memory swing is fixed. Native foreground rendering
+and replay completion passed; typing/selection across multiple panes, display
+reconnection and long-duration mixed-use coverage remain limited. Existing
+animation timing, blur sigma, shaders and clipping are unchanged.
+
+## Earlier isolated native offscreen comparison
 
 Two sequential runs per build, ordered baseline/candidate/candidate/baseline,
 on macOS 26.0.1 (25A362), arm64 Mac16,7 with 24 GiB RAM. The synthetic shell
@@ -64,13 +98,13 @@ The baseline adds only the profiling driver and embedded-platform launch support
 | CPU, 100% per core | 18.49% | 18.46% |
 | Mean of per-run peak physical footprint | 282.85 MiB | 286.69 MiB |
 
-These runs establish **no meaningful streaming CPU or memory improvement** in
-this isolated workload. It excludes native display-link dispatch and desktop
+These earlier runs, before the primary transcript scene-cache change, establish
+**no meaningful streaming CPU or memory improvement** in the isolated workload. It excludes native display-link dispatch and desktop
 composition and does not open alternating menus. The completed 2640×1760 app
 image is byte-identical between baseline and candidate in the first matched pair.
-The frame-gating and unused-resource cleanup benefits still require a foreground
-comparison. Do not present these results as a reduction in the reported whole-app
-streaming usage, or as a universal memory floor.
+Keep this historical result separate from the later native-window measurements
+above; its polling loop and compositor coverage differ. It is not a universal
+memory floor.
 
 ## Reproduction
 
@@ -81,7 +115,7 @@ an isolated profile and the bundled sanitized fixture; it makes no model API cal
 
 ```sh
 cargo build --release --locked -p zeron
-ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=45000 \
+ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=10000 \
   CLAUDE_CODE_EXECUTABLE="$PWD/scripts/replay-claude.py" \
   ZERON_REPLAY_JOURNAL="$PWD/scripts/fixtures/resource-stream.jsonl" \
   node scripts/resource-profile.mjs target/release/zeron /tmp/zeron-native claude-code
@@ -89,7 +123,7 @@ ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=45000 \
 # UI-only offscreen replay of those verified protocol frames:
 cargo build --release --locked -p zeron-ui --features resource-profile \
   --example macos-resource-profile
-ZERON_FRAME_STATS=0 target/release/examples/macos-resource-profile \
+ZERON_VERIFY_CACHE=1 ZERON_FRAME_STATS=0 target/release/examples/macos-resource-profile \
   /tmp/zeron-native/frames.json /tmp/zeron-native-ui
 
 # Native counter usable with either process (CPU uses 100% per core):

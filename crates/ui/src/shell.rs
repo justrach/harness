@@ -1210,6 +1210,7 @@ pub struct Shell {
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
+    _transcript_invalidation: Subscription,
 }
 
 impl Shell {
@@ -1313,6 +1314,11 @@ impl Shell {
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
+        });
+        // Parent notifications carry presentation changes (session status,
+        // elapsed labels, menus); sibling animation/caret ticks do not.
+        let transcript_invalidation = cx.observe_self(|shell, cx| {
+            shell.transcript.update(cx, |_, cx| cx.notify());
         });
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
@@ -1420,6 +1426,7 @@ impl Shell {
             _state_observation: observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
+            _transcript_invalidation: transcript_invalidation,
         }
     }
 
@@ -5556,7 +5563,10 @@ impl Shell {
         // at all → the onboarding card. The composer sits below the first two
         // (new-chat mode mints the chat id on first send).
         let outlet: AnyElement = if has_selection {
-            self.transcript.clone().into_any_element()
+            self.transcript
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
         } else if !has_spaces && !no_project {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.

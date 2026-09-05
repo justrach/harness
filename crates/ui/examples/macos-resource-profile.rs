@@ -159,6 +159,65 @@ fn main() -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(8));
     }
+    // Opt-in correctness check: a reused transcript scene must match a fresh
+    // layout after idle, panel transitions and scrolling. Keep this outside
+    // measured phases; screenshot readback and forced refreshes add work.
+    if std::env::var_os("ZERON_VERIFY_CACHE").is_some() {
+        for scenario in ["settled", "sidebar-hidden", "sidebar-restored", "scrolled"] {
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, cx| match scenario {
+                        "sidebar-hidden" | "sidebar-restored" => {
+                            window.dispatch_action(Box::new(shell::ToggleSidebar), cx)
+                        }
+                        "scrolled" => {
+                            window.dispatch_event(
+                                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                                    position: gpui::point(px(700.), px(400.)),
+                                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(500.))),
+                                    modifiers: gpui::Modifiers::default(),
+                                    touch_phase: gpui::TouchPhase::Moved,
+                                }),
+                                cx,
+                            );
+                        }
+                        _ => {}
+                    })
+                    .unwrap()
+            });
+            let settle = Instant::now();
+            while settle.elapsed() < Duration::from_secs(1) {
+                app.update(|cx| {
+                    window
+                        .update(cx, |_, window, cx| {
+                            window.simulate_next_frame(cx);
+                        })
+                        .unwrap()
+                });
+                dispatcher.run_until_idle();
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            let cached = app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.render_to_image().unwrap())
+                    .unwrap()
+            });
+            app.update(|cx| window.update(cx, |_, window, _| window.refresh()).unwrap());
+            dispatcher.run_until_idle();
+            let fresh = app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.render_to_image().unwrap())
+                    .unwrap()
+            });
+            cached.save(output.join(format!("{scenario}-cached.png")))?;
+            fresh.save(output.join(format!("{scenario}-fresh.png")))?;
+            anyhow::ensure!(
+                cached == fresh,
+                "Cached scene differs from fresh layout: {scenario}"
+            );
+            eprintln!("cache pixels match: {scenario}");
+        }
+    }
     eprintln!("elapsed={:?}", start.elapsed());
     drop(state);
     app.update(|cx| cx.quit());

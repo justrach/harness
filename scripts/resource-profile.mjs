@@ -177,7 +177,10 @@ try {
   sampler = setInterval(() => {
     if (macOS) {
       try { execFileSync(nativeWindow, [String(ui.pid), '--check'], { stdio: 'pipe' }); }
-      catch { streamError = Error('Native window became inactive, hidden or locked during profiling; discard this run'); }
+      catch (error) {
+        const reason = error.stderr?.toString().trim() || error.message;
+        streamError = Error(`Native window validation failed: ${reason}`);
+      }
     }
     samples.push({ at: Date.now(), phase, engine: stat(engine.pid), ui: stat(ui.pid),
       harness: descendants(engine.pid).map(stat).filter(Boolean) });
