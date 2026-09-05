@@ -1,0 +1,176 @@
+{
+  "baseline": {
+    "sourceRevision": "f1d4bad36b77eed5cf4432bb68291840987ebeb5",
+    "binary": "/tmp/zeron-resource-profile/zeron-release-baseline",
+    "binarySha256": "3329082b8e76b4e4dec263c15077f1cf7f30b989ede851a9dde26f2441ab9995",
+    "harness": "claude-code",
+    "mode": "replay",
+    "renderThreads": "4",
+    "frameStats": "0",
+    "submission": "rpc",
+    "prompt": "Do not use tools. Write a detailed tutorial of Rust ownership in exactly 80 numbered sections. Each section should have a heading, a paragraph of at least 60 words and a short Rust code example. Continue through all 80 sections without asking questions.",
+    "replySha256": "87f610ae8e3be4c4a6eb3ce6655e2f2728e532115fd3b4c5a2db00a0e0ac73fb",
+    "replyBytes": 52624,
+    "transcriptBytes": 55067,
+    "frames": 133,
+    "phases": {
+      "idle": {
+        "durationSeconds": 9.008,
+        "engine": {
+          "peakPssMiB": 151.3671875,
+          "endPssMiB": 151.365234375,
+          "peakRssMiB": 158.59765625,
+          "endRssMiB": 158.59765625,
+          "cpuPercent": 3.4413854351687387,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 122.6552734375,
+          "endPssMiB": 122.65234375,
+          "peakRssMiB": 172.09375,
+          "endRssMiB": 172.09375,
+          "cpuPercent": 24.311722912966253,
+          "mainCpuPercent": 0.7770870337477795
+        }
+      },
+      "stream": {
+        "durationSeconds": 17.508,
+        "engine": {
+          "peakPssMiB": 153.267578125,
+          "endPssMiB": 153.2666015625,
+          "peakRssMiB": 160.83984375,
+          "endRssMiB": 160.83984375,
+          "cpuPercent": 0.9138679460817911,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 147.47265625,
+          "endPssMiB": 145.908203125,
+          "peakRssMiB": 197.1640625,
+          "endRssMiB": 195.81640625,
+          "cpuPercent": 266.50673977610234,
+          "mainCpuPercent": 8.281928261366232
+        }
+      },
+      "settled": {
+        "durationSeconds": 44.561,
+        "engine": {
+          "peakPssMiB": 154.1845703125,
+          "endPssMiB": 154.1787109375,
+          "peakRssMiB": 161.7578125,
+          "endRssMiB": 161.75390625,
+          "cpuPercent": 0.2468526289804986,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 152.255859375,
+          "endPssMiB": 147.7333984375,
+          "peakRssMiB": 202.453125,
+          "endRssMiB": 197.703125,
+          "cpuPercent": 63.64309598079038,
+          "mainCpuPercent": 2.019703328022261
+        }
+      }
+    },
+    "postCompletionTail": {
+      "durationSeconds": 9.511,
+      "engine": {
+        "endRssMiB": 161.75390625,
+        "cpuPercent": 0.3154242456103462,
+        "mainCpuPercent": 0
+      },
+      "ui": {
+        "endRssMiB": 197.703125,
+        "cpuPercent": 23.8671012511828,
+        "mainCpuPercent": 0.8411313216275899
+      }
+    }
+  },
+  "candidate": {
+    "sourceRevision": "4902c792576ed1392c210f0e07c000ee1afc924c",
+    "binary": "/tmp/zeron-resource-profile/zeron-release-final",
+    "binarySha256": "cbad95334488ba5f377d7c8cc32161d9e6ce8a157507bba15bba3ca5624d8643",
+    "harness": "claude-code",
+    "mode": "replay",
+    "renderThreads": "4",
+    "frameStats": "0",
+    "submission": "rpc",
+    "prompt": "Do not use tools. Write a detailed tutorial of Rust ownership in exactly 80 numbered sections. Each section should have a heading, a paragraph of at least 60 words and a short Rust code example. Continue through all 80 sections without asking questions.",
+    "replySha256": "87f610ae8e3be4c4a6eb3ce6655e2f2728e532115fd3b4c5a2db00a0e0ac73fb",
+    "replyBytes": 52624,
+    "transcriptBytes": 55067,
+    "frames": 130,
+    "phases": {
+      "idle": {
+        "durationSeconds": 9.009,
+        "engine": {
+          "peakPssMiB": 23.1630859375,
+          "endPssMiB": 23.1630859375,
+          "peakRssMiB": 30.47265625,
+          "endRssMiB": 30.47265625,
+          "cpuPercent": 0.8880008880008881,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 123.03515625,
+          "endPssMiB": 123.00390625,
+          "peakRssMiB": 172.56640625,
+          "endRssMiB": 172.56640625,
+          "cpuPercent": 14.652014652014648,
+          "mainCpuPercent": 0.666000666000666
+        }
+      },
+      "stream": {
+        "durationSeconds": 17.511,
+        "engine": {
+          "peakPssMiB": 26.6123046875,
+          "endPssMiB": 26.611328125,
+          "peakRssMiB": 34.23046875,
+          "endRssMiB": 34.23046875,
+          "cpuPercent": 0.8566044200788077,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 147.0537109375,
+          "endPssMiB": 147.0537109375,
+          "peakRssMiB": 197.05078125,
+          "endRssMiB": 197.05078125,
+          "cpuPercent": 226.54331563017533,
+          "mainCpuPercent": 9.822397350236994
+        }
+      },
+      "settled": {
+        "durationSeconds": 44.559,
+        "engine": {
+          "peakPssMiB": 27.59765625,
+          "endPssMiB": 27.595703125,
+          "peakRssMiB": 35.21484375,
+          "endRssMiB": 35.21484375,
+          "cpuPercent": 0.24686370879059222,
+          "mainCpuPercent": 0
+        },
+        "ui": {
+          "peakPssMiB": 147.2666015625,
+          "endPssMiB": 145.587890625,
+          "peakRssMiB": 197.53515625,
+          "endRssMiB": 195.6484375,
+          "cpuPercent": 16.539868488969674,
+          "mainCpuPercent": 0.7854754370609754
+        }
+      }
+    },
+    "postCompletionTail": {
+      "durationSeconds": 9.51,
+      "engine": {
+        "endRssMiB": 35.21484375,
+        "cpuPercent": 0.2103049421661411,
+        "mainCpuPercent": 0
+      },
+      "ui": {
+        "endRssMiB": 195.6484375,
+        "cpuPercent": 16.614090431125113,
+        "mainCpuPercent": 0.7360672975814915
+      }
+    }
+  }
+}

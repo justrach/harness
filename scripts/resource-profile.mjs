@@ -59,7 +59,11 @@ function stat(pid) {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
     const main = readFileSync(`/proc/${pid}/task/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
     const status = readFileSync(`/proc/${pid}/status`, 'utf8');
-    return { pid, cpuSeconds: (Number(stat[11]) + Number(stat[12])) / hz,
+    // Optional proportional memory avoids counting shared mappings twice.
+    const pss = process.env.ZERON_PROFILE_PSS === '1'
+      ? { pssMiB: Number(readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8').match(/^Pss:\s+(\d+)/m)?.[1] ?? 0) / 1024 }
+      : {};
+    return { pid, ...pss, cpuSeconds: (Number(stat[11]) + Number(stat[12])) / hz,
       mainCpuSeconds: (Number(main[11]) + Number(main[12])) / hz,
       rssMiB: Number(status.match(/VmRSS:\s+(\d+)/)?.[1] ?? 0) / 1024,
       threads: Number(status.match(/Threads:\s+(\d+)/)?.[1] ?? 0) };
@@ -193,7 +197,10 @@ try {
     for (const name of ['engine', 'ui']) {
       const valid = rows.filter(r => r[name]);
       const first = valid[0], last = valid.at(-1);
-      summary.phases[p][name] = { peakRssMiB: Math.max(...valid.map(r => r[name].rssMiB)),
+      summary.phases[p][name] = {
+        ...(first[name].pssMiB == null ? {} : {
+          peakPssMiB: Math.max(...valid.map(r => r[name].pssMiB)), endPssMiB: last[name].pssMiB,
+        }), peakRssMiB: Math.max(...valid.map(r => r[name].rssMiB)),
         endRssMiB: last[name].rssMiB,
         cpuPercent: 100000 * (last[name].cpuSeconds - first[name].cpuSeconds) / (last.at - first.at),
         mainCpuPercent: 100000 * (last[name].mainCpuSeconds - first[name].mainCpuSeconds) / (last.at - first.at) };

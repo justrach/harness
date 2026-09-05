@@ -4,7 +4,8 @@
 Set CLAUDE_CODE_EXECUTABLE to this file and ZERON_REPLAY_JOURNAL to the JSONL
 captured by resource-profile.mjs. This is a deterministic adapter replay, not
 a live API run. Tool workloads must use the real harness or integration tests.
-ZERON_REPLAY_DELAY_MS defaults to 40; no network or API calls are made.
+ZERON_REPLAY_DELAY_MS defaults to 40; ZERON_REPLAY_REPEAT defaults to 1.
+No network or API calls are made. Repetition is a synthetic stress workload.
 """
 import json
 import os
@@ -32,16 +33,20 @@ def emit(frame):
 emit({"type": "system", "subtype": "init", "model": "haiku", "tools": [],
       "cwd": os.getcwd(), "session_id": "resource-profile-replay"})
 delay = float(os.environ.get("ZERON_REPLAY_DELAY_MS", "40")) / 1000
-for event in events:
-    kind = event["type"]
-    if kind not in ("textDelta", "reasoningDelta"):
-        continue
-    text = event["text"]
-    delta = {"type": "text_delta", "text": text} if kind == "textDelta" else {
-        "type": "thinking_delta", "thinking": text}
-    emit({"type": "stream_event", "parent_tool_use_id": None,
-          "event": {"type": "content_block_delta", "delta": delta}})
-    time.sleep(delay)
+repeats = int(os.environ.get("ZERON_REPLAY_REPEAT", "1"))
+if repeats < 1:
+    raise ValueError("ZERON_REPLAY_REPEAT must be positive")
+for _ in range(repeats):
+    for event in events:
+        kind = event["type"]
+        if kind not in ("textDelta", "reasoningDelta"):
+            continue
+        text = event["text"]
+        delta = {"type": "text_delta", "text": text} if kind == "textDelta" else {
+            "type": "thinking_delta", "thinking": text}
+        emit({"type": "stream_event", "parent_tool_use_id": None,
+              "event": {"type": "content_block_delta", "delta": delta}})
+        time.sleep(delay)
 emit({"type": "result", "subtype": "success", "is_error": False,
       "session_id": "resource-profile-replay", "result": ""})
 # Match the live CLI's persistent stdin lifecycle until the engine retires it.
