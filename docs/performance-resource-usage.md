@@ -1,5 +1,8 @@
 # Resource profiling, 2026-09-05
 
+For the subsequent native macOS work and its validation limits, see
+[Native macOS resource follow-up](performance-macos.md).
+
 Baseline: main `f1d4bad` (v0.2.37). Final application revision: `b09b379`.
 The previous optimized build is `cff81e7`, using zui `25f1c948`; the final build
 pins [`zeronsh/zui` at `49f9abd19`](https://github.com/zeronsh/zui/commit/49f9abd196705eda6a27080c506295a19b5da63e).

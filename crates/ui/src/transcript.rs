@@ -2201,6 +2201,7 @@ pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
     rows: Vec<Row>,
+    last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
@@ -2449,6 +2450,7 @@ impl Transcript {
             state,
             list,
             rows: Vec::new(),
+            last_source: None,
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
@@ -3428,6 +3430,16 @@ impl Transcript {
             }
         };
 
+        let source = (
+            selected.clone(),
+            replay,
+            self.state.read(cx).transcript_revision,
+        );
+        if self.last_source.as_ref() == Some(&source) {
+            return;
+        }
+        self.last_source = Some(source);
+
         let attached = selected != self.chat_id;
         if attached {
             // Read the incoming snapshot before inserting the outgoing one:
@@ -3684,7 +3696,13 @@ impl Transcript {
     /// Cached row build for one entry (streaming entries bypass the cache).
     fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
-        let fingerprint = entry_fingerprint(entry, pending);
+        // Live entries always rebuild; don't allocate a fingerprint that the
+        // streaming path cannot use.
+        let fingerprint = if streaming {
+            0
+        } else {
+            entry_fingerprint(entry, pending)
+        };
         if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
             && cached.fingerprint == fingerprint

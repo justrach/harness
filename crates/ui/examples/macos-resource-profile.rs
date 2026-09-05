@@ -1,0 +1,167 @@
+//! UI-only replay with native CoreText/Metal and real animation clocks.
+//! Input is frames.json from scripts/resource-profile.mjs. An offscreen target
+//! replaces the window compositor; this is not a whole-app CPU measurement.
+use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
+use zeron_ui::*;
+
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[derive(serde::Deserialize)]
+struct Frame {
+    at: u64,
+    frame: zeron_doc::TranscriptFrame,
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!("This profiler requires macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    let args: Vec<_> = std::env::args().collect();
+    anyhow::ensure!(
+        args.len() == 3,
+        "Usage: macos-resource-profile FRAMES_JSON OUTPUT_DIR"
+    );
+    let frames: Vec<Frame> = serde_json::from_slice(&std::fs::read(&args[1])?)?;
+    anyhow::ensure!(!frames.is_empty(), "Empty replay");
+    let output = std::path::PathBuf::from(&args[2]);
+    std::fs::create_dir_all(&output)?;
+    let native = gpui_platform::current_platform(true);
+    let platform = gpui::bench_platform(
+        Some(Box::new(gpui_platform::current_headless_renderer)),
+        native.text_system(),
+    );
+    let executor = platform.background_executor();
+    let handles = Rc::new(RefCell::new(None));
+    let captured = handles.clone();
+    let data = output.clone();
+    let app = gpui::Application::with_platform(platform).with_assets(icons::Assets)
+        .run_embedded(move |cx| {
+            gpui_tokio::init(cx);
+            let settings = settings::UiSettings::default();
+            settings::init(settings.clone(), data.clone(), cx);
+            let fonts = typography::register_fonts(cx);
+            typography::init(settings.ui_font_family.clone(), settings.ui_font_size, fonts, cx);
+            theme_library::init(data.clone(), cx);
+            appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
+                settings.accent, settings.surface, cx);
+            composer::init(cx);
+            terminal::panel::init(cx);
+            app_menus::init(cx);
+            let state = cx.new(|_| {
+                let mut state = state::AppState::new();
+                state.connection = zeron_proto::view::ConnectionStatus::Ready;
+                state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                state.selected_chat = Some("profile".into());
+                state.selected_space = Some("project".into());
+                state.auto_selected = true;
+                state.chats_synced = true;
+                state.spaces_synced = true;
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id":"project", "deviceId":"local", "path":"/tmp/resource-profile",
+                    "createdAt":"2026-09-05T00:00:00Z"
+                })).unwrap()];
+                state.chats = vec![serde_json::from_value(serde_json::json!({
+                    "id":"profile", "deviceId":"local", "spaceId":"project", "title":"Resource profile",
+                    "archived":false, "createdAt":"2026-09-05T00:00:00Z",
+                    "config":{"harness":"claude-code", "model":"claude-haiku-4-5", "reasoning":null, "sandbox":"workspace-write"}
+                })).unwrap()];
+                state
+            });
+            let boot = EngineBootConfig { data_dir:data, ipc_port:0,
+                edge_url:String::new(), edge_token:None, org_id:None,
+                workos_client_id:None, default_harness:HarnessId::ClaudeCode };
+            let window = cx.open_window(WindowOptions {
+                window_bounds:Some(WindowBounds::Windowed(Bounds::new(
+                    gpui::point(px(0.),px(0.)),size(px(1320.),px(880.))))),
+                ..Default::default()
+            }, |_,cx| cx.new(|cx| shell::Shell::new(state.clone(),boot,cx))).unwrap();
+            *captured.borrow_mut() = Some((state,window));
+        });
+    let (state, window) = handles.borrow_mut().take().unwrap();
+    let dispatcher = executor.dispatcher().as_bench().unwrap();
+    let start = Instant::now();
+    let first_at = frames[0].at;
+    let mut frames = frames.into_iter().peekable();
+    let mut completed_at = None;
+    eprintln!("pid={} phase=replay", std::process::id());
+    loop {
+        objc::rc::autoreleasepool(|| {
+            let elapsed = start.elapsed().as_millis() as u64;
+            while frames.peek().is_some_and(|f| f.at - first_at <= elapsed) {
+                let frame = frames.next().unwrap();
+                app.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        state.apply_transcript_frame(frame.frame).unwrap();
+                        let streaming = state
+                            .transcript
+                            .iter()
+                            .any(|entry| entry.status == Some(zeron_doc::MessageStatus::Streaming));
+                        state.apply_sessions(vec![zeron_proto::Session {
+                            chat_id: "profile".into(),
+                            device_id: "local".into(),
+                            status: if streaming {
+                                zeron_proto::SessionStatus::Working
+                            } else {
+                                zeron_proto::SessionStatus::Idle
+                            },
+                            started_at: Some(chrono::Utc::now()),
+                            updated_at: chrono::Utc::now(),
+                        }]);
+                        cx.notify();
+                    })
+                });
+            }
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        window.simulate_next_frame(cx);
+                    })
+                    .unwrap()
+            });
+            dispatcher.run_until_idle();
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.present_if_needed())
+                    .unwrap()
+            });
+        });
+        if frames.peek().is_none() && completed_at.is_none() {
+            eprintln!("phase=settled elapsed={:?}", start.elapsed());
+            completed_at = Some(Instant::now());
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| {
+                        window
+                            .render_to_image()
+                            .unwrap()
+                            .save(output.join("complete.png"))
+                            .unwrap();
+                    })
+                    .unwrap()
+            });
+        }
+        if completed_at.is_some_and(|t| t.elapsed() > Duration::from_secs(15)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    eprintln!("elapsed={:?}", start.elapsed());
+    drop(state);
+    app.update(|cx| cx.quit());
+    drop(app);
+    Ok(())
+}

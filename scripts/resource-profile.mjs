@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Linux end-to-end resource profile. Node >=22; no npm dependencies.
+// Linux/macOS end-to-end resource profile. Node >=22; no npm dependencies.
 // Usage: node scripts/resource-profile.mjs BINARY OUTPUT_DIR [claude-code|mock]
 // DISPLAY must name a working X server; unset WAYLAND_DISPLAY for Xvfb.
 // Uses isolated local data and a real harness (Haiku by default). This costs
@@ -10,12 +10,24 @@ import { resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
+
+const macOS = process.platform === 'darwin';
+const nativeWindowSource = fileURLToPath(new URL('./macos-profile-window.swift', import.meta.url));
+if (macOS && process.env.ZERON_PROFILE_SUBMIT_UI === '1')
+  throw Error('Composer submission profiling currently requires Linux/X11; use RPC submission on macOS');
+if (macOS) execFileSync('swift', [nativeWindowSource]);
 
 const [binaryArg, outputArg, harness = 'claude-code'] = process.argv.slice(2);
 if (!binaryArg || !outputArg) throw Error('Usage: resource-profile.mjs BINARY OUTPUT_DIR [claude-code|mock]');
 const binary = resolve(binaryArg), output = resolve(outputArg);
 if (existsSync(output)) throw Error('Use a new output directory for an isolated run');
 mkdirSync(output, { recursive: true });
+const nativeStat = `${output}/macos-resource-stat`;
+const nativeWindow = `${output}/macos-profile-window`;
+if (macOS) execFileSync('xcrun', ['clang', '-O2', '-Wall', '-Wextra',
+  fileURLToPath(new URL('./macos-resource-stat.c', import.meta.url)), '-o', nativeStat]);
+if (macOS) execFileSync('swiftc', ['-O', nativeWindowSource, '-o', nativeWindow]);
 // Shared Cargo targets can be replaced by another worktree mid-profile.
 // Both processes must execute the exact same immutable build throughout.
 const profiledBinary = `${output}/zeron-profiled`;
@@ -56,6 +68,7 @@ let phase = 'startup', id = 0, transcript = [], streamError;
 const hz = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim());
 function stat(pid) {
   try {
+    if (macOS) return JSON.parse(execFileSync(nativeStat, [String(pid)], { encoding: 'utf8' }))[0] ?? null;
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
     const main = readFileSync(`/proc/${pid}/task/${pid}/stat`, 'utf8').split(') ')[1].split(' ');
     const status = readFileSync(`/proc/${pid}/status`, 'utf8');
@@ -71,6 +84,12 @@ function stat(pid) {
 }
 function descendants(pid) {
   try {
+    if (macOS) {
+      const rows = execFileSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' })
+        .trim().split('\n').map(line => line.trim().split(/\s+/).map(Number));
+      const walk = parent => rows.filter(row => row[1] === parent).flatMap(([child]) => [child, ...walk(child)]);
+      return walk(pid);
+    }
     // A Tokio worker can own the subprocess: inspect all task children.
     const tasks = readdirSync(`/proc/${pid}/task`);
     const children = new Set(tasks.flatMap(t => {
@@ -133,26 +152,38 @@ try {
     config: { harness, model: harness === 'mock' ? 'fable-5' : 'claude-haiku-4-5', reasoning: null, sandbox: 'workspace-write' } });
   await call('Mutate', { op: 'renameChat', chatId, title: 'Resource profile' });
   pending.set(++id, { reject: e => { streamError = e; }, item: frame => {
-    frames.push({ at: Date.now(), frame }); apply(frame);
+    // apply() reuses reset/upsert objects as the mutable transcript. Capture
+    // first so later append frames cannot rewrite earlier replay records.
+    frames.push({ at: Date.now(), frame: structuredClone(frame) }); apply(frame);
   } });
   ws.send(JSON.stringify({ id, method: 'WatchDocMessages', params: { chatId } }));
   const locator = createHash('sha256').update(`Local\0device:${deviceId}`).digest('hex').slice(0, 16);
   const ui = start([`zeron://open/chat/${chatId}?workspace=${locator}`], 'ui', { ZERON_DATA_DIR: `${output}/ui` });
+  writeFileSync(`${output}/pids.json`, JSON.stringify({engine: engine.pid, ui: ui.pid}));
+  // Native windows activate themselves. Let the initial layout/splash settle.
+  if (macOS) {
+    await sleep(2000);
+    execFileSync(nativeWindow, [String(ui.pid)]);
+  }
   // Xvfb has no window manager to send the initial configure/focus events.
   // Force first paint before measuring (otherwise a mapped, transparent
   // window can consume no rendering CPU for the entire workload).
-  if (process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+  if (!macOS && process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     await sleep(2000);
     const windows = execFileSync('xdotool', ['search', '--class', '^zeron$'], { encoding: 'utf8' }).trim().split('\n');
     if (windows.length !== 1) throw Error('Use a dedicated X display with exactly one Zeron window');
     execFileSync('xdotool', ['windowraise', windows[0], 'windowsize', windows[0], '1280', '800', 'windowfocus', windows[0]]);
   }
   sampler = setInterval(() => {
+    if (macOS) {
+      try { execFileSync(nativeWindow, [String(ui.pid), '--check'], { stdio: 'pipe' }); }
+      catch { streamError = Error('Native window became inactive, hidden or locked during profiling; discard this run'); }
+    }
     samples.push({ at: Date.now(), phase, engine: stat(engine.pid), ui: stat(ui.pid),
       harness: descendants(engine.pid).map(stat).filter(Boolean) });
   }, 500);
   phase = 'idle';
-  await sleep(10000);
+  await sleep(Number(process.env.ZERON_PROFILE_PRE_IDLE_MS ?? 10000));
   if (ui.exitCode != null) throw Error('UI exited; inspect ui.log');
   phase = 'stream';
   const prompt = process.env.ZERON_PROFILE_PROMPT ??
@@ -184,9 +215,12 @@ try {
   if (!complete) throw Error(`Turn did not complete within ${timeoutMs / 1000} seconds`);
   phase = 'settled';
   await sleep(Number(process.env.ZERON_PROFILE_IDLE_MS ?? 15000));
+  if (streamError) throw streamError;
+  if (macOS) execFileSync(nativeWindow);
   const reply = transcript.filter(e => e.role === 'assistant').flatMap(e => e.parts)
     .filter(p => p.kind === 'text' || p.kind === 'reasoning').map(p => p.text).join('\n\n');
   const summary = { binary, binarySha256, harness, mode: process.env.ZERON_REPLAY_JOURNAL ? 'replay' : 'live',
+    platform: process.platform, arch: process.arch,
     renderThreads: process.env.LP_NUM_THREADS ?? 'default', frameStats: env.ZERON_FRAME_STATS,
     submission: process.env.ZERON_PROFILE_SUBMIT_UI === '1' ? 'composer' : 'rpc', prompt,
     replySha256: createHash('sha256').update(reply).digest('hex'), replyBytes: Buffer.byteLength(reply),
@@ -198,12 +232,15 @@ try {
       const valid = rows.filter(r => r[name]);
       const first = valid[0], last = valid.at(-1);
       summary.phases[p][name] = {
+        ...(macOS ? { peakFootprintMiB: Math.max(...valid.map(r => r[name].footprintMiB)),
+          endFootprintMiB: last[name].footprintMiB,
+          lifetimePeakFootprintMiB: last[name].lifetimePeakFootprintMiB } : {}),
         ...(first[name].pssMiB == null ? {} : {
           peakPssMiB: Math.max(...valid.map(r => r[name].pssMiB)), endPssMiB: last[name].pssMiB,
         }), peakRssMiB: Math.max(...valid.map(r => r[name].rssMiB)),
         endRssMiB: last[name].rssMiB,
         cpuPercent: 100000 * (last[name].cpuSeconds - first[name].cpuSeconds) / (last.at - first.at),
-        mainCpuPercent: 100000 * (last[name].mainCpuSeconds - first[name].mainCpuSeconds) / (last.at - first.at) };
+        ...(macOS ? {} : { mainCpuPercent: 100000 * (last[name].mainCpuSeconds - first[name].mainCpuSeconds) / (last.at - first.at) }) };
     }
   }
   // Report the last ten seconds separately from the completion transition.
@@ -213,9 +250,10 @@ try {
   for (const name of ['engine', 'ui']) {
     const first = quiet[0], last = quiet.at(-1);
     summary.postCompletionTail[name] = {
+      ...(macOS ? { endFootprintMiB: last[name].footprintMiB } : {}),
       endRssMiB: last[name].rssMiB,
       cpuPercent: 100000 * (last[name].cpuSeconds - first[name].cpuSeconds) / (last.at - first.at),
-      mainCpuPercent: 100000 * (last[name].mainCpuSeconds - first[name].mainCpuSeconds) / (last.at - first.at),
+      ...(macOS ? {} : { mainCpuPercent: 100000 * (last[name].mainCpuSeconds - first[name].mainCpuSeconds) / (last.at - first.at) }),
     };
   }
   writeFileSync(`${output}/summary.json`, JSON.stringify(summary, null, 2));
