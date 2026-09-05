@@ -1,55 +1,90 @@
 # Resource profiling, 2026-09-05
 
-Baseline: main `f1d4bad` (v0.2.37). Optimized application source: `4902c79`.
-Both are release builds. The optimized build pins
-[`zeronsh/zui` at `25f1c948`](https://github.com/zeronsh/zui/commit/25f1c948cef229df2536cf4b7b6731bcb30602e1).
+Baseline: main `f1d4bad` (v0.2.37). Final application revision: `b09b379`.
+The previous optimized build is `cff81e7`, using zui `25f1c948`; the final build
+pins [`zeronsh/zui` at `49f9abd19`](https://github.com/zeronsh/zui/commit/49f9abd196705eda6a27080c506295a19b5da63e).
+All measured binaries are release builds. The renderer follow-up preserves the
+existing animation clocks, scrolling behavior and visual effects.
 
-## Measured results
+## Repeated CPU comparison
 
-UI + engine totals, foreground window with a focused composer. The short
-workload is the same captured Haiku response in every run: 51,769 bytes of
-assistant Markdown, or 52,624 bytes including reasoning and part separators.
-Values below average two independent runs with one software-rendering worker.
-The exact executable hashes, reply hashes and individual measurements are in
-[baseline](performance/resource-baseline.json) and
-[candidate](performance/resource-candidate.json).
+With four software-rendering workers, streaming CPU fell **40.3%
+from old Zeron**, and **33.3% from the previous optimized build**.
+The six runs were sequential: old, previous, final, final, previous, old. Each
+cell averages two runs. [Raw results](performance/resource-four-workers.json)
+include every executable hash, reply hash, phase and individual measurement.
 
-| Metric | Old Zeron | Optimized | Change |
+| Metric | Old Zeron | Previous optimized | Final |
 | --- | ---: | ---: | ---: |
-| Idle peak RSS | 331.10 MiB | 204.08 MiB | -38.4% |
-| Streaming peak RSS | 359.39 MiB | 230.13 MiB | -36.0% |
-| Streaming CPU | 113.51% | 109.78% | -3.3% |
-| Post-completion CPU, last 10 s | 20.96% | 14.66% | -30.1% |
+| Idle CPU | 27.41% | 15.75% | 7.49% |
+| Streaming CPU | 265.57% | 237.60% | 158.57% |
+| Post-completion CPU, last 10 s | 24.34% | 17.13% | 9.14% |
+| Idle peak RSS | 330.92 MiB | 204.24 MiB | 206.11 MiB |
+| Streaming peak RSS | 358.73 MiB | 229.64 MiB | 235.24 MiB |
+| Streaming peak proportional memory | 301.38 MiB | 172.07 MiB | 177.19 MiB |
 
-The synthetic long workload repeats the same captured deltas ten times,
-producing a 526,258-byte combined reply. Each build ran it once:
+The new pipelines add about 1.9 MiB of idle RSS and
+5.6 MiB of streaming RSS compared with the previous optimized build.
+This is a small memory tradeoff for the CPU reduction, with no new image or scene
+cache. Final idle RSS remains 37.7% below old Zeron.
+
+UI + engine totals, foreground 1280×800 window with a focused composer.
+The short workload is identical captured Haiku output: 51,769 bytes of Markdown,
+or 52,624 bytes including reasoning and part separators, at 40 ms per delta.
+CPU uses **100% per core**. These measurements use Linux software Vulkan;
+they are not measurements of native Metal or a prediction of laptop CPU percentages.
+
+## One-worker and long-transcript checks
+
+The one-worker short comparison also averages two runs per build:
+[baseline](performance/resource-baseline.json),
+[final](performance/resource-candidate.json). It uses the same captured output.
+
+| Metric | Old Zeron | Final |
+| --- | ---: | ---: |
+| Idle CPU | 25.45% | 6.93% |
+| Streaming CPU | 113.51% | 100.64% |
+| Post-completion CPU, last 10 s | 20.96% | 7.88% |
+| Idle peak RSS | 331.10 MiB | 206.64 MiB |
+| Streaming peak RSS | 359.39 MiB | 233.21 MiB |
+
+The synthetic long workload repeats the same deltas ten times at 8 ms per delta,
+producing a 526,258-byte combined reply. Each build ran it once with one worker:
 [baseline](performance/resource-long-baseline.json),
-[candidate](performance/resource-long-candidate.json).
+[final](performance/resource-long-candidate.json).
 
-| Long-stream metric | Old Zeron | Optimized | Change |
-| --- | ---: | ---: | ---: |
-| Streaming peak RSS | 398.13 MiB | 254.06 MiB | -36.2% |
-| Streaming CPU | 112.30% | 113.50% | +1.1% |
-| Post-completion CPU, last 10 s | 92.77% | 15.55% | -83.2% |
+| Metric | Old Zeron | Final |
+| --- | ---: | ---: |
+| Streaming CPU | 112.30% | 103.13% |
+| Post-completion CPU, last 10 s | 92.77% | 8.30% |
+| Streaming peak RSS | 398.13 MiB | 256.27 MiB |
 
-The long completion result captures an actual defect: a landed spring could
-keep requesting frames, and subsequent virtual-list height estimates could
-restart its glide indefinitely. The optimized build parks and anchors to the
-final list item. Real scrolling still uses the existing spring integration.
+A single graphics worker can constrain streaming throughput; the repeated
+four-worker runs are the primary CPU comparison. The long completion check also
+covers the earlier spring defect: completed replies could continue requesting
+frames and restart their glide on virtual-list height estimates. The final build
+parks and anchors to the final list item while retaining real spring motion.
 
-The single graphics worker is saturated while streaming. Total streaming CPU
-is effectively unchanged there; those samples do not establish a meaningful
-streaming CPU reduction. A separate four-worker check reduces that constraint
-and also records proportional memory, which apportions shared mappings instead
-of counting their full RSS in both processes. This is one run per build, not
-the repeated comparison above; see [raw results](performance/resource-four-workers.json).
+## Final renderer changes
 
-| Four-worker metric | Old Zeron | Optimized | Change |
-| --- | ---: | ---: | ---: |
-| Idle peak RSS | 330.69 MiB | 203.04 MiB | -38.6% |
-| Idle peak proportional memory | 274.02 MiB | 146.20 MiB | -46.6% |
-| Streaming peak proportional memory | 300.74 MiB | 173.67 MiB | -42.3% |
-| Streaming CPU | 267.42% | 227.40% | -15.0% |
+- Plain rectangular fills use a small fragment shader that avoids the general
+  quad shader's per-pixel instance reads and control flow.
+- Fully opaque fills skip destination blending and unnecessary clipping only
+  when coverage is proven. The eligibility check rounds geometry outward so
+  rasterization near fractional pixel edges cannot bypass a required clip.
+- On software adapters, large solid shapes use the fast fill in a conservative
+  interior rectangle. Four disjoint exterior strips retain the original shader
+  for corners, borders and fades. Small shapes, gradients, non-finite values and
+  coordinates beyond the precision guard keep the general path.
+- Physical GPUs keep the original batch structure. They use specialized shaders
+  only for homogeneous batches, avoiding the extra draw-call overhead of the
+  software-specific split.
+
+Diagnostic category omissions identified quads as the largest remaining cost:
+removing quads temporarily reduced streaming CPU from about 234% to 95%; removing
+text, paths or shadows barely changed it. Those incomplete diagnostic frames are
+not shipped and are not performance results for a functioning application.
+The full-scene measurements above use the final release binary and complete output.
 
 ## Changes supported by profiling
 
@@ -94,73 +129,74 @@ These are parser-only allocation/time results, not whole-process RSS or CPU.
 
 ## Method and limits
 
-Linux x86-64, Xvfb 1440×900, app window 1280×800, GPUI software Vulkan rendering.
-CPU uses one core = 100% and includes every process thread. RSS totals sum each
-process's phase peak; those peaks need not occur simultaneously. UI + engine
-figures exclude Claude/OpenCode child processes, which are sampled separately.
-OpenCode is installed and automatic model discovery is included. Catalog-related
-memory savings depend on that workload. Sampling begins after the initial
-window configure/focus, so the idle phase is not a complete startup-peak capture.
+Linux x86-64, Xvfb 1440×900, window 1280×800, software Vulkan rendering. CPU sums
+all process threads. RSS totals sum each process's phase peak; those peaks need
+not occur simultaneously. Proportional memory apportions shared mappings. UI +
+engine figures exclude Claude/OpenCode child processes, which are sampled separately.
+OpenCode automatic model discovery is included, so some memory savings depend
+on its catalog workload. Sampling starts after window configure/focus and does
+not capture the complete startup peak.
 
-Each matched run uses a new profile, project and chat; 10 seconds before sending,
-fixed replay cadence (40 ms short, 8 ms long), and 45 seconds after completion.
-The last 10 seconds are reported separately from final scroll/fade settling.
-Runs were sequential with no concurrent task builds. Frame diagnostics were
-disabled for matched measurements. Each driver snapshots and hashes its binary,
-validates production transcript reset/upsert/append/remove frames, and requires
-successful completion. Matching reply hashes verify identical content.
+Every matched run uses a fresh profile, project and chat, 10 seconds before the
+prompt, a fixed replay cadence and 45 seconds after completion. The last ten
+seconds are reported separately from scroll/fade settling. Runs are sequential,
+with no concurrent task builds or manual interaction. Frame diagnostics are off.
+The one-worker baseline comes from the earlier pass on this host; the four-worker
+comparison reruns all three builds together in forward and reverse order.
 
-A process-targeted `perf` sample attributed about 95% of UI CPU to software
-rendering. UI heaptrack's largest allocation groups were 54.32 MB in lavapipe
-and 28.38 MB in Gallium/EGL. Those are graphics-driver costs on this host;
-they are not measurements of macOS Metal or a universal laptop resource ceiling.
+The driver snapshots and hashes its executable, validates production transcript
+reset/upsert/append/remove frames and requires successful completion. Matching
+reply hashes establish identical replay content. Earlier process-targeted `perf`
+samples attributed about 95% of UI CPU to software rendering; heaptrack's largest
+UI groups were 54.32 MB in lavapipe and 28.38 MB in Gallium/EGL. A final live-run sample attributed 74.01% of UI CPU to JIT shader code and
+16.27% to lavapipe, versus 4.23% in the application binary. Remaining CPU on
+this host is still predominantly software graphics. These host-specific costs
+are not a universal desktop memory floor.
 
 ## Validation and reproduction
 
-978 application tests passed, with four existing ignored tests: UI (592),
-document (87), engine library (127), harness library (103), RPC (12), syntax
-library/integration (25), Claude/OpenCode adapter integration (21), and targeted
-engine integration (11). The 592 UI tests were rerun in release mode against
-the final zui dependency. Five additional zui numerical tests cover convolution
-equivalence, paired samples at texture edges, oversized radii, scissor coverage
-and translated snapshots. Script checks and `git diff --check` passed. This is
-not a claim that every workspace integration target ran.
+978 application tests passed during this optimization work, with four existing
+ignored tests. The 592 UI tests were rerun in release mode against the final zui
+pin. The other coverage includes document (87), engine library (127), harness
+library (103), RPC (12), syntax library/integration (25), Claude/OpenCode adapter
+integration (21) and targeted engine integration (11).
 
-A fresh authenticated Haiku 4.5 turn was submitted through the composer on the
-final executable. It completed a shell-tool call successfully and produced
-30 sections and 27,062 bytes of reply text/reasoning. Sidebar collapse/expand,
-scrolling away and returning to the live tail, syntax highlighting, selected
-text copy/paste and the completed state were checked in the real window. Its
-[summary](performance/resource-live.json) is functional verification: manual
-interactions and a concurrent test build make its CPU values unsuitable for
-the matched comparison.
+28 zui renderer/text/atlas tests pass, including the five existing blur numerical
+tests and five new fill-path tests. The two graphics tests perform **1,888
+byte-identical offscreen image comparisons**: individual shapes and overlapping
+batches, opaque and translucent colors, fractional geometry and clipping,
+nonuniform and dashed borders, rounded corners, fades, two target formats and
+both alpha modes. The real Vulkan tests are explicitly opt-in on machines with
+an adapter; they were run here, rather than counted as skipped checks.
 
-Requires Node 22+, Rust, Python 3, Xvfb/xdotool for Linux desktop profiling,
-and an authenticated Claude CLI for a live run. Live mode incurs API usage.
-The checked-in [sanitized fixture](../scripts/fixtures/README.md) reproduces the
-measured replay without an API call. Use a dedicated display and new output
-directories; the driver requires exactly one Zeron window.
+A fresh authenticated Haiku 4.5 turn was submitted through the final application's
+composer. It completed a shell-tool call and produced 10,902 bytes of
+reply text/reasoning. Sidebar, scrolling, text selection/copy, resizing, the model menu and completion
+were checked in the real window, reopening the saved transcript for the last checks. Its [summary](performance/resource-live.json) is
+functional verification, separate from the fixed-output performance comparison.
+Script checks and diff checks passed. This is not a claim that every workspace
+integration target ran, or that native Metal performance was measured.
+
+Requires Node 22+, Rust, Python 3 and Xvfb/xdotool for Linux desktop profiling.
+The [sanitized fixture](../scripts/fixtures/README.md) reproduces the measured
+replay without an API call. Use a dedicated display and fresh output directories;
+the driver requires exactly one Zeron window.
 
 ```sh
 cargo build --release -p zeron
 Xvfb :98 -screen 0 1440x900x24 -nolisten tcp
-# In another terminal, run the exact short replay:
-DISPLAY=:98 WAYLAND_DISPLAY= LP_NUM_THREADS=1 ZERON_FRAME_STATS=0 \
-  ZERON_PROFILE_IDLE_MS=45000 \
+# In another terminal:
+DISPLAY=:98 WAYLAND_DISPLAY= LP_NUM_THREADS=4 ZERON_FRAME_STATS=0 \
+  ZERON_PROFILE_PSS=1 ZERON_PROFILE_IDLE_MS=45000 \
   CLAUDE_CODE_EXECUTABLE="$PWD/scripts/replay-claude.py" \
   ZERON_REPLAY_JOURNAL="$PWD/scripts/fixtures/resource-stream.jsonl" \
   node scripts/resource-profile.mjs target/release/zeron /tmp/zeron-short claude-code
 
+# Use LP_NUM_THREADS=1 for the one-worker check.
 # Add ZERON_REPLAY_REPEAT=10 ZERON_REPLAY_DELAY_MS=8 for the long workload.
-# Use LP_NUM_THREADS=4 ZERON_PROFILE_PSS=1 for the four-worker check.
-# For a live turn, omit the replay variables and point
-# CLAUDE_CODE_EXECUTABLE to the real CLI. ZERON_PROFILE_SUBMIT_UI=1
-# submits through the composer instead of QueueCommand.
-```
+# For a live turn, omit replay variables and point CLAUDE_CODE_EXECUTABLE to
+# the authenticated CLI; ZERON_PROFILE_SUBMIT_UI=1 submits through the composer.
 
-Each run writes its summary, raw process samples, RPC frames, final transcript
-and process logs. Optional `ZERON_MAX_ENGINE_RSS_MIB` / `ZERON_MAX_UI_RSS_MIB`
-set machine-specific peak-RSS budgets. `ZERON_FRAME_STATS=1` enables render
-cadence and row-cost diagnostics; application diagnostics are off by default.
-The replay helper deliberately rejects failed/tool/subagent journals: those
-features require the real harness or integration suites.
+# In the zui checkout, on a host with Vulkan (software Vulkan works):
+LP_NUM_THREADS=4 cargo test --release -p gpui_wgpu --lib -- --include-ignored
+```

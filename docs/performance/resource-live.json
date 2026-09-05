@@ -1,75 +1,76 @@
 {
-  "binary": "/tmp/zeron-resource-profile/zeron-release-final",
-  "binarySha256": "cbad95334488ba5f377d7c8cc32161d9e6ce8a157507bba15bba3ca5624d8643",
+  "sourceRevision": "b09b37963cf9c78e1aa6acd5195f8a4427dfe21f",
+  "binary": "/tmp/zeron-cpu-round2/zeron-final",
+  "binarySha256": "f4b91201706962a9a29a52dfbe89ccc959870132d28ff8cf1a6b964dbd1dbe20",
   "harness": "claude-code",
   "mode": "live",
-  "renderThreads": "1",
+  "renderThreads": "4",
   "frameStats": "1",
   "submission": "composer",
-  "prompt": "Run pwd once using your shell tool, then write a Rust ownership tutorial in 30 numbered sections. Each section should contain a heading, a paragraph of at least 50 words and a short Rust example. Finish all 30 sections without asking questions.",
-  "replySha256": "fb6438f16e24d9b49ef86651c6691e3d08e1e07500e619d6f50853a0f9be3598",
-  "replyBytes": 27062,
-  "transcriptBytes": 28559,
-  "frames": 520,
+  "prompt": "Run pwd using the shell tool. Then write a tutorial on Rust ownership in 20 numbered sections, each with a heading, a paragraph, and a short Rust code block. Do not create or modify any files.",
+  "replySha256": "c665755f852c296481a13bffffd4d584202165993436424e29d8e085502fb4cb",
+  "replyBytes": 10902,
+  "transcriptBytes": 12132,
+  "frames": 100,
   "phases": {
     "idle": {
       "durationSeconds": 9.013,
       "engine": {
-        "peakRssMiB": 31.0546875,
-        "endRssMiB": 31.0546875,
-        "cpuPercent": 0.9985576389659381,
+        "peakRssMiB": 30.8203125,
+        "endRssMiB": 30.8203125,
+        "cpuPercent": 0.7766559414179518,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 172.1953125,
-        "endRssMiB": 172.1953125,
-        "cpuPercent": 14.867413735715079,
-        "mainCpuPercent": 0.7766559414179517
+        "peakRssMiB": 175.19140625,
+        "endRssMiB": 175.18359375,
+        "cpuPercent": 7.10085432153556,
+        "mainCpuPercent": 0.6657050926439587
       }
     },
     "stream": {
-      "durationSeconds": 73.589,
+      "durationSeconds": 34.546,
       "engine": {
-        "peakRssMiB": 34.68359375,
-        "endRssMiB": 34.68359375,
-        "cpuPercent": 0.9648181114025194,
+        "peakRssMiB": 32.6640625,
+        "endRssMiB": 32.6640625,
+        "cpuPercent": 0.4920974931974758,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 195.546875,
-        "endRssMiB": 195.26953125,
-        "cpuPercent": 91.72566552066206,
-        "mainCpuPercent": 4.932802456888938
+        "peakRssMiB": 197.06640625,
+        "endRssMiB": 196.17578125,
+        "cpuPercent": 131.7663405314653,
+        "mainCpuPercent": 10.855091761709026
       }
     },
     "settled": {
-      "durationSeconds": 14.523,
+      "durationSeconds": 14.525,
       "engine": {
-        "peakRssMiB": 34.74609375,
-        "endRssMiB": 34.74609375,
-        "cpuPercent": 0.27542518763340934,
+        "peakRssMiB": 32.76953125,
+        "endRssMiB": 32.76953125,
+        "cpuPercent": 0.27538726333907043,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 197.98828125,
-        "endRssMiB": 196.14453125,
-        "cpuPercent": 24.925979480823553,
-        "mainCpuPercent": 1.3771259381670435
+        "peakRssMiB": 196.48828125,
+        "endRssMiB": 196.37109375,
+        "cpuPercent": 9.63855421686746,
+        "mainCpuPercent": 0.9638554216867509
       }
     }
   },
   "postCompletionTail": {
-    "durationSeconds": 9.516,
+    "durationSeconds": 9.518,
     "engine": {
-      "endRssMiB": 34.74609375,
-      "cpuPercent": 0.2101723413198825,
+      "endRssMiB": 32.76953125,
+      "cpuPercent": 0.3151922672830424,
       "mainCpuPercent": 0
     },
     "ui": {
-      "endRssMiB": 196.14453125,
-      "cpuPercent": 29.52921395544349,
-      "mainCpuPercent": 1.576292559899121
+      "endRssMiB": 196.37109375,
+      "cpuPercent": 9.876024374868646,
+      "mainCpuPercent": 0.8405127127547812
     }
   },
-  "notes": "Functional verification with composer submission, a successful shell tool call, sidebar/scroll/selection interactions, and a concurrent test build. CPU values are not a matched benchmark."
+  "notes": "Functional verification: authenticated Haiku 4.5 composer submission, successful pwd tool call, and targeted perf sampling. Not a matched CPU comparison. Sidebar, scroll-away/return, selected-text copy/paste, resize and the model menu were checked in the real window, with the saved transcript reopened for the final interaction checks."
 }

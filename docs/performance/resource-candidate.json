@@ -1,10 +1,10 @@
 {
-  "sourceRevision": "4902c792576ed1392c210f0e07c000ee1afc924c",
-  "build": "release",
+  "sourceRevision": "b09b37963cf9c78e1aa6acd5195f8a4427dfe21f",
+  "gpuiRevision": "49f9abd196705eda6a27080c506295a19b5da63e",
   "runs": [
     {
-      "binary": "/tmp/zeron-resource-profile/zeron-release-final",
-      "binarySha256": "cbad95334488ba5f377d7c8cc32161d9e6ce8a157507bba15bba3ca5624d8643",
+      "binary": "/tmp/zeron-cpu-round2/zeron-final",
+      "binarySha256": "f4b91201706962a9a29a52dfbe89ccc959870132d28ff8cf1a6b964dbd1dbe20",
       "harness": "claude-code",
       "mode": "replay",
       "renderThreads": "1",
@@ -14,71 +14,83 @@
       "replySha256": "87f610ae8e3be4c4a6eb3ce6655e2f2728e532115fd3b4c5a2db00a0e0ac73fb",
       "replyBytes": 52624,
       "transcriptBytes": 55067,
-      "frames": 131,
+      "frames": 128,
       "phases": {
         "idle": {
-          "durationSeconds": 9.013,
+          "durationSeconds": 9.011,
           "engine": {
-            "peakRssMiB": 31.703125,
-            "endRssMiB": 31.06640625,
-            "cpuPercent": 0.9985576389659383,
+            "peakPssMiB": 23.197265625,
+            "endPssMiB": 23.1923828125,
+            "peakRssMiB": 30.31640625,
+            "endRssMiB": 30.31640625,
+            "cpuPercent": 0.8878037953612252,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 172.4453125,
-            "endRssMiB": 172.4453125,
-            "cpuPercent": 13.203151004105182,
-            "mainCpuPercent": 0.6657050926439587
+            "peakPssMiB": 125.328125,
+            "endPssMiB": 125.306640625,
+            "peakRssMiB": 174.69921875,
+            "endRssMiB": 174.69140625,
+            "cpuPercent": 6.103651093108424,
+            "mainCpuPercent": 0.6658528465209189
           }
         },
         "stream": {
-          "durationSeconds": 17.512,
+          "durationSeconds": 17.506,
           "engine": {
-            "peakRssMiB": 34.94140625,
-            "endRssMiB": 34.94140625,
-            "cpuPercent": 0.8565555047967108,
+            "peakPssMiB": 25.9609375,
+            "endPssMiB": 25.9609375,
+            "peakRssMiB": 33.44140625,
+            "endRssMiB": 33.44140625,
+            "cpuPercent": 0.8568490803153205,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 195.9765625,
-            "endRssMiB": 194.66796875,
-            "cpuPercent": 109.12517131110096,
-            "mainCpuPercent": 5.367747830059388
+            "peakPssMiB": 149.8681640625,
+            "endPssMiB": 148.4951171875,
+            "peakRssMiB": 199.734375,
+            "endRssMiB": 198.36328125,
+            "cpuPercent": 99.90860276476636,
+            "mainCpuPercent": 8.79698389123729
           }
         },
         "settled": {
-          "durationSeconds": 44.574,
+          "durationSeconds": 44.571,
           "engine": {
-            "peakRssMiB": 35.875,
-            "endRssMiB": 35.875,
-            "cpuPercent": 0.24678063445057652,
+            "peakPssMiB": 26.7451171875,
+            "endPssMiB": 26.7412109375,
+            "peakRssMiB": 34.234375,
+            "endRssMiB": 34.22265625,
+            "cpuPercent": 0.2692333580130578,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 195.1953125,
-            "endRssMiB": 195.12890625,
-            "cpuPercent": 14.76196886077085,
-            "mainCpuPercent": 0.785211109615471
+            "peakPssMiB": 151.552734375,
+            "endPssMiB": 149.75,
+            "peakRssMiB": 201.484375,
+            "endRssMiB": 199.6796875,
+            "cpuPercent": 11.330237149716185,
+            "mainCpuPercent": 1.054497318884476
           }
         }
       },
       "postCompletionTail": {
-        "durationSeconds": 9.518,
+        "durationSeconds": 9.514,
         "engine": {
-          "endRssMiB": 35.875,
-          "cpuPercent": 0.2101281781886953,
+          "endRssMiB": 34.22265625,
+          "cpuPercent": 0.3153247845280636,
           "mainCpuPercent": 0
         },
         "ui": {
-          "endRssMiB": 195.12890625,
-          "cpuPercent": 14.814036562303006,
-          "mainCpuPercent": 0.7354486236604335
+          "endRssMiB": 199.6796875,
+          "cpuPercent": 7.462686567164188,
+          "mainCpuPercent": 0.7357578305654807
         }
       }
     },
     {
-      "binary": "/tmp/zeron-resource-profile/zeron-release-final",
-      "binarySha256": "cbad95334488ba5f377d7c8cc32161d9e6ce8a157507bba15bba3ca5624d8643",
+      "binary": "/tmp/zeron-cpu-round2/zeron-final",
+      "binarySha256": "f4b91201706962a9a29a52dfbe89ccc959870132d28ff8cf1a6b964dbd1dbe20",
       "harness": "claude-code",
       "mode": "replay",
       "renderThreads": "1",
@@ -88,65 +100,77 @@
       "replySha256": "87f610ae8e3be4c4a6eb3ce6655e2f2728e532115fd3b4c5a2db00a0e0ac73fb",
       "replyBytes": 52624,
       "transcriptBytes": 55067,
-      "frames": 129,
+      "frames": 132,
       "phases": {
         "idle": {
-          "durationSeconds": 9.016,
+          "durationSeconds": 9.014,
           "engine": {
-            "peakRssMiB": 31.578125,
-            "endRssMiB": 31.578125,
-            "cpuPercent": 0.8873114463176575,
+            "peakPssMiB": 26.505859375,
+            "endPssMiB": 26.5,
+            "peakRssMiB": 33.8125,
+            "endRssMiB": 33.8125,
+            "cpuPercent": 0.7765697803416908,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 172.4375,
-            "endRssMiB": 172.4375,
-            "cpuPercent": 13.309671694764864,
-            "mainCpuPercent": 0.6654835847382431
+            "peakPssMiB": 124.921875,
+            "endPssMiB": 124.8525390625,
+            "peakRssMiB": 174.453125,
+            "endRssMiB": 174.4453125,
+            "cpuPercent": 6.101619702684713,
+            "mainCpuPercent": 0.6656312402928778
           }
         },
         "stream": {
-          "durationSeconds": 17.503,
+          "durationSeconds": 17.509,
           "engine": {
-            "peakRssMiB": 34.33984375,
-            "endRssMiB": 34.33984375,
-            "cpuPercent": 0.7998628806490314,
+            "peakPssMiB": 26.44140625,
+            "endPssMiB": 26.44140625,
+            "peakRssMiB": 33.96484375,
+            "endRssMiB": 33.96484375,
+            "cpuPercent": 0.8567022674053344,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 195.0078125,
-            "endRssMiB": 194.7109375,
-            "cpuPercent": 108.7813517682683,
-            "mainCpuPercent": 5.427640975832714
+            "peakPssMiB": 149.3916015625,
+            "endPssMiB": 147.779296875,
+            "peakRssMiB": 199.26953125,
+            "endRssMiB": 197.65234375,
+            "cpuPercent": 99.66303044148724,
+            "mainCpuPercent": 8.624136158547033
           }
         },
         "settled": {
-          "durationSeconds": 44.588,
+          "durationSeconds": 44.553,
           "engine": {
-            "peakRssMiB": 35.53125,
-            "endRssMiB": 35.53125,
-            "cpuPercent": 0.24670314882928138,
+            "peakPssMiB": 27.26171875,
+            "endPssMiB": 27.2607421875,
+            "peakRssMiB": 34.78515625,
+            "endRssMiB": 34.78515625,
+            "cpuPercent": 0.24689695418939236,
             "mainCpuPercent": 0
           },
           "ui": {
-            "peakRssMiB": 195.4765625,
-            "endRssMiB": 195.41015625,
-            "cpuPercent": 14.263927514129362,
-            "mainCpuPercent": 0.7849645644568047
+            "peakPssMiB": 148.1376953125,
+            "endPssMiB": 148.1357421875,
+            "peakRssMiB": 199.67578125,
+            "endRssMiB": 198.0703125,
+            "cpuPercent": 7.653805579871165,
+            "mainCpuPercent": 0.8529167508360832
           }
         }
       },
       "postCompletionTail": {
-        "durationSeconds": 9.518,
+        "durationSeconds": 9.512,
         "engine": {
-          "endRssMiB": 35.53125,
-          "cpuPercent": 0.2101281781886947,
+          "endRssMiB": 34.78515625,
+          "cpuPercent": 0.3153910849453319,
           "mainCpuPercent": 0
         },
         "ui": {
-          "endRssMiB": 195.41015625,
-          "cpuPercent": 14.078587938642572,
-          "mainCpuPercent": 0.7354486236604335
+          "endRssMiB": 198.0703125,
+          "cpuPercent": 7.6745164003364215,
+          "mainCpuPercent": 0.8410428931875533
         }
       }
     }

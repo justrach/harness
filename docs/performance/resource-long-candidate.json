@@ -1,7 +1,7 @@
 {
-  "sourceRevision": "4902c792576ed1392c210f0e07c000ee1afc924c",
-  "binary": "/tmp/zeron-resource-profile/zeron-release-final",
-  "binarySha256": "cbad95334488ba5f377d7c8cc32161d9e6ce8a157507bba15bba3ca5624d8643",
+  "sourceRevision": "b09b37963cf9c78e1aa6acd5195f8a4427dfe21f",
+  "binary": "/tmp/zeron-cpu-round2/zeron-final",
+  "binarySha256": "f4b91201706962a9a29a52dfbe89ccc959870132d28ff8cf1a6b964dbd1dbe20",
   "harness": "claude-code",
   "mode": "replay",
   "renderThreads": "1",
@@ -16,60 +16,72 @@
     "idle": {
       "durationSeconds": 9.014,
       "engine": {
-        "peakRssMiB": 31.22265625,
-        "endRssMiB": 31.22265625,
-        "cpuPercent": 0.9984468604393169,
+        "peakPssMiB": 24.16015625,
+        "endPssMiB": 23.525390625,
+        "peakRssMiB": 31.5234375,
+        "endRssMiB": 30.88671875,
+        "cpuPercent": 0.7765697803416906,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 172.1875,
-        "endRssMiB": 172.1875,
-        "cpuPercent": 12.868870645662305,
-        "mainCpuPercent": 0.554692700244065
+        "peakPssMiB": 125.5888671875,
+        "endPssMiB": 125.583984375,
+        "peakRssMiB": 175.18359375,
+        "endRssMiB": 175.17578125,
+        "cpuPercent": 6.323496782782339,
+        "mainCpuPercent": 0.6656312402928778
       }
     },
     "stream": {
-      "durationSeconds": 36.528,
+      "durationSeconds": 36.516,
       "engine": {
-        "peakRssMiB": 47.43359375,
-        "endRssMiB": 46.60546875,
-        "cpuPercent": 1.6151992991677617,
+        "peakPssMiB": 36.3994140625,
+        "endPssMiB": 35.4365234375,
+        "peakRssMiB": 43.93359375,
+        "endRssMiB": 42.97265625,
+        "cpuPercent": 1.670500602475627,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 206.62890625,
-        "endRssMiB": 206.00390625,
-        "cpuPercent": 111.8867717915024,
-        "mainCpuPercent": 10.813622426631625
+        "peakPssMiB": 162.4697265625,
+        "endPssMiB": 159.0517578125,
+        "peakRssMiB": 212.3359375,
+        "endRssMiB": 208.9453125,
+        "cpuPercent": 101.46237265856062,
+        "mainCpuPercent": 14.733267608719466
       }
     },
     "settled": {
-      "durationSeconds": 44.583,
+      "durationSeconds": 44.561,
       "engine": {
-        "peakRssMiB": 49.59765625,
-        "endRssMiB": 49.59765625,
-        "cpuPercent": 0.2467308166790034,
+        "peakPssMiB": 37.19140625,
+        "endPssMiB": 37.189453125,
+        "peakRssMiB": 44.72265625,
+        "endRssMiB": 44.72265625,
+        "cpuPercent": 0.2468526289804986,
         "mainCpuPercent": 0
       },
       "ui": {
-        "peakRssMiB": 207.19921875,
-        "endRssMiB": 207.19921875,
-        "cpuPercent": 15.790772267456203,
-        "mainCpuPercent": 0.8972029697418287
+        "peakPssMiB": 161.119140625,
+        "endPssMiB": 161.0419921875,
+        "peakRssMiB": 211.06640625,
+        "endRssMiB": 210.9921875,
+        "cpuPercent": 8.841812347119689,
+        "mainCpuPercent": 0.9874105159219935
       }
     }
   },
   "postCompletionTail": {
     "durationSeconds": 9.515,
     "engine": {
-      "endRssMiB": 49.59765625,
-      "cpuPercent": 0.31529164477141386,
+      "endRssMiB": 44.72265625,
+      "cpuPercent": 0.31529164477141264,
       "mainCpuPercent": 0
     },
     "ui": {
-      "endRssMiB": 207.19921875,
-      "cpuPercent": 15.239096163951686,
-      "mainCpuPercent": 0.9458749343142392
+      "endRssMiB": 210.9921875,
+      "cpuPercent": 7.987388334209197,
+      "mainCpuPercent": 0.8407777193904369
     }
   }
 }
