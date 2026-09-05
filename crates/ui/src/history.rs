@@ -413,9 +413,10 @@ impl Render for GitHistoryFetchButton {
                     })
             })
             .child(if fetching {
-                crate::loaders::mini_gradient_spinner(
+                crate::loaders::mini_glyph_spinner(
                     "history-fetch-all-spinner",
                     1.75,
+                    theme.glyph,
                     cx.entity_id(),
                     cx,
                 )

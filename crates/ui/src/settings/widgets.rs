@@ -36,7 +36,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
         .gap(px(10.0))
         .child(
             div()
-                .text_size(px(16.0))
+                .text_size(crate::typography::ui_rems(16.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(SharedString::from(title.to_string())),
@@ -44,7 +44,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
         .when_some(count, |el, count| {
             el.child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .text_color(theme.text_muted.opacity(0.7))
                     .child(SharedString::from(format!("{count}"))),
             )
@@ -55,7 +55,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
 pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
     div()
         .mt(px(4.0))
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted)
         .child(copy.into())
 }
@@ -64,7 +64,7 @@ pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div 
 /// "Theme" caption over a picker, not a page headline.
 pub fn field_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
-        .text_size(px(13.0))
+        .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(label.into())
@@ -88,14 +88,11 @@ pub const OPTION_CARD_HEIGHT: f32 = 148.0;
 /// are axis-aligned rectangles, so `overflow_hidden` on the frame clips to its
 /// bounding box and not to its corner radius — a preview that paints its own
 /// background will square off the corners and cover the frame's border with it.
-pub const OPTION_CARD_RADIUS: f32 = 10.0;
-/// Clear space between the frame and the selection ring.
-const RING_GAP: f32 = 2.0;
-/// Thickness of the selection ring.
-const RING_WIDTH: f32 = 2.0;
+pub const OPTION_CARD_RADIUS: f32 = 6.0;
 
-/// One card in an [`option_card_row`]: a fixed-height preview frame that carries
-/// the selection ring, with a caption underneath.
+/// One card in an [`option_card_row`]: a fixed-height preview frame with a quiet
+/// selected edge and caption underneath. There is deliberately no outer card
+/// or ring; the preview itself is the control.
 ///
 /// `preview` fills the frame and **must round its own corners** to
 /// [`OPTION_CARD_RADIUS`] if it paints a background — see that constant.
@@ -109,22 +106,6 @@ pub fn option_card(
     selected: bool,
     preview: AnyElement,
 ) -> gpui::Div {
-    let frame = div()
-        .h(px(OPTION_CARD_HEIGHT))
-        .w_full()
-        .rounded(px(OPTION_CARD_RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(theme.border)
-        .child(preview);
-
-    // The ring is a *wrapper border*, not a spread shadow. A shadow's spread
-    // grows the rectangle without growing its corner radius, so the halo's
-    // corners tighten relative to the frame's and the two visibly drift apart by
-    // a pixel at each rounded corner. Concentric borders can't do that: each
-    // element rounds itself, and the outer radius is the inner one plus the gap
-    // it sits behind. Always present, transparent when unselected, so selecting a
-    // card never reflows the row.
     div()
         .flex_1()
         .min_w_0()
@@ -135,22 +116,24 @@ pub fn option_card(
         .cursor_pointer()
         .child(
             div()
+                .h(px(OPTION_CARD_HEIGHT))
                 .w_full()
-                .rounded(px(OPTION_CARD_RADIUS + RING_GAP + RING_WIDTH))
-                .p(px(RING_GAP))
-                .border_2()
-                .border_color(if selected {
-                    theme.accent
-                } else {
-                    gpui::transparent_black()
-                })
-                .child(frame),
+                .rounded(px(OPTION_CARD_RADIUS))
+                .overflow_hidden()
+                .border_1()
+                .border_color(if selected { theme.accent } else { theme.border })
+                .child(preview),
         )
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .font_weight(if selected {
+                    gpui::FontWeight::MEDIUM
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .text_color(if selected {
-                    theme.text
+                    theme.accent
                 } else {
                     theme.text_muted
                 })
@@ -213,7 +196,7 @@ pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
     div()
         .min_w_0()
         .truncate()
-        .text_size(px(ROW_TITLE_SIZE))
+        .text_size(crate::typography::ui_rems(ROW_TITLE_SIZE))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(title.into())
@@ -230,7 +213,7 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
         .items_center()
         .gap_x(px(8.0))
         .gap_y(px(2.0))
-        .text_size(px(ROW_DESCRIPTION_SIZE))
+        .text_size(crate::typography::ui_rems(ROW_DESCRIPTION_SIZE))
         .text_color(theme.text_muted.opacity(0.65));
     let mut first = true;
     for fragment in fragments {
@@ -256,7 +239,7 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .rounded_full()
         .border_1()
         .border_color(theme.border)
-        .text_size(px(10.5))
+        .text_size(crate::typography::ui_rems(10.5))
         .text_color(theme.text_muted)
         .child(label.into())
 }
@@ -272,7 +255,7 @@ pub fn badge_active(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div 
         .py(px(2.0))
         .rounded_full()
         .bg(emerald.opacity(0.12))
-        .text_size(px(10.5))
+        .text_size(crate::typography::ui_rems(10.5))
         .text_color(emerald_text.opacity(0.9))
         .child(label.into())
 }
@@ -312,7 +295,7 @@ pub fn ghost_action(theme: &Theme) -> gpui::Div {
         .rounded(px(8.0))
         .px(px(10.0))
         .py(px(6.0))
-        .text_size(px(12.0))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_muted)
         .cursor_pointer()
 }
@@ -337,7 +320,7 @@ pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div
         .border_1()
         .border_color(red.opacity(0.2))
         .bg(red.opacity(0.06))
-        .text_size(px(12.5))
+        .text_size(crate::typography::ui_rems(12.5))
         .text_color(red_text.opacity(0.9))
         .flex()
         .flex_row()
@@ -367,7 +350,7 @@ pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::D
         .border_1()
         .border_color(amber.opacity(0.2))
         .bg(amber.opacity(0.06))
-        .text_size(px(12.0))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(amber_text.opacity(0.9))
         .flex()
         .flex_row()

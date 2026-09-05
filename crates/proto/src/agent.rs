@@ -8,13 +8,17 @@ pub enum HarnessId {
     ClaudeCode,
     Codex,
     Cursor,
+    /// Cognition's Devin agent, driven over ACP (`devin acp`).
+    Devin,
     /// xAI's Grok Build agent, driven over ACP (`grok agent stdio`).
     Grok,
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     Hermes,
     /// The pi coding agent (pi.dev), driven over ACP via the `pi-acp` adapter.
     Pi,
-    /// SST's opencode agent, driven over ACP (`opencode acp`).
+    /// SST's opencode agent, driven natively over its own HTTP/SSE server
+    /// protocol (`opencode serve` — the same wire the opencode desktop app
+    /// speaks).
     Opencode,
     /// Test harness; never shown in production pickers.
     Mock,
