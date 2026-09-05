@@ -133,9 +133,9 @@ pub const USER_LINE_HEIGHT: f32 = 22.0;
 /// fallback lets clearly long prompts render their affordance immediately
 /// before that first layout has completed.
 pub const USER_COLLAPSE_CHARS: usize = 400;
-/// The expander strip under a clipped prompt: a right-aligned chevron button
+/// The expander strip under a clipped prompt: a right-aligned labeled button
 /// inside the bubble, on its own row so it never paints over the last line.
-const USER_TOGGLE_SIZE: f32 = 18.0;
+const USER_TOGGLE_HEIGHT: f32 = 26.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a FIXED-height strip (load-state flips never shift the virtualizer).
 pub const ATT_THUMB_W: f32 = 112.0;
@@ -4247,9 +4247,8 @@ impl Transcript {
             .into_any_element()
     }
 
-    /// The expand/collapse chevron for a clipped prompt: bottom-right INSIDE
-    /// the bubble, on its own strip so it never paints over the last visible
-    /// line.
+    /// A labeled toggle in the bubble's footer. The row participates in
+    /// layout so the control cannot cover the fifth line or a file mention.
     fn render_user_expander(
         &mut self,
         row_id: &SharedString,
@@ -4266,26 +4265,35 @@ impl Transcript {
         } else {
             crate::icons::ALT_ARROW_DOWN
         };
-        div()
+        let label = if expanded { "Show less" } else { "Show more" };
+        let button = div()
             .id(SharedString::from(format!("{row_id}-expander")))
-            .absolute()
-            // The bubble supplies 16px/10px padding around the relative body.
-            // Bleed into that padding so the control sits near the actual
-            // bubble edge without reserving text width or covering the last
-            // line's content.
-            .right(px(-12.0))
-            .bottom(px(-6.0))
-            .size(px(USER_TOGGLE_SIZE))
+            .group("user-message-toggle")
+            .role(gpui::Role::Button)
+            .aria_label(if expanded {
+                "Collapse message"
+            } else {
+                "Expand message"
+            })
+            .aria_expanded(expanded)
+            .min_h(px(USER_TOGGLE_HEIGHT))
+            .px(px(8.0))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.0))
+            .gap(px(4.0))
+            .rounded(px(6.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(crate::typography::ui_rems(18.0))
+            .text_color(theme.text_muted)
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.08)))
+            .hover(|s| s.bg(crate::theme::ink(0.08)).text_color(theme.text))
+            .child(label)
             .child(
                 crate::icons::icon(glyph)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted.opacity(0.75)),
+                    .size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .group_hover("user-message-toggle", |s| s.text_color(theme.text)),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_user_fold(
@@ -4296,7 +4304,13 @@ impl Transcript {
                     motion::reduced_motion(cx),
                 );
                 cx.notify();
-            }))
+            }));
+        div()
+            .w_full()
+            .mt(px(6.0))
+            .flex()
+            .justify_end()
+            .child(button)
             .into_any_element()
     }
 
