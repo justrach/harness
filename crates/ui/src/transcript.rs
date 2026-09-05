@@ -2282,6 +2282,8 @@ pub struct Transcript {
     user_hold_task: Option<Task<()>>,
     user_hold_token: u64,
     user_collapse_scroll: Option<UserCollapseScroll>,
+    /// Tracks the queued frame, even when its animation is canceled/replaced.
+    /// Only that callback clears it, so rapid input cannot fork frame drivers.
     user_collapse_scroll_scheduled: bool,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
@@ -2695,6 +2697,8 @@ impl Transcript {
     /// reduced-motion or animated branch moves the list.
     pub(crate) fn begin_scroll_navigation(&mut self) {
         self.discard_pending_viewport();
+        self.cancel_user_hold();
+        self.user_collapse_scroll = None;
         // Rail navigation within the session RELEASES the hold but keeps the
         // runway (user spec: only leaving and revisiting the session clears
         // it) — scrolling back down re-arms the hold like any restick.
@@ -2743,6 +2747,10 @@ impl Transcript {
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+        // Cancel synchronously, before a queued animation frame can undo the
+        // wheel/touch input. Neither operation reads the borrowed ListState.
+        self.user_collapse_scroll = None;
+        self.cancel_user_hold();
         // The list invokes this handler ONLY from its wheel/touch input path
         // (programmatic scroll_by/scroll_to never re-enter it), while holding
         // its internal RefCell borrow — reading the ListState back
@@ -2919,12 +2927,7 @@ impl Transcript {
         // moving it again. This is what lets a stationary edge pointer consume
         // successive virtualized rows.
         render::update_drag_at(position);
-        self.scroll_anim = None;
-        self.discard_pending_viewport();
-        self.release_own_turn_hold();
-        self.pinned = false;
-        self.spring.reset();
-        self.spring_last_tick = None;
+        self.begin_scroll_navigation();
         self.list.scroll_by(px(step));
         self.last_scroll_distance = self.distance_from_bottom();
         self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
@@ -2940,6 +2943,8 @@ impl Transcript {
     /// bottom lands the prompt at the top. Replacing a still-held previous
     /// anchor collapses its pad into the same glide — one continuous motion.
     pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
+        self.user_collapse_scroll = None;
+        self.cancel_user_hold();
         self.discard_pending_viewport();
         self.pinned = false;
         self.show_jump_button = false;
@@ -3326,6 +3331,8 @@ impl Transcript {
 
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.user_collapse_scroll = None;
+        self.cancel_user_hold();
         self.discard_pending_viewport();
         // With a live runway, "bottom" IS the held position (the reservation
         // makes prompt-at-top and pad-bottom the same place): re-arm the hold
@@ -3498,7 +3505,6 @@ impl Transcript {
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
             self.user_hold_task = None;
             self.user_collapse_scroll = None;
-            self.user_collapse_scroll_scheduled = false;
             self.veils.clear();
             self.render_cache.borrow_mut().clear();
             self.highlights.entries.clear();
@@ -3812,8 +3818,11 @@ impl Transcript {
         reduced_motion: bool,
     ) {
         let duration_ms = user_resize_duration_ms(full_h - collapsed_h);
-        self.user_collapse_scroll = None;
-        self.user_collapse_scroll_scheduled = false;
+        // A fold owns the viewport just like explicit navigation. Release
+        // the sent-turn hold as well as the spring: otherwise growing beyond
+        // the reserved space hands the still-held turn back to the bottom
+        // pin and hides the beginning of the newly expanded prompt.
+        self.begin_scroll_navigation();
         let entry = self.user_folds.entry(row_id).or_default();
         let currently_open = entry.open.unwrap_or(false);
         entry.from = if currently_open { full_h } else { collapsed_h };
@@ -3821,17 +3830,6 @@ impl Transcript {
         entry.epoch += 1;
         entry.toggled_at = Some(Instant::now());
         entry.duration_ms = duration_ms;
-
-        // An expansion must release the bottom pin too. Otherwise the spring
-        // keeps the transcript's tail fixed while the bubble grows, lifting
-        // the newly revealed first lines behind the top fade.
-        if !currently_open {
-            self.pinned = false;
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
-        }
 
         // Capture a screen-space anchor for the clicked row. We do not subtract
         // the removed height: that is only correct when the row's top is
@@ -3858,11 +3856,6 @@ impl Transcript {
         let needs_scroll = (target_top - initial_top).abs() > 0.5;
 
         if needs_scroll {
-            self.pinned = false;
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
             if reduced_motion {
                 if let Some(current) = self.list.bounds_for_item(row_ix) {
                     self.list
@@ -3942,7 +3935,7 @@ impl Transcript {
         let progress = spec.progress(raw);
         let desired_top = motion::lerp(initial_top, target_top, progress);
         if let Some(current) = self.list.bounds_for_item(row_ix) {
-            // `scroll_by(+x)` moves content down, so correcting current minus
+            // `scroll_by(+x)` moves content up, so correcting current minus
             // desired keeps the row on the interpolated screen-space path.
             let correction = f32::from(current.top()) - desired_top;
             if correction.abs() > 0.1 {
@@ -7849,6 +7842,120 @@ mod tests {
             &echoed[0].kind,
             RowKind::User { pending: true, .. }
         ));
+    }
+
+    // Exercise the real Transcript handlers with GPUI's Linux headless
+    // platform; no renderer, display server, or test-only dependency needed.
+    #[cfg(target_os = "linux")]
+    mod user_fold_scroll {
+        use super::*;
+
+        fn with_transcript(test: impl FnOnce(&mut Transcript, &mut Context<Transcript>) + 'static) {
+            gpui_platform::headless().run(move |cx| {
+                let state = cx.new(|_| AppState::new());
+                let transcript = cx.new(|cx| Transcript::new(state, cx));
+                transcript.update(cx, test);
+                // Quit after the platform loop starts; calloop resets its
+                // stop flag on entry, so quitting in the launch hook hangs.
+                cx.spawn(async move |cx| {
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            });
+        }
+
+        #[test]
+        fn folding_releases_sent_turn_hold_without_removing_reservation() {
+            with_transcript(|transcript, _| {
+                for reduced_motion in [false, true] {
+                    for open in [false, true] {
+                        transcript.own_turn = Some(OwnTurnAnchor {
+                            chat_id: "chat".into(),
+                            message_id: "prompt".into(),
+                            runway: 640.0,
+                            held: true,
+                            positioned: true,
+                            seen_prompt: true,
+                        });
+                        transcript.pinned = true;
+                        transcript.spring_kick = true;
+                        transcript.own_turn_last_tick = Some(Instant::now());
+                        transcript
+                            .user_folds
+                            .entry("prompt".into())
+                            .or_default()
+                            .open = Some(open);
+
+                        // No row bounds yet: ownership must transfer even if
+                        // geometry is unavailable during a list remeasurement.
+                        transcript.toggle_user_fold("prompt".into(), 0, 110.0, 2200.0, reduced_motion);
+
+                        let turn = transcript.own_turn.as_ref().unwrap();
+                        assert!(
+                            !turn.held,
+                            "an outgrown reservation must not re-engage the pin"
+                        );
+                        assert_eq!(turn.runway, 640.0);
+                        assert!(transcript.own_turn_last_tick.is_none());
+                        assert!(!transcript.pinned);
+                        assert!(!transcript.spring_kick);
+                        assert_eq!(transcript.user_folds["prompt"].open, Some(!open));
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn navigation_cancels_fold_compensation_before_queued_frame() {
+            with_transcript(|transcript, cx| {
+                for navigation in ["wheel", "rail", "bottom", "send"] {
+                    transcript.user_collapse_scroll = Some(UserCollapseScroll {
+                        started_at: Instant::now(),
+                        duration_ms: 850,
+                        height_delta: 2000.0,
+                        row_ix: 0,
+                        initial_top: -1000.0,
+                        target_top: 80.0,
+                    });
+                    transcript.user_collapse_scroll_scheduled = true;
+                    let hold_token = transcript.user_hold_token;
+                    match navigation {
+                        "wheel" => transcript.handle_scroll(
+                            &ListScrollEvent {
+                                visible_range: 0..0,
+                                count: 0,
+                                is_scrolled: true,
+                                is_following_tail: false,
+                            },
+                            cx,
+                        ),
+                        "rail" => transcript.begin_scroll_navigation(),
+                        "bottom" => transcript.jump_to_bottom(cx),
+                        "send" => transcript.on_own_send("chat".into(), "prompt".into(), cx),
+                        _ => unreachable!(),
+                    }
+                    assert!(transcript.user_collapse_scroll.is_none(), "{navigation}");
+                    assert_ne!(
+                        transcript.user_hold_token, hold_token,
+                        "cancel stale long presses"
+                    );
+                    assert!(
+                        transcript.user_collapse_scroll_scheduled,
+                        "keep the queued-frame guard"
+                    );
+
+                    // A frame queued before the input must neither move the
+                    // viewport nor resurrect the canceled compensation.
+                    let offset = transcript.list.logical_scroll_top();
+                    transcript.user_collapse_scroll_scheduled = false;
+                    transcript.step_user_collapse_scroll(cx);
+                    let after = transcript.list.logical_scroll_top();
+                    assert_eq!(after.item_ix, offset.item_ix);
+                    assert_eq!(after.offset_in_item, offset.offset_in_item);
+                    assert!(transcript.user_collapse_scroll.is_none());
+                }
+            });
+        }
     }
 
     /// Explicit multiline and long soft-wrapped prompts get a fold affordance;
