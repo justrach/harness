@@ -163,10 +163,15 @@ fn main() -> anyhow::Result<()> {
     // layout after idle, panel transitions and scrolling. Keep this outside
     // measured phases; screenshot readback and forced refreshes add work.
     if std::env::var_os("ZERON_VERIFY_CACHE").is_some() {
-        for scenario in ["settled", "sidebar-hidden", "sidebar-restored", "scrolled"] {
+        let mut scenarios = vec!["settled", "sidebar-hidden", "sidebar-restored", "scrolled"];
+        // These hit coordinates target the bundled 80-section fixture. General
+        // frame replays can still use the cache checks above on their own.
+        if std::env::var_os("ZERON_VERIFY_INTERACTIONS").is_some() {
+            scenarios.extend(["selected", "typed", "model-menu", "menu-dismissed"]);
+        }
+        for scenario in scenarios {
             app.update(|cx| {
-                window
-                    .update(cx, |_, window, cx| match scenario {
+                cx.update_window(window.into(), |_, window, cx| match scenario {
                         "sidebar-hidden" | "sidebar-restored" => {
                             window.dispatch_action(Box::new(shell::ToggleSidebar), cx)
                         }
@@ -181,6 +186,33 @@ fn main() -> anyhow::Result<()> {
                                 cx,
                             );
                         }
+                        "selected" => {
+                            window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                position: gpui::point(px(430.), px(283.)),
+                                click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                            window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: gpui::point(px(580.), px(349.)),
+                                pressed_button: Some(gpui::MouseButton::Left),
+                                ..Default::default()
+                            }), cx);
+                            window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                position: gpui::point(px(580.), px(349.)),
+                                click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                            assert!(markdown::selection::selected_text().is_some_and(|text| text.len() > 20),
+                                "The fixed 80-section fixture must support dragging across text after scene reuse");
+                        }
+                        "typed" => {
+                            click(window, cx, 550., 839.);
+                            for key in ["c", "a", "c", "h", "e", "space", "c", "h", "e", "c", "k"] {
+                                assert!(window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx));
+                            }
+                        }
+                        "model-menu" => click(window, cx, 1020., 839.),
+                        "menu-dismissed" => click(window, cx, 1250., 500.),
                         _ => {}
                     })
                     .unwrap()
@@ -211,11 +243,25 @@ fn main() -> anyhow::Result<()> {
             });
             cached.save(output.join(format!("{scenario}-cached.png")))?;
             fresh.save(output.join(format!("{scenario}-fresh.png")))?;
-            anyhow::ensure!(
-                cached == fresh,
-                "Cached scene differs from fresh layout: {scenario}"
-            );
-            eprintln!("cache pixels match: {scenario}");
+            if scenario == "model-menu" {
+                // With no engine catalog the menu animates its loading bars.
+                // Their phase advances between readbacks; compare the rest of
+                // the window, and retain both full images for visual review.
+                for (x, y, pixel) in cached.enumerate_pixels() {
+                    let in_menu = (1550..2170).contains(&x) && (1190..1640).contains(&y);
+                    anyhow::ensure!(
+                        in_menu || pixel == fresh.get_pixel(x, y),
+                        "Scene outside the animated model menu differs at {x},{y}"
+                    );
+                }
+                eprintln!("cache pixels match outside animated model menu");
+            } else {
+                anyhow::ensure!(
+                    cached == fresh,
+                    "Cached scene differs from fresh layout: {scenario}"
+                );
+                eprintln!("cache pixels match: {scenario}");
+            }
         }
     }
     eprintln!("elapsed={:?}", start.elapsed());
@@ -223,4 +269,25 @@ fn main() -> anyhow::Result<()> {
     app.update(|cx| cx.quit());
     drop(app);
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn click(window: &mut gpui::Window, cx: &mut gpui::App, x: f32, y: f32) {
+    let position = gpui::point(px(x), px(y));
+    window.dispatch_event(
+        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+            position,
+            click_count: 1,
+            ..Default::default()
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+            position,
+            click_count: 1,
+            ..Default::default()
+        }),
+        cx,
+    );
 }

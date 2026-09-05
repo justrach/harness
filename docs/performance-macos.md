@@ -44,9 +44,17 @@ application builds.
 The final completed native replay image is pixel-identical to the baseline.
 With `ZERON_VERIFY_CACHE=1`, the example also compares the reused scene with a
 forced fresh render after settling, hiding/restoring the sidebar and scrolling;
-all four comparisons are pixel-identical. A precompiled-shader experiment also
-produced identical pixels but no meaningful foreground memory improvement, so
-the existing runtime-shader build configuration is retained.
+all four comparisons are pixel-identical. With the bundled 80-section fixture,
+`ZERON_VERIFY_INTERACTIONS=1` also drives a text-selection drag, composer typing,
+and model-menu open/outside-click dismissal. Selection, typed text and dismissal match a fresh
+render byte for byte. The model menu has no engine catalog in this isolated
+example, so its loading bars keep animating: the comparison excludes the menu
+rectangle, and both complete images are retained for visual review. This checks
+opening/dismissing the popover, not selecting a live provider model.
+
+A precompiled-shader experiment also produced identical pixels but no meaningful
+foreground memory improvement, so the existing runtime-shader build
+configuration is retained.
 
 ## Native foreground measurements
 
@@ -73,6 +81,16 @@ observations averaged 0.83–0.87% UI CPU and ended at 323.31–326.25 MiB; the
 baseline used a longer 30-second observation, so those settled averages are
 not a matched-duration before/after claim. All completed replies have the same
 52,624-byte combined text/reasoning digest.
+
+A larger replay repeated the fixture four times at a 10 ms provider delay,
+producing 210,502 combined text/reasoning bytes in about 21.5 seconds. Two valid
+foreground runs used 13.03–15.34% streaming UI CPU and peaked at
+328.74–329.75 MiB UI physical footprint. The first ten seconds after completion
+included additional work (3.50% UI CPU in the first run); the second run's final
+ten seconds of a 30-second observation averaged 0.80% and ended at 332.41 MiB.
+This checks a larger, faster reply without establishing long-duration memory
+stability or a matched baseline improvement.
+[Stress-run counters and executable identity](performance/resource-macos-stress.json).
 
 CPU uses 100% per core. Physical footprint includes memory charged by macOS,
 including compressed and GPU allocations; RSS alone cannot represent this.
@@ -123,8 +141,13 @@ ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=10000 \
 # UI-only offscreen replay of those verified protocol frames:
 cargo build --release --locked -p zeron-ui --features resource-profile \
   --example macos-resource-profile
-ZERON_VERIFY_CACHE=1 ZERON_FRAME_STATS=0 target/release/examples/macos-resource-profile \
+ZERON_VERIFY_CACHE=1 ZERON_VERIFY_INTERACTIONS=1 ZERON_FRAME_STATS=0 \
+  target/release/examples/macos-resource-profile \
   /tmp/zeron-native/frames.json /tmp/zeron-native-ui
+
+# Larger/faster reply: use the foreground command above with these added:
+# ZERON_REPLAY_REPEAT=4 ZERON_REPLAY_DELAY_MS=10 ZERON_PROFILE_IDLE_MS=30000
+# and a fresh output directory.
 
 # Native counter usable with either process (CPU uses 100% per core):
 xcrun clang -O2 scripts/macos-resource-stat.c -o /tmp/zeron-stat
