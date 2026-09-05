@@ -133,9 +133,8 @@ pub const USER_LINE_HEIGHT: f32 = 22.0;
 /// fallback lets clearly long prompts render their affordance immediately
 /// before that first layout has completed.
 pub const USER_COLLAPSE_CHARS: usize = 400;
-/// The chevron's hit target sits in the transcript gutter next to the bubble;
-/// it adds no height or text padding to the message.
-const USER_TOGGLE_SIZE: f32 = 24.0;
+/// Vertical separation before the plain expand/collapse link.
+const USER_TOGGLE_GAP: f32 = 8.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a FIXED-height strip (load-state flips never shift the virtualizer).
 pub const ATT_THUMB_W: f32 = 112.0;
@@ -4131,8 +4130,12 @@ impl Transcript {
     ) -> AnyElement {
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
-        let collapsed_h = USER_COLLAPSED_LINES as f32
-            * f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
+        let line_height =
+            f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
+        let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
+        // Include the continuation line in the resize endpoints so removing
+        // it on expansion does not make the bubble jump by a line.
+        let collapsed_h = collapsed_text_h + line_height;
         let measured_h = self
             .user_heights
             .entry(row_id.clone())
@@ -4140,7 +4143,7 @@ impl Transcript {
             .clone();
         let measured = measured_h.get();
         let collapsible = text.lines().count() > USER_COLLAPSED_LINES
-            || (measured > 0.0 && measured > collapsed_h + 0.5)
+            || (measured > 0.0 && measured > collapsed_text_h + 0.5)
             || (measured == 0.0 && user_message_needs_collapse(&text));
         let full_h = measured_h.get().max(collapsed_h);
 
@@ -4208,24 +4211,31 @@ impl Transcript {
                     at.elapsed() < Duration::from_millis(duration_ms + 200)
                 })
             && !motion::reduced_motion(cx);
+        let ellipsis = || div().h(px(line_height)).child("...");
         let body: AnyElement = if animating {
             let from = fold.from;
             let to = if expanded { full_h } else { collapsed_h };
             let resize = user_resize_spec(full_h - collapsed_h);
+            let ellipsis_h = if expanded { 0.0 } else { line_height };
             div()
-                .overflow_hidden()
-                .child(body)
-                .with_animation(
-                    SharedString::from(format!("{row_id}-user-resize-{}", fold.epoch)),
-                    resize.animation(),
-                    move |el, t| el.h(px(motion::lerp(from, to, t))),
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .child(body)
+                        .with_animation(
+                            SharedString::from(format!("{row_id}-user-resize-{}", fold.epoch)),
+                            resize.animation(),
+                            move |el, t| {
+                                el.h(px((motion::lerp(from, to, t) - ellipsis_h).max(0.0)))
+                            },
+                        ),
                 )
+                .when(!expanded, |el| el.child(ellipsis()))
                 .into_any_element()
         } else if collapsible && !expanded {
             div()
-                .h(px(collapsed_h))
-                .overflow_hidden()
-                .child(body)
+                .child(div().h(px(collapsed_text_h)).overflow_hidden().child(body))
+                .child(ellipsis())
                 .into_any_element()
         } else {
             body.into_any_element()
@@ -4247,9 +4257,8 @@ impl Transcript {
             .into_any_element()
     }
 
-    /// Keep the toggle beside the bubble's last line, inside the existing
-    /// 48px transcript gutter. The icon stays clear of text at every width
-    /// without adding a footer or changing the bubble's proportions.
+    /// A plain text link aligned with the message's left edge, following the
+    /// continuation ellipsis when collapsed. No pill, border, or button wash.
     fn render_user_expander(
         &mut self,
         row_id: &SharedString,
@@ -4266,7 +4275,8 @@ impl Transcript {
         } else {
             crate::icons::ALT_ARROW_DOWN
         };
-        div()
+        let label = if expanded { "Show less" } else { "Show more" };
+        let button = div()
             .id(SharedString::from(format!("{row_id}-expander")))
             .group("user-message-toggle")
             .role(gpui::Role::Button)
@@ -4276,22 +4286,19 @@ impl Transcript {
                 "Expand message"
             })
             .aria_expanded(expanded)
-            .absolute()
-            // Text ends 16px before the bubble edge. Leave a 4px gap, then
-            // give the 12px chevron a 24px target in the existing gutter.
-            .right(px(-44.0))
-            .bottom(px(0.0))
-            .size(px(USER_TOGGLE_SIZE))
             .flex()
             .items_center()
-            .justify_center()
-            .rounded(px(6.0))
+            .gap(px(5.0))
+            .text_size(crate::typography::ui_rems(14.0))
+            .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
+            .text_color(theme.text_muted)
             .cursor_pointer()
-            .hover(|s| s.bg(crate::theme::ink(0.06)))
+            .hover(|s| s.text_color(theme.text))
+            .child(label)
             .child(
                 crate::icons::icon(glyph)
                     .size(px(12.0))
-                    .text_color(theme.text_muted.opacity(0.65))
+                    .text_color(theme.text_muted)
                     .group_hover("user-message-toggle", |s| s.text_color(theme.text)),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -4303,7 +4310,12 @@ impl Transcript {
                     motion::reduced_motion(cx),
                 );
                 cx.notify();
-            }))
+            }));
+        div()
+            .mt(px(USER_TOGGLE_GAP))
+            .flex()
+            .items_start()
+            .child(button)
             .into_any_element()
     }
 
