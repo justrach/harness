@@ -17,7 +17,7 @@ Zeron also uses the following editor foundations from the pinned `zeronsh/gpui-c
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| gpui-base | 0.5.2 (`c5dca15`) | Apache-2.0 | https://github.com/zeronsh/gpui-component |
+| gpui-base | 0.5.2 (`ed27327`) | Apache-2.0 | https://github.com/zeronsh/gpui-component |
 | mermaid-rs-renderer | 0.3.1 | MIT | https://github.com/1jehuang/mermaid-rs-renderer |
 | Ropey | 2.0.0-beta.1 | MIT | https://github.com/cessen/ropey |
 
@@ -122,3 +122,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Native browser host
+
+The macOS browser uses [Wry 0.56.0](https://github.com/tauri-apps/wry/tree/wry-v0.56.0)
+(MIT OR Apache-2.0) to host the system WebKit engine, with the `objc2` family
+of bindings (MIT) and `block2` (MIT). Exact versions and transitive dependencies
+are pinned in `Cargo.lock`. The browser integration is independently written
+Zeron code.
+
+The Zui native overlay renderer adapts Apache-2.0 GPUI code from
+[`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
+Attribution is retained in the pinned Zui dependency’s `NOTICE`.
