@@ -284,6 +284,14 @@ pub enum GitHistoryAuthorDisplay {
     Name,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComposerSendBehavior {
+    #[default]
+    Enter,
+    ModEnter,
+}
+
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
     if !cx.has_global::<SettingsStore>() {
@@ -334,6 +342,8 @@ pub enum SidebarSort {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    /// Submit using Enter or the platform modifier plus Enter.
+    pub composer_send_behavior: ComposerSendBehavior,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -461,6 +471,7 @@ impl Default for UiSettings {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),
+            composer_send_behavior: ComposerSendBehavior::default(),
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
@@ -514,6 +525,7 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
     SaveFile,
+    BrowserReload,
     ToggleSidebar,
     ToggleChanges,
     ToggleTerminal,
@@ -525,8 +537,9 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 8 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 9 + JUMP_SLOTS] = [
         ShortcutId::SaveFile,
+        ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
@@ -549,6 +562,7 @@ impl ShortcutId {
     pub fn label(self) -> &'static str {
         match self {
             ShortcutId::SaveFile => "Save file",
+            ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
             ShortcutId::ToggleChanges => "Toggle right sidebar",
             ShortcutId::ToggleTerminal => "Toggle terminal",
@@ -570,6 +584,7 @@ impl ShortcutId {
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
             ShortcutId::SaveFile => "mod-s",
+            ShortcutId::BrowserReload => "mod-shift-r",
             ShortcutId::ToggleSidebar => "mod-b",
             ShortcutId::ToggleChanges => "mod-r",
             ShortcutId::ToggleTerminal => "mod-j",
@@ -611,6 +626,7 @@ impl ShortcutId {
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
     pub save_file: String,
+    pub browser_reload: String,
     pub toggle_sidebar: String,
     pub toggle_changes: String,
     pub toggle_terminal: String,
@@ -629,6 +645,7 @@ impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
             save_file: ShortcutId::SaveFile.default_combo().into(),
+            browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
@@ -645,6 +662,7 @@ impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
             ShortcutId::SaveFile => &self.save_file,
+            ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
@@ -663,6 +681,7 @@ impl KeymapConfig {
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
             ShortcutId::SaveFile => self.save_file = combo,
+            ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
@@ -693,6 +712,18 @@ impl KeymapConfig {
         while self.jump_session.len() < JUMP_SLOTS {
             self.jump_session
                 .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+        }
+    }
+
+    /// Cmd/Ctrl+Enter belongs to the composer on every send mode. Older
+    /// settings could assign it to an app shortcut while plain Enter was the
+    /// configured sender; restore only those newly-conflicting rows to their
+    /// defaults and preserve every unrelated customization.
+    fn heal_reserved_composer_shortcuts(&mut self) {
+        for id in ShortcutId::ALL {
+            if self.get(id) == "mod-enter" {
+                self.reset(id);
+            }
         }
     }
 }
@@ -792,6 +823,12 @@ pub fn jump_hints_visible(keymap: &KeymapConfig, primary: bool, alt: bool, shift
         .into_iter()
         .filter(|id| id.jump_slot().is_some())
         .any(|id| combo_modifiers(keymap.get(id)) == (primary, alt, shift))
+}
+
+/// Cmd on macOS and Ctrl elsewhere reveals the composer's modified-submit
+/// hint only while that modifier is held by itself.
+pub fn modifier_send_hint_visible(primary: bool, alt: bool, shift: bool) -> bool {
+    primary && !alt && !shift
 }
 
 /// Translate a stored combo into a bindable keystroke for this platform.
@@ -899,6 +936,7 @@ impl UiSettings {
         self.git_history_column_order = self.git_history_column_order.normalized();
         self.ui_font_size = self.ui_font_size.normalized();
         self.keymap.heal_jump_slots();
+        self.keymap.heal_reserved_composer_shortcuts();
         self
     }
 
@@ -1021,6 +1059,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+        )
+        .unwrap();
+
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(!loaded.sound_enabled);
+    }
+
+    #[test]
+    fn obsolete_steering_preference_does_not_reset_other_settings() {
+        let loaded: UiSettings = serde_json::from_str(
+            r#"{"activeTurnSendBehavior":"steer","sidebarWidth":300,"soundEnabled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(!loaded.sound_enabled);
+        assert!(
+            serde_json::to_value(&loaded)
+                .unwrap()
+                .get("activeTurnSendBehavior")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
@@ -1055,6 +1124,7 @@ mod tests {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
             },
+            composer_send_behavior: ComposerSendBehavior::ModEnter,
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -1698,6 +1768,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_modifier_enter_shortcut_heals_without_losing_other_customizations() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"newSession": "mod-enter", "toggleSidebar": "mod-shift-x"}}"#,
+        )
+        .unwrap();
+
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(
+            loaded.keymap.get(ShortcutId::NewSession),
+            ShortcutId::NewSession.default_combo()
+        );
+        assert_eq!(loaded.keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
+    }
+
+    #[test]
     fn jump_hints_need_an_exact_modifier_match() {
         let keymap = KeymapConfig::default();
         // Mod alone matches mod-1..9.
@@ -1722,6 +1809,14 @@ mod tests {
         let mut bare = KeymapConfig::default();
         bare.set(ShortcutId::JumpSession(0), "f5".into());
         assert!(!jump_hints_visible(&bare, false, false, false));
+    }
+
+    #[test]
+    fn modifier_send_hint_needs_only_the_primary_modifier() {
+        assert!(modifier_send_hint_visible(true, false, false));
+        assert!(!modifier_send_hint_visible(false, false, false));
+        assert!(!modifier_send_hint_visible(true, true, false));
+        assert!(!modifier_send_hint_visible(true, false, true));
     }
 
     #[test]

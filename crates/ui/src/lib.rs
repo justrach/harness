@@ -16,6 +16,7 @@ pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
 pub mod badges;
+pub mod browser;
 pub mod change_requests;
 pub mod changes;
 pub mod comments;
@@ -34,6 +35,7 @@ pub mod notify;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
+pub mod queue;
 pub mod rail;
 pub mod settings;
 pub mod shell;
@@ -159,7 +161,7 @@ pub fn run_app(config: UiConfig) {
             ui_settings.git_history_author_display,
             cx,
         );
-        composer::init(cx);
+        composer::init(cx, ui_settings.composer_send_behavior);
         terminal::panel::init(cx);
         app_menus::init(cx);
         cx.register_url_scheme("zeron").detach();

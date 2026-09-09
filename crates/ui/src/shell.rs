@@ -44,10 +44,10 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    self, CHAT_PANEL_MIN, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN,
-    SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId, SidebarOrganization,
-    SidebarSort, TERMINAL_DEFAULT_HEIGHT, UiSettings, badge_combo, jump_hints_visible,
-    platform_combo,
+    self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
+    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
+    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, UiSettings, badge_combo,
+    jump_hints_visible, modifier_send_hint_visible, platform_combo,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
@@ -262,7 +262,11 @@ pub fn cluster_clearance(
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
 /// §1.4). Invalid persisted combos fall back to that shortcut's default.
-pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
+pub fn apply_keymap(
+    cx: &mut App,
+    keymap: &KeymapConfig,
+    composer_send_behavior: ComposerSendBehavior,
+) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
         if Keystroke::parse(&candidate).is_ok() {
@@ -275,10 +279,9 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
-    // rebuilding Zeron's bindings so Backspace, navigation, selection, undo,
-    // and the rest of the editor keymap continue to reach focused inputs.
+    // rebuilding Zeron's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
-    crate::composer::init(cx);
+    crate::composer::init(cx, composer_send_behavior);
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
@@ -334,6 +337,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // bar); pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), AddSpacePalette, None),
     ]);
+    crate::browser::bind_keys(cx, keymap);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
@@ -424,6 +428,7 @@ pub enum RightSurface {
     Picker,
     Files,
     File(u64),
+    Browser(u64),
     Diff(u64),
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
@@ -1144,6 +1149,11 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
+    browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
+    browser_subs: std::collections::HashMap<u64, Subscription>,
+    browser_seq: u64,
+    browser_context: crate::browser::BrowserContext,
+    browser_profile: Option<String>,
     /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
     /// closed terminals/diffs — are skipped at read time).
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
@@ -1292,6 +1302,9 @@ pub struct Shell {
     /// Set by [`Shell::eval_tween`] when any tween is mid-flight this frame;
     /// render schedules the next animation frame off it.
     motion_active: std::cell::Cell<bool>,
+    /// All pane masks and chrome evaluate animation at the same frame time.
+    /// A slow render must not give the native page and its titlebar different widths.
+    render_time: Option<std::time::Instant>,
     splash: SplashPhase,
     splash_task: Option<Task<()>>,
     /// Focus fallback (registered on first paint — [`Shell::new`] has no
@@ -1356,6 +1369,14 @@ impl Shell {
                     target_device_id.clone(),
                     cx,
                 ),
+                ComposerEvent::Queued {
+                    chat_id,
+                    message_id,
+                } => {
+                    transcript.update(cx, |t, cx| {
+                        t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
+                    });
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -1400,7 +1421,7 @@ impl Shell {
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
         // Bind the customizable shortcuts from the persisted keymap.
-        apply_keymap(cx, &settings.keymap);
+        apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
         // straight into a settings section — these pages have no deep link and
         // synthetic input can't reach them on headless compositors.
@@ -1486,6 +1507,11 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
+            browsers: std::collections::HashMap::new(),
+            browser_subs: std::collections::HashMap::new(),
+            browser_seq: 0,
+            browser_context: crate::browser::BrowserContext::default(),
+            browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
             right_tab_scroll: gpui::ScrollHandle::new(),
@@ -1559,6 +1585,7 @@ impl Shell {
             terminal_drag_anchor: None,
             reduced_motion: false,
             motion_active: std::cell::Cell::new(false),
+            render_time: None,
             splash: SplashPhase::Visible,
             splash_task: None,
             focus_sub: None,
@@ -1927,7 +1954,7 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        let from = self.sidebar_target();
+        let from = self.eval_tween(self.sidebar_tween, self.sidebar_target());
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
         self.schedule_save(cx);
@@ -1935,8 +1962,8 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        // No git gate: the pane hosts terminals too (see `right_pane_open`).
-        let from = self.right_target(cx);
+        // Reverse from the visible width when toggled during an animation.
+        let from = self.eval_tween(self.right_tween, self.right_target(cx));
         let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
         let from_main = conversation_width(self.viewport_width, sidebar_now, from);
         let was_expanded = self.right_pane_expanded;
@@ -2031,6 +2058,15 @@ impl Shell {
                     .subagent_tabs
                     .get(id)
                     .map(|tab| (*surface, tab.title.clone(), false, None)),
+                RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
+                    let browser = browser.read(cx);
+                    (
+                        *surface,
+                        browser.title(),
+                        false,
+                        browser.page.url.clone().map(Into::into),
+                    )
+                }),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -2050,7 +2086,8 @@ impl Shell {
             RightSurface::Picker
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
-            | RightSurface::Subagent(_) => {
+            | RightSurface::Subagent(_)
+            | RightSurface::Browser(_) => {
                 return None;
             }
         };
@@ -2138,7 +2175,7 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) => {}
+            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
         cx.notify();
@@ -2150,6 +2187,12 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let RightSurface::Browser(id) = surface {
+            if let Some(browser) = self.browsers.get(&id).cloned() {
+                browser.update(cx, |browser, cx| browser.focus_address(window, cx));
+            }
+            return;
+        }
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::Files => self.files.get(&key).cloned(),
@@ -2223,6 +2266,61 @@ impl Shell {
         }
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// Browser tabs are independent instances owned by the current session.
+    fn add_browser_surface(
+        &mut self,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        let key = self.panel_key(cx);
+        let remote = {
+            let state = self.state.read(cx);
+            state.selected_chat_row().is_some_and(|chat| {
+                Some(chat.device_id.as_str()) != state.local_device_id.as_deref()
+            })
+        };
+        self.browser_seq += 1;
+        let id = self.browser_seq;
+        let browser = cx.new(|cx| {
+            crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
+        });
+        let owner = key.clone();
+        let sub = cx.subscribe_in(&browser, window, move |this, _, event, window, cx| {
+            match event {
+                crate::browser::BrowserEvent::Changed => cx.notify(),
+                crate::browser::BrowserEvent::NewTab(url) => {
+                    // A background page cannot open a tab in the wrong session.
+                    if this.panel_key(cx) == owner
+                        && this.resolved_right_active(cx) == RightSurface::Browser(id)
+                    {
+                        this.add_browser_surface(url.clone(), window, cx);
+                    }
+                }
+                crate::browser::BrowserEvent::Close => {
+                    this.close_right_surface(RightSurface::Browser(id), window, cx)
+                }
+            }
+        });
+        self.browsers.insert(id, browser.clone());
+        self.browser_subs.insert(id, sub);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::Browser(id));
+        self.set_right_active(RightSurface::Browser(id), cx);
+        browser.update(cx, |browser, cx| {
+            if let Some(url) = url {
+                browser.navigate(&url, window, cx);
+            } else {
+                browser.focus_address(window, cx);
+            }
+        });
     }
 
     /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
@@ -2590,6 +2688,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let was_active = self.resolved_right_active(cx) == surface;
         let key = self.panel_key(cx);
         let files = match surface {
             RightSurface::Files => self.files.get(&key).cloned(),
@@ -2613,6 +2712,15 @@ impl Shell {
         }
         match surface {
             RightSurface::Files | RightSurface::File(_) => {}
+            RightSurface::Browser(id) => {
+                if let Some(browser) = self.browsers.remove(&id) {
+                    browser.update(cx, |browser, cx| browser.close(cx));
+                }
+                self.browser_subs.remove(&id);
+                if was_active {
+                    window.focus(&self.composer.focus_handle(cx), cx);
+                }
+            }
             RightSurface::Diff(id) => {
                 // Dropping the entity tears down its diff watch.
                 self.diffs.remove(&id);
@@ -3164,14 +3272,26 @@ impl Shell {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
-                    let page = cx.new(|cx| ShortcutsPage::new(state, keymap, cx));
-                    // Persist + re-apply the keymap whenever the page changes it.
+                    let composer_send_behavior = self.settings.composer_send_behavior;
+                    let page =
+                        cx.new(|cx| ShortcutsPage::new(state, keymap, composer_send_behavior, cx));
+                    // Persist + re-apply shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
-                            let ShortcutsEvent::Changed(keymap) = event;
-                            this.settings.keymap = keymap.clone();
-                            apply_keymap(cx, keymap);
+                            match event {
+                                ShortcutsEvent::KeymapChanged(keymap) => {
+                                    this.settings.keymap = keymap.clone();
+                                }
+                                ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
+                                    this.settings.composer_send_behavior = *behavior;
+                                }
+                            }
+                            apply_keymap(
+                                cx,
+                                &this.settings.keymap,
+                                this.settings.composer_send_behavior,
+                            );
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -3313,8 +3433,8 @@ impl Shell {
         self.add_space.is_some() || self.composer.read(cx).pickers().read(cx).is_open()
     }
 
-    /// Track the held modifiers so the sidebar can show its jump hints. Only a
-    /// change in visibility repaints — modifier traffic is otherwise constant.
+    /// Track held modifiers for sidebar jump hints and the queue's submit hint.
+    /// Only a visibility change repaints; modifier traffic is otherwise constant.
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
         let mods = &event.modifiers;
         let primary = if cfg!(target_os = "macos") {
@@ -3328,6 +3448,12 @@ impl Shell {
             && !self.overlay_owns_keyboard(cx)
             && jump_hints_visible(&self.settings.keymap, primary, mods.alt, mods.shift);
         self.set_jump_hints(visible, cx);
+        let queue_shortcut_revealed = matches!(self.route, Route::Chat)
+            && !self.overlay_owns_keyboard(cx)
+            && modifier_send_hint_visible(primary, mods.alt, mods.shift);
+        self.composer.update(cx, |composer, cx| {
+            composer.set_queue_shortcut_revealed(queue_shortcut_revealed, cx)
+        });
     }
 
     pub(super) fn set_jump_hints(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -3339,6 +3465,16 @@ impl Shell {
 
     fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
+        if let Some(tabs) = self.right_tabs.get(&chat_id) {
+            for surface in tabs {
+                if let RightSurface::Browser(id) = surface {
+                    if let Some(browser) = self.browsers.remove(id) {
+                        browser.update(cx, |browser, cx| browser.close(cx));
+                    }
+                    self.browser_subs.remove(id);
+                }
+            }
+        }
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
             self.state.update(cx, |s, cx| s.select_chat(None, cx));
         }
@@ -3912,7 +4048,13 @@ impl Shell {
 
     // ---- render pieces ----
 
-    /// Evaluate a width tween at "now" (manual drive — see [`WidthTween`]).
+    fn tween_elapsed(&self, started: std::time::Instant) -> Duration {
+        self.render_time
+            .unwrap_or_else(std::time::Instant::now)
+            .saturating_duration_since(started)
+    }
+
+    /// Evaluate a width tween at the frame time (see [`WidthTween`]).
     /// Mid-flight: eased 200ms lerp, and `motion_active` is flagged so render
     /// schedules the next animation frame. Finished, stale, absent, or under
     /// reduced motion: exactly `target`. Honors `ZERON_MOTION_SCALE`.
@@ -3924,7 +4066,7 @@ impl Shell {
             return target;
         }
         let total = RESIZE.total().mul_f32(motion::speed_scale());
-        let raw = started.elapsed().as_secs_f32() / total.as_secs_f32();
+        let raw = self.tween_elapsed(started).as_secs_f32() / total.as_secs_f32();
         if raw >= 1.0 {
             return target;
         }
@@ -3935,7 +4077,7 @@ impl Shell {
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
         tween.is_some_and(|tween| {
             !self.reduced_motion
-                && tween.started.elapsed() < RESIZE.total().mul_f32(motion::speed_scale())
+                && self.tween_elapsed(tween.started) < RESIZE.total().mul_f32(motion::speed_scale())
         })
     }
 
@@ -3943,7 +4085,8 @@ impl Shell {
         tween
             .filter(|transition| {
                 !self.reduced_motion
-                    && transition.started.elapsed() < RESIZE.total().mul_f32(motion::speed_scale())
+                    && self.tween_elapsed(transition.started)
+                        < RESIZE.total().mul_f32(motion::speed_scale())
             })
             .map(|transition| (transition.from, transition.to))
     }
@@ -6727,7 +6870,8 @@ impl Shell {
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) {
+        let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
+        {
             match self.resolved_right_active(cx) {
                 RightSurface::Files => {
                     let key = self.panel_key(cx);
@@ -6764,6 +6908,12 @@ impl Shell {
                         .child(div().flex_1().min_h_0().child(changes))
                         .into_any_element()
                 }
+                RightSurface::Browser(id) => self
+                    .browsers
+                    .get(&id)
+                    .cloned()
+                    .map(|browser| browser.into_any_element())
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Terminal(tab) => {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
@@ -6902,6 +7052,11 @@ impl Shell {
                                 this.add_files_surface(window, cx);
                             }),
                         ),
+                    )
+                    .child(
+                        row("surface-card-browser", icons::GLOBE, "Browser").on_click(cx.listener(
+                            |this, _, window, cx| this.add_browser_surface(None, window, cx),
+                        )),
                     )
                     .child(
                         row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
@@ -7111,13 +7266,25 @@ impl Shell {
                     .unwrap_or(icons::LIST),
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
+                RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
             };
             // A live subagent tab swaps its icon for the mini working
             // spinner (the history fetch button's in-flight recipe) — the
             // doc's streaming tail entry IS the run's liveness, so the swap
             // settles by itself when the subagent finishes.
+            let browser_favicon = match surface {
+                RightSurface::Browser(id) => self
+                    .browsers
+                    .get(&id)
+                    .and_then(|b| b.read(cx).favicon.clone()),
+                _ => None,
+            };
             let subagent_running = match surface {
+                RightSurface::Browser(id) => self
+                    .browsers
+                    .get(&id)
+                    .is_some_and(|b| b.read(cx).page.loading),
                 RightSurface::Subagent(id) => self.subagent_tabs.get(&id).is_some_and(|tab| {
                     self.state
                         .read(cx)
@@ -7235,6 +7402,8 @@ impl Shell {
                                         cx,
                                     )
                                     .into_any_element()
+                                } else if let Some(favicon) = browser_favicon {
+                                    gpui::img(favicon).size(px(12.0)).into_any_element()
                                 } else {
                                     icon(icon_path)
                                         .size(px(12.0))
@@ -7374,6 +7543,20 @@ impl Shell {
                                         .text_color(theme.text_muted),
                                 )
                                 .child(SharedString::from("Files")),
+                        )
+                        .child(
+                            popover::menu_row(&theme, false, "right-plus-browser")
+                                .id("right-plus-browser-row")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_browser_surface(None, window, cx);
+                                    this.close_right_plus(cx);
+                                }))
+                                .child(
+                                    icon(icons::GLOBE)
+                                        .size(px(13.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Browser")),
                         )
                         .child(
                             popover::menu_row(&theme, false, "right-plus-terminal")
@@ -8161,6 +8344,7 @@ fn header_icon_button(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_time = Some(std::time::Instant::now());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {
@@ -8212,6 +8396,44 @@ impl Render for Shell {
             .clone()
             .unwrap_or_else(|| self.state.read(cx).gate());
 
+        let browser_profile = {
+            let state = self.state.read(cx);
+            crate::links::workspace_locator(
+                state.workspace_scope,
+                state.auth.as_ref(),
+                state.local_device_id.as_deref(),
+            )
+        };
+        if browser_profile.is_some() && browser_profile != self.browser_profile {
+            if self.browser_profile.is_some() {
+                for browser in self.browsers.values() {
+                    browser.update(cx, |browser, cx| browser.close(cx));
+                }
+                self.browsers.clear();
+                self.browser_subs.clear();
+                self.browser_context = crate::browser::BrowserContext::default();
+            }
+            self.browser_profile = browser_profile;
+        }
+        let browser_active = matches!(gate, GatePhase::Ready)
+            && !restart_required
+            && matches!(self.route, Route::Chat)
+            && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
+        // Native clipping follows the animated GPUI mask. Drags only transfer
+        // pointer ownership; the browser continues rendering and reflowing.
+        let browser_dragging = cx.has_active_drag();
+        let selected_surface = self.resolved_right_active(cx);
+        for (id, browser) in &self.browsers {
+            let presentation = crate::browser::model::presentation(
+                browser_active && selected_surface == RightSurface::Browser(*id),
+                browser_dragging,
+            );
+            browser.update(cx, |browser, cx| {
+                browser.set_shortcuts(&self.settings.keymap);
+                browser.set_presentation(presentation, cx);
+            });
+        }
+
         // Fullscreen hides the macOS traffic lights — reflow the control
         // cluster with a 200ms ease-out tween (§1.1). A fullscreen transition
         // resizes the window, which re-renders us, so polling here is exact.
@@ -8243,6 +8465,9 @@ impl Render for Shell {
                 |this: &mut Shell, window, cx| {
                     if !window.is_window_active() {
                         this.set_jump_hints(false, cx);
+                        this.composer.update(cx, |composer, cx| {
+                            composer.set_queue_shortcut_revealed(false, cx)
+                        });
                     }
                 },
             ));
@@ -8628,8 +8853,11 @@ impl Render for Shell {
                 ),
             )
         };
-        root.children(self.render_windows_caption_controls(window, cx))
-            .children(self.render_linux_caption_controls(window, cx))
+        let root = root
+            .children(self.render_windows_caption_controls(window, cx))
+            .children(self.render_linux_caption_controls(window, cx));
+        self.render_time = None;
+        root
     }
 }
 
@@ -9416,6 +9644,155 @@ mod exit_regressions {
     use gpui::{AppContext, TestAppContext};
 
     #[gpui::test]
+    fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                let duration = RESIZE.total().mul_f32(motion::speed_scale());
+                let started = std::time::Instant::now() - duration.mul_f32(2.);
+                let tween = Some(WidthTween {
+                    from: 520.,
+                    to: 0.,
+                    started,
+                });
+                shell.reduced_motion = false;
+                // The frame started halfway through the transition but rendering
+                // crossed its deadline. Every region must still use that frame.
+                shell.render_time = Some(started + duration.mul_f32(0.5));
+                assert!(shell.tween_active(tween));
+                assert_eq!(shell.active_tween_endpoints(tween), Some((520., 0.)));
+                let width = shell.eval_tween(tween, 0.);
+                assert!(width > 0. && width < 520.);
+                assert_eq!(shell.eval_tween(tween, 0.), width);
+                shell.active_chat = "preview".into();
+                shell.viewport_width = 1000.;
+                shell.right_tween = tween;
+                shell.toggle_right_pane(cx);
+                assert_eq!(
+                    shell.right_tween.unwrap().from,
+                    width,
+                    "reversing must not restart from zero"
+                );
+                shell.settings.sidebar_collapsed = true;
+                shell.sidebar_tween = tween;
+                shell.toggle_sidebar(cx);
+                assert_eq!(shell.sidebar_tween.unwrap().from, width);
+                shell.render_time = None;
+                assert!(!shell.tween_active(tween));
+                assert_eq!(shell.active_tween_endpoints(tween), None);
+                assert_eq!(shell.eval_tween(tween, 0.), 0.);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn browser_tabs_keep_session_ownership_and_release_on_close(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let weak = window
+            .update(cx, |shell, window, cx| {
+                // A fresh-session canvas never accumulates ownerless tabs.
+                shell.add_browser_surface(None, window, cx);
+                assert!(shell.browsers.is_empty());
+                shell.active_chat = "first-session".into();
+                shell.add_browser_surface(None, window, cx);
+                let first = shell.browser_seq;
+                let weak = shell.browsers[&first].downgrade();
+                shell.add_browser_surface(None, window, cx);
+                let second = shell.browser_seq;
+                assert_ne!(first, second);
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(second)
+                );
+                shell.active_chat = "second-session".into();
+                assert!(shell.right_surface_rows(cx).is_empty());
+                shell.add_browser_surface(None, window, cx);
+                let other = shell.browser_seq;
+                shell.active_chat = "first-session".into();
+                assert_eq!(shell.right_surface_rows(cx).len(), 2);
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(second)
+                );
+                // Closing a background tab preserves the selected address input.
+                let focus = window.focused(cx);
+                shell.close_right_surface(RightSurface::Browser(first), window, cx);
+                assert_eq!(window.focused(cx), focus);
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(second)
+                );
+                shell.close_right_surface(RightSurface::Browser(second), window, cx);
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                shell.active_chat = "second-session".into();
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(other)
+                );
+                shell.close_right_surface(RightSurface::Browser(other), window, cx);
+                assert!(shell.browsers.is_empty());
+                assert!(shell.browser_subs.is_empty());
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "closed browser retained by callbacks"
+        );
+    }
+
+    #[gpui::test]
     fn lifecycle_actions_keep_pending_and_failed_file_saves_alive(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -9493,5 +9870,61 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
+    }
+}
+
+/// Native browser regression fixture hooks are excluded from shipped builds.
+#[cfg(feature = "browser-fixture")]
+impl Shell {
+    pub fn fixture_open_browser(
+        &mut self,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (u64, Entity<crate::browser::BrowserSurface>) {
+        if !self.right_pane_open(cx) {
+            self.toggle_right_pane(cx);
+        }
+        // Hosted Macs can expose only a 1024px desktop. Use the app's
+        // normal collapsed-sidebar layout to keep both conversation and
+        // preview readable in that real window.
+        if f32::from(window.viewport_size().width) < 1200.0 {
+            self.settings.sidebar_collapsed = true;
+        }
+        self.add_browser_surface(url, window, cx);
+        (self.browser_seq, self.browsers[&self.browser_seq].clone())
+    }
+    pub fn fixture_select_browser(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.set_right_active(RightSurface::Browser(id), cx);
+    }
+    pub fn fixture_close_browser(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_right_surface(RightSurface::Browser(id), window, cx);
+    }
+    pub fn fixture_browser_menu(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            self.right_plus.open(());
+            cx.notify();
+        } else {
+            self.close_right_plus(cx);
+        }
+    }
+    pub fn fixture_expand_browser(&mut self, cx: &mut Context<Self>) {
+        self.toggle_right_pane_expand(cx);
+    }
+    pub fn fixture_blur_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.route = Route::Settings(SettingsSection::Devices);
+        window.blur();
+        cx.notify();
+    }
+    pub fn fixture_toggle_sidebar(&mut self, right: bool, cx: &mut Context<Self>) {
+        if right {
+            self.toggle_right_pane(cx);
+        } else {
+            self.toggle_sidebar(cx);
+        }
+    }
+    pub fn fixture_resize_browser(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.settings.right_pane_width = width;
+        cx.notify();
     }
 }
