@@ -147,7 +147,11 @@ jobs:
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
       - name: X11 and Wayland browser regressions
         timeout-minutes: 5
-        run: scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser"
+        env:
+          RUST_LOG: gpui_wgpu=info
+        run: |
+          scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
+          VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
       - name: Upload native browser evidence
         if: always()
         uses: actions/upload-artifact@v4
