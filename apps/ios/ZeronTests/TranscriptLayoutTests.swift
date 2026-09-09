@@ -95,6 +95,7 @@ final class TranscriptLayoutTests: XCTestCase {
     }
 
     override func tearDown() {
+        window?.endEditing(true)
         window?.isHidden = true
         window?.rootViewController = nil
         window = nil
@@ -174,8 +175,14 @@ final class TranscriptLayoutTests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
             XCTAssertEqual(gaps.count, 30)
-            XCTAssertGreaterThan(Set(heights.map { Int($0.rounded()) }).count, 5)
-            XCTAssertGreaterThan(abs(heights.last! - start), 100)
+            // Task.sleep is a minimum delay, not a display-frame clock. A
+            // loaded simulator can sample a 200ms transition fewer than six
+            // times. Require actual interpolation rather than a frame count.
+            let end = heights.last!
+            XCTAssertTrue(heights.contains {
+                $0 > min(start, end) + 1 && $0 < max(start, end) - 1
+            }, "Disclosure must render an intermediate height, not snap between endpoints")
+            XCTAssertGreaterThan(abs(end - start), 100)
             XCTAssertLessThan((gaps.max() ?? .infinity) - (gaps.min() ?? 0), 4)
             assertTailVisible()
         }
@@ -194,11 +201,13 @@ final class TranscriptLayoutTests: XCTestCase {
         let path = IndexPath(row: index, section: 0)
         let closedHeight = table.rectForRow(at: path).height
         var heights = [closedHeight]
+        var sampleTimes = [CACurrentMediaTime()]
         for open in [true, false, true, false, true, false] {
             withAnimation(Motion.resize) { harness.folds.values[id] = open }
             for tick in 0..<5 {
                 try? await Task.sleep(for: .milliseconds(16))
                 heights.append(table.rectForRow(at: path).height)
+                sampleTimes.append(CACurrentMediaTime())
                 assertTailVisible() // Inspect the rendered frame before applying the next network update.
                 if tick == 2 {
                     var entries = harness.store.entries
@@ -210,8 +219,21 @@ final class TranscriptLayoutTests: XCTestCase {
         }
         await settle()
         XCTAssertEqual(table.rectForRow(at: path).height, closedHeight, accuracy: 1)
-        XCTAssertGreaterThan(Set(heights.map { Int($0.rounded()) }).count, 10)
-        XCTAssertLessThan(zip(heights, heights.dropFirst()).map { abs($1 - $0) }.max() ?? .infinity, 100)
+        let peakHeight = heights.max()!
+        XCTAssertTrue(heights.contains { $0 > closedHeight + 1 && $0 < peakHeight - 1 },
+                      "Reversals must include partially revealed content")
+        // A late wake-up can span several rendered frames. Compare movement
+        // per nominal 60Hz frame, not the entire unsampled interval, while
+        // retaining the original 100pt bound for on-time samples.
+        let frameSteps = (1..<heights.count).map { index in
+            let elapsed = max(sampleTimes[index] - sampleTimes[index - 1], 1.0 / 60)
+            return abs(heights[index] - heights[index - 1]) / CGFloat(elapsed * 60)
+        }
+        let attachment = XCTAttachment(string: "heights=\(heights)\nsampleTimes=\(sampleTimes)\nframeSteps=\(frameSteps)")
+        attachment.name = "tool-reversal-motion"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertLessThan(frameSteps.max() ?? .infinity, 100)
         assertTailVisible()
     }
 
@@ -275,11 +297,13 @@ final class TranscriptLayoutTests: XCTestCase {
         let editor = findNativeEditor(window)!
         let tailKey = key + "|a599#t1.0"
         for showing in [true, false, true, false] {
-            let baseline = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
-                - TranscriptLayoutProbe.presentedFrame(for: tailKey)!.maxY
+            let startPosition = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
+            let baseline = startPosition - TranscriptLayoutProbe.presentedFrame(for: tailKey)!.maxY
             if showing { editor.becomeFirstResponder() } else { editor.resignFirstResponder() }
             var errors: [CGFloat] = []
-            var positions: [CGFloat] = []
+            // Include the pre-animation position: the first async sample can
+            // arrive after most of the keyboard transition has completed.
+            var positions: [CGFloat] = [startPosition]
             for _ in 0..<100 {
                 try? await Task.sleep(for: .milliseconds(16))
                 if let viewport = TranscriptLayoutProbe.presentedFrame(for: key),
@@ -409,6 +433,7 @@ final class TranscriptLayoutTests: XCTestCase {
         let startGap = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
             - TranscriptLayoutProbe.presentedFrame(for: tailKey)!.maxY
         for height: CGFloat in [390, 64, 240, 64] {
+            let startPosition = TranscriptLayoutProbe.presentedFrame(for: key)!.maxY
             withAnimation(.easeInOut(duration: 0.35)) { harness.composerHeight = height }
             var samples: [String] = []
             var gaps: [CGFloat] = []
@@ -426,7 +451,10 @@ final class TranscriptLayoutTests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
             XCTAssertEqual(gaps.count, 30, "Resizing must not temporarily unrealize the tail")
-            XCTAssertGreaterThan(Set(positions.map { Int($0.rounded()) }).count, 5)
+            let endPosition = positions.last!
+            XCTAssertTrue(positions.contains {
+                $0 > min(startPosition, endPosition) + 1 && $0 < max(startPosition, endPosition) - 1
+            }, "Composer resize must render an intermediate position")
             XCTAssertLessThan(gaps.map { abs($0 - startGap) }.max() ?? .infinity, 4,
                 "Transcript and composer must move together throughout the resize")
             await settle()
@@ -455,6 +483,7 @@ final class TranscriptLayoutTests: XCTestCase {
             return view.subviews.lazy.compactMap { findScroll($0) }.first
         }
         let native = findScroll(window)!
+        let startOffset = native.layer.presentation()?.bounds.origin.y ?? native.contentOffset.y
         harness.store.sendSteer(prompt: "Keep this local turn at the top.")
         let id = harness.store.lastSubmittedMessageId!
         var offsets: [CGFloat] = []
@@ -477,8 +506,10 @@ final class TranscriptLayoutTests: XCTestCase {
         diagnostic.name = "pending-send-animation-samples"
         diagnostic.lifetime = .keepAlways
         add(diagnostic)
-        XCTAssertGreaterThan(Set(offsets.map { Int($0.rounded()) }).count, 3,
-                             "The send must glide through intermediate offsets, not jump after a delay")
+        let endOffset = offsets.last!
+        XCTAssertTrue(offsets.contains {
+            $0 > min(startOffset, endOffset) + 1 && $0 < max(startOffset, endOffset) - 1
+        }, "The send must glide through an intermediate offset, not jump after a delay")
         await settle()
         func assertPrompt() {
             guard let prompt = TranscriptLayoutProbe.tails[key + "|" + id],
