@@ -63,6 +63,9 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDeleg
 reqwest.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "webp"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
