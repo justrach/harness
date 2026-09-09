@@ -7,6 +7,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'scripts/test-linux-browser.sh'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
   push:
@@ -16,6 +17,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'scripts/test-linux-browser.sh'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
   workflow_dispatch:
@@ -35,12 +37,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: GPUI system dependencies
         run: |
-          sudo apt-get update -qq
+          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
           sudo apt-get install -y -qq \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev \
             libfontconfig1-dev libfreetype-dev libasound2-dev \
-            libvulkan-dev pkg-config cmake
+            libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -71,7 +74,7 @@ jobs:
       - name: Check macOS application
         run: cargo check --release --locked -p zeron
       - name: Build native browser fixture
-        run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
+        run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots
         timeout-minutes: 3
         env:
@@ -85,6 +88,25 @@ jobs:
         with:
           name: browser-macos-captures
           path: ${{ runner.temp }}/browser-captures
+          if-no-files-found: ignore
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install preview fixture server
+        run: npm ci --prefix edge
+      - name: Project discovery, stable URLs and HMR in native WebKit
+        timeout-minutes: 3
+        env:
+          ZERON_PREVIEW_AUTO_OPEN: 1
+        run: |
+          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          test -f "$RUNNER_TEMP/preview-captures/result.txt"
+      - name: Upload preview screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-macos-captures
+          path: ${{ runner.temp }}/preview-captures
           if-no-files-found: ignore
       - name: Native frame-source recovery regression
         working-directory: frame-source-tests
@@ -121,3 +143,38 @@ jobs:
           name: ios-test-results
           path: ${{ runner.temp }}/ios-tests.xcresult
           if-no-files-found: ignore
+
+  linux-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native browser and GPUI dependencies
+        run: |
+          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          sudo apt-get install -y -qq \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev \
+            libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake \
+            libwebkit2gtk-4.1-dev libjson-glib-dev xvfb xdotool openbox \
+            weston ffmpeg imagemagick fonts-noto-cjk
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build browser fixture
+        run: cargo build --release --locked -p zeron-ui --example browser-fixture --features browser-fixture
+      - name: X11 and Wayland browser regressions
+        timeout-minutes: 5
+        env:
+          RUST_LOG: gpui_wgpu=info
+        run: |
+          scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
+          VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
+      - name: Upload native browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-browser
+          path: ${{ runner.temp }}/linux-browser
+          if-no-files-found: warn

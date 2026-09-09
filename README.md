@@ -17,6 +17,8 @@ zeron status
 
 The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
 
+The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
+
 Day-to-day:
 
 ```bash
