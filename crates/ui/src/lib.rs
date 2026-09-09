@@ -16,12 +16,14 @@ pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
 pub mod badges;
+pub mod browser;
 pub mod change_requests;
 pub mod changes;
 pub mod comments;
 pub mod composer;
 mod context_usage;
 pub mod edge_fade;
+pub mod files;
 pub mod frost;
 pub mod history;
 pub mod icons;
@@ -32,17 +34,20 @@ pub mod motion;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
+pub mod queue;
 pub mod rail;
 pub mod settings;
 pub mod shell;
 pub mod sound;
 pub mod state;
+pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
 pub mod typography;
+mod workspace_links;
 
 use std::path::PathBuf;
 
@@ -127,6 +132,7 @@ pub fn run_app(config: UiConfig) {
     app.run(move |cx: &mut App| {
         // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
         gpui_tokio::init(cx);
+        gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
@@ -147,7 +153,14 @@ pub fn run_app(config: UiConfig) {
             ui_settings.surface,
             cx,
         );
-        composer::init(cx);
+        history::init(
+            ui_settings.git_history_columns,
+            ui_settings.git_history_column_widths,
+            ui_settings.git_history_column_order,
+            ui_settings.git_history_author_display,
+            cx,
+        );
+        composer::init(cx, ui_settings.composer_send_behavior);
         terminal::panel::init(cx);
         app_menus::init(cx);
         cx.register_url_scheme("zeron").detach();
@@ -260,7 +273,14 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             // the subscription lives as long as the window does, and the window
             // owns nothing that would drop it early.
             appearance::observe_window(window, cx).detach();
-            cx.new(|cx| shell::Shell::new(state, boot, cx))
+            let shell = cx.new(|cx| shell::Shell::new(state, boot, cx));
+            let weak_shell = shell.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                weak_shell
+                    .update(cx, |shell, cx| shell.prepare_window_close(cx))
+                    .unwrap_or(true)
+            });
+            shell
         },
     )
     .expect("failed to open window");

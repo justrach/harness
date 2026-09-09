@@ -50,15 +50,30 @@ macro_rules! icon_assets {
 icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
+    // Browser globe, drawn in the same linear weight as the toolbar family.
+    (GLOBE, "globe"),
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
     (SORT_VERTICAL, "sort-vertical"),
+    // Compact six-dot grip used to reorder queued prompts.
+    (DRAG_HANDLE, "drag-handle"),
+    // Original queue-only line family: 24px canvas, 1.5px round strokes and
+    // medium-radius geometry. Kept separate so the queue can adopt the visual
+    // language of the supplied Central Icons reference without changing
+    // shared application glyphs or copying third-party artwork.
+    (QUEUE_DRAG_HANDLE, "queue-drag-handle"),
+    (QUEUE_SEND, "queue-send"),
+    (QUEUE_CHECK, "queue-check"),
+    (QUEUE_CLOSE, "queue-close"),
+    (QUEUE_PAPERCLIP, "queue-paperclip"),
     (CLOCK_CIRCLE, "clock-circle"),
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
     (FOLDER, "folder"),
+    // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
+    (FLOPPY_DISK, "floppy-disk"),
     // Hand-drawn git-branch glyph in the Solar Linear style (like the
     // terminal/plus/return ports) — the set has no branch icon.
     (GIT_BRANCH, "git-branch"),
@@ -112,6 +127,8 @@ icon_assets![
     (RESTART, "restart"),
     (ADD_CIRCLE, "add-circle"),
     (TUNING, "tuning"),
+    (EYE, "eye"),
+    (EYE_CLOSED, "eye-closed"),
     (PAPERCLIP, "paperclip"),
     // Hand-drawn pushpin in the Solar Linear style for local sidebar pins.
     (PIN, "pin"),

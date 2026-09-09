@@ -27,7 +27,7 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-use crate::comments::DiffComment;
+use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
@@ -487,6 +487,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
             Ok(EngineInfo {
                 device_id: legacy.device_id,
                 workspace_scope: WorkspaceScope::Synced,
+                capabilities: Vec::new(),
             })
         }
         Err(err) => Err(err),
@@ -630,6 +631,10 @@ pub struct AppState {
     deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
+    /// The selected chat's pending-message queue — what was typed while the
+    /// agent was busy, in the order it will be sent. Device-agnostic: the
+    /// chat's doc holds them (every device sees the same queue).
+    pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
     /// The selected chat's opening `WatchDocMessages` reset has landed. An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -651,7 +656,11 @@ pub struct AppState {
     /// percent ring, present exactly while bytes are moving.
     transfers: HashMap<String, (u64, u64)>,
     /// Written by the changes pane, read by the composer.
-    diff_comments: HashMap<String, Vec<DiffComment>>,
+    review_comments: HashMap<String, Vec<ReviewComment>>,
+    /// File surfaces whose editor-backed comments currently cite a buffer
+    /// revision that has not reached disk yet. A chat remains blocked until
+    /// every surface waiting on a workspace write has finished or cancelled.
+    review_comment_flushes: HashMap<String, HashSet<u64>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
@@ -665,6 +674,7 @@ pub struct AppState {
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
+    queue_task: Option<Task<()>>,
     change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
@@ -717,6 +727,7 @@ impl AppState {
             selected_device: None,
             selected_chat: None,
             transcript: Vec::new(),
+            queue: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
             transcript_revision: 0,
@@ -724,7 +735,8 @@ impl AppState {
             pending_sends: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
-            diff_comments: HashMap::new(),
+            review_comments: HashMap::new(),
+            review_comment_flushes: HashMap::new(),
             local_device_id: None,
             update: None,
             data_dir: None,
@@ -733,6 +745,7 @@ impl AppState {
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
+            queue_task: None,
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
@@ -751,35 +764,83 @@ impl AppState {
         self.selected_chat.clone().unwrap_or_default()
     }
 
-    pub fn diff_comments(&self, key: &str) -> &[DiffComment] {
-        self.diff_comments
+    pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
+        self.review_comments
             .get(key)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
 
-    pub fn add_diff_comment(&mut self, key: &str, comment: DiffComment) {
-        self.diff_comments
+    pub fn add_review_comment(&mut self, key: &str, comment: ReviewComment) {
+        self.review_comments
             .entry(key.to_string())
             .or_default()
             .push(comment);
     }
 
-    pub fn remove_diff_comment(&mut self, key: &str, id: &str) {
-        if let Some(list) = self.diff_comments.get_mut(key) {
+    pub fn remove_review_comment(&mut self, key: &str, id: &str) {
+        if let Some(list) = self.review_comments.get_mut(key) {
             list.retain(|c| c.id != id);
             if list.is_empty() {
-                self.diff_comments.remove(key);
+                self.review_comments.remove(key);
+                self.review_comment_flushes.remove(key);
             }
         }
     }
 
-    pub fn take_diff_comments(&mut self, key: &str) -> Vec<DiffComment> {
-        self.diff_comments.remove(key).unwrap_or_default()
+    pub fn update_review_comment_line(&mut self, key: &str, id: &str, line: u32) {
+        if let Some(comment) = self
+            .review_comments
+            .get_mut(key)
+            .and_then(|comments| comments.iter_mut().find(|comment| comment.id == id))
+        {
+            comment.line = line;
+        }
     }
 
-    pub fn purge_diff_comments(&mut self, key: &str) {
-        self.diff_comments.remove(key);
+    pub fn rename_review_comment_path(&mut self, key: &str, old_path: &str, new_path: &str) {
+        if let Some(comments) = self.review_comments.get_mut(key) {
+            for comment in comments
+                .iter_mut()
+                .filter(|comment| comment.is_file() && comment.path == old_path)
+            {
+                comment.path = new_path.to_string();
+            }
+        }
+    }
+
+    pub fn take_review_comments(&mut self, key: &str) -> Vec<ReviewComment> {
+        self.review_comment_flushes.remove(key);
+        self.review_comments.remove(key).unwrap_or_default()
+    }
+
+    pub fn purge_review_comments(&mut self, key: &str) {
+        self.review_comment_flushes.remove(key);
+        self.review_comments.remove(key);
+    }
+
+    pub fn begin_review_comment_flush(&mut self, key: &str, source: u64) {
+        self.review_comment_flushes
+            .entry(key.to_string())
+            .or_default()
+            .insert(source);
+    }
+
+    pub fn finish_review_comment_flush(&mut self, key: &str, source: u64) {
+        let remove_key = self
+            .review_comment_flushes
+            .get_mut(key)
+            .is_some_and(|sources| {
+                sources.remove(&source);
+                sources.is_empty()
+            });
+        if remove_key {
+            self.review_comment_flushes.remove(key);
+        }
+    }
+
+    pub fn review_comment_flush_pending(&self, key: &str) -> bool {
+        self.review_comment_flushes.contains_key(key)
     }
 
     // ---- reducers (pure) ----
@@ -798,6 +859,8 @@ impl AppState {
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
+            self.queue.clear();
+            self.queue_task = None;
         }
     }
 
@@ -960,6 +1023,28 @@ impl AppState {
             .and_then(|d| d.version.as_deref())
             .and_then(version_triple)
             .is_some_and(|v| v >= min)
+    }
+
+    /// Capability checks use the live EngineInfo for this device (including a
+    /// localhost daemon that may not match the UI binary) and synced device
+    /// rows for peers. Missing declarations are conservatively unsupported.
+    pub fn device_supports(&self, device_id: &str, capability: &str) -> bool {
+        if let Some(engine) = self.engine.as_ref()
+            && engine.engine_info().device_id == device_id
+        {
+            return engine.engine_info().supports(capability);
+        }
+        self.devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .is_some_and(|device| device.supports(capability))
+    }
+
+    pub fn chat_host_supports(&self, chat_id: &str, capability: &str) -> bool {
+        self.chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| self.device_supports(&chat.device_id, capability))
     }
 
     /// First project on the composer's picked device (falling back through
@@ -1623,7 +1708,14 @@ impl AppState {
         self.connection = ConnectionStatus::Ready;
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
-            self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
+            self.transcript_task =
+                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            if handle
+                .engine_info()
+                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+            {
+                self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+            }
         }
         cx.notify();
     }
@@ -1727,6 +1819,8 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.transcript_task = None;
+        self.queue.clear();
+        self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.
@@ -1745,9 +1839,34 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
-            self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
+            self.transcript_task =
+                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            if handle
+                .engine_info()
+                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+            {
+                self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+            }
         }
         cx.notify();
+    }
+
+    /// Replace the selected chat's queue subscription without clearing its
+    /// current projection. This is used after an optimistic mutation fails:
+    /// the authoritative opening frame repairs the local list even though the
+    /// document itself did not change and therefore emitted no new frame.
+    pub(crate) fn refresh_selected_queue(&mut self, cx: &mut Context<Self>) {
+        self.queue_task = None;
+        let (Some(chat_id), Some(handle)) = (self.selected_chat.clone(), self.engine.clone())
+        else {
+            return;
+        };
+        if handle
+            .engine_info()
+            .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+        {
+            self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
+        }
     }
 
     /// Select a project; the caller (shell) decides which chat to land on.
@@ -2158,10 +2277,69 @@ fn spawn_transcript_watch(
     })
 }
 
+/// The selected chat's pending-message queue, straight off its doc. Whole-list
+/// frames (the queue is a handful of rows at most), retried like the transcript
+/// watch — a queue that silently stopped updating would show messages the host
+/// has already sent.
+fn spawn_queue_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    chat_id: String,
+) -> Task<()> {
+    #[derive(serde::Deserialize)]
+    struct QueueFrame {
+        #[serde(default)]
+        items: Vec<zeron_doc::QueuedMessage>,
+    }
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        'resubscribe: loop {
+            let params = serde_json::json!({ "chatId": chat_id });
+            let mut rx = match handle
+                .client()
+                .subscribe(methods::WATCH_QUEUE, params)
+                .await
+            {
+                Ok(rx) => rx,
+                Err(err) => {
+                    tracing::debug!(%chat_id, error = %err, "queue watch failed; retrying");
+                    if this.update(cx, |_, _| {}).is_err() {
+                        return;
+                    }
+                    cx.background_executor().timer(RETRY_DELAY).await;
+                    continue 'resubscribe;
+                }
+            };
+            while let Some(value) = rx.recv().await {
+                let frame: QueueFrame = match serde_json::from_value(value) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "dropping malformed queue frame");
+                        continue;
+                    }
+                };
+                let alive = this.update(cx, |state, cx| {
+                    // Guard against a stale pump racing a newer selection.
+                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                        state.queue = frame.items;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+            if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
-/// instead of the selected chat's transcript. The apply guard is PER KEY:
-/// the map still holding the key (unwatch/snapshot both remove it), never
-/// `selected_chat` — a subagent tab outlives chat switches.
+/// instead of the selected chat's transcript. The apply guard is per key so a
+/// subagent tab can outlive chat switches.
 fn spawn_subagent_watch(
     cx: &mut Context<AppState>,
     handle: EngineHandle,
@@ -2433,6 +2611,7 @@ mod tests {
                 engine_info: EngineInfo {
                     device_id: "owner-device".into(),
                     workspace_scope: WorkspaceScope::Local,
+                    capabilities: zeron_proto::capabilities::current(),
                 },
                 state: state_rx,
             }),
@@ -2874,6 +3053,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -3698,6 +3878,21 @@ mod tests {
     }
 
     #[test]
+    fn review_comment_flush_waits_for_every_file_surface() {
+        let mut state = AppState::new();
+
+        state.begin_review_comment_flush("chat-1", 1);
+        state.begin_review_comment_flush("chat-1", 2);
+        assert!(state.review_comment_flush_pending("chat-1"));
+
+        state.finish_review_comment_flush("chat-1", 1);
+        assert!(state.review_comment_flush_pending("chat-1"));
+
+        state.finish_review_comment_flush("chat-1", 2);
+        assert!(!state.review_comment_flush_pending("chat-1"));
+    }
+
+    #[test]
     fn version_triple_parses_and_gates_device_features() {
         assert_eq!(version_triple("0.2.12"), Some((0, 2, 12)));
         assert_eq!(version_triple("0.2.12-beta.1"), Some((0, 2, 12)));
@@ -3717,6 +3912,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: Some("0.2.12".into()),
+            capabilities: Vec::new(),
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
         assert!(!s.device_version_at_least("d1", (0, 2, 13)));
@@ -3725,6 +3921,34 @@ mod tests {
             !s.device_version_at_least("d1", (0, 2, 12)),
             "unstamped version conservatively fails the gate"
         );
+    }
+
+    #[test]
+    fn explicit_capabilities_distinguish_same_version_builds() {
+        let mut state = AppState::default();
+        state.devices = vec![
+            Device {
+                id: "personal".into(),
+                name: "personal".into(),
+                platform: "macos".into(),
+                last_seen_at: None,
+                created_at: None,
+                version: Some("0.2.31".into()),
+                capabilities: vec![zeron_proto::capabilities::MESSAGE_QUEUE_V1.into()],
+            },
+            Device {
+                id: "upstream".into(),
+                name: "upstream".into(),
+                platform: "macos".into(),
+                last_seen_at: None,
+                created_at: None,
+                version: Some("0.2.31".into()),
+                capabilities: Vec::new(),
+            },
+        ];
+
+        assert!(state.device_supports("personal", zeron_proto::capabilities::MESSAGE_QUEUE_V1));
+        assert!(!state.device_supports("upstream", zeron_proto::capabilities::MESSAGE_QUEUE_V1));
     }
 
     #[test]
@@ -3745,6 +3969,7 @@ mod tests {
             last_seen_at: Some(now),
             created_at: None,
             version: None,
+            capabilities: Vec::new(),
         }];
         s.connectivity.state = ConnectivityState::Connected;
         s.connectivity.chats = vec![ChatConnectivity {

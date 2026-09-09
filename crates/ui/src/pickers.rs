@@ -496,7 +496,9 @@ pub struct Pickers {
 
 impl Pickers {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| ComposerInput::new("Search…", cx));
+        let search = cx.new(|cx| {
+            ComposerInput::new("Search…", cx).with_accessibility_role(gpui::Role::SearchInput)
+        });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => {
                 // Typing in a filter resets the highlight to the top of the
@@ -517,7 +519,9 @@ impl Pickers {
                 }
                 cx.notify();
             }
-            ComposerInputEvent::Submitted => this.on_search_submit(cx),
+            ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                this.on_search_submit(cx)
+            }
             // Pasted images/files don't apply to a search box.
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
@@ -768,20 +772,6 @@ impl Pickers {
         }
     }
 
-    /// The fully-resolved config the composer threads into the Run request and
-    /// `Mutate createChat`: concrete model + reasoning whenever the catalog is
-    /// loaded (no "engine picks a default" passthrough).
-    /// The resolved harness's steering mode, from the loaded descriptor list.
-    /// `None` while the catalog is loading (callers should assume the common
-    /// StepBoundary case and show nothing).
-    pub fn resolved_steering_mode(&self, cx: &App) -> Option<zeron_proto::SteeringMode> {
-        let harness = self.effective_harness(cx)?;
-        self.harnesses
-            .ready()
-            .and_then(|list| list.iter().find(|d| d.id == harness))
-            .map(|d| d.steering_mode)
-    }
-
     /// The catalog is loaded and offers nothing runnable — the no-agents
     /// state (every enabled harness is missing its CLI, or nothing is
     /// enabled). False while the catalog is still loading or failed
@@ -792,6 +782,9 @@ impl Pickers {
             .is_some_and(|list| offered_harnesses(list).is_empty())
     }
 
+    /// The fully-resolved config the composer threads into the Run request and
+    /// `Mutate createChat`: concrete model + reasoning whenever the catalog is
+    /// loaded (no "engine picks a default" passthrough).
     pub fn resolved(&self, cx: &App) -> ResolvedRunConfig {
         ResolvedRunConfig {
             harness: self.effective_harness(cx),
