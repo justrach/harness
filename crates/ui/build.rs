@@ -12,7 +12,10 @@ fn main() {
         .expect("pkg-config is required to build the Linux browser helper");
     assert!(
         flags.status.success(),
-        "Install libwebkit2gtk-4.1-dev and libjson-glib-dev to build the Linux browser"
+        "The Linux browser requires WebKitGTK 4.1 and JSON-GLib development files \
+         discoverable by pkg-config (webkit2gtk-4.1 and json-glib-1.0). \
+         See docs/reference/linux-browser.md for distribution-specific installation commands.\n{}",
+        String::from_utf8_lossy(&flags.stderr)
     );
     let status = Command::new(env::var("CC").unwrap_or_else(|_| "cc".into()))
         .args([
