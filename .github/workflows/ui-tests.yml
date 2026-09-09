@@ -37,7 +37,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: GPUI system dependencies
         run: |
-          sudo apt-get update -qq
+          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
           sudo apt-get install -y -qq \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev \
@@ -131,7 +132,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Native browser and GPUI dependencies
         run: |
-          sudo apt-get update -qq
+          # Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
           sudo apt-get install -y -qq \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev \
