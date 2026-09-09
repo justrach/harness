@@ -8,7 +8,9 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::settings::{KeymapConfig, ShortcutId, combo_from_keystroke, display_combo};
+use crate::settings::{
+    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke, display_combo,
+};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -39,12 +41,15 @@ pub enum ShortcutsEvent {
     KeymapChanged(KeymapConfig),
     /// The Escape fallback changed — persist it locally.
     EscapeStopsActiveAgentChanged(bool),
+    /// The composer send behavior changed — persist + re-apply.
+    ComposerSendBehaviorChanged(ComposerSendBehavior),
 }
 
 pub struct ShortcutsPage {
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
     escape_stops_active_agent: bool,
+    composer_send_behavior: ComposerSendBehavior,
     recording: Option<ShortcutId>,
     /// A rejected record attempt ("{Combo} is already assigned to {label}.") —
     /// conflicts never persist; they're refused at record time, as in zeron.
@@ -62,11 +67,13 @@ impl ShortcutsPage {
         state: Entity<AppState>,
         keymap: KeymapConfig,
         escape_stops_active_agent: bool,
+        composer_send_behavior: ComposerSendBehavior,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             keymap,
             escape_stops_active_agent,
+            composer_send_behavior,
             recording: None,
             conflict_notice: None,
             focus: cx.focus_handle(),
@@ -83,6 +90,19 @@ impl ShortcutsPage {
         if self.escape_stops_active_agent != enabled {
             self.escape_stops_active_agent = enabled;
             cx.emit(ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled));
+            cx.notify();
+        }
+    }
+
+    fn set_composer_send_behavior(
+        &mut self,
+        behavior: ComposerSendBehavior,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composer_send_behavior != behavior {
+            self.composer_send_behavior = behavior;
+            self.conflict_notice = None;
+            cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
             cx.notify();
         }
     }
@@ -105,6 +125,15 @@ impl ShortcutsPage {
             }
             RecordOutcome::Ignored => {}
             RecordOutcome::Set(combo) => {
+                if send_combo_is_reserved(self.composer_send_behavior, &combo) {
+                    self.conflict_notice = Some(
+                        format!("{} is reserved for the composer.", display_combo(&combo)).into(),
+                    );
+                    self.recording = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 // A combo already bound elsewhere is REFUSED, naming the owner
                 // (zeron settings.shortcuts.tsx: "… is already assigned to …").
                 if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
@@ -245,16 +274,26 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
         .find(|&other| other != id && keymap.get(other) == combo)
 }
 
+pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
+    combo == "mod-enter"
+}
+
+pub fn modifier_send_label(is_macos: bool) -> &'static str {
+    if is_macos { "⌘ Enter" } else { "Ctrl Enter" }
+}
+
 /// The page's sections, in display order. [`group`] is a total match, so every
 /// [`ShortcutId::ALL`] entry lands in exactly one — a shortcut added later
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 3] = ["Panels", "Sessions", "Jump to session"];
+const GROUP_ORDER: [&str; 5] = ["Files", "Browser", "Panels", "Sessions", "Jump to session"];
 
 /// The section a shortcut's row renders under.
 fn group(id: ShortcutId) -> &'static str {
     match id {
+        ShortcutId::SaveFile => "Files",
+        ShortcutId::BrowserReload => "Browser",
         ShortcutId::ToggleSidebar | ShortcutId::ToggleChanges | ShortcutId::ToggleTerminal => {
             "Panels"
         }
@@ -270,8 +309,10 @@ fn group(id: ShortcutId) -> &'static str {
 /// `SHORTCUT_DEFINITIONS` descriptions, verbatim).
 fn description(id: ShortcutId) -> &'static str {
     match id {
+        ShortcutId::SaveFile => "Save the active workspace file.",
+        ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
-        ShortcutId::ToggleChanges => "Show or hide changes for the current session.",
+        ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
@@ -291,7 +332,11 @@ impl Render for ShortcutsPage {
         let theme = Theme::of(cx).clone();
         let recording = self.recording;
         let escape_stops_active_agent = self.escape_stops_active_agent;
-        let customized = self.keymap != KeymapConfig::default() || escape_stops_active_agent;
+        let send_behavior = self.composer_send_behavior;
+        let customized = self.keymap != KeymapConfig::default()
+            || escape_stops_active_agent
+            || send_behavior != ComposerSendBehavior::default();
+        let modifier_label = modifier_send_label(cfg!(target_os = "macos"));
 
         let escape_behavior_row = widgets::section_card(&theme).child(
             widgets::card_row(&theme, true)
@@ -325,6 +370,109 @@ impl Render for ShortcutsPage {
                 ),
         );
 
+        let send_behavior_control = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .when(send_behavior != ComposerSendBehavior::Enter, |el| {
+                el.child(
+                    div()
+                        .id("composer-send-reset")
+                        .size(px(26.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(crate::theme::ink(0.04)).text_color(theme.text))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_composer_send_behavior(ComposerSendBehavior::Enter, cx)
+                        }))
+                        .child(
+                            crate::icons::icon(crate::icons::RESTART)
+                                .size(px(13.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("composer-send-behavior")
+                    .flex()
+                    .flex_row()
+                    .rounded(px(9.0))
+                    .p(px(2.0))
+                    .bg(crate::theme::ink(0.04))
+                    .children(
+                        [
+                            (ComposerSendBehavior::Enter, "Enter"),
+                            (ComposerSendBehavior::ModEnter, modifier_label),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, (behavior, label))| {
+                            let selected = send_behavior == behavior;
+                            div()
+                                .id(("composer-send-option", ix))
+                                .min_w(px(72.0))
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .rounded(px(7.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .font_family(theme.font_mono.clone())
+                                .text_size(px(12.0))
+                                .text_color(if selected {
+                                    theme.text
+                                } else {
+                                    theme.text_muted
+                                })
+                                .when(selected, |el| {
+                                    el.bg(theme.bg)
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.8))
+                                })
+                                .when(!selected, |el| {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.text_color(theme.text))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_composer_send_behavior(behavior, cx)
+                                        }))
+                                })
+                                .child(SharedString::from(label))
+                        }),
+                    ),
+            );
+
+        let send_behavior_row = widgets::section_card(&theme)
+            .child(
+                widgets::card_row(&theme, true)
+                    .min_h(px(84.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Send messages with"))
+                            .child(
+                                div()
+                                    .mt(px(4.0))
+                                    .max_w(px(430.0))
+                                    .text_size(px(11.5))
+                                    .line_height(px(17.0))
+                                    .text_color(theme.text_muted.opacity(0.65))
+                                    .child(SharedString::from(
+                                        "Choose whether Enter sends immediately or starts a new paragraph. Cmd/Ctrl+Enter always submits; with an empty composer it advances the queue. Shift+Enter always inserts a line break.",
+                                    )),
+                            ),
+                    )
+                    .child(send_behavior_control),
+            );
         // One card per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
@@ -410,6 +558,10 @@ impl Render for ShortcutsPage {
                                                 this.conflict_notice = None;
                                                 this.commit(cx);
                                                 this.set_escape_stops_active_agent(false, cx);
+                                                this.set_composer_send_behavior(
+                                                    ComposerSendBehavior::Enter,
+                                                    cx,
+                                                );
                                             }),
                                         )
                                     })
@@ -421,9 +573,10 @@ impl Render for ShortcutsPage {
                                     .child(SharedString::from("Restore defaults"))
                             }),
                     )
+                    .child(send_behavior_row.mt(px(32.0)))
                     .child(
                         div()
-                            .mt(px(32.0))
+                            .mt(px(28.0))
                             .flex()
                             .flex_col()
                             .gap(px(28.0))
@@ -512,7 +665,7 @@ mod tests {
         // zeron parity: a combo bound elsewhere is refused at record time (the
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
-        let RecordOutcome::Set(combo) = record_key("b", false, false, false, true) else {
+        let RecordOutcome::Set(combo) = record_key("r", false, false, false, true) else {
             panic!("expected Set");
         };
         assert_eq!(
@@ -529,5 +682,27 @@ mod tests {
             conflict_owner(&keymap, ShortcutId::ToggleSidebar, "mod-shift-x"),
             None
         );
+    }
+
+    #[test]
+    fn modifier_send_labels_are_platform_specific() {
+        assert_eq!(modifier_send_label(true), "⌘ Enter");
+        assert_eq!(modifier_send_label(false), "Ctrl Enter");
+    }
+
+    #[test]
+    fn modifier_send_is_always_reserved_for_the_composer() {
+        assert!(send_combo_is_reserved(
+            ComposerSendBehavior::Enter,
+            "mod-enter"
+        ));
+        assert!(send_combo_is_reserved(
+            ComposerSendBehavior::ModEnter,
+            "mod-enter"
+        ));
+        assert!(!send_combo_is_reserved(
+            ComposerSendBehavior::ModEnter,
+            "mod-shift-enter"
+        ));
     }
 }

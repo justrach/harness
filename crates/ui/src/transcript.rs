@@ -65,6 +65,8 @@ pub const OVERDRAW_PX: f32 = 320.0;
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
+/// Bound locally-authored queue ids waiting to become transcript prompts.
+const MAX_PENDING_QUEUED_TURNS: usize = 256;
 /// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
 /// smooth enough to track text while avoiding a permanent animation-frame loop
 /// on low-end devices.
@@ -136,10 +138,10 @@ pub const USER_COLLAPSE_CHARS: usize = 400;
 /// Vertical separation before the plain expand/collapse link.
 const USER_TOGGLE_GAP: f32 = 8.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
-/// a FIXED-height strip (load-state flips never shift the virtualizer).
+/// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
+/// shifting the virtualizer.
 pub const ATT_THUMB_W: f32 = 112.0;
 pub const ATT_THUMB_H: f32 = 80.0;
-pub const ATT_STRIP_H: f32 = ATT_THUMB_H + 10.0;
 
 // ---------------------------------------------------------------------------
 // Stick-to-bottom spring (mugen §1e — same constants as its DEFAULT_SPRING,
@@ -2048,6 +2050,50 @@ impl OwnTurnAnchor {
     }
 }
 
+/// Locally-authored queue rows whose stable ids have not appeared in the
+/// transcript yet. Registration is deliberately inert: adding a queue row
+/// must leave the currently-visible turn and its runway untouched. Once a
+/// matching prompt materializes, the newest match becomes the own-turn anchor.
+#[derive(Default)]
+struct PendingQueuedTurns {
+    items: VecDeque<(String, SharedString)>,
+}
+
+impl PendingQueuedTurns {
+    fn register(&mut self, chat_id: String, message_id: String) {
+        self.items
+            .retain(|(chat, id)| chat != &chat_id || id.as_ref() != message_id);
+        self.items
+            .push_back((chat_id, SharedString::from(message_id)));
+        while self.items.len() > MAX_PENDING_QUEUED_TURNS {
+            self.items.pop_front();
+        }
+    }
+
+    /// Consume every candidate from this chat that is now present and return
+    /// the newest one. Multiple rows can land in one doc frame; the last send
+    /// owns the runway, matching consecutive immediate sends.
+    fn take_latest_materialized(&mut self, chat_id: &str, rows: &[Row]) -> Option<String> {
+        let mut latest = None;
+        self.items.retain(|(chat, message_id)| {
+            let materialized = chat == chat_id
+                && rows
+                    .iter()
+                    .any(|row| row.turn_start && row.entry_id == message_id.as_ref());
+            if materialized {
+                latest = Some(message_id.to_string());
+            }
+            !materialized
+        });
+        latest
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+}
+
 /// A stable per-chat viewport anchor. Row identity is preferred over its old
 /// index because async replay can insert or remove rows while a chat is away.
 #[derive(Clone, Debug)]
@@ -2333,6 +2379,7 @@ pub struct Transcript {
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
+    workspace_link: Option<render::LinkUi>,
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -2355,6 +2402,9 @@ pub struct Transcript {
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
+    /// Queue rows authored in this window. They become own-turn anchors only
+    /// after the host promotes their stable id into a transcript message.
+    pending_queued_turns: PendingQueuedTurns,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -2453,6 +2503,9 @@ pub enum TranscriptEvent {
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
 impl Transcript {
+    pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
+        self.workspace_link = Some(handler);
+    }
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::build(state, None, true, cx)
     }
@@ -2559,6 +2612,7 @@ impl Transcript {
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
+            workspace_link: None,
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             code_fences_generation: crate::settings::code_fences_generation(cx),
@@ -2567,6 +2621,7 @@ impl Transcript {
             last_scroll_distance: 0.0,
             pinned,
             own_turn: None,
+            pending_queued_turns: PendingQueuedTurns::default(),
             own_turn_kick: false,
             own_turn_scheduled: false,
             own_turn_last_tick: None,
@@ -3033,6 +3088,46 @@ impl Transcript {
         self.own_turn_kick = true;
         self.remeasure_last_row();
         cx.notify();
+    }
+
+    /// Remember a locally-authored queue row without touching the active
+    /// runway. If host promotion won the race with the QueueMessage reply, the
+    /// matching prompt is already present and can be anchored immediately.
+    pub fn on_own_queued_send(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let materialized = self.chat_id.as_deref() == Some(chat_id.as_str())
+            && self
+                .rows
+                .iter()
+                .any(|row| row.turn_start && row.entry_id == message_id.as_str());
+        if materialized {
+            self.on_own_send(chat_id, message_id, cx);
+        } else {
+            self.pending_queued_turns.register(chat_id, message_id);
+        }
+    }
+
+    /// Promote a queued row only after its real transcript bubble exists.
+    /// Materializations first observed while attaching to a chat are consumed
+    /// without taking viewport ownership: navigation must not create a hidden
+    /// auto-follow merely because queued work ran while the chat was away.
+    fn promote_materialized_queued_turn(&mut self, attached: bool, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let Some(message_id) = self
+            .pending_queued_turns
+            .take_latest_materialized(&chat_id, &self.rows)
+        else {
+            return;
+        };
+        if !attached {
+            self.on_own_send(chat_id, message_id, cx);
+        }
     }
 
     /// Convert a glued scroll offset (`None`/past-the-end — layout re-snaps
@@ -3730,6 +3825,7 @@ impl Transcript {
                 if self.restore_pending_viewport(replay) {
                     cx.notify();
                 }
+                self.promote_materialized_queued_turn(attached, cx);
                 return;
             }
             Some((old_range, count)) => {
@@ -3776,6 +3872,7 @@ impl Transcript {
         self.refresh_protected_attachments(cx);
         self.reconcile_own_turn_prompt();
         self.restore_pending_viewport(replay);
+        self.promote_materialized_queued_turn(attached, cx);
         if self.land_end_pending && !self.rows.is_empty() {
             // First content for an unpinned override tab: land at the end.
             // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
@@ -4428,15 +4525,17 @@ impl Transcript {
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
-            .h(px(ATT_STRIP_H))
+            .min_w_0()
+            .flex_none()
             .flex()
             .flex_row()
+            .flex_wrap()
             .justify_end()
             .items_start()
             .gap(px(8.0))
-            .overflow_hidden()
             .px(px(4.0))
-            .pt(px(4.0));
+            .pt(px(4.0))
+            .pb(px(6.0));
         for (aix, att) in atts.iter().enumerate() {
             let state = self.attachment_state(&device_ids, &att.path, cx);
             // The in-flight send's progress belongs ON the thumbnail
@@ -4835,6 +4934,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    link: self.workspace_link.clone(),
                     code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
@@ -4879,6 +4979,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
+                    link: self.workspace_link.clone(),
                     code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
@@ -7351,6 +7452,46 @@ mod tests {
             !turn.observe_prompt(false),
             "failed echo retires the activated runway"
         );
+    }
+
+    #[test]
+    fn queued_turn_waits_for_its_bubble_without_replacing_the_live_turn() {
+        let live_rows = vec![viewport_row("live", "live-prompt")];
+        let mut pending = PendingQueuedTurns::default();
+        pending.register("chat-a".into(), "queued-prompt".into());
+
+        assert_eq!(
+            pending.take_latest_materialized("chat-a", &live_rows),
+            None,
+            "queue-panel insertion alone must not claim a transcript anchor"
+        );
+        assert_eq!(pending.len(), 1, "the queued id remains armed");
+
+        let materialized = vec![
+            viewport_row("live", "live-prompt"),
+            viewport_row("queued", "queued-prompt"),
+        ];
+        assert_eq!(
+            pending.take_latest_materialized("chat-a", &materialized),
+            Some("queued-prompt".into()),
+            "the stable id promotes only when its real bubble appears"
+        );
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn newest_materialized_queue_turn_owns_a_batched_transcript_frame() {
+        let mut pending = PendingQueuedTurns::default();
+        pending.register("chat-a".into(), "queued-a".into());
+        pending.register("chat-b".into(), "other-chat".into());
+        pending.register("chat-a".into(), "queued-b".into());
+        let rows = vec![viewport_row("a", "queued-a"), viewport_row("b", "queued-b")];
+
+        assert_eq!(
+            pending.take_latest_materialized("chat-a", &rows),
+            Some("queued-b".into())
+        );
+        assert_eq!(pending.len(), 1, "another chat's candidate is preserved");
     }
 
     #[test]

@@ -192,6 +192,35 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
 }
 
+async fn init_workspace_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path.join("src")).expect("repo tree");
+    let run = |args: &'static [&'static str]| async move {
+        let output = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .await
+            .expect("git spawns");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(&["init", "-b", "main"]).await;
+    std::fs::write(
+        path.join("src/remote.rs"),
+        "pub const REMOTE: bool = true;\n",
+    )
+    .expect("remote source");
+    run(&["add", "."]).await;
+    run(&["commit", "-m", "initial"]).await;
+}
+
 struct StaticChangeRequestLookup {
     source: CheckoutSourceContext,
     summary: ChangeRequestSummary,
@@ -815,6 +844,155 @@ async fn terminal_stream_proxies_over_the_relay() {
     core_b.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_file_surface_proxies_over_the_relay() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let repo_b = dirs.path().join("repo-b");
+    init_workspace_repo(&repo_b).await;
+
+    let core_b = assemble(&dirs.path().join("b-files"), "device-b");
+    core_b
+        .workspace
+        .create_space(
+            "space-files",
+            "device-b",
+            &repo_b.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space on B");
+    core_b
+        .workspace
+        .create_chat("chat-files", Some("space-files"), None, None, None)
+        .expect("chat on B");
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let core_a = assemble(&dirs.path().join("a-files"), "device-a");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let client = zeron_rpc::memory_client(core_a.rpc_service());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let listing = loop {
+        match client
+            .call(
+                methods::LIST_WORKSPACE_DIRECTORY,
+                serde_json::json!({
+                    "chatId": "chat-files",
+                    "targetDeviceId": "device-b",
+                }),
+            )
+            .await
+        {
+            Ok(value) => break value,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    assert!(
+        listing["entries"]
+            .as_array()
+            .is_some_and(|entries| { entries.iter().any(|entry| entry["path"] == "src") })
+    );
+
+    let matches = client
+        .call(
+            methods::SEARCH_WORKSPACE_FILES,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "query": "remote",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote search");
+    assert_eq!(matches[0]["path"], "src/remote.rs");
+
+    let read = client
+        .call(
+            methods::READ_WORKSPACE_FILE,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "path": "src/remote.rs",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote read");
+    assert!(
+        read["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("REMOTE"))
+    );
+    let hash = read["contentHash"].as_str().expect("content hash");
+
+    let written = client
+        .call(
+            methods::WRITE_WORKSPACE_FILE,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "path": "src/remote.rs",
+                "text": "pub const REMOTE: bool = false;\n",
+                "expectedCheckoutId": read["checkoutId"],
+                "expectedContentHash": hash,
+                "encoding": "utf8",
+                "lineEnding": "lf",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote write");
+    assert_eq!(written["status"], "written");
+    assert!(
+        std::fs::read_to_string(repo_b.join("src/remote.rs"))
+            .unwrap()
+            .contains("false")
+    );
+
+    let mut stream = client
+        .subscribe(
+            methods::WATCH_WORKSPACE_FILES,
+            serde_json::json!({
+                "chatId": "chat-files",
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote watch");
+    let baseline = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("baseline timeout")
+        .expect("watch alive");
+    assert_eq!(baseline["resyncRequired"], true);
+    std::fs::write(repo_b.join("remote-created.txt"), "created\n").expect("external write on B");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let item = tokio::time::timeout_at(deadline, stream.recv())
+            .await
+            .expect("remote watch timeout")
+            .expect("remote watch alive");
+        if item["changes"].as_array().is_some_and(|changes| {
+            changes
+                .iter()
+                .any(|change| change["path"] == "remote-created.txt")
+        }) {
+            break;
+        }
+    }
+    drop(stream);
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
 #[tokio::test]
 async fn remote_target_without_links_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
@@ -831,5 +1009,182 @@ async fn remote_target_without_links_fails_clearly() {
         err.to_string().contains("remote routing unavailable"),
         "got: {err}"
     );
+    let err = client
+        .call(
+            methods::LIST_WORKSPACE_DIRECTORY,
+            serde_json::json!({
+                "chatId": "missing-local-chat",
+                "targetDeviceId": "device-elsewhere",
+            }),
+        )
+        .await
+        .expect_err("workspace call must not fall back locally");
+    assert!(
+        err.to_string().contains("remote routing unavailable"),
+        "got: {err}"
+    );
     core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+
+    // Seed B's session doc while the workspace temporarily names A as host.
+    // That keeps B's automatic drain from consuming the fixture before the
+    // remote client has subscribed to it.
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    core_b
+        .workspace
+        .create_chat("chat-queue-remote", None, Some("device-a"), None, None)
+        .expect("create remote queue chat");
+    core_b
+        .workspace
+        .rename_chat("chat-queue-remote", "Pre-titled")
+        .expect("avoid auto-title run");
+    let first_id = core_b
+        .doc_host
+        .queue_message_with_behavior(
+            "chat-queue-remote",
+            "first from the shared queue",
+            Vec::new(),
+            true,
+        )
+        .expect("seed held queue row");
+    let _host = core_b.start_host_relay(&relay_url);
+
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let mut link_config =
+        LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    link_config.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(link_config));
+    let remote_client = zeron_rpc::memory_client(core_a.rpc_service());
+    let local_client = zeron_rpc::memory_client(core_b.rpc_service());
+
+    // The opening stream frame is the authoritative whole-list snapshot a
+    // remote Desktop/iOS client uses to repair or initialize its queue.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut queue_stream = loop {
+        match remote_client
+            .subscribe_checked(
+                methods::WATCH_QUEUE,
+                serde_json::json!({
+                    "chatId": "chat-queue-remote",
+                    "targetDeviceId": "device-b",
+                }),
+            )
+            .await
+        {
+            Ok(stream) => break stream,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay never came up: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    let initial = tokio::time::timeout(Duration::from_secs(5), queue_stream.recv())
+        .await
+        .expect("remote queue frame before timeout")
+        .expect("remote queue stream alive");
+    assert_eq!(initial["items"][0]["id"], first_id);
+    assert_eq!(initial["items"][0]["holdForTurnEnd"], true);
+
+    // Re-home the chat to B without touching the session doc, then execute the
+    // row explicitly through A. Only B may take it or run the harness.
+    core_b
+        .workspace
+        .set_chat_host("chat-queue-remote", "device-b")
+        .expect("re-home chat to B");
+    let sent = remote_client
+        .call(
+            methods::SEND_QUEUED_MESSAGE_NOW,
+            serde_json::json!({
+                "chatId": "chat-queue-remote",
+                "id": first_id,
+                "targetDeviceId": "device-b",
+            }),
+        )
+        .await
+        .expect("remote send-now reaches B");
+    assert_eq!(sent["sent"], true);
+    assert!(
+        core_b
+            .doc_host
+            .open("chat-queue-remote")
+            .expect("B chat")
+            .doc()
+            .read_queue()
+            .expect("B queue")
+            .is_empty()
+    );
+    assert!(
+        core_a
+            .doc_host
+            .open("chat-queue-remote")
+            .expect("A chat")
+            .doc()
+            .read_entries()
+            .expect("A transcript")
+            .is_empty(),
+        "the forwarding engine must not execute the queued prompt"
+    );
+
+    // Two clients racing the same synchronized row still produce exactly one
+    // consumer. The loser gets `sent: false` and can reconcile its projection.
+    core_b
+        .workspace
+        .set_chat_host("chat-queue-remote", "device-a")
+        .expect("pause B drain");
+    let second_id = core_b
+        .doc_host
+        .queue_message_with_behavior("chat-queue-remote", "consume me once", Vec::new(), true)
+        .expect("seed contested row");
+    // Let the doc-change drain observe the temporary non-host assignment
+    // before flipping the workspace row back. Otherwise the scheduler can
+    // process the queue commit only after the flip and legitimately drain it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        core_b
+            .doc_host
+            .open("chat-queue-remote")
+            .expect("B chat")
+            .doc()
+            .read_queue()
+            .expect("contested queue")
+            .len(),
+        1
+    );
+    core_b
+        .workspace
+        .set_chat_host("chat-queue-remote", "device-b")
+        .expect("restore B host");
+    let remote_params = serde_json::json!({
+        "chatId": "chat-queue-remote",
+        "id": second_id,
+        "targetDeviceId": "device-b",
+    });
+    let local_params = serde_json::json!({
+        "chatId": "chat-queue-remote",
+        "id": second_id,
+    });
+    let (remote_result, local_result) = tokio::join!(
+        remote_client.call(methods::SEND_QUEUED_MESSAGE_NOW, remote_params),
+        local_client.call(methods::SEND_QUEUED_MESSAGE_NOW, local_params),
+    );
+    let acknowledgements = [
+        remote_result.expect("remote contender")["sent"] == true,
+        local_result.expect("local contender")["sent"] == true,
+    ];
+    assert_eq!(
+        acknowledgements.into_iter().filter(|sent| *sent).count(),
+        1,
+        "the host must atomically take a queue row once"
+    );
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
 }
