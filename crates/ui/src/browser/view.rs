@@ -101,7 +101,186 @@ impl BrowserSurface {
         cx.stop_propagation();
     }
 
+    fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let snapshot = &self.previews;
+        let available = snapshot.error.is_none();
+        let subtitle = if snapshot.remote {
+            "Running on your device"
+        } else {
+            "Running locally"
+        };
+        let mut content = div()
+            .w_full()
+            .max_w(px(280.0))
+            .flex_shrink_0()
+            .my_auto()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .mb(px(4.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(subtitle),
+            );
+        for service in &snapshot.services {
+            let url = service.url(snapshot.proxy_port);
+            let row_url = url.clone();
+            let border_strong = theme.border_strong;
+            let label = if snapshot.remote {
+                format!("{} · localhost:{}", service.device_name, service.port)
+            } else {
+                format!("localhost:{}", service.port)
+            };
+            content = content.child(
+                div()
+                    .id(gpui::SharedString::from(format!("preview-row-{}", service.id)))
+                    .w_full()
+                    .h(px(56.0))
+                    .px(px(14.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::ink(0.02))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .when(available, |el| {
+                        el.cursor_pointer()
+                            .hover(move |style| {
+                                style
+                                    .bg(crate::theme::ink(0.05))
+                                    .border_color(border_strong)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.navigate(&row_url, window, cx)
+                            }))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(service.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .truncate()
+                                    .child(label),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .map(|el| {
+                                #[cfg(feature = "browser-fixture")]
+                                if snapshot
+                                    .services
+                                    .first()
+                                    .is_some_and(|first| first.id == service.id)
+                                {
+                                    let position = self.fixture_preview_open.clone();
+                                    return el.on_children_prepainted(move |bounds, _, _| {
+                                        position.set(bounds.first().map(|bounds| bounds.center()));
+                                    });
+                                }
+                                el
+                            })
+                            .id(gpui::SharedString::from(format!(
+                                "open-preview-{}",
+                                service.id
+                            )))
+                            .h(px(28.0))
+                            .px(px(6.0))
+                            .flex_shrink_0()
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Open {} preview", service.name))
+                            .when(available, |el| {
+                                el.cursor_pointer()
+                                    .hover(|style| style.bg(crate::theme::ink(0.05)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.navigate(&url, window, cx)
+                                    }))
+                            })
+                            .when(!available, |el| el.opacity(0.4))
+                            .child("Open"),
+                    ),
+            );
+        }
+        if snapshot.services.is_empty() {
+            let message = if self.previews_loading {
+                "Looking for dev servers…"
+            } else if snapshot.remote {
+                "Start a dev server in this project on your other device. Its preview will appear here when that device is online."
+            } else {
+                "Start a dev server in this project. It will appear here automatically, ready to open."
+            };
+            content = content.child(
+                div()
+                    .p(px(16.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .line_height(px(19.0))
+                    .text_color(theme.text_muted)
+                    .child(message),
+            );
+        }
+        if let Some(error) = &snapshot.error {
+            content = content.child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(17.0))
+                    .text_color(theme.text_muted)
+                    .child(error.clone()),
+            );
+        }
+        content = content.child(
+            div()
+                .id("preview-enter-address")
+                .mt(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label("Enter a website address")
+                .on_click(cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
+                .child("Or enter a website address"),
+        );
+        div()
+            .id("browser-previews")
+            .size_full()
+            .overflow_y_scroll()
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(content)
+            .into_any_element()
+    }
+
     fn empty_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if self.page.url.is_none() && self.previews_task.is_some() {
+            return self.preview_body(theme, cx);
+        }
         let external = !cfg!(any(target_os = "macos", target_os = "linux"));
         let has_error = self.page.error.is_some();
         let title = if has_error {
@@ -447,7 +626,12 @@ impl Render for BrowserSurface {
                 .url
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok())
-                .is_some_and(|u| super::model::loopback(&u));
+                .is_some_and(|u| {
+                    super::model::loopback(&u)
+                        && !(u.port() == Some(zeron_proto::PREVIEW_PROXY_PORT)
+                            && u.host_str()
+                                .is_some_and(|host| host.ends_with(".localhost")))
+                });
         div().id("browser-surface").size_full().flex().flex_col().track_focus(&self.focus)
             .key_context("Browser").on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
@@ -466,7 +650,7 @@ impl Render for BrowserSurface {
             .when_some(self.validation.clone(), |el, message| el.child(div().px(px(12.0)).py(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.danger).child(message)))
             .when(remote_loopback, |el| el.child(div().px(px(12.0)).py(px(8.0)).border_b_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)
-                .child("Localhost opens on this device. For your remote session, use a reachable server address.")))
+                .child("Localhost opens on this device. Open a detected preview from a new tab to reach your other device.")))
             .child(body)
             .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
