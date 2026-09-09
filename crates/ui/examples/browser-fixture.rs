@@ -1,5 +1,8 @@
-//! Real shell + native WebKit smoke test and screenshot fixture. Synthetic
-//! chat data, isolated temp storage, loopback-only website, no engine services.
+#[cfg(target_os = "linux")]
+#[path = "browser-fixture/linux.rs"]
+mod linux;
+// Real shell + native WebKit smoke test and screenshot fixture. Synthetic
+// chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
 use std::{
     io::{Read, Write},
@@ -32,6 +35,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     };
     #[cfg(not(target_os = "macos"))]
     let status = {
+        let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
             .args([
                 "search",
@@ -40,11 +44,15 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
                 &std::process::id().to_string(),
             ])
             .output()?;
-        let id = String::from_utf8(windows.stdout)?
-            .lines()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("fixture window not visible"))?
-            .to_owned();
+        let id = capture_window
+            .or_else(|| {
+                String::from_utf8(windows.stdout)
+                    .ok()?
+                    .lines()
+                    .next()
+                    .map(str::to_owned)
+            })
+            .ok_or_else(|| anyhow::anyhow!("fixture window not visible"))?;
         std::process::Command::new("import")
             .args(["-window", &id])
             .arg(&path)
@@ -54,7 +62,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_blur(
     directory: &std::path::Path,
     region: (f64, f64, f64, f64),
@@ -110,7 +118,9 @@ fn validate_blur(
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("warn").init();
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+        .init();
     let output = PathBuf::from(
         std::env::args()
             .nth(1)
@@ -196,7 +206,7 @@ fn main() -> anyhow::Result<()> {
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
                 capture(&output, "browser-empty-dark")?;
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
                     let deadline = std::time::Instant::now() + Duration::from_secs(25);
@@ -226,7 +236,7 @@ fn main() -> anyhow::Result<()> {
                 let (second_id, second) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 250).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "background page stayed visible");
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     first.read_with(cx, |b, _| b.fixture_eval("document.cookie = 'browserfixture=shared; path=/'"));
                     window.update(cx, |_, w, cx| second.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
@@ -245,6 +255,8 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 250).await;
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(second_id, w, cx))?;
                 drop(second);
+                #[cfg(target_os = "linux")]
+                linux::exercise(window, first.clone(), &output, cx).await?;
                 #[cfg(target_os = "macos")]
                 let mut recording;
                 #[cfg(target_os = "macos")]
@@ -441,7 +453,7 @@ fn main() -> anyhow::Result<()> {
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
                 capture(&output, "browser-light")?;
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_native_visible()), "page not restored after overlays/takeover");
                     // Use an ordinary closed localhost port. Port 1 is on
@@ -464,7 +476,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");
-                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
+                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
