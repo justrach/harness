@@ -182,6 +182,8 @@ pub struct FilesSurface {
     pending_request_context: Option<FilesRequestContext>,
     tree: FileTreeModel,
     tree_list: ListState,
+    tree_list_rows: Vec<model::VisibleTreeRow>,
+    tree_list_generation: u64,
     tree_focus: FocusHandle,
     search: Entity<ComposerInput>,
     search_state: FileSearchState,
@@ -204,7 +206,7 @@ impl Render for FilesSurface {
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
-        } else if let Some(error) = self.error.clone() {
+        } else if let Some(error) = self.error.clone().filter(|_| !self.tree_has_content()) {
             div()
                 .flex_1()
                 .flex()
@@ -239,10 +241,12 @@ impl Render for FilesSurface {
                         .on_click(cx.listener(|this, _, _, cx| this.retry_root(cx))),
                 )
                 .into_any_element()
-        } else if matches!(
-            phase.as_ref(),
-            Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
-        ) {
+        } else if !self.tree_has_content()
+            && matches!(
+                phase.as_ref(),
+                Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
+            )
+        {
             div().flex_1().into_any_element()
         } else {
             self.render_tree(cx)
@@ -529,6 +533,8 @@ impl FilesSurface {
             pending_request_context: None,
             tree: FileTreeModel::with_include_ignored(show_all_files),
             tree_list: ListState::new(0, ListAlignment::Top, px(560.0)),
+            tree_list_rows: Vec::new(),
+            tree_list_generation: 0,
             tree_focus: cx.focus_handle(),
             search,
             search_state: FileSearchState::default(),
@@ -730,12 +736,15 @@ impl FilesSurface {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.loads.clear();
         self.error = None;
-        self.tree.reset();
-        self.sync_tree_list();
         self.started = true;
-        self.load_directory(String::new(), None, cx);
+        self.tree.invalidate_all_directories();
+        let directories = std::iter::once(String::new())
+            .chain(self.tree.expanded_directories())
+            .collect::<Vec<_>>();
+        for directory in directories {
+            self.load_directory(directory, None, cx);
+        }
     }
 
     pub fn tab_title(&self) -> SharedString {
@@ -796,6 +805,14 @@ impl FilesSurface {
             return;
         };
         let generation = self.tree.generation();
+        let cached_paths = if cursor.is_none() {
+            self.tree
+                .node(&directory)
+                .map(|node| node.children.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if !self.tree.begin_load(&directory, cursor.clone(), generation) {
             return;
         }
@@ -820,17 +837,20 @@ impl FilesSurface {
         };
         let client = WorkspaceFilesClient::new(engine, request_context);
         let task = cx.spawn(async move |this, cx| {
-            let mut result = client.list_directory(request.clone()).await;
+            let mut result = client
+                .list_directory_snapshot(request.clone(), &cached_paths)
+                .await;
             if result.as_ref().is_err_and(|error| error.retryable()) {
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;
-                result = client.list_directory(request).await;
+                result = client.list_directory_snapshot(request, &cached_paths).await;
             }
             let _ = this.update(cx, |surface, cx| {
                 if surface.tree.generation() != generation {
                     return;
                 }
+                let reload = surface.tree.node(&directory).is_some_and(|node| node.stale);
                 match result {
                     Ok(page) => {
                         surface.error = None;
@@ -847,6 +867,9 @@ impl FilesSurface {
                     }
                 }
                 surface.sync_tree_list();
+                if reload {
+                    surface.load_directory(directory, None, cx);
+                }
                 cx.notify();
             });
         });
@@ -914,9 +937,25 @@ impl FilesSurface {
         self.started = false;
     }
 
-    fn sync_tree_list(&self) {
-        self.tree_list
-            .reset_with_uniform_height(self.tree.visible_rows().len(), px(tree::TREE_ROW_HEIGHT));
+    fn tree_has_content(&self) -> bool {
+        self.tree.node("").is_some_and(|node| node.has_loaded)
+    }
+
+    fn sync_tree_list(&mut self) {
+        if self.tree_list_generation != self.tree.generation() {
+            self.tree_list.reset_with_uniform_height(
+                self.tree.visible_rows().len(),
+                px(tree::TREE_ROW_HEIGHT),
+            );
+            self.tree_list_generation = self.tree.generation();
+        } else {
+            tree::sync_list_rows(
+                &self.tree_list,
+                &self.tree_list_rows,
+                self.tree.visible_rows(),
+            );
+        }
+        self.tree_list_rows = self.tree.visible_rows().to_vec();
     }
 
     fn render_header(&mut self, theme: &crate::theme::Theme, cx: &mut Context<Self>) -> gpui::Div {

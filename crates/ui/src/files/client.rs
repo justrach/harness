@@ -124,6 +124,44 @@ impl WorkspaceFilesClient {
         self.call(methods::LIST_WORKSPACE_DIRECTORY, &request).await
     }
 
+    /// Refresh through the cached children before publishing the new listing.
+    /// Usually this reads only the pages already visited. If a cached child is
+    /// missing, reach the end before treating it as deleted.
+    pub(super) async fn list_directory_snapshot(
+        &self,
+        mut request: ListWorkspaceDirectoryRequest,
+        cached_paths: &[String],
+    ) -> Result<WorkspaceDirectoryPage, FilesClientError> {
+        let mut page = self.list_directory(request.clone()).await?;
+        if !cached_paths.is_empty() {
+            let mut remaining = cached_paths
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            for entry in &page.entries {
+                remaining.remove(entry.path.as_str());
+            }
+            let mut cursors = std::collections::HashSet::new();
+            while !remaining.is_empty() {
+                let Some(cursor) = page.next_cursor.take() else {
+                    break;
+                };
+                if !cursors.insert(cursor.clone()) {
+                    return Err(FilesClientError::Decode("Repeated directory cursor".into()));
+                }
+                request.cursor = Some(cursor);
+                let next = self.list_directory(request.clone()).await?;
+                for entry in &next.entries {
+                    remaining.remove(entry.path.as_str());
+                }
+                page.entries.extend(next.entries);
+                page.next_cursor = next.next_cursor;
+                page.truncated = next.truncated;
+            }
+        }
+        Ok(page)
+    }
+
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,
@@ -201,12 +239,16 @@ mod tests {
         responses: HashMap<String, Value>,
         calls: Mutex<Vec<(String, Value)>>,
         watch_values: Vec<Value>,
+        scripted_responses: Mutex<std::collections::VecDeque<Result<Value, RpcError>>>,
     }
 
     #[async_trait]
     impl WorkspaceFilesTransport for DeterministicTransport {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             self.calls.lock().unwrap().push((method.into(), params));
+            if let Some(response) = self.scripted_responses.lock().unwrap().pop_front() {
+                return response;
+            }
             Ok(self.responses.get(method).cloned().unwrap())
         }
 
@@ -229,6 +271,149 @@ mod tests {
             chat_id: Some("chat-1".into()),
             space_id: None,
             checkout_path: None,
+        }
+    }
+
+    fn directory_page(name: &str, next: Option<&str>) -> Value {
+        serde_json::json!({
+            "directory": "", "entries": [{
+                "path": name, "name": name, "kind": "file", "size": 1,
+                "modifiedAt": null, "ignored": false, "readOnly": false
+            }], "nextCursor": next, "truncated": next.is_some()
+        })
+    }
+
+    #[tokio::test]
+    async fn cached_directory_refresh_collects_pages_but_initial_load_stays_lazy() {
+        for refresh in [false, true] {
+            let transport = Arc::new(DeterministicTransport {
+                scripted_responses: Mutex::new(
+                    [
+                        Ok(directory_page("a", Some("next"))),
+                        Ok(directory_page("z", None)),
+                    ]
+                    .into(),
+                ),
+                ..Default::default()
+            });
+            let client = WorkspaceFilesClient::with_transport(
+                transport.clone(),
+                FilesRequestContext {
+                    target: target(),
+                    target_device_id: Some("remote".into()),
+                    cwd: "/workspace".into(),
+                    checkout_id: None,
+                },
+            );
+            let page = client
+                .list_directory_snapshot(
+                    ListWorkspaceDirectoryRequest {
+                        target: target(),
+                        directory: "".into(),
+                        include_ignored: true,
+                        cursor: None,
+                    },
+                    &if refresh {
+                        vec!["a".into(), "z".into()]
+                    } else {
+                        vec![]
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.entries.len(), if refresh { 2 } else { 1 });
+            assert_eq!(page.next_cursor.is_none(), refresh);
+            let calls = transport.calls.lock().unwrap();
+            assert_eq!(calls.len(), if refresh { 2 } else { 1 });
+            if refresh {
+                assert_eq!(calls[1].1["cursor"], "next");
+                assert_eq!(calls[1].1["targetDeviceId"], "remote");
+                assert_eq!(calls[1].1["includeIgnored"], true);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_expand_unvisited_pages_unless_a_cached_child_is_missing() {
+        for missing in [false, true] {
+            let transport = Arc::new(DeterministicTransport {
+                scripted_responses: Mutex::new(
+                    [
+                        Ok(directory_page("a", Some("next"))),
+                        Ok(directory_page("z", None)),
+                    ]
+                    .into(),
+                ),
+                ..Default::default()
+            });
+            let client = WorkspaceFilesClient::with_transport(
+                transport.clone(),
+                FilesRequestContext {
+                    target: target(),
+                    target_device_id: None,
+                    cwd: "/workspace".into(),
+                    checkout_id: None,
+                },
+            );
+            let page = client
+                .list_directory_snapshot(
+                    ListWorkspaceDirectoryRequest {
+                        target: target(),
+                        directory: "".into(),
+                        include_ignored: false,
+                        cursor: None,
+                    },
+                    &[if missing {
+                        "deleted".into()
+                    } else {
+                        "a".into()
+                    }],
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.next_cursor.is_none(), missing);
+            assert_eq!(
+                transport.calls.lock().unwrap().len(),
+                if missing { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_or_repeated_later_page_does_not_publish_a_partial_refresh() {
+        for second in [
+            Err(RpcError::Transport("offline".into())),
+            Ok(directory_page("z", Some("next"))),
+        ] {
+            let transport = Arc::new(DeterministicTransport {
+                scripted_responses: Mutex::new(
+                    [Ok(directory_page("a", Some("next"))), second].into(),
+                ),
+                ..Default::default()
+            });
+            let client = WorkspaceFilesClient::with_transport(
+                transport,
+                FilesRequestContext {
+                    target: target(),
+                    target_device_id: None,
+                    cwd: "/workspace".into(),
+                    checkout_id: None,
+                },
+            );
+            assert!(
+                client
+                    .list_directory_snapshot(
+                        ListWorkspaceDirectoryRequest {
+                            target: target(),
+                            directory: "".into(),
+                            include_ignored: false,
+                            cursor: None,
+                        },
+                        &["missing".into()]
+                    )
+                    .await
+                    .is_err()
+            );
         }
     }
 
