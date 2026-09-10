@@ -6,7 +6,7 @@ use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send,
+    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode,
@@ -25,23 +25,112 @@ use std::{
 };
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
 
+#[derive(Default)]
+struct BrowserStore {
+    store: Option<Retained<objc2_web_kit::WKWebsiteDataStore>>,
+    preview_hosts: std::collections::BTreeSet<String>,
+}
 #[derive(Clone, Default)]
-pub(super) struct BrowserData(Rc<RefCell<Option<Retained<objc2_web_kit::WKWebsiteDataStore>>>>);
+pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
 impl BrowserData {
     fn configuration(
         &self,
         mtm: MainThreadMarker,
     ) -> Retained<objc2_web_kit::WKWebViewConfiguration> {
         let mut data = self.0.borrow_mut();
-        let store = data.get_or_insert_with(|| unsafe {
-            objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm)
-        });
+        if data.store.is_none() {
+            data.store =
+                Some(unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) });
+            if let Err(error) =
+                configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
+            {
+                tracing::warn!(%error, "preview hostname proxy unavailable");
+            }
+        }
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
         unsafe {
-            configuration.setWebsiteDataStore(store);
+            configuration.setWebsiteDataStore(data.store.as_ref().unwrap());
         }
         configuration
     }
+    pub(super) fn register_preview(&self, address: &str) {
+        let Ok(url) = url::Url::parse(address) else {
+            return;
+        };
+        let Some(host) = url.host_str() else {
+            return;
+        };
+        if url.scheme() != "http"
+            || url.port() != Some(zeron_proto::PREVIEW_PROXY_PORT)
+            || !host.ends_with(".localhost")
+        {
+            return;
+        }
+        let mut data = self.0.borrow_mut();
+        if !data.preview_hosts.insert(host.into()) {
+            return;
+        }
+        if let Some(store) = &data.store {
+            if let Err(error) = configure_preview_proxy(store, &data.preview_hosts) {
+                tracing::warn!(%error, "preview hostname proxy unavailable");
+            }
+        }
+    }
+}
+
+/// Network.framework objects are Objective-C OS objects. Resolve the newer API
+/// dynamically so older systems can still open ordinary browser tabs. Match
+/// only discovered/opened preview hostnames; other websites retain normal routing.
+fn configure_preview_proxy(
+    store: &objc2_web_kit::WKWebsiteDataStore,
+    hosts: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    use objc2_foundation::{NSArray, NSObject};
+    use std::ffi::{CStr, CString, c_char};
+    unsafe {
+        let supported: bool = msg_send![store, respondsToSelector: sel!(setProxyConfigurations:)];
+        if !supported {
+            return Err("Automatic preview hostnames require macOS 14 or later".into());
+        }
+        static NETWORK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let handle = *NETWORK.get_or_init(|| {
+            libc::dlopen(
+                c"/System/Library/Frameworks/Network.framework/Network".as_ptr(),
+                libc::RTLD_LAZY,
+            ) as usize
+        });
+        let symbol = |name: &CStr| -> Result<*mut std::ffi::c_void, String> {
+            let value = libc::dlsym(handle as *mut _, name.as_ptr());
+            if handle == 0 || value.is_null() {
+                Err("Preview proxy API unavailable".into())
+            } else {
+                Ok(value)
+            }
+        };
+        let endpoint: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut NSObject =
+            std::mem::transmute(symbol(c"nw_endpoint_create_host")?);
+        let proxy: unsafe extern "C" fn(*mut NSObject, *mut NSObject) -> *mut NSObject =
+            std::mem::transmute(symbol(c"nw_proxy_config_create_http_connect")?);
+        let match_domain: unsafe extern "C" fn(*mut NSObject, *const c_char) =
+            std::mem::transmute(symbol(c"nw_proxy_config_add_match_domain")?);
+        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), c"7331".as_ptr()))
+            .ok_or("Could not create preview endpoint")?;
+        let config = Retained::from_raw(proxy(
+            Retained::as_ptr(&endpoint) as *mut _,
+            std::ptr::null_mut(),
+        ))
+        .ok_or("Could not create preview proxy")?;
+        for host in hosts {
+            let host = CString::new(host.as_str()).map_err(|_| "Invalid preview hostname")?;
+            match_domain(Retained::as_ptr(&config) as *mut _, host.as_ptr());
+        }
+        let proxies = NSArray::arrayWithObject(&*config);
+        let _: () = msg_send![store, setProxyConfigurations: &*proxies];
+    }
+    Ok(())
 }
 
 type Sender = tokio::sync::mpsc::Sender<NativeEvent>;
@@ -111,11 +200,17 @@ define_class!(
         }
         #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
         fn provisional_error(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
-            if error.code() != -999 { self.fail("Check the address and make sure your server is running, then try again."); }
+            if error.code() != -999 {
+                tracing::warn!(domain = %error.domain(), code = error.code(), "browser provisional navigation failed");
+                self.fail("Check the address and make sure your server is running, then try again.");
+            }
         }
         #[unsafe(method(webView:didFailNavigation:withError:))]
         fn navigation_error(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
-            if error.code() != -999 { self.fail("The connection was interrupted. Try loading this page again."); }
+            if error.code() != -999 {
+                tracing::warn!(domain = %error.domain(), code = error.code(), "browser navigation failed");
+                self.fail("The connection was interrupted. Try loading this page again.");
+            }
         }
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, _view: &WKWebView) {
@@ -150,6 +245,7 @@ impl Observer {
 struct ClipState {
     dragging: Cell<bool>,
     region: Cell<objc2_foundation::NSRect>,
+    resize_inset: Cell<f64>,
 }
 
 // Clips native content to GPUI's current paint mask. During app drags the
@@ -165,7 +261,7 @@ define_class!(
         fn hit_test(&self, point: objc2_foundation::NSPoint) -> *mut NSView {
             let region = self.ivars().region.get();
             if self.ivars().dragging.get()
-                || point.x < region.origin.x || point.x >= region.origin.x + region.size.width
+                || point.x < region.origin.x + self.ivars().resize_inset.get() || point.x >= region.origin.x + region.size.width
                 || point.y < region.origin.y || point.y >= region.origin.y + region.size.height
             { std::ptr::null_mut() }
             else { unsafe { msg_send![super(self), hitTest: point] } }
@@ -177,6 +273,7 @@ pub(super) struct NativePage(Rc<RefCell<Host>>);
 
 pub(super) struct Host {
     web: WebView,
+    data: BrowserData,
     view: Retained<WKWebView>,
     observer: Retained<Observer>,
     clip: Retained<BrowserClipView>,
@@ -220,6 +317,7 @@ impl NativePage {
             let object = mtm.alloc().set_ivars(ClipState {
                 dragging: Cell::new(false),
                 region: Cell::new(objc2_foundation::NSRect::ZERO),
+                resize_inset: Cell::new(0.0),
             });
             msg_send![super(object), initWithFrame: objc2_foundation::NSRect::ZERO]
         };
@@ -316,6 +414,7 @@ impl NativePage {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &callback)
         };
         Ok(Self(Rc::new(RefCell::new(Host {
+            data: data.clone(),
             web,
             view,
             observer,
@@ -347,6 +446,7 @@ impl NativePage {
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
         let host = self.0.borrow();
+        host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())
@@ -430,7 +530,13 @@ fn has_focus(view: &NSView) -> bool {
 }
 
 impl Host {
-    pub fn sync(&mut self, bounds: Bounds<Pixels>, mask: Bounds<Pixels>, dragging: bool) {
+    pub fn sync(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        mask: Bounds<Pixels>,
+        dragging: bool,
+        resize_inset: Pixels,
+    ) {
         // WebKit may fill newly exposed tiles a frame after a viewport change.
         // Match its page background beneath those tiles instead of exposing
         // the application's dark window background at the resize edge.
@@ -453,6 +559,10 @@ impl Host {
         }
         let visible = bounds.intersect(&mask);
         self.clip.ivars().dragging.set(dragging);
+        self.clip
+            .ivars()
+            .resize_inset
+            .set(f64::from(f32::from(resize_inset)));
         if self.bounds != Some(bounds) || self.visible_bounds != Some(visible) {
             self.bounds = Some(bounds);
             self.visible_bounds = Some(visible);
@@ -481,19 +591,23 @@ impl Host {
             unsafe {
                 let _: () = msg_send![&*self.clip_mask, setFrame: region];
             }
-            let rect = wry::Rect {
-                position: wry::dpi::LogicalPosition::new(
-                    f64::from(f32::from(bounds.origin.x)),
-                    f64::from(f32::from(bounds.origin.y)),
-                )
-                .into(),
-                size: wry::dpi::LogicalSize::new(
-                    f64::from(f32::from(bounds.size.width)),
-                    f64::from(f32::from(bounds.size.height)),
-                )
-                .into(),
+            // Wry's set_bounds rounds logical origins and sizes to whole points. GPUI
+            // uses fractional points, so that leaves uncovered background
+            // strips between the WKWebView and its clip after a resize.
+            let web_height = f64::from(f32::from(bounds.size.height)).max(0.);
+            let web_y = f64::from(f32::from(bounds.origin.y));
+            let web_y = if self.parent.isFlipped() {
+                web_y
+            } else {
+                self.parent.bounds().size.height - web_y - web_height
             };
-            let _ = self.web.set_bounds(rect);
+            self.view.setFrame(objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(f64::from(f32::from(bounds.origin.x)), web_y),
+                objc2_foundation::NSSize::new(
+                    f64::from(f32::from(bounds.size.width)).max(0.),
+                    web_height,
+                ),
+            ));
             unsafe {
                 // Leave the implicit transaction open for the matching Metal
                 // presentation. Committing here would expose native geometry early.

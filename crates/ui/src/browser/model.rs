@@ -1,7 +1,7 @@
 //! Browser state shared by the chrome and platform host. No native handles.
 use std::net::IpAddr;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct PageState {
     pub url: Option<String>,
     pub title: String,

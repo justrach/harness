@@ -895,6 +895,10 @@ impl AppState {
         sort_spaces(&mut spaces);
         self.spaces = spaces;
         self.spaces_synced = true;
+        if self.no_project {
+            self.selected_space = None;
+            return;
+        }
         // Heal a vanished selection (project deleted elsewhere): fall back to
         // the first project; its chats died with it, so a matching chat
         // selection is healed by the accompanying chats frame (`apply_chats`).
@@ -1359,6 +1363,26 @@ impl AppState {
         self.chats.iter().filter(|c| !c.archived)
     }
 
+    pub(crate) fn restore_composer_target(
+        &mut self,
+        defaults: &crate::settings::composer::ComposerDefaults,
+    ) {
+        if self.selected_chat.is_some() || self.no_project {
+            return;
+        }
+        if self.selected_device.is_none() {
+            self.selected_device = defaults.device.clone();
+        }
+        if self.selected_space.is_none() {
+            self.no_project = defaults.no_project;
+            self.selected_space = if defaults.no_project {
+                None
+            } else {
+                defaults.project.clone()
+            };
+        }
+    }
+
     pub fn selected_space_row(&self) -> Option<&Space> {
         if self.no_project {
             return None;
@@ -1392,9 +1416,7 @@ impl AppState {
                 .find(|s| s.device_id == device_id)
                 .map(|s| s.id.clone());
             self.no_project = first.is_none();
-            if first.is_some() {
-                self.selected_space = first;
-            }
+            self.selected_space = first;
         }
         self.selected_device = Some(device_id);
         cx.notify();
@@ -1831,6 +1853,7 @@ impl AppState {
                         self.no_project = false;
                     }
                     None => {
+                        self.selected_space = None;
                         self.no_project = true;
                         self.selected_device = Some(chat.device_id.clone());
                     }
@@ -1880,15 +1903,16 @@ impl AppState {
                     self.selected_device = Some(device);
                 }
             }
-            None => self.no_project = true,
+            None => {
+                self.selected_device = self.effective_device_id();
+                self.no_project = true;
+            }
         }
         if self.selected_space == space_id && space_id.is_some() {
             cx.notify();
             return;
         }
-        if space_id.is_some() {
-            self.selected_space = space_id;
-        }
+        self.selected_space = space_id;
         cx.notify();
     }
 
@@ -2412,6 +2436,7 @@ fn spawn_subagent_watch(
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+    use gpui::AppContext;
     use zeron_engine::{EngineCore, default_registry};
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
@@ -2978,6 +3003,7 @@ mod tests {
         now: DateTime<Utc>,
     ) -> Session {
         Session {
+            last_completed_turn: None,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
             status,
@@ -3062,6 +3088,7 @@ mod tests {
         let mut state = AppState::new();
         let now = Utc::now();
         let mut row = Session {
+            last_completed_turn: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3092,6 +3119,7 @@ mod tests {
         let mut state = AppState::new();
         let now = Utc::now();
         state.sessions = vec![Session {
+            last_completed_turn: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
             status: SessionStatus::Working,
@@ -3445,6 +3473,65 @@ mod tests {
     }
 
     #[test]
+    fn projectless_preference_survives_restart_and_space_refreshes() {
+        let dir = tempfile::tempdir().unwrap();
+        let defaults = crate::settings::composer::ComposerDefaults {
+            device: Some("remote".into()),
+            // Older versions kept a stale project alongside the opt-out.
+            project: Some("old-project".into()),
+            no_project: true,
+            ..Default::default()
+        };
+        defaults.save(dir.path()).unwrap();
+        let mut state = AppState::new();
+        state.restore_composer_target(&crate::settings::composer::ComposerDefaults::load(
+            dir.path(),
+        ));
+        for spaces in [
+            vec![],
+            vec![space("s1", "remote", "/a", 1)],
+            vec![],
+            vec![space("s2", "other", "/b", 2)],
+        ] {
+            state.apply_spaces(spaces);
+            assert!(state.no_project);
+            assert!(state.selected_space.is_none());
+            assert!(state.selected_space_row().is_none());
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+        }
+    }
+
+    #[gpui::test]
+    fn projectless_selection_clears_project_and_survives_device_switch(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_spaces(vec![
+                space("s1", "dev", "/a", 1),
+                space("s2", "remote", "/b", 2),
+            ]);
+            state.select_space(Some("s1".into()), cx);
+            state.select_space(None, cx);
+            assert!(state.selected_space.is_none());
+            state.select_device("remote".into(), cx);
+            assert!(state.no_project);
+            assert!(state.selected_space.is_none());
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+            state.select_space(Some("s2".into()), cx);
+            assert!(!state.no_project);
+            assert_eq!(state.selected_space_row().unwrap().id, "s2");
+            state.selected_device = Some("dev".into());
+            state.select_space(None, cx);
+            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+            state.select_space(Some("s2".into()), cx);
+            state.select_device("empty-device".into(), cx);
+            assert!(state.selected_space.is_none());
+            assert_eq!(state.effective_device_id().as_deref(), Some("empty-device"));
+        });
+    }
+
+    #[test]
     fn chats_in_space_filters_and_orders() {
         let mut state = AppState::new();
         state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
@@ -3783,6 +3870,8 @@ mod tests {
         assert_eq!(project_label(Some("/home/w/dev/zeron")), "zeron");
         assert_eq!(project_label(Some("/home/w/dev/zeron/")), "zeron");
         assert_eq!(project_label(None), "No project");
+        assert_eq!(project_label(Some("~")), "No project");
+        assert_eq!(project_label(Some("~/")), "No project");
         assert_eq!(project_label(Some("   ")), "No project");
         assert_eq!(project_label(Some("/")), "/");
     }

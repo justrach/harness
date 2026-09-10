@@ -16,6 +16,53 @@ use crate::{
 pub const TREE_ROW_HEIGHT: f32 = 27.0;
 const TREE_INDENT: f32 = 14.0;
 
+/// Keep the viewport attached to a path rather than an index when rows move.
+pub(super) fn sync_list_rows(
+    list: &gpui::ListState,
+    old: &[super::model::VisibleTreeRow],
+    new: &[super::model::VisibleTreeRow],
+) {
+    if old == new {
+        return;
+    }
+    let mut anchor = list.logical_scroll_top();
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let positions = new
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.path.as_str(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let old_index = anchor.item_ix.min(old.len().saturating_sub(1));
+    let mut path = old.get(old_index).map(|row| row.path.clone());
+    let mut target = None;
+    while let Some(candidate) = path {
+        if let Some(index) = positions.get(candidate.as_str()) {
+            target = Some(*index);
+            break;
+        }
+        path = super::model::parent_path(&candidate);
+    }
+    let target = target.or_else(|| {
+        old.iter()
+            .skip(old_index)
+            .chain(old[..old_index].iter().rev())
+            .find_map(|row| positions.get(row.path.as_str()).copied())
+    });
+    list.splice(prefix..old.len() - suffix, new.len() - prefix - suffix);
+    list.clone().with_uniform_item_height(px(TREE_ROW_HEIGHT));
+    anchor.item_ix = target.unwrap_or(0);
+    if target.is_none() {
+        anchor.offset_in_item = px(0.0);
+    }
+    list.scroll_to(anchor);
+}
+
 impl FilesSurface {
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -76,7 +123,10 @@ impl FilesSurface {
                     WorkspaceEntryKind::File | WorkspaceEntryKind::Symlink => icons::DOCUMENT,
                 };
                 div()
-                    .id(("files-tree-entry", index))
+                    .id(gpui::SharedString::from(format!(
+                        "files-tree-entry:{}",
+                        row.path
+                    )))
                     .role(gpui::Role::TreeItem)
                     .aria_label(node.entry.name.clone())
                     .aria_selected(selected)
@@ -341,4 +391,62 @@ fn status_row(
         .text_color(color)
         .child(label)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::VisibleTreeRow;
+    use super::*;
+    use gpui::{ListAlignment, ListOffset, ListState};
+
+    fn rows(paths: &[&str]) -> Vec<VisibleTreeRow> {
+        paths
+            .iter()
+            .map(|path| VisibleTreeRow {
+                path: (*path).into(),
+                depth: 0,
+                kind: VisibleRowKind::Entry,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn directory_load_keeps_the_viewport_on_the_same_path() {
+        let old = rows(&["a", "src", "z"]);
+        let loading = rows(&["a", "src", "src/loading", "z"]);
+        let loaded = rows(&["a", "src", "src/a", "src/b", "z"]);
+        let list = ListState::new(old.len(), ListAlignment::Top, px(100.0))
+            .with_uniform_item_height(px(TREE_ROW_HEIGHT));
+        list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(7.0),
+        });
+        sync_list_rows(&list, &old, &loading);
+        assert_eq!(list.logical_scroll_top().item_ix, 3);
+        sync_list_rows(&list, &loading, &loaded);
+        assert_eq!(list.logical_scroll_top().item_ix, 4);
+        assert_eq!(list.logical_scroll_top().offset_in_item, px(7.0));
+        sync_list_rows(&list, &loaded, &loaded);
+        assert_eq!(list.logical_scroll_top().item_ix, 4);
+        assert_eq!(list.logical_scroll_top().offset_in_item, px(7.0));
+    }
+
+    #[test]
+    fn removed_anchor_falls_back_to_parent_then_neighbor() {
+        let old = rows(&["a", "src", "src/child", "z"]);
+        let collapsed = rows(&["a", "src", "z"]);
+        let removed = rows(&["a", "z"]);
+        let list = ListState::new(old.len(), ListAlignment::Top, px(100.0));
+        list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(3.0),
+        });
+        sync_list_rows(&list, &old, &collapsed);
+        assert_eq!(list.logical_scroll_top().item_ix, 1);
+        sync_list_rows(&list, &collapsed, &removed);
+        assert_eq!(list.logical_scroll_top().item_ix, 1);
+        sync_list_rows(&list, &removed, &[]);
+        assert_eq!(list.item_count(), 0);
+        assert_eq!(list.logical_scroll_top().item_ix, 0);
+    }
 }
