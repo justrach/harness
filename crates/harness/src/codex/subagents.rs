@@ -1,9 +1,12 @@
 //! Stable ownership of child traffic. A thread belongs to its original spawn
 //! call; activity ids and early thread notifications are never document ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
 use zeron_proto::AgentEvent;
+
+use super::normalize::{ChildStream, Phase, collab_spawn_child, item_type, map_item};
 
 const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
@@ -19,6 +22,9 @@ pub(super) struct Subagents {
     pending: HashMap<String, Pending>,
     pending_bytes: usize,
     warned_overflow: bool,
+    streams: HashMap<String, ChildStream>,
+    emitted_spawns: HashSet<String>,
+    resolved_spawns: HashSet<String>,
 }
 
 impl Subagents {
@@ -29,7 +35,75 @@ impl Subagents {
             pending: HashMap::new(),
             pending_bytes: 0,
             warned_overflow: false,
+            streams: HashMap::new(),
+            emitted_spawns: HashSet::new(),
+            resolved_spawns: HashSet::new(),
         }
+    }
+
+    pub(super) fn notification(
+        &mut self,
+        child: &str,
+        method: &str,
+        params: &Value,
+    ) -> Vec<AgentEvent> {
+        let events = self
+            .streams
+            .entry(child.to_owned())
+            .or_default()
+            .map(child, method, params);
+        self.route(child, events)
+    }
+
+    pub(super) fn parent_item(&mut self, phase: Phase, item: &Value) -> Vec<AgentEvent> {
+        let activity = matches!(item_type(item), "subAgentActivity" | "sub_agent_activity");
+        let child = if activity {
+            let path = item.get("agentPath").and_then(Value::as_str).unwrap_or("");
+            if matches!(path, "/" | "/root") {
+                return Vec::new();
+            }
+            if !matches!(
+                item.get("kind").and_then(Value::as_str),
+                Some("started" | "spawned")
+            ) {
+                return Vec::new();
+            }
+            item.get("agentThreadId").and_then(Value::as_str)
+        } else {
+            collab_spawn_child(item)
+        };
+        if child == Some(self.root.as_str()) {
+            return Vec::new();
+        }
+        let mut item = item.clone();
+        let mut buffered = Vec::new();
+        if let Some(child) = child {
+            let call = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            buffered = self.bind(child, &call);
+            if let Some(owner) = self.spawns.get(child) {
+                item["id"] = owner.clone().into();
+            }
+        }
+        let mut events: Vec<_> = map_item(phase, &item)
+            .into_iter()
+            .filter(|event| match event {
+                // Completed items refresh tool metadata, but a spawn chip must
+                // appear once even when its parent text segment has already ended.
+                AgentEvent::ToolCall { id, call } if call.is_subagent_spawn() => {
+                    self.emitted_spawns.insert(id.clone())
+                }
+                AgentEvent::ToolResult { id, .. } if self.emitted_spawns.contains(id) => {
+                    self.resolved_spawns.insert(id.clone())
+                }
+                _ => true,
+            })
+            .collect();
+        events.extend(buffered);
+        events
     }
 
     /// Call only for a spawn. Emit its parent chip BEFORE the returned events,

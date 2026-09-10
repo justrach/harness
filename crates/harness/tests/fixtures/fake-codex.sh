@@ -149,6 +149,11 @@ case "$turnline" in
   cat "$(dirname "$0")/codex/v1-subagents.jsonl"
   ;;
 
+*scenario:v2-lifecycle*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  cat "$(dirname "$0")/codex/v2-lifecycle.jsonl"
+  ;;
+
 *scenario:subagent*)
   # Multi-agent v2 child-thread routing: registration via subAgentActivity,
   # tagged child items, consumed child turn bookkeeping (must never settle
@@ -157,6 +162,7 @@ case "$turnline" in
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   # Parent spawn item registers the child (call id = the parent chip).
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
   # The wire also emits subAgentActivity about the ROOT during collab runs:
   # no chip, no registration.
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_root","type":"subAgentActivity","kind":"interacted","agentThreadId":"th-1","agentPath":"/root"}}}'
@@ -176,7 +182,7 @@ case "$turnline" in
   emit '{"method":"thread/somethingBrandNew","params":{"threadId":"child-1"}}'
   # Child closes → tagged terminal; the spawn chip resolves on the parent.
   emit '{"method":"thread/closed","params":{"threadId":"child-1"}}'
-  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"completed","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"subagent-completed-alpha","type":"subAgentActivity","kind":"completed","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   ;;
 

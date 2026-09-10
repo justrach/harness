@@ -6,7 +6,7 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -355,6 +355,14 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
         // child's own traffic routes separately (see `route_child_notification`
         // in mod.rs); this is only the spawn tool call the chip folds from.
         "subAgentActivity" | "sub_agent_activity" => {
+            // A lifecycle marker has its own item id. It is not another
+            // spawn; the child's turn notifications carry its terminal state.
+            if !matches!(
+                item.get("kind").and_then(Value::as_str),
+                Some("started" | "spawned")
+            ) {
+                return Vec::new();
+            }
             let name = str_field(item, &["agentPath"])
                 .rsplit('/')
                 .find(|s| !s.is_empty())
@@ -396,6 +404,139 @@ pub(crate) fn user_message_text(item: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n\n");
     (!joined.trim().is_empty()).then_some(joined)
+}
+
+/// Per-child stream state, retained across parent turns and follow-up tasks.
+/// Completion-only messages need the same text fallback as the root. Replayed
+/// user items must not reopen a finished document or duplicate a steering entry.
+#[derive(Default)]
+pub(super) struct ChildStream {
+    reasoning: ReasoningStream,
+    streamed_text: std::collections::HashSet<String>,
+    completed_items: std::collections::VecDeque<String>,
+    completed_turns: std::collections::VecDeque<String>,
+    settled: bool,
+}
+
+fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
+    if id.is_empty() {
+        return true;
+    }
+    if ids.contains(&id) {
+        return false;
+    }
+    if ids.len() == 256 {
+        ids.pop_front();
+    }
+    ids.push_back(id);
+    true
+}
+
+impl ChildStream {
+    pub(super) fn map(&mut self, child: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
+        if matches!(method, "item/started" | "item/completed") {
+            let item = params.get("item").unwrap_or(&Value::Null);
+            let phase = if method == "item/started" {
+                Phase::Started
+            } else {
+                Phase::Completed
+            };
+            if phase == Phase::Completed
+                && !remember(&mut self.completed_items, str_field(item, &["id"]))
+            {
+                return Vec::new();
+            }
+            if matches!(item_type(item), "userMessage" | "user_message") {
+                return if phase == Phase::Completed {
+                    user_message_text(item)
+                        .map(|text| {
+                            self.settled = false;
+                            AgentEvent::UserMessage { text }
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            }
+            if self.settled {
+                return Vec::new();
+            }
+            if matches!(item_type(item), "agentMessage" | "agent_message") {
+                if phase == Phase::Started {
+                    return Vec::new();
+                }
+                let mut events = Vec::new();
+                if !self.streamed_text.remove(&str_field(item, &["id"])) {
+                    let text = str_field(item, &["text"]);
+                    if !text.is_empty() {
+                        events.push(AgentEvent::TextDelta { text });
+                    }
+                }
+                events.push(AgentEvent::TextDelta {
+                    text: "\n\n".into(),
+                });
+                return events;
+            }
+            return map_item(phase, item);
+        }
+        if self.settled {
+            return Vec::new();
+        }
+        match method {
+            "item/agentMessage/delta" => {
+                let id = item_id(params);
+                if !id.is_empty() && self.completed_items.contains(&id) {
+                    return Vec::new();
+                }
+                self.streamed_text.insert(id);
+                delta_text(params)
+                    .map(|text| AgentEvent::TextDelta { text })
+                    .into_iter()
+                    .collect()
+            }
+            "item/reasoning/textDelta"
+            | "item/reasoning/summaryTextDelta"
+            | "item/reasoning/summaryPartAdded" => self.reasoning.map(method, params),
+            "turn/completed" | "turn/failed" | "turn/aborted" | "thread/closed" => {
+                if method != "thread/closed"
+                    && !remember(&mut self.completed_turns, turn_id(params))
+                {
+                    return Vec::new();
+                }
+                self.settled = true;
+                self.streamed_text.clear();
+                let error = turn_error_message(params);
+                let status = if method == "turn/failed"
+                    || error.is_some()
+                    || params.pointer("/turn/status").and_then(Value::as_str) == Some("failed")
+                {
+                    DoneStatus::Errored
+                } else if method == "turn/aborted"
+                    || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted")
+                {
+                    DoneStatus::Interrupted
+                } else {
+                    DoneStatus::Completed
+                };
+                vec![AgentEvent::Done {
+                    status,
+                    result: None,
+                    error,
+                    session_id: Some(child.to_owned()),
+                }]
+            }
+            "error" => vec![AgentEvent::Error {
+                message: params
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| params.get("message").and_then(Value::as_str))
+                    .unwrap_or("Codex subagent error")
+                    .to_owned(),
+            }],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// The thread a notification is addressed to: `thread/started` carries it at
@@ -690,6 +831,22 @@ mod tests {
     }
 
     #[test]
+    fn activity_updates_are_not_spawns_in_either_item_phase() {
+        for kind in [
+            "interacted",
+            "completed",
+            "failed",
+            "errored",
+            "futureActivity",
+        ] {
+            let item = json!({"type":"subAgentActivity", "id":"activity", "kind":kind,
+                "agentThreadId":"child", "agentPath":"/root/alpha"});
+            assert!(map_item(Phase::Started, &item).is_empty());
+            assert!(map_item(Phase::Completed, &item).is_empty());
+        }
+    }
+
+    #[test]
     fn sub_agent_activity_maps_to_a_named_parent_chip() {
         let started = map_item(
             Phase::Started,
@@ -704,7 +861,7 @@ mod tests {
         ));
         let completed = map_item(
             Phase::Completed,
-            &json!({"type": "subAgentActivity", "id": "call_1", "kind": "completed",
+            &json!({"type": "subAgentActivity", "id": "call_1", "kind": "started",
                     "agentThreadId": "child-1", "agentPath": "/root/alpha"}),
         );
         assert!(matches!(

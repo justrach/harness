@@ -641,6 +641,58 @@ async fn models_discovers_visible_catalog_with_pagination() {
 }
 
 #[tokio::test]
+async fn v2_lifecycle_reuses_chips_and_reopens_the_same_child_for_followup() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:v2-lifecycle"), controls).await;
+    let spawns: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { id, call } if call.is_subagent_spawn() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spawns, ["spawn-alpha", "spawn-beta"]);
+    let mut alpha_text = String::new();
+    let mut alpha_users = Vec::new();
+    let mut alpha_done = Vec::new();
+    for e in &events {
+        if let AgentEvent::Subagent {
+            parent_tool_use_id,
+            event,
+        } = e
+        {
+            assert!(spawns.contains(&parent_tool_use_id.as_str()));
+            if parent_tool_use_id == "spawn-alpha" {
+                match event.as_ref() {
+                    AgentEvent::TextDelta { text } => alpha_text.push_str(text),
+                    AgentEvent::UserMessage { text } => alpha_users.push(text.as_str()),
+                    AgentEvent::Done { status, error, .. } => {
+                        alpha_done.push((*status, error.as_deref()))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(alpha_text, "first alpha\n\nsecond alpha\n\n");
+    assert_eq!(alpha_users, ["First assignment", "Second assignment"]);
+    assert_eq!(
+        alpha_done,
+        [
+            (DoneStatus::Completed, None),
+            (DoneStatus::Errored, Some("followup failed"))
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Done { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn v1_spawns_bind_children_and_controls_do_not_create_agents() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:v1-subagents"), controls).await;
