@@ -6117,6 +6117,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
+        ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
@@ -8418,6 +8419,7 @@ mod tests {
                     this.rail_enabled = false;
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
+                            last_completed_turn: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,

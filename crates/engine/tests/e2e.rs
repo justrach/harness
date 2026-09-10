@@ -2371,3 +2371,143 @@ async fn context_usage_settles_after_done_without_reopening_the_turn() {
         "usage does not create transcript rows"
     );
 }
+
+/// Reproduce a steer accepted just before the old turn's Done. The harness
+/// confirms the new boundary later; only its eventual completion may notify.
+#[tokio::test]
+async fn pending_steer_handoff_does_not_publish_a_completion() {
+    struct ControlledHarness(
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>>>,
+    );
+    #[async_trait]
+    impl Harness for ControlledHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Controlled"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[ReasoningLevel::Medium]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            let rx = self.0.lock().unwrap().take().unwrap();
+            // Keep the mailbox alive but let the test control confirmation.
+            Ok(
+                futures::stream::unfold((rx, controls), |(mut rx, controls)| async move {
+                    rx.recv().await.map(|event| (Ok(event), (rx, controls)))
+                })
+                .boxed(),
+            )
+        }
+    }
+    for routed_dispatch in [false, true] {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir = tempfile::tempdir().unwrap();
+        let core = assemble(
+            dir.path(),
+            Arc::new(ControlledHarness(std::sync::Mutex::new(Some(rx)))),
+        );
+        let handle = core.doc_host.open(CHAT).unwrap();
+        queue_as_viewer(
+            handle.doc(),
+            "cmd-completion",
+            SessionCommandPayload::Run {
+                request: run_request("opening"),
+                message_id: "user-opening".into(),
+            },
+        );
+        tx.send(mock_script()[0].clone()).unwrap();
+        wait_for(
+            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Working),
+            "opening run",
+        )
+        .await;
+        if routed_dispatch {
+            core.sessions
+                .dispatch(
+                    CHAT,
+                    HarnessId::Mock,
+                    run_request("redirect"),
+                    Some("user-steer".into()),
+                )
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(
+                core.sessions
+                    .steer(CHAT, "redirect", Some("user-steer".into()))
+                    .await
+                    .unwrap(),
+                zeron_engine::sessions::SteerOutcome::Accepted
+            );
+        }
+        tx.send(done(DoneStatus::Completed)).unwrap();
+        wait_for(
+            || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+            "internal handoff",
+        )
+        .await;
+        assert_eq!(
+            core.sessions
+                .session_status(CHAT)
+                .unwrap()
+                .last_completed_turn,
+            None
+        );
+        tx.send(AgentEvent::Steered {
+            assistant_message_id: Some("a-1".into()),
+            next_assistant_message_id: Some("a-steered".into()),
+        })
+        .unwrap();
+        tx.send(AgentEvent::TextDelta {
+            text: "redirected response".into(),
+        })
+        .unwrap();
+        tx.send(done(DoneStatus::Completed)).unwrap();
+        wait_for(
+            || {
+                core.sessions
+                    .session_status(CHAT)
+                    .and_then(|s| s.last_completed_turn)
+                    .as_deref()
+                    == Some("a-steered")
+            },
+            "real completion",
+        )
+        .await;
+        // A duplicate terminal frame from a parked runtime cannot ring twice.
+        let (_, mut events) = core.sessions.subscribe(CHAT, 0).unwrap();
+        tx.send(done(DoneStatus::Completed)).unwrap();
+        let duplicate = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(duplicate.event, AgentEvent::Done { .. }));
+        // drive_run publishes and settles synchronously before polling again.
+        tokio::task::yield_now().await;
+        drop(tx);
+        assert_eq!(
+            core.sessions
+                .session_status(CHAT)
+                .unwrap()
+                .last_completed_turn
+                .as_deref(),
+            Some("a-steered")
+        );
+        core.shutdown().await;
+    }
+}

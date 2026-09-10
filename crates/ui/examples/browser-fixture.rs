@@ -1,5 +1,8 @@
-//! Real shell + native WebKit smoke test and screenshot fixture. Synthetic
-//! chat data, isolated temp storage, loopback-only website, no engine services.
+#[cfg(target_os = "linux")]
+#[path = "browser-fixture/linux.rs"]
+mod linux;
+// Real shell + native WebKit smoke test and screenshot fixture. Synthetic
+// chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
 use std::{
     io::{Read, Write},
@@ -32,6 +35,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     };
     #[cfg(not(target_os = "macos"))]
     let status = {
+        let capture_window = std::env::var("ZERON_BROWSER_CAPTURE_WINDOW").ok();
         let windows = std::process::Command::new("xdotool")
             .args([
                 "search",
@@ -40,11 +44,15 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
                 &std::process::id().to_string(),
             ])
             .output()?;
-        let id = String::from_utf8(windows.stdout)?
-            .lines()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("fixture window not visible"))?
-            .to_owned();
+        let id = capture_window
+            .or_else(|| {
+                String::from_utf8(windows.stdout)
+                    .ok()?
+                    .lines()
+                    .next()
+                    .map(str::to_owned)
+            })
+            .ok_or_else(|| anyhow::anyhow!("fixture window not visible"))?;
         std::process::Command::new("import")
             .args(["-window", &id])
             .arg(&path)
@@ -54,7 +62,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_blur(
     directory: &std::path::Path,
     region: (f64, f64, f64, f64),
@@ -110,7 +118,9 @@ fn validate_blur(
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("warn").init();
+    tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+        .init();
     let output = PathBuf::from(
         std::env::args()
             .nth(1)
@@ -196,7 +206,7 @@ fn main() -> anyhow::Result<()> {
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
                 capture(&output, "browser-empty-dark")?;
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     window.update(cx, |_, w, cx| first.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
                     let deadline = std::time::Instant::now() + Duration::from_secs(25);
@@ -226,7 +236,7 @@ fn main() -> anyhow::Result<()> {
                 let (second_id, second) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 250).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "background page stayed visible");
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     first.read_with(cx, |b, _| b.fixture_eval("document.cookie = 'browserfixture=shared; path=/'"));
                     window.update(cx, |_, w, cx| second.update(cx, |b, cx| b.navigate(&_origin, w, cx)))?;
@@ -245,6 +255,8 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 250).await;
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(second_id, w, cx))?;
                 drop(second);
+                #[cfg(target_os = "linux")]
+                linux::exercise(window, first.clone(), &output, cx).await?;
                 #[cfg(target_os = "macos")]
                 let mut recording;
                 #[cfg(target_os = "macos")]
@@ -341,11 +353,16 @@ fn main() -> anyhow::Result<()> {
                     let (left,top)=first.read_with(cx,|b,_|b.fixture_origin());
                     // Real resize-handle drag, including crossing into the native page.
                     eprintln!("Browser fixture: starting resize drag");
-                    let start=gpui::point(px(left-2.),px(top+120.));
+                    // Both halves must reach GPUI before a drag exists.
+                    for offset in [-6., -2., 0., 3., 4.5] {
+                        anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_page_hit((left+offset) as f64,(top+120.) as f64)),"native page stole the resize target at offset {offset}");
+                    }
+                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((left+6.) as f64,(top+120.) as f64)),"resize target blocked adjacent page content");
+                    let start=gpui::point(px(left+3.),px(top+120.));
                     gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent{position:start,button:gpui::MouseButton::Left,click_count:1,..Default::default()}),cx);})?;
                     let mut widths=Vec::new();
                     for delta in [10.,30.,60.,100.,140.,180.,140.,100.,60.,20.,-20.,-60.,-100.,-140.,-180.,-140.,-100.,-60.,-20.,0.] {
-                        let pos=gpui::point(px(left-2.+delta),start.y);
+                        let pos=gpui::point(px(left+3.+delta),start.y);
                         first.read_with(cx,|b,_|b.fixture_move_cursor(f32::from(pos.x) as f64,f32::from(pos.y) as f64));
                         gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent{position:pos,pressed_button:Some(gpui::MouseButton::Left),modifiers:Default::default()}),cx);})?;
                         pause(cx,100).await;
@@ -431,9 +448,14 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(std::fs::metadata(output.join("browser-layout.mov"))?.len()>10000,"layout recording is empty");
                     validate_blur(&output,regions[0],window_width)?;
                 }
-                for width in [380., 640., 520.] {
+                for width in [380.25, 640.5, 520.75] {
                     window.update(cx, |shell, _, cx| shell.fixture_resize_browser(width, cx))?;
                     pause(cx, 150).await;
+                    #[cfg(target_os = "macos")]
+                    {
+                        let (layout,native,clip)=first.read_with(cx,|b,_|b.fixture_geometry());
+                        anyhow::ensure!((layout-native).abs()<0.01 && (clip-native).abs()<0.01,"fractional resize left a gap between the page and clip: {layout}/{native}/{clip}");
+                    }
                 }
                 window.update(cx, |shell, _, cx| shell.fixture_expand_browser(cx))?;
                 pause(cx, 400).await;
@@ -441,7 +463,7 @@ fn main() -> anyhow::Result<()> {
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
                 capture(&output, "browser-light")?;
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {
                     anyhow::ensure!(first.read_with(cx, |b, _| b.fixture_native_visible()), "page not restored after overlays/takeover");
                     // Use an ordinary closed localhost port. Port 1 is on
@@ -464,7 +486,7 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(first_id, w, cx))?;
                 pause(cx, 200).await;
                 anyhow::ensure!(!first.read_with(cx, |b, _| b.fixture_native_visible()), "closed tab retained its native view");
-                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
+                std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }

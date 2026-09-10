@@ -14,6 +14,10 @@ name = "macos-resource-profile"
 required-features = ["resource-profile"]
 
 [[example]]
+name = "preview-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "browser-fixture"
 required-features = ["browser-fixture"]
 
@@ -52,6 +56,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 objc = "0.2"
 wry = { version = "0.56", default-features = false, features = ["os-webview"] }
 raw-window-handle = "0.6"
@@ -62,6 +67,9 @@ objc2-foundation = "0.3.2"
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
 reqwest.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "webp"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

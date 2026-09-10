@@ -367,7 +367,31 @@ fn exit_progress(since: std::time::Instant) -> f32 {
 /// hold full strength through the fade and pop off at unmount.
 fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
     let blur = crate::frost::MENU_BLUR * (1.0 - exit.unwrap_or(0.0));
-    crate::frost::frosted(CARD_RADIUS, blur, content).into_any_element()
+    // Outside-dismiss listeners run during capture. Consume that same press
+    // during bubble, after dismissal, so content behind the menu cannot act
+    // on it too. The following click can reach that content normally.
+    let guard = gpui::canvas(
+        |_, _, _| (),
+        |bounds, _, window, _| {
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble && !bounds.contains(&event.position) {
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0();
+    crate::frost::frosted(
+        CARD_RADIUS,
+        blur,
+        div()
+            .relative()
+            .child(guard)
+            .child(content)
+            .into_any_element(),
+    )
+    .into_any_element()
 }
 
 /// Entrance or exit motion for a popover layer. While exiting (the [`Popup`]
