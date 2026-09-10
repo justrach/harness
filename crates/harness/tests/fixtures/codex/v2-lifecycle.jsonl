@@ -16,7 +16,7 @@
 {"method":"item/completed","params":{"threadId":"child-beta","item":{"type":"agentMessage","id":"beta-answer","text":"beta answer"}}}
 {"method":"turn/completed","params":{"threadId":"child-beta","turn":{"id":"beta-turn","status":"completed"}}}
 {"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"message-alpha","kind":"interacted","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}
-{"method":"item/completed","params":{"threadId":"child-alpha","item":{"type":"userMessage","id":"alpha-input-2","text":"Second assignment"}}}
+{"method":"turn/started","params":{"threadId":"child-alpha","turn":{"id":"alpha-turn-2","status":"inProgress"}}}
 {"method":"item/completed","params":{"threadId":"child-alpha","item":{"type":"userMessage","id":"alpha-input-1","text":"First assignment"}}}
 {"method":"turn/completed","params":{"threadId":"child-alpha","turn":{"id":"alpha-turn-1","status":"completed"}}}
 {"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"followup-alpha","kind":"started","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}

@@ -3,7 +3,7 @@
 //! uses. Resurrected from the pre-ACP driver and modernized.
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
-//! experimentalApi`); this driver is validated against codex-cli 0.149.0 —
+//! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
 //! revalidate the method/notification surface when bumping past it.
 //!
 //! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`) then
@@ -23,8 +23,8 @@
 //! - Subagents are full child app-server threads. Parent spawn items establish
 //!   their stable ownership; content arriving before the spawn is buffered.
 //!   A registered child's notifications route through an EXPLICIT table
-//!   ([`normalize::route_child_notification`]) — item lifecycles/errors become
-//!   tagged [`AgentEvent::Subagent`] events, child turn bookkeeping is
+//!   ([`normalize::route_child_notification`]) — content, errors and child turns
+//!   become tagged [`AgentEvent::Subagent`] events; unrelated child bookkeeping is
 //!   consumed so it can never settle the parent turn, and unknown methods
 //!   fall through to the parent path (fail open, never silent loss).
 //! - Steering: `turn/steer { expectedTurnId }` into the live turn; a rejected
@@ -906,9 +906,11 @@ async fn run_session(session: Session) {
                 .await?
         };
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
-        Ok::<String, HarnessError>(thread_id)
+        let mut children = subagents::Subagents::new(thread_id.clone());
+        children.restore(&thread["thread"]);
+        Ok::<_, HarnessError>((thread_id, children))
     };
-    let thread_id = tokio::select! {
+    let (thread_id, mut children) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -983,7 +985,6 @@ async fn run_session(session: Session) {
     }
 
     let mut router = TurnRouter::default();
-    let mut children = subagents::Subagents::new(thread_id.clone());
     match start_turn(&client, turn_params(&request.prompt)).await {
         Ok(id) => router.adopt_started(id),
         Err(e) => {

@@ -434,6 +434,23 @@ fn remember(ids: &mut std::collections::VecDeque<String>, id: String) -> bool {
 
 impl ChildStream {
     pub(super) fn map(&mut self, child: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
+        if method == "turn/started" {
+            let id = turn_id(params);
+            if !id.is_empty() && self.completed_turns.contains(&id) {
+                return Vec::new();
+            }
+            if self.settled {
+                self.settled = false;
+                // v2 followup_task starts a new child turn without echoing a
+                // userMessage. Reopen the existing document without inventing
+                // a user prompt or attributing an activity id as a new spawn.
+                return vec![AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                }];
+            }
+            return Vec::new();
+        }
         if matches!(method, "item/started" | "item/completed") {
             let item = params.get("item").unwrap_or(&Value::Null);
             let phase = if method == "item/started" {
@@ -593,16 +610,16 @@ pub(crate) fn route_child_notification(method: &str) -> ChildRoute {
         | "item/reasoning/textDelta"
         | "item/reasoning/summaryTextDelta"
         | "item/reasoning/summaryPartAdded"
+        | "turn/started"
         | "turn/completed"
         | "turn/failed"
         | "turn/aborted"
         | "error"
         | "thread/closed" => ChildRoute::Subagent,
-        // Child turn/status bookkeeping with no subagent meaning: consumed
+        // Child status bookkeeping with no subagent meaning: consumed
         // so it can never settle the PARENT turn (the exact bug class the
         // explicit table exists for).
-        "turn/started"
-        | "thread/status/changed"
+        "thread/status/changed"
         | "thread/tokenUsage/updated"
         // Child chatter with no consumer on this wire.
         | "item/commandExecution/outputDelta"
@@ -888,11 +905,11 @@ mod tests {
         for m in ["turn/completed", "turn/aborted", "turn/failed"] {
             assert_eq!(route_child_notification(m), ChildRoute::Subagent, "{m}");
         }
-        // …while turn/started stays consumed — and NONE of them may reach
-        // the parent turn router.
+        // A child turn start can reopen a completed assignment. It must never
+        // reach the parent turn router.
         assert_eq!(
             route_child_notification("turn/started"),
-            ChildRoute::Consumed
+            ChildRoute::Subagent
         );
         // Child-owned thread lifecycle would rewrite parent state — consumed.
         for m in ["thread/archived", "thread/compacted", "thread/started"] {

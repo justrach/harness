@@ -50,7 +50,11 @@ if has "$line" '"method":"model/list"'; then
   exec sleep 30
 fi
 if has "$line" '"method":"thread/resume"'; then
-  if has "$line" '"threadId":"resume-fail"'; then
+  if has "$line" '"threadId":"resume-with-child-v1"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
+  elif has "$line" '"threadId":"resume-with-child-v2"'; then
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
+  elif has "$line" '"threadId":"resume-fail"'; then
     # Missing/foreign rollout: reject, expect the fresh-start fallback.
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"rollout not found\"}}"
     read -r line || exit 1
@@ -286,6 +290,15 @@ case "$turnline" in
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"boom"}}}}'
+  ;;
+
+*scenario:resumed-child*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"child-alpha","turn":{"id":"alpha-resumed"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-resumed","item":{"type":"subAgentActivity","id":"resumed-interaction","kind":"interacted","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"child-alpha","item":{"type":"agentMessage","id":"resumed-answer","text":"resumed alpha"}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"child-alpha","turn":{"id":"alpha-resumed","status":"completed"}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-resumed","turn":{"id":"t-2","status":"completed"}}}'
   ;;
 
 *scenario:resumed*)

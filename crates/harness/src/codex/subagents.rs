@@ -41,6 +41,29 @@ impl Subagents {
         }
     }
 
+    /// thread/resume returns the stored parent items. Rebuild ownership without
+    /// replaying chips or content that already lives in Zeron's documents.
+    pub(super) fn restore(&mut self, thread: &Value) {
+        for item in thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|turn| {
+                turn.get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+        {
+            if super::normalize::is_collab_spawn(item)
+                || matches!(item_type(item), "subAgentActivity" | "sub_agent_activity")
+            {
+                self.parent_item(Phase::Completed, item);
+            }
+        }
+    }
+
     pub(super) fn notification(
         &mut self,
         child: &str,

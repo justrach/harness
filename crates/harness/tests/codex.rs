@@ -641,6 +641,25 @@ async fn models_discovers_visible_catalog_with_pagination() {
 }
 
 #[tokio::test]
+async fn resumed_parent_recovers_v1_and_v2_child_owners_without_replaying_chips() {
+    for mode in ["v1", "v2"] {
+        let mut req = request("scenario:resumed-child");
+        req.resume = Some(format!("resume-with-child-{mode}"));
+        let (controls, _steer, _token) = controls("Yes");
+        let events = run_to_end(&harness(), req, controls).await;
+        assert!(
+            !events.iter().any(
+                |e| matches!(e, AgentEvent::ToolCall { call, .. } if call.is_subagent_spawn())
+            )
+        );
+        assert!(events.iter().any(|e| matches!(e,
+            AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == "spawn-alpha" && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "resumed alpha")
+        )), "{mode}: {events:?}");
+    }
+}
+
+#[tokio::test]
 async fn v2_lifecycle_reuses_chips_and_reopens_the_same_child_for_followup() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:v2-lifecycle"), controls).await;
@@ -675,7 +694,7 @@ async fn v2_lifecycle_reuses_chips_and_reopens_the_same_child_for_followup() {
         }
     }
     assert_eq!(alpha_text, "first alpha\n\nsecond alpha\n\n");
-    assert_eq!(alpha_users, ["First assignment", "Second assignment"]);
+    assert_eq!(alpha_users, ["First assignment"]);
     assert_eq!(
         alpha_done,
         [
@@ -934,7 +953,141 @@ async fn child_thread_routing_tags_and_never_settles_parent() {
     assert!(child_done < late_parent_delta, "{events:?}");
 }
 
-/// Live smoke against the REAL codex app-server (0.146.x, installed + authed):
+/// Run once per multi-agent mode using a wrapper supplied via
+/// CODEX_SUBAGENT_TEST_EXECUTABLE. The wrapper can set feature flags for its
+/// process without changing the user's config. This deliberately consumes
+/// model calls and is never part of the offline suite.
+#[tokio::test]
+#[ignore = "real Codex spawn, followup and resume; needs install, auth and network"]
+async fn live_subagent_spawn_and_followup_keep_one_transcript() {
+    let executable = std::env::var_os("CODEX_SUBAGENT_TEST_EXECUTABLE")
+        .expect("set CODEX_SUBAGENT_TEST_EXECUTABLE to a wrapper selecting v1 or v2");
+    let harness = CodexHarness::new().with_executable(executable);
+    let cwd = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "This is an integration smoke test. Spawn EXACTLY ONE subagent (name it alpha if naming is supported). Its entire task is: reply exactly child-first. It must not use any tools or spawn agents. Wait for it to finish, then reply exactly parent-first. Do not close the child; we will reuse it. Do not inspect or change any files.",
+    );
+    req.cwd = cwd.path().display().to_string();
+    req.reasoning = Some(ReasoningLevel::Low);
+    if let Ok(model) = std::env::var("CODEX_SUBAGENT_TEST_MODEL") {
+        req.model = Some(model);
+    }
+    let (run_controls, mut steer, mut interrupt) = controls("Yes");
+    let mut stream = harness
+        .run(req.clone(), run_controls)
+        .await
+        .expect("run starts");
+    let mut events = Vec::new();
+    for turn in 0..3 {
+        if turn == 1 {
+            steer.send(SteerMessage {
+                prompt: "Reuse the SAME existing subagent for one more task: reply exactly child-second. Use followup_task if available, otherwise send_input. Do not spawn a new agent. Wait for it to finish, then reply exactly parent-second. Do not inspect or change files.".into(),
+                message_id: None,
+            }).await.unwrap();
+        }
+        if turn == 2 {
+            // End the first app-server process while idle, then resume the
+            // parent in a fresh process and address its already-known child.
+            interrupt.cancel();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while stream.next().await.is_some() {}
+            })
+            .await
+            .expect("old app-server stops");
+            req.resume = events.iter().find_map(|e| match e {
+                AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            });
+            req.prompt = "The app-server has restarted. Reuse the SAME existing subagent again: reply exactly child-third. Use followup_task if available. Otherwise first use resume_agent with the existing child's id to reactivate it, then send_input. Do not spawn another agent. Wait for its actual child-third reply before replying exactly parent-third. If a tool fails, recover using the same child id; never claim the child finished without its reply. Do not inspect or change files.".into();
+            let (run_controls, new_steer, new_interrupt) = controls("Yes");
+            steer = new_steer;
+            interrupt = new_interrupt;
+            stream = harness
+                .run(req.clone(), run_controls)
+                .await
+                .expect("parent resumes");
+        }
+        let result = tokio::time::timeout(Duration::from_secs(120), async {
+            while let Some(event) = stream.next().await {
+                let event = event.expect("stream event");
+                let done = matches!(event, AgentEvent::Done { .. });
+                let failed = matches!(
+                    event,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored | DoneStatus::Interrupted,
+                        ..
+                    }
+                );
+                events.push(event);
+                assert!(!failed, "parent failed: {:?}", events.last());
+                if done {
+                    return;
+                }
+            }
+            panic!("stream ended before parent completion");
+        })
+        .await;
+        if result.is_err() {
+            interrupt.cancel();
+        }
+        result.expect("live turn finishes within 120 seconds");
+    }
+    drop(stream);
+    if let Some(path) = std::env::var_os("CODEX_SUBAGENT_TEST_CAPTURE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&events).unwrap()).unwrap();
+    }
+    let spawns: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { id, call } if call.is_subagent_spawn() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spawns.len(), 1, "one original spawn: {spawns:?}");
+    if let Ok(mode) = std::env::var("CODEX_SUBAGENT_TEST_MODE") {
+        let expected = match mode.as_str() {
+            "v1" => "collabAgentToolCall",
+            "v2" => "subAgentActivity",
+            _ => panic!("unknown mode {mode}"),
+        };
+        assert!(
+            events.iter().any(|e| matches!(e,
+                AgentEvent::ToolCall { call: ToolCall::Unknown { input: Some(input), .. }, .. }
+                if input.get("type").and_then(serde_json::Value::as_str) == Some(expected)
+            )),
+            "the model must actually use {mode}"
+        );
+    }
+    let mut text = String::new();
+    let mut terminals = 0;
+    for event in &events {
+        if let AgentEvent::Subagent {
+            parent_tool_use_id,
+            event,
+        } = event
+        {
+            assert_eq!(parent_tool_use_id, spawns[0]);
+            if let AgentEvent::TextDelta { text: delta } = event.as_ref() {
+                text.push_str(delta);
+            }
+            if matches!(
+                event.as_ref(),
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            ) {
+                terminals += 1;
+            }
+        }
+    }
+    for reply in ["child-first", "child-second", "child-third"] {
+        assert_eq!(text.matches(reply).count(), 1, "child transcript: {text:?}");
+    }
+    assert_eq!(terminals, 3, "one child completion per assignment");
+}
+
+/// Live smoke against the REAL codex app-server (installed + authed):
 /// one trivial turn, ending on turn/completed.
 /// `cargo test -p zeron-harness --test codex -- --ignored`.
 #[tokio::test]
