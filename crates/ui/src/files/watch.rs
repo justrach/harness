@@ -134,13 +134,13 @@ impl FilesSurface {
             }
         }
 
-        let reload = parents
-            .into_iter()
-            .filter(|parent| self.tree.is_expanded(parent) && self.tree.is_directory_loaded(parent))
-            .collect::<Vec<_>>();
-        for parent in &reload {
+        for parent in &parents {
             self.tree.invalidate_directory(parent);
         }
+        let reload = parents
+            .into_iter()
+            .filter(|parent| self.tree.is_expanded(parent))
+            .collect::<Vec<_>>();
         self.sync_tree_list();
         for parent in reload {
             self.load_directory(parent, None, cx);

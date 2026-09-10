@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,8 @@ struct WorkspaceFileKey {
 struct CheckoutWatch {
     checkout_id: String,
     root: PathBuf,
-    sequence: AtomicU64,
+    // Serializes publication with subscription baselines, including lag recovery.
+    sequence: Mutex<u64>,
     subscribers: AtomicUsize,
     changes_tx: broadcast::Sender<WorkspaceFileChanges>,
     cancel: CancellationToken,
@@ -568,7 +569,7 @@ impl CheckoutWatch {
         let watch = Arc::new(Self {
             checkout_id,
             root,
-            sequence: AtomicU64::new(0),
+            sequence: Mutex::new(0),
             subscribers: AtomicUsize::new(0),
             changes_tx,
             cancel,
@@ -588,25 +589,35 @@ impl CheckoutWatch {
 
     fn subscribe(self: &Arc<Self>, owner: Weak<WorkspaceFilesInner>) -> WorkspaceFileSubscription {
         self.subscribers.fetch_add(1, Ordering::AcqRel);
-        let initial = self.resync();
+        let (receiver, initial) = self.subscribe_with_baseline();
         WorkspaceFileSubscription {
-            receiver: self.changes_tx.subscribe(),
+            receiver,
             watch: self.clone(),
             owner,
             initial: Some(initial),
         }
     }
 
-    fn resync(&self) -> WorkspaceFileChanges {
-        WorkspaceFileChanges {
-            sequence: self.sequence.fetch_add(1, Ordering::AcqRel) + 1,
+    fn subscribe_with_baseline(
+        &self,
+    ) -> (
+        broadcast::Receiver<WorkspaceFileChanges>,
+        WorkspaceFileChanges,
+    ) {
+        let sequence = lock(&self.sequence);
+        let receiver = self.changes_tx.subscribe();
+        let baseline = WorkspaceFileChanges {
+            sequence: *sequence,
             resync_required: true,
             changes: Vec::new(),
-        }
+        };
+        (receiver, baseline)
     }
 
     fn publish(&self, resync_required: bool, changes: Vec<WorkspaceFileChange>) {
-        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut counter = lock(&self.sequence);
+        *counter += 1;
+        let sequence = *counter;
         tracing::trace!(
             checkout_id = %self.checkout_id,
             sequence,
@@ -636,7 +647,11 @@ impl WorkspaceFileSubscription {
         };
         match received {
             Ok(changes) => Some(changes),
-            Err(broadcast::error::RecvError::Lagged(_)) => Some(self.watch.resync()),
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let (receiver, baseline) = self.watch.subscribe_with_baseline();
+                self.receiver = receiver;
+                Some(baseline)
+            }
             Err(broadcast::error::RecvError::Closed) => None,
         }
     }
@@ -2510,6 +2525,59 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "removed.rs");
         assert_eq!(changes[0].kind, WorkspaceFileChangeKind::Removed);
+    }
+
+    #[tokio::test]
+    async fn new_subscribers_do_not_create_sequence_gaps_for_existing_subscribers() {
+        let root = tempfile::tempdir().unwrap();
+        let watch = CheckoutWatch::start(
+            "checkout".into(),
+            root.path().into(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut first = watch.subscribe(Weak::new());
+        let baseline = first.recv().await.unwrap();
+        watch.publish(false, Vec::new());
+        let first_event = first.recv().await.unwrap();
+        assert_eq!(first_event.sequence, baseline.sequence + 1);
+        let mut second = watch.subscribe(Weak::new());
+        assert_eq!(second.recv().await.unwrap().sequence, first_event.sequence);
+        watch.publish(false, Vec::new());
+        assert_eq!(
+            first.recv().await.unwrap().sequence,
+            first_event.sequence + 1
+        );
+        assert_eq!(
+            second.recv().await.unwrap().sequence,
+            first_event.sequence + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn lag_recovery_drops_old_frames_without_advancing_shared_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let watch = CheckoutWatch::start(
+            "checkout".into(),
+            root.path().into(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut slow = watch.subscribe(Weak::new());
+        let mut fast = watch.subscribe(Weak::new());
+        slow.recv().await.unwrap();
+        fast.recv().await.unwrap();
+        let mut last = 0;
+        for _ in 0..WATCH_BROADCAST_BUFFER + 2 {
+            watch.publish(false, Vec::new());
+            last = fast.recv().await.unwrap().sequence;
+        }
+        let recovery = slow.recv().await.unwrap();
+        assert!(recovery.resync_required);
+        assert_eq!(recovery.sequence, last);
+        watch.publish(false, Vec::new());
+        assert_eq!(slow.recv().await.unwrap().sequence, last + 1);
+        assert_eq!(fast.recv().await.unwrap().sequence, last + 1);
     }
 
     #[tokio::test]

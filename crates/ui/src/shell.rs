@@ -99,12 +99,21 @@ pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
 fn restore_mounted_focus(
     root: &FocusHandle,
     preferred: &FocusHandle,
+    unfocused: &FocusHandle,
     window: &mut Window,
     cx: &mut App,
 ) {
     let preferred_mounted = root.contains(preferred, window);
     if !root.contains_focused(window, cx) || (root.is_focused(window) && preferred_mounted) {
-        let target = if preferred_mounted { preferred } else { root };
+        // Explicit blur keeps shortcuts active without returning the caret to
+        // an input. The root remains the temporary fallback for stale handles.
+        let target = if window.focused(cx).is_none() {
+            unfocused
+        } else if preferred_mounted {
+            preferred
+        } else {
+            root
+        };
         window.focus(target, cx);
     }
 }
@@ -161,6 +170,7 @@ impl SidebarDisclosureMotion {
 /// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
 /// the shared constructor makes left/right seams mirror each other and avoids
 /// relying on paint order when chrome crosses an animated pane boundary.
+const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 6.0;
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
@@ -1325,6 +1335,8 @@ pub struct Shell {
     /// settle, preserving focus on mounted controls.
     focus_sub: Option<Subscription>,
     shortcut_focus: FocusHandle,
+    /// Neutral shortcut target after clicking away from an input.
+    unfocused: FocusHandle,
     /// Clears the jump hints when the window deactivates: a Cmd+Tab away
     /// swallows the key-up, so without this the chips stay on screen for good.
     activation_sub: Option<Subscription>,
@@ -1590,6 +1602,7 @@ impl Shell {
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
+            unfocused: cx.focus_handle(),
             activation_sub: None,
             _ticker: ticker,
             _state_observation: observation,
@@ -2175,7 +2188,12 @@ impl Shell {
             }
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
+                self.composer
+                    .update(cx, |composer, _| composer.focus_pending = false);
+                panel.update(cx, |panel, cx| {
+                    panel.select_tab_by_key(tab, cx);
+                    panel.request_focus(cx);
+                });
             }
             RightSurface::Diff(id) => {
                 if let Some(changes) = self.diffs.get(&id).cloned() {
@@ -2911,6 +2929,9 @@ impl Shell {
         let panel = self.terminal_panel(cx);
         panel.update(cx, |panel, cx| panel.set_open(open, cx));
         if open {
+            self.composer
+                .update(cx, |composer, _| composer.focus_pending = false);
+            panel.update(cx, |panel, cx| panel.request_focus(cx));
             // Opening lands keyboard focus IN the shell — typing goes straight
             // to the prompt, no click needed (zeron terminal-panel.tsx: the
             // visible+active effect calls `terminal.focus()` on every open).
@@ -3104,6 +3125,7 @@ impl Shell {
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
+        self.focus_composer(cx);
         self.nav.push(NavEntry::Chat(self.active_chat.clone()));
         cx.notify();
     }
@@ -3129,6 +3151,7 @@ impl Shell {
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.route = Route::Chat;
+                self.focus_composer(cx);
                 let target = (!chat_id.is_empty()).then_some(chat_id);
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
@@ -6326,8 +6349,9 @@ impl Shell {
             .absolute()
             .top(px(PANE_RESIZE_HITBOX_TOP))
             .bottom_0()
-            .w(px(12.0))
+            .w(px(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0))
             .flex_none()
+            .occlude()
             .cursor_col_resize()
             .on_hover(motion::hover_listener(fade_key))
             // Codex-style seam feedback: the existing 1px panel border stays
@@ -8435,6 +8459,16 @@ impl Render for Shell {
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
         let browser_dragging = cx.has_active_drag();
+        #[cfg(target_os = "macos")]
+        let browser_resize_inset = if self.right_pane_open(cx)
+            && !self.right_pane_expanded
+            && !self.tween_active(self.right_tween)
+        {
+            // The browser starts inside the panel's one-point left border.
+            px(PANE_RESIZE_HITBOX_HALF_WIDTH - 1.0)
+        } else {
+            px(0.0)
+        };
         let selected_surface = self.resolved_right_active(cx);
         for (id, browser) in &self.browsers {
             let presentation = crate::browser::model::presentation(
@@ -8442,6 +8476,8 @@ impl Render for Shell {
                 browser_dragging,
             );
             browser.update(cx, |browser, cx| {
+                #[cfg(target_os = "macos")]
+                browser.set_resize_inset(browser_resize_inset, cx);
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
             });
@@ -8491,17 +8527,19 @@ impl Render for Shell {
         if self.focus_sub.is_none() {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
+                let unfocused = this.unfocused.clone();
                 let preferred = this.composer.focus_handle(cx);
                 window.on_next_frame(move |window, cx| {
-                    restore_mounted_focus(&root, &preferred, window, cx);
+                    restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
                 cx.notify();
             }));
         }
         let shortcut_focus = self.shortcut_focus.clone();
+        let unfocused = self.unfocused.clone();
         let preferred_focus = self.composer.focus_handle(cx);
         window.defer(cx, move |window, cx| {
-            restore_mounted_focus(&shortcut_focus, &preferred_focus, window, cx);
+            restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
 
         // Modifier events follow focus too. Reconcile from the window's input
@@ -8517,6 +8555,7 @@ impl Render for Shell {
         let root = div()
             .id("shell-root")
             .track_focus(&self.shortcut_focus)
+            .child(div().track_focus(&self.unfocused))
             .relative()
             .flex()
             .flex_row()
@@ -8699,7 +8738,7 @@ impl Render for Shell {
                     )
                     // A forgiving transparent hit target centered on the
                     // seam; the panel's 1px border remains the visual divider.
-                    .left(px(-6.0))
+                    .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
                 let right: AnyElement = if on_chat {
                     self.render_right_pane(cx)
@@ -8749,12 +8788,16 @@ impl Render for Shell {
                 // Keep the right resize target outside the pane's
                 // overflow-hidden width container. This mirrors the sidebar
                 // seam and lets the target straddle both adjacent panes.
+                // Paint it after the page so page input cannot occlude the
+                // inner half. A deferred draw would capture all native input.
                 let right_seam: AnyElement = if let Some(handle) = right_handle {
                     div()
                         .w(px(0.0))
                         .h_full()
                         .flex_none()
-                        .relative()
+                        .absolute()
+                        .left_0()
+                        .top_0()
                         .child(handle)
                         .into_any_element()
                 } else {
@@ -8794,8 +8837,14 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
-                            .child(right_seam)
-                            .child(right),
+                            .child(
+                                div()
+                                    .h_full()
+                                    .flex_none()
+                                    .relative()
+                                    .child(right)
+                                    .child(right_seam),
+                            ),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
@@ -9728,6 +9777,162 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn opening_terminals_focuses_the_terminal_once(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let mut drawer_window = None;
+        for embedded in [false, false, true] {
+            let panel = window
+                .update(cx, |shell, window, cx| {
+                    shell.open_chat("terminal-session".into(), cx);
+                    shell.active_chat = "terminal-session".into();
+                    let panel = if embedded {
+                        shell.add_terminal_surface(cx);
+                        shell.right_terminal.clone().unwrap()
+                    } else {
+                        shell.toggle_terminal(window, cx);
+                        shell.terminal.clone().unwrap()
+                    };
+                    assert!(!shell.composer.read(cx).focus_pending);
+                    panel
+                })
+                .unwrap();
+            let terminal_window = if !embedded && drawer_window.is_some() {
+                drawer_window.unwrap()
+            } else {
+                let handle = cx.update(|cx| {
+                    cx.open_window(gpui::WindowOptions::default(), |_, _| panel.clone())
+                        .unwrap()
+                });
+                if !embedded {
+                    drawer_window = Some(handle);
+                }
+                handle
+            };
+            cx.update_window(terminal_window.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                assert!(
+                    panel.read(cx).focus_handle().is_focused(window),
+                    "embedded: {embedded}"
+                );
+                // Ordinary redraws must not steal focus from another control.
+                let other_input = cx.focus_handle();
+                window.focus(&other_input, cx);
+                window.draw(cx).clear();
+                assert!(other_input.is_focused(window));
+            })
+            .unwrap();
+            if !embedded {
+                window
+                    .update(cx, |shell, window, cx| {
+                        shell.toggle_terminal(window, cx);
+                        assert!(shell.composer.focus_handle(cx).is_focused(window));
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn session_navigation_focuses_composer_once(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        // Render the real composer in its own window to exercise mounting
+        // without the shell's boot/connection gate hiding the destination.
+        let composer_window = cx.update(|cx| {
+            let composer = window.read(cx).unwrap().composer.clone();
+            cx.open_window(gpui::WindowOptions::default(), |_, _| composer)
+                .unwrap()
+        });
+        for destination in ["initial", "chat", "chat", "new", "new", "back", "settings"] {
+            window
+                .update(cx, |shell, _, cx| match destination {
+                    "chat" => shell.open_chat("existing-session".into(), cx),
+                    "new" => shell.open_new_session(cx),
+                    "back" => shell.apply_nav(NavEntry::Chat("existing-session".into()), cx),
+                    "settings" => {
+                        shell.open_settings(SettingsSection::Devices, cx);
+                        shell.close_settings(cx);
+                    }
+                    _ => {}
+                })
+                .unwrap();
+            cx.update_window(composer_window.into(), |composer, window, cx| {
+                window.draw(cx).clear();
+                assert!(
+                    composer
+                        .downcast::<Composer>()
+                        .unwrap()
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    "{destination}"
+                );
+                // Subsequent renders after a click-away must not reclaim it.
+                window.blur();
+                window.draw(cx).clear();
+                assert!(window.focused(cx).is_none(), "{destination}");
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui::test]
     fn projectless_new_session_restores_opt_out_and_clears_sidebar_filter(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         crate::settings::composer::ComposerDefaults {
@@ -10027,6 +10232,7 @@ mod shortcut_focus_regressions {
 
     struct ShortcutHost {
         root: FocusHandle,
+        unfocused: FocusHandle,
         editor: FocusHandle,
         show_editor: bool,
         jumps: usize,
@@ -10035,13 +10241,15 @@ mod shortcut_focus_regressions {
     impl Render for ShortcutHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let root = self.root.clone();
+            let unfocused = self.unfocused.clone();
             let preferred = self.editor.clone();
             window.defer(cx, move |window, cx| {
-                restore_mounted_focus(&root, &preferred, window, cx);
+                restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
             });
             div()
                 .size_full()
                 .track_focus(&self.root)
+                .child(div().track_focus(&self.unfocused))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -10064,6 +10272,30 @@ mod shortcut_focus_regressions {
     }
 
     #[gpui::test]
+    fn explicit_blur_does_not_refocus_a_mounted_input(cx: &mut TestAppContext) {
+        let host = cx.add_window(|_, cx| ShortcutHost {
+            root: cx.focus_handle(),
+            unfocused: cx.focus_handle(),
+            editor: cx.focus_handle(),
+            show_editor: true,
+            jumps: 0,
+        });
+        cx.run_until_parked();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        host.update(cx, |host, window, cx| {
+            window.focus(&host.editor, cx);
+            window.blur();
+            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
+            assert!(host.unfocused.is_focused(window));
+            // Subsequent renders must keep the neutral shortcut focus too.
+            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
+            assert!(host.unfocused.is_focused(window));
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
     fn shortcuts_recover_from_retained_editor_focus(cx: &mut TestAppContext) {
         cx.update(|cx| {
             cx.bind_keys([KeyBinding::new(
@@ -10074,6 +10306,7 @@ mod shortcut_focus_regressions {
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
             root: cx.focus_handle(),
+            unfocused: cx.focus_handle(),
             editor: cx.focus_handle(),
             show_editor: true,
             jumps: 0,
@@ -10090,7 +10323,7 @@ mod shortcut_focus_regressions {
             cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
                 .unwrap();
             host.update(cx, |host, window, cx| {
-                restore_mounted_focus(&host.root, &host.editor, window, cx);
+                restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
                 assert!(host.root.contains_focused(window, cx));
                 assert_eq!(host.editor.is_focused(window), show_editor);
             })
@@ -10100,8 +10333,8 @@ mod shortcut_focus_regressions {
         host.update(cx, |host, window, cx| {
             assert_eq!(host.jumps, 4);
             window.blur();
-            restore_mounted_focus(&host.root, &host.editor, window, cx);
-            assert!(host.root.is_focused(window));
+            restore_mounted_focus(&host.root, &host.editor, &host.unfocused, window, cx);
+            assert!(host.unfocused.is_focused(window));
         })
         .unwrap();
     }
@@ -10117,6 +10350,7 @@ mod shortcut_focus_regressions {
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
             root: cx.focus_handle(),
+            unfocused: cx.focus_handle(),
             editor: cx.focus_handle(),
             show_editor: true,
             jumps: 0,

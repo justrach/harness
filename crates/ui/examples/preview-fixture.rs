@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
         history::init(settings.git_history_columns, settings.git_history_column_widths, settings.git_history_column_order, settings.git_history_author_display, cx);
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
         let state = cx.new(|_| { let mut s = state::AppState::new(); s.connection = zeron_proto::view::ConnectionStatus::Ready; s.workspace_scope = Some(zeron_proto::WorkspaceScope::Development); s.local_device_id = Some(device.clone()); s.devices = vec![serde_json::from_value(serde_json::json!({"id":device,"name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()]; s.chats = chats; s.spaces = spaces; s.selected_chat = Some("preview-fixture".into()); s.selected_space = Some("project".into()); s.auto_selected = true; s.chats_synced = true; s.spaces_synced = true; s });
-        let window = cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)),size(px(1100.),px(760.))))), ..Default::default() }, |_,cx| cx.new(|cx| shell::Shell::new(state.clone(),boot,cx))).unwrap();
+        let window = cx.open_window(WindowOptions { window_background: theme::Theme::of(cx).window_background_appearance(), window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)),size(px(1100.),px(760.))))), ..Default::default() }, |_,cx| cx.new(|cx| shell::Shell::new(state.clone(),boot,cx))).unwrap();
         state.update(cx, |_,cx| cx.notify()); cx.activate(true);
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
@@ -202,10 +202,14 @@ fn main() -> anyhow::Result<()> {
                 capture(&output,"preview-live-update")?;
                 drop(vite_child.take()); pause(cx,2600).await;
                 anyhow::ensure!(browser.read_with(cx,|b,_|b.fixture_previews().services.len()==1),"stopped Vite remained in discovery");
+                std::fs::write(project.join("index.html"),html.replace("Fieldnotes</title>","Fieldnotes · Restarted</title>"))?;
                 vite_child = Some(Child(std::process::Command::new("node").arg(vite_restart).args(["--host","127.0.0.1","--strictPort","--port",&second_port.to_string()]).current_dir(restart_root).stdout(std::process::Stdio::null()).spawn()?));
                 for _ in 0..150 { if browser.read_with(cx,|b,_|b.fixture_previews().services.iter().any(|s|s.port==second_port)) {break;} pause(cx,100).await; }
                 let after = browser.read_with(cx,|b,_|b.fixture_previews()); anyhow::ensure!(after.services.iter().any(|s|s.port==second_port && s.url(after.proxy_port)==stable),"port change lost stable identity");
-                window.update(cx,|_,w,cx|browser.update(cx,|b,cx|b.navigate(&stable,w,cx)))?; pause(cx,2000).await; capture(&output,"preview-restarted-stable-url")?;
+                window.update(cx,|_,w,cx|browser.update(cx,|b,cx|b.navigate(&stable,w,cx)))?;
+                for _ in 0..150 { if browser.read_with(cx,|b,_|b.page.title=="Fieldnotes · Restarted" && !b.page.loading) { break; } pause(cx,100).await; }
+                anyhow::ensure!(browser.read_with(cx,|b,_|b.page.title=="Fieldnotes · Restarted" && b.page.error.is_none()),"restarted server did not load through its stable URL: {:?}",browser.read_with(cx,|b,_|b.page.clone()));
+                capture(&output,"preview-restarted-stable-url")?;
                 drop(api.take()); pause(cx,2600).await;
                 let (_,empty) = window.update(cx,|shell,w,cx|shell.fixture_open_browser(None,w,cx))?;
                 empty.update(cx,|b,cx|b.watch_previews(handle.clone(),"preview-fixture".into(),cx)); pause(cx,800).await;
