@@ -205,6 +205,34 @@ pub(crate) fn item_type(item: &Value) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
+pub(super) fn is_collab_spawn(item: &Value) -> bool {
+    matches!(
+        item_type(item),
+        "collabAgentToolCall" | "collab_agent_tool_call"
+    ) && matches!(
+        item.get("tool").and_then(Value::as_str),
+        Some("spawnAgent" | "spawn_agent")
+    )
+}
+
+/// A v1 spawn names its child in the completed result. Other collaboration
+/// tools can address several receivers, but only a spawn owns a transcript.
+pub(super) fn collab_spawn_child(item: &Value) -> Option<&str> {
+    if !is_collab_spawn(item)
+        || matches!(
+            item.get("status").and_then(Value::as_str),
+            Some("failed" | "errored")
+        )
+    {
+        return None;
+    }
+    let receivers = field(item, &["receiverThreadIds", "receiver_thread_ids"])?.as_array()?;
+    match receivers.as_slice() {
+        [child] => child.as_str().filter(|id| !id.is_empty()),
+        _ => None,
+    }
+}
+
 /// Map one `item/started` or `item/completed` payload's item to events.
 /// `agentMessage` and `reasoning` flow through their delta channels and are
 /// handled by the session loop, not here.
@@ -299,6 +327,29 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
         "error" => vec![AgentEvent::Error {
             message: str_field(item, &["message"]),
         }],
+        "collabAgentToolCall" | "collab_agent_tool_call" => {
+            let tool = str_field(item, &["tool"]);
+            let name = if is_collab_spawn(item) {
+                "Agent".to_owned()
+            } else {
+                match tool.as_str() {
+                    "sendInput" | "send_input" => "Send agent message".to_owned(),
+                    "wait" => "Wait for agents".to_owned(),
+                    "closeAgent" | "close_agent" => "Close agent".to_owned(),
+                    "resumeAgent" | "resume_agent" => "Resume agent".to_owned(),
+                    _ => format!("Agent control: {tool}"),
+                }
+            };
+            tool_lifecycle(
+                phase,
+                id,
+                ToolCall::Unknown {
+                    name,
+                    input: Some(item.clone()),
+                },
+                matches!(status.as_str(), "failed" | "errored"),
+            )
+        }
         // A subagent spawn/lifecycle marker on the PARENT thread (multi-agent
         // v2, codex 0.146.x): the parent-feed chip for the child thread. The
         // child's own traffic routes separately (see `route_child_notification`
@@ -591,6 +642,54 @@ mod tests {
     }
 
     #[test]
+    fn v1_spawns_and_controls_have_distinct_roles() {
+        for tool in ["spawnAgent", "spawn_agent"] {
+            let mut item = json!({"type":"collabAgentToolCall", "id":"spawn", "tool":tool,
+                "status":"completed", "receiverThreadIds":["child"], "model":"child-model"});
+            assert_eq!(collab_spawn_child(&item), Some("child"));
+            let events = map_item(Phase::Completed, &item);
+            assert!(matches!(&events[0], AgentEvent::ToolCall { call, .. }
+                if call.is_subagent_spawn() && call.subagent_model() == Some("child-model")));
+            assert!(matches!(
+                &events[1],
+                AgentEvent::ToolResult {
+                    is_error: false,
+                    ..
+                }
+            ));
+            item["status"] = "failed".into();
+            assert_eq!(collab_spawn_child(&item), None);
+            assert!(matches!(
+                map_item(Phase::Completed, &item).last(),
+                Some(AgentEvent::ToolResult { is_error: true, .. })
+            ));
+        }
+        for tool in [
+            "sendInput",
+            "send_input",
+            "wait",
+            "closeAgent",
+            "resumeAgent",
+            "futureControl",
+        ] {
+            let item = json!({"type":"collabAgentToolCall", "id":"control", "tool":tool,
+                "receiverThreadIds":["child"]});
+            assert_eq!(collab_spawn_child(&item), None);
+            assert!(
+                matches!(&map_item(Phase::Started, &item)[0], AgentEvent::ToolCall { call, .. } if !call.is_subagent_spawn())
+            );
+        }
+        for receivers in [json!([]), json!(["one", "two"]), json!([""])] {
+            assert_eq!(
+                collab_spawn_child(
+                    &json!({"type":"collabAgentToolCall", "tool":"spawnAgent", "receiverThreadIds":receivers})
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn sub_agent_activity_maps_to_a_named_parent_chip() {
         let started = map_item(
             Phase::Started,
@@ -660,10 +759,16 @@ mod tests {
             Some("th-c".into())
         );
         assert_eq!(
-            notification_thread_id("turn/completed", &json!({"threadId": "th-1", "turn": {"id": "t"}})),
+            notification_thread_id(
+                "turn/completed",
+                &json!({"threadId": "th-1", "turn": {"id": "t"}})
+            ),
             Some("th-1".into())
         );
-        assert_eq!(notification_thread_id("error", &json!({"message": "x"})), None);
+        assert_eq!(
+            notification_thread_id("error", &json!({"message": "x"})),
+            None
+        );
     }
 
     #[test]

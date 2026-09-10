@@ -641,6 +641,57 @@ async fn models_discovers_visible_catalog_with_pagination() {
 }
 
 #[tokio::test]
+async fn v1_spawns_bind_children_and_controls_do_not_create_agents() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:v1-subagents"), controls).await;
+    let spawns: std::collections::HashSet<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { id, call } if call.is_subagent_spawn() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spawns,
+        std::collections::HashSet::from(["spawn-alpha", "spawn-beta"])
+    );
+    for e in &events {
+        if let AgentEvent::Subagent {
+            parent_tool_use_id, ..
+        } = e
+        {
+            assert!(spawns.contains(parent_tool_use_id.as_str()), "{e:?}");
+        }
+    }
+    for (owner, text) in [
+        ("spawn-alpha", "alpha answer"),
+        ("spawn-beta", "beta answer"),
+    ] {
+        assert!(events.iter().any(|e| matches!(e,
+            AgentEvent::Subagent { parent_tool_use_id, event }
+            if parent_tool_use_id == owner && matches!(event.as_ref(), AgentEvent::TextDelta { text: t } if t == text)
+        )));
+    }
+    assert!(events.iter().any(|e| matches!(e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+        if parent_tool_use_id == "spawn-beta" && matches!(event.as_ref(), AgentEvent::ToolCall { id, .. } if id == "beta-tool")
+    )));
+    assert!(events.iter().any(|e| matches!(e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+        if parent_tool_use_id == "spawn-beta" && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Also check gamma")
+    )));
+    assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::Subagent { event, .. } if matches!(event.as_ref(), AgentEvent::Done { .. }))).count(), 2);
+    let parent: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parent, "parent answer");
+}
+
+#[tokio::test]
 async fn child_identity_survives_early_output_and_later_activity_ids() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:child-identity"), controls).await;

@@ -1178,6 +1178,11 @@ async fn run_session(session: Session) {
                         };
                         let item = params.get("item").cloned().unwrap_or(Value::Null);
                         let mut buffered_child_events = Vec::new();
+                        if let Some(child) = normalize::collab_spawn_child(&item) {
+                            if child == thread_id { continue; }
+                            let call = item.get("id").and_then(Value::as_str).unwrap_or("");
+                            buffered_child_events = children.bind(child, call);
+                        }
                         // Only a spawn establishes ownership. Later activity ids
                         // must never replace the id used by the child's document.
                         if matches!(

@@ -144,6 +144,11 @@ case "$turnline" in
   cat "$(dirname "$0")/codex/child-identity.jsonl"
   ;;
 
+*scenario:v1-subagents*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  cat "$(dirname "$0")/codex/v1-subagents.jsonl"
+  ;;
+
 *scenario:subagent*)
   # Multi-agent v2 child-thread routing: registration via subAgentActivity,
   # tagged child items, consumed child turn bookkeeping (must never settle
