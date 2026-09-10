@@ -2805,6 +2805,36 @@ impl Shell {
         self.prepare_exit(PendingExit::CloseWindow, cx)
     }
 
+    /// The first rung of `⌘W` / Window > Close Window: when the right pane is
+    /// open on a real surface (the file / diff / terminal / browser tab the
+    /// user just opened), close THAT and leave the window alone. Returns true
+    /// when the close was consumed by the pane.
+    ///
+    /// The pane's empty picker state and a closed pane both yield false, so the
+    /// caller falls through to [`Self::prepare_window_close`] and the window
+    /// closes — the same cascade browsers use. The native traffic-light close
+    /// deliberately skips this rung: it always closes the window.
+    pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(surface) = self.closable_right_surface(cx) else {
+            return false;
+        };
+        self.close_right_surface(surface, window, cx);
+        true
+    }
+
+    /// The right pane's closable surface for the `⌘W` cascade: the resolved
+    /// active surface while the pane is open, or `None` on the picker empty
+    /// state / a closed pane / the new-session canvas.
+    fn closable_right_surface(&self, cx: &App) -> Option<RightSurface> {
+        if !self.right_pane_open(cx) {
+            return None;
+        }
+        match self.resolved_right_active(cx) {
+            RightSurface::Picker => None,
+            surface => Some(surface),
+        }
+    }
+
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::Quit, cx)
     }
@@ -10086,6 +10116,68 @@ mod exit_regressions {
             weak.upgrade().is_none(),
             "closed browser retained by callbacks"
         );
+    }
+
+    #[gpui::test]
+    fn cmd_w_closes_the_active_right_pane_surface_before_the_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "session".into();
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+
+                shell.add_browser_surface(None, window, cx);
+                let first = shell.browser_seq;
+                shell.add_browser_surface(None, window, cx);
+                let second = shell.browser_seq;
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(second)
+                );
+
+                // ⌘W closes the active tab, not the window.
+                assert!(shell.close_active_surface(window, cx));
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(first)
+                );
+
+                // …and again for the last tab.
+                assert!(shell.close_active_surface(window, cx));
+                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+
+                // An open pane with nothing left to close falls through to the
+                // window-close rung instead of being consumed.
+                assert!(!shell.close_active_surface(window, cx));
+
+                // So does an already-closed pane.
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx));
+                assert!(!shell.close_active_surface(window, cx));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
