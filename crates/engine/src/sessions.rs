@@ -362,20 +362,28 @@ impl SessionsEngine {
             )
         });
         if let Some((run_id, steerable, same_runtime, steer_tx, ledger)) = routed {
-            let message = SteerMessage {
-                prompt: request.prompt.clone(),
-                message_id: message_id.clone(),
-            };
-            if steerable && same_runtime && steer_tx.try_send(message).is_ok() {
-                // The run can vanish between the send and here (the idle
-                // reaper, a parked child death): the ledger entry below is
-                // the at-least-once guarantee — the run task's exit drain
-                // re-dispatches any accepted steer no `Steered` confirmed.
-                let user_id = message_id.clone().unwrap_or_else(new_id);
-                lock(&ledger).push_back(RoutedSteer {
+            let user_id = message_id.clone().unwrap_or_else(new_id);
+            let accepted = if steerable && same_runtime {
+                // Warm dispatch uses the same mailbox as explicit steering.
+                // Register acceptance before a fast boundary can retire it.
+                let mut pending = lock(&ledger);
+                let message = SteerMessage {
                     prompt: request.prompt.clone(),
-                    message_id: user_id.clone(),
-                });
+                    message_id: Some(user_id.clone()),
+                };
+                if steer_tx.try_send(message).is_ok() {
+                    pending.push_back(RoutedSteer {
+                        prompt: request.prompt.clone(),
+                        message_id: user_id.clone(),
+                    });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if accepted {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 if self.is_live(chat_id, &run_id) {
@@ -533,23 +541,23 @@ impl SessionsEngine {
         let Some((run_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
             prompt: prompt.to_string(),
-            message_id: message_id.clone(),
+            message_id: Some(user_id.clone()),
         };
-        if steer_tx.try_send(message).is_err() {
-            return Ok(SteerOutcome::NotSteerable);
+        {
+            // Serialize mailbox acceptance with confirmation and Done-time
+            // inspection: a fast consumer must never outrun its ledger entry.
+            let mut pending = lock(&ledger);
+            if steer_tx.try_send(message).is_err() {
+                return Ok(SteerOutcome::NotSteerable);
+            }
+            pending.push_back(RoutedSteer {
+                prompt: prompt.to_string(),
+                message_id: user_id.clone(),
+            });
         }
-        // Accepted: ledger first (at-least-once across a dying run), then the
-        // user entry (client-minted id), then Working BEFORE the
-        // lastMessageAt bump — same causal-order invariant as the dispatch
-        // route (an observer must never hold [new message, settled status]:
-        // the phantom "completed" flash, 2026-07-31).
-        let user_id = message_id.unwrap_or_else(new_id);
-        lock(&ledger).push_back(RoutedSteer {
-            prompt: prompt.to_string(),
-            message_id: user_id.clone(),
-        });
         let handle = self.doc_handle(chat_id)?;
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
@@ -845,12 +853,32 @@ impl Inner {
     }
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
+        self.set_status_with_completion(chat_id, status, fresh_start, None);
+    }
+
+    fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
+        lock(&self.runs)
+            .get(chat_id)
+            .filter(|h| h.run_id == run_id)
+            .is_some_and(|h| !lock(&h.routed_steers).is_empty())
+    }
+
+    /// Publish the completion marker atomically with the settled status. Keep
+    /// it on subsequent Working/heartbeat rows for coalesced and remote watches.
+    fn set_status_with_completion(
+        &self,
+        chat_id: &str,
+        status: SessionStatus,
+        fresh_start: bool,
+        completed_turn: Option<String>,
+    ) {
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
+                    last_completed_turn: None,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
                     status,
@@ -867,6 +895,9 @@ impl Inner {
                 entry.status,
                 SessionStatus::Working | SessionStatus::AwaitingInput
             );
+            if let Some(turn) = completed_turn {
+                entry.last_completed_turn = Some(turn);
+            }
             entry.status = status;
             entry.updated_at = now;
             match status {
@@ -1448,6 +1479,7 @@ async fn drive_run(
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
 
+    let mut final_completed_turn = None;
     let final_status = loop {
         let event: AgentEvent = tokio::select! {
             biased;
@@ -1571,6 +1603,13 @@ async fn drive_run(
                     "turn quiesced: stream silent after completed output with no \
                      turn-end; parking (suspected missing harness Done)"
                 );
+                // Some adapters close a completed response through this
+                // engine watchdog instead of a native Done. Preserve that
+                // completion notice, but never notify for an empty boundary
+                // or while an accepted steer still awaits delivery.
+                let completed_turn = ((!folded.is_empty() || writer.is_some())
+                    && !inner.has_pending_steers(&chat_id, &run_id))
+                    .then(|| entry_id.clone());
                 if !folded.is_empty() || writer.is_some() {
                     if let Err(err) = finish_segment(
                         doc_ref,
@@ -1591,7 +1630,9 @@ async fn drive_run(
                 segment_started = now_ms();
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                inner.set_status(&chat_id, SessionStatus::Idle, false);
+                inner.set_status_with_completion(
+                    &chat_id, SessionStatus::Idle, false, completed_turn,
+                );
                 continue;
             }
         };
@@ -1810,6 +1851,7 @@ async fn drive_run(
         // self-continued turn starts a whole new agent round trip (seconds
         // at minimum, minutes in the incident). Inside the gate everything
         // non-boundary stays inert, exactly as before.
+        let turn_was_active = idle_since.is_none();
         const RESUME_GATE: std::time::Duration = std::time::Duration::from_secs(1);
         if idle_since.is_some() {
             let self_continued = idle_since
@@ -2099,6 +2141,15 @@ async fn drive_run(
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
             }
+            // An accepted steer awaiting its boundary owns the continuation:
+            // the previous Done is an internal handoff, not a completion ping.
+            // Ordinary queued rows are not in this ledger and still notify.
+            let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
+            let completed_turn = (*status == DoneStatus::Completed
+                && !interrupted
+                && turn_was_active
+                && !pending_steer)
+                .then(|| entry_id.clone());
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
@@ -2111,9 +2162,15 @@ async fn drive_run(
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
-                inner.set_status(&chat_id, SessionStatus::Idle, false);
+                inner.set_status_with_completion(
+                    &chat_id,
+                    SessionStatus::Idle,
+                    false,
+                    completed_turn,
+                );
                 continue;
             }
+            final_completed_turn = completed_turn;
             break match status {
                 DoneStatus::Errored => SessionStatus::Errored,
                 _ => SessionStatus::Idle,
@@ -2155,7 +2212,7 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
-    inner.set_status(&chat_id, final_status, false);
+    inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
     if !interrupted && !orphans.is_empty() {
         // The dying run accepted these into its mailbox but never confirmed a
         // Steered boundary (idle-reaper race, a mid-turn error discarding
