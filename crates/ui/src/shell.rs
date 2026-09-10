@@ -1228,7 +1228,7 @@ pub struct Shell {
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, zeron_proto::SessionStatus>,
+    sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -1720,48 +1720,26 @@ impl Shell {
                 });
             }
         }
-        // Session chimes (herdr semantics, `sound::sound_for_transition`): a
-        // question rings whenever a session flips to AwaitingInput, a
-        // completion rings on the Working→Idle edge — for ANY session on any
-        // device. A row's first appearance only seeds the baseline, so boot
-        // (restored rows) and fresh sends stay silent. Desktop banners
-        // (`notify::post`) ride the SAME edges and gates behind their own
-        // settings flag — one detector, two outputs, so the banner can never
-        // fire where the chime wouldn't.
-        //
-        // STALENESS-GATED like the dot (`effective_indicator`), for the same
-        // reason: raw row statuses include the past. A dead turn's Working row
-        // (host killed mid-run, Idle write lost to a wedged room) seeded
-        // prev=Working here, and the moment the old Idle finally synced in —
-        // typically piggybacked on the round-trip of a fresh send — the chime
-        // heard a phantom Working→Idle and rang "done" on send (user report
-        // 2026-07-31). The dot never showed that ghost; the chime must judge
-        // by the identical clock.
-        //
-        // SEND-PENDING-GATED too (`AppState::send_pending`): a send whose
-        // queued command the host hasn't executed yet can still surface a
-        // phantom Working→Idle (a stale Working row crossing the 45s gate on
-        // the send's own re-render, or a late old Idle row) — the done-chime
-        // stays quiet for that chat until the host acks, while the baseline
-        // keeps tracking silently so the ghost edge never fires later. The
-        // question chime is NOT gated: an instant AwaitingInput ack should
-        // still ring.
+        // Banners and chimes share one detector. Completion markers survive
+        // queue handoffs and never advance for interrupts or stale activity.
+        // A row's first appearance seeds the baseline silently (boot/replay).
+        // Pending sends consume completion changes silently, while questions
+        // still ring immediately. Output settings do not affect the baseline.
         {
             let now = Utc::now();
-            type Ping = (String, zeron_proto::SessionStatus, bool, Option<String>);
+            type Ping = (
+                String,
+                crate::sound::SessionNotificationState,
+                bool,
+                Option<String>,
+            );
             let sessions: Vec<Ping> = {
                 let state = state.read(cx);
                 state
                     .sessions
                     .iter()
                     .map(|s| {
-                        use zeron_proto::view::Indicator;
-                        let status = match zeron_proto::view::effective_indicator(Some(s), now) {
-                            Indicator::Working => zeron_proto::SessionStatus::Working,
-                            Indicator::AwaitingInput => zeron_proto::SessionStatus::AwaitingInput,
-                            Indicator::Errored => zeron_proto::SessionStatus::Errored,
-                            Indicator::None => zeron_proto::SessionStatus::Idle,
-                        };
+                        let status = crate::sound::SessionNotificationState::new(s, now);
                         let send_pending = state.send_pending(&s.chat_id, now);
                         let title = state
                             .chats
@@ -1778,10 +1756,9 @@ impl Shell {
             // Zeron; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
             for (chat_id, status, send_pending, title) in sessions {
-                let prev = self.sound_prev.insert(chat_id, status);
+                let prev = self.sound_prev.insert(chat_id, status.clone());
                 if let Some(prev) = prev
-                    && let Some(sound) = crate::sound::sound_for_transition(prev, status)
-                    && !(send_pending && sound == crate::sound::Sound::Done)
+                    && let Some(sound) = status.sound_since(&prev, send_pending)
                 {
                     if self.settings.sound_enabled {
                         crate::sound::play(sound);
@@ -2319,7 +2296,9 @@ impl Shell {
         });
         if let Some(handle) = self.state.read(cx).engine().cloned() {
             let chat_id = self.active_chat.clone();
-            browser.update(cx, |browser, cx| browser.watch_previews(handle, chat_id, cx));
+            browser.update(cx, |browser, cx| {
+                browser.watch_previews(handle, chat_id, cx)
+            });
         }
         let owner = key.clone();
         let sub = cx.subscribe_in(&browser, window, move |this, _, event, window, cx| {
