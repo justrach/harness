@@ -1147,13 +1147,15 @@ impl MarkdownPreview {
                         .justify_center()
                         .px(px(24.0))
                         .pb(px(render::MD_BLOCK_GAP))
+                        // Include the comment gutter so moving from the block to
+                        // its button never leaves the hover group.
+                        .group(group.clone())
                         .child(
                             div()
                                 .w_full()
                                 .max_w(px(MAX_PREVIEW_CONTENT_WIDTH))
                                 .min_w_0()
                                 .relative()
-                                .group(group.clone())
                                 .when_some(comment_line, |el, line| {
                                     el.child(
                                         div()
