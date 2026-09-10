@@ -139,6 +139,11 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
+*scenario:child-identity*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  cat "$(dirname "$0")/codex/child-identity.jsonl"
+  ;;
+
 *scenario:subagent*)
   # Multi-agent v2 child-thread routing: registration via subAgentActivity,
   # tagged child items, consumed child turn bookkeeping (must never settle

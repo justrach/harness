@@ -641,6 +641,67 @@ async fn models_discovers_visible_catalog_with_pagination() {
 }
 
 #[tokio::test]
+async fn child_identity_survives_early_output_and_later_activity_ids() {
+    let (controls, _steer, _token) = controls("Yes");
+    let events = run_to_end(&harness(), request("scenario:child-identity"), controls).await;
+    let spawn = events
+        .iter()
+        .position(|e| {
+            matches!(e,
+                AgentEvent::ToolCall { id, .. } if id == "spawn-alpha"
+            )
+        })
+        .unwrap();
+    let early = events.iter().position(|e| matches!(e,
+        AgentEvent::Subagent { parent_tool_use_id, event }
+        if parent_tool_use_id == "spawn-alpha"
+            && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "early alpha")
+    )).unwrap();
+    assert!(
+        spawn < early,
+        "the chip must exist before buffered traffic binds"
+    );
+    let mut alpha = String::new();
+    let mut beta = String::new();
+    for e in &events {
+        if let AgentEvent::Subagent {
+            parent_tool_use_id,
+            event,
+        } = e
+        {
+            assert!(matches!(
+                parent_tool_use_id.as_str(),
+                "spawn-alpha" | "spawn-beta"
+            ));
+            if let AgentEvent::TextDelta { text } = event.as_ref() {
+                if parent_tool_use_id == "spawn-alpha" {
+                    alpha.push_str(text);
+                } else {
+                    beta.push_str(text);
+                }
+            }
+        }
+    }
+    assert_eq!(alpha, "early alphalater alpha");
+    assert_eq!(beta, "beta outputbeta continues");
+    let parent: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parent, "parent output");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Done { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn child_thread_routing_tags_and_never_settles_parent() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:subagent"), controls).await;
