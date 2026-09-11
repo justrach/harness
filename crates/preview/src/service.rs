@@ -244,18 +244,14 @@ impl Connector for LocalConnector {
             .0
             .local_route(id)
             .ok_or_else(|| anyhow::anyhow!("preview service stopped"))?;
-        // Recheck process ownership before dialing: a stopped dev server's port
-        // may have been reused by an unrelated process since the last scan.
-        let expected = route.listener.clone();
-        let valid = tokio::task::spawn_blocking(move || {
-            discovery::listeners().iter().any(|actual| {
-                actual.pid == expected.pid
-                    && actual.started_at == expected.started_at
-                    && actual.cwd == expected.cwd
-                    && actual.address == expected.address
-            })
-        })
-        .await?;
+        // Recheck process identity before dialing: a stopped dev server's port
+        // may have been reused since the last scan. Checking the one pid is
+        // cheap; enumerating every listener here spawned lsof and ps for each
+        // asset a remote page requested, which showed up as memory and CPU
+        // churn on the hosting Mac.
+        let (pid, started_at) = (route.listener.pid, route.listener.started_at);
+        let valid =
+            tokio::task::spawn_blocking(move || discovery::same_process(pid, started_at)).await?;
         anyhow::ensure!(valid, "preview process changed; waiting for rediscovery");
         Ok(Box::new(
             tokio::net::TcpStream::connect(route.listener.address).await?,
