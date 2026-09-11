@@ -4,6 +4,10 @@ use std::{
     time::Duration,
 };
 use zeron_preview::PreviewService;
+/// Every service binds the fixed proxy port, so tests in this binary must
+/// not run concurrently: one test freeing 7331 for its own proxy to reclaim
+/// would otherwise race another test's service for it.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Child(std::process::Child);
 impl Drop for Child {
     fn drop(&mut self) {
@@ -48,6 +52,7 @@ async fn wait(service: &PreviewService, expected_pid: Option<u32>) {
 }
 #[tokio::test]
 async fn only_current_project_http_processes_are_exposed_and_removals_are_live() {
+    let _serial = SERIAL.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let a = temp.path().join("app");
     let b = temp.path().join("unrelated");
@@ -104,6 +109,7 @@ async fn only_current_project_http_processes_are_exposed_and_removals_are_live()
 /// showed up as request spam (and growing memory) in dev servers like Expo.
 #[tokio::test]
 async fn a_discovered_server_is_probed_once_not_every_cycle() {
+    let _serial = SERIAL.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let app = temp.path().join("app");
     std::fs::create_dir(&app).unwrap();
