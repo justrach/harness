@@ -229,7 +229,8 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
         .write_to(&mut png, image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
     let bytes = png.into_inner();
-    let retained = bytes.len() + (width * height * 4.0) as usize;
+    // GPUI retains decoded CPU pixels as well as the uploaded GPU texture.
+    let retained = bytes.len() + decoded.width() as usize * decoded.height() as usize * 8;
     Ok(MediaImage {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
         width,

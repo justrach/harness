@@ -1866,6 +1866,23 @@ mod async_tests {
     }
 
     #[gpui::test]
+    fn raster_admission_accounts_for_cpu_pixels_and_gpu_texture(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        // The compressed source and one pixel buffer fit, but retaining both
+        // decoded CPU pixels and the GPU texture exceeds the document budget.
+        let raster = image::RgbaImage::new(3000, 3000);
+        let mut png = std::io::Cursor::new(Vec::new());
+        raster.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert!(png.get_ref().len() < zeron_proto::MAX_WORKSPACE_IMAGE_BYTES);
+        let media =
+            super::super::markdown_media::decode_image("image/png", png.into_inner()).unwrap();
+        view.read_with(cx, |view, _| {
+            assert!(view.admit_media(Ok(media)).is_err());
+        });
+    }
+
+    #[gpui::test]
     fn referenced_image_change_invalidates_cache_and_memory_is_bounded(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let view =
