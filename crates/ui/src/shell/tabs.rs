@@ -219,6 +219,8 @@ impl Shell {
         } else {
             content_left
         };
+        let files_width = self.files_reserved_width(cx);
+        let files_slot = files_width.max(28.0);
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -241,7 +243,7 @@ impl Shell {
                 // budgeting them the capped strip overflows by exactly one gap and
                 // the buttons slide right on expand (user report).
                 let gap_budget = if takeover { 8.0 } else { 16.0 };
-                let avail = self.viewport_width - row_left - pr - gap_budget;
+                let avail = self.viewport_width - files_slot - row_left - pr - gap_budget;
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
@@ -292,6 +294,25 @@ impl Shell {
                         &theme,
                         cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                     ))
+                    .child(
+                        div()
+                            .w(px((files_slot
+                                - self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET))
+                            .max(28.0)))
+                            .h_full()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .child(header_icon_button(
+                                "toggle-files-panel",
+                                icons::FOLDER_WITH_FILES,
+                                &theme,
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_files_panel(window, cx)
+                                }),
+                            )),
+                    )
                     .into_any_element(),
             )
         };

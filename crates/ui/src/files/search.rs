@@ -452,9 +452,7 @@ impl FilesSurface {
                     .search
                     .update(cx, |search, cx| search.set_text("", cx));
                 surface.reveal_tree_selection();
-                if result.kind == WorkspaceEntryKind::Directory {
-                    surface.show_tree_sidebar(cx);
-                } else {
+                if result.kind != WorkspaceEntryKind::Directory {
                     surface.open_tree_file(result.path.clone(), cx);
                 }
                 cx.notify();
