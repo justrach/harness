@@ -3719,11 +3719,12 @@ mod markdown_buffer_tests {
                         let _ = window.draw(cx);
                         let bounds = view.read(cx).test_block_bounds(1);
                         let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        // The stored card uses the same remove action as a diff card.
+                        // The 16px remove button ends at the reading column's right edge.
+                        // Click its center; Markdown cards have no inner horizontal padding.
                         click(
                             window,
                             gpui::point(
-                                bounds.right() - gutter - px(24.0),
+                                bounds.right() - gutter - px(8.0),
                                 bounds.bottom()
                                     - px(12.0)
                                     - px(comments::card_height("Clarify this paragraph"))

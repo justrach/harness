@@ -3223,6 +3223,7 @@ impl Changes {
                         &theme,
                         cx,
                         Self::remove_comment,
+                        None,
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
@@ -3246,6 +3247,7 @@ impl Changes {
                         cx,
                         Self::cancel_draft,
                         Self::commit_draft,
+                        None,
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
