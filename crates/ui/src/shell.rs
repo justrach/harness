@@ -7041,7 +7041,9 @@ impl Shell {
                     let panel = self.right_terminal_panel(cx);
                     // Keep the embedded panel's own active tab aligned with
                     // the resolved surface (fallbacks can move it).
-                    let resize_suspended = self.tween_active(self.right_tween);
+                    let resize_suspended = self.tween_active(self.right_tween)
+                        || self.tween_active(self.files_tween)
+                        || self.tween_active(self.sidebar_tween);
                     panel.update(cx, |panel, cx| {
                         panel.set_resize_suspended(resize_suspended);
                         panel.select_tab_by_key(tab, cx);
@@ -8441,7 +8443,7 @@ fn header_icon_button(
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let muted = theme.text_muted;
     let fade_key = format!("header-icon-{id}");
     div()
@@ -8501,7 +8503,14 @@ impl Render for Shell {
             });
         }
         crate::transcript::record_view_frame("shell");
-        self.viewport_width = f32::from(window.viewport_size().width);
+        let viewport = f32::from(window.viewport_size().width);
+        if (self.viewport_width - viewport).abs() > 1.0 {
+            self.files_tween = None;
+            self.right_tween = None;
+            self.right_takeover_content_tween = None;
+            self.main_takeover_tween = None;
+        }
+        self.viewport_width = viewport;
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
@@ -8562,6 +8571,12 @@ impl Render for Shell {
         } else {
             px(0.0)
         };
+        #[cfg(target_os = "macos")]
+        let browser_overlay_width = px(if self.files_visible_width(cx) > 0.0 {
+            self.files_visible_width(cx) + PANE_RESIZE_HITBOX_HALF_WIDTH
+        } else {
+            0.0
+        });
         let selected_surface = self.resolved_right_active(cx);
         for (id, browser) in &self.browsers {
             let presentation = crate::browser::model::presentation(
@@ -8570,7 +8585,10 @@ impl Render for Shell {
             );
             browser.update(cx, |browser, cx| {
                 #[cfg(target_os = "macos")]
-                browser.set_resize_inset(browser_resize_inset, cx);
+                {
+                    browser.set_resize_inset(browser_resize_inset, cx);
+                    browser.set_right_occlusion(browser_overlay_width, cx);
+                }
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
             });

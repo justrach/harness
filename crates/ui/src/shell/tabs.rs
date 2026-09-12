@@ -219,7 +219,7 @@ impl Shell {
         } else {
             content_left
         };
-        let files_width = self.files_reserved_width(cx);
+        let files_width = self.files_visible_width(cx);
         let files_slot = files_width.max(28.0);
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
@@ -233,7 +233,9 @@ impl Shell {
                 .flex_row()
                 .items_center();
             if right_open {
-                let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
+                let right_now = (self.eval_tween(self.right_tween, self.right_target(cx))
+                    - self.files_overlay_width(cx))
+                .max(0.0);
                 let pr = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
                 // The row's own left padding is part of its content box: a strip
                 // wider than what's left after it overflows and clips at the right
@@ -304,14 +306,37 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_end()
-                            .child(header_icon_button(
-                                "toggle-files-panel",
-                                icons::FOLDER_WITH_FILES,
-                                &theme,
-                                cx.listener(|this, _, window, cx| {
-                                    this.toggle_files_panel(window, cx)
+                            .when(files_width >= 120.0, |slot| {
+                                slot.border_l_1()
+                                    .border_color(theme.border)
+                                    .pl(px(10.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text_muted)
+                                            .child("Files"),
+                                    )
+                            })
+                            .child(
+                                header_icon_button(
+                                    "toggle-files-panel",
+                                    icons::FOLDER_WITH_FILES,
+                                    &theme,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.toggle_files_panel(window, cx)
+                                    }),
+                                )
+                                .role(gpui::Role::Button)
+                                .aria_label(if self.files_panel_open(cx) {
+                                    "Hide files panel"
+                                } else {
+                                    "Show files panel"
+                                })
+                                .when(self.files_panel_open(cx), |button| {
+                                    button.bg(crate::theme::wash(0.09))
                                 }),
-                            )),
+                            ),
                     )
                     .into_any_element(),
             )
