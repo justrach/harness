@@ -182,6 +182,7 @@ pub struct FilesSurface {
     editor_path: Option<String>,
     request_context: Option<FilesRequestContext>,
     target_change_pending: bool,
+    selected_editor_path: Option<String>,
     pending_request_context: Option<FilesRequestContext>,
     tree: FileTreeModel,
     tree_list: ListState,
@@ -467,6 +468,7 @@ impl FilesSurface {
             editor_path: editor_path.clone(),
             request_context: None,
             target_change_pending: false,
+            selected_editor_path: None,
             pending_request_context: None,
             tree: FileTreeModel::with_include_ignored(show_all_files),
             tree_list: ListState::new(0, ListAlignment::Top, px(560.0)),
@@ -721,16 +723,29 @@ impl FilesSurface {
         window.defer(cx, move |window, cx| focus.focus(window, cx));
     }
 
+    /// Synchronize selection without replacing the user's current search.
     pub(crate) fn reveal_file(&mut self, path: String, cx: &mut Context<Self>) {
-        self.reveal_search_result(
-            zeron_proto::WorkspaceFileSearchMatch {
-                name: path.rsplit('/').next().unwrap_or(&path).to_string(),
-                path,
-                kind: zeron_proto::WorkspaceEntryKind::File,
-                score: 0,
-            },
-            cx,
-        );
+        if self.selected_editor_path.as_deref() == Some(&path) {
+            return;
+        }
+        if self.request_context.is_none() || self.state.read(cx).engine().is_none() {
+            return;
+        }
+        self.selected_editor_path = Some(path.clone());
+        self.reveal_path(path, false, cx);
+    }
+
+    pub(crate) fn reveal_file_explicit(&mut self, path: String, cx: &mut Context<Self>) {
+        self.selected_editor_path = None;
+        self.search.update(cx, |search, cx| search.set_text("", cx));
+        self.reveal_file(path, cx);
+    }
+
+    pub(crate) fn is_current_target(&self, cx: &gpui::App) -> bool {
+        self.request_context.is_some()
+            && self.request_context
+                == FilesRequestContext::for_chat(self.state.read(cx), &self.chat_id)
+            && !self.target_change_pending
     }
 
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
@@ -741,6 +756,8 @@ impl FilesSurface {
 
     fn apply_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         if self.tree.set_include_ignored(show_all_files) {
+            self.selected_editor_path = None;
+            self.cancel_reveal();
             self.loads.clear();
             self.error = None;
             self.sync_tree_list();
@@ -889,6 +906,15 @@ impl FilesSurface {
         self.editor_context_menu = crate::popover::Popup::default();
         self.preview.reset();
         self.tree.reset();
+        self.selected_editor_path = None;
+        self.cancel_reveal();
+        self.search_state.task = None;
+        self.search_state.generation = self.search_state.generation.wrapping_add(1);
+        self.search_state.query.clear();
+        self.search_state.results.clear();
+        self.search_state.loading = false;
+        self.search_state.error = None;
+        self.reset_search_results();
         self.sync_tree_list();
         self.error = if next.is_none() {
             Some("No workspace available for this chat.".into())
@@ -897,6 +923,9 @@ impl FilesSurface {
         };
         self.request_context = next;
         self.started = false;
+        if !self.search.read(cx).text().trim().is_empty() {
+            self.on_search_edited(cx);
+        }
     }
 
     fn tree_has_content(&self) -> bool {

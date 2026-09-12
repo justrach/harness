@@ -96,6 +96,47 @@ impl Shell {
         self.right_takeover_content_tween = None;
     }
 
+    pub(super) fn accepts_file_navigation(
+        &self,
+        owner: &str,
+        source: &Entity<FilesSurface>,
+        cx: &App,
+    ) -> bool {
+        matches!(self.route, Route::Chat)
+            && self.panel_key(cx) == owner
+            && source.read(cx).is_current_target(cx)
+    }
+
+    pub(super) fn prune_file_explorers(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if !state.chats_synced {
+            return;
+        }
+        let live = state
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .map(|chat| chat.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for key in self.files.keys().filter(|key| !live.contains(key.as_str())) {
+            self.panels.update(key, |panels| panels.files_open = false);
+        }
+        self.files.retain(|key, _| live.contains(key.as_str()));
+        self.files_subs.retain(|key, _| live.contains(key.as_str()));
+    }
+
+    pub(super) fn sync_explorer_selection(&mut self, cx: &mut Context<Self>) {
+        let RightSurface::File(id) = self.resolved_right_active(cx) else {
+            return;
+        };
+        let Some(path) = self.file_surface_paths.get(&id).cloned() else {
+            return;
+        };
+        if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
+            files.update(cx, |files, cx| files.reveal_file(path, cx));
+        }
+    }
+
     pub(super) fn add_files_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_chat.is_empty() {
             return;
@@ -114,8 +155,10 @@ impl Shell {
             let sub = cx.subscribe_in(
                 &files,
                 window,
-                move |this: &mut Self, _, event, window, cx| match event {
-                    FilesEvent::OpenFile(path) if this.panel_key(cx) == owner => {
+                move |this: &mut Self, source, event, window, cx| match event {
+                    FilesEvent::OpenFile(path)
+                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                    {
                         this.add_file_surface(path.clone(), window, cx);
                     }
                     FilesEvent::ShowAllFilesChanged(show_all) => {
@@ -189,6 +232,7 @@ impl Shell {
         if let Some(files) = &content {
             files.update(cx, |files, cx| files.ensure_loaded(cx));
         }
+        self.sync_explorer_selection(cx);
         let target = self.files_target(cx);
         let content_width =
             stable_panel_content_width(target, self.active_tween_endpoints(self.files_tween));
@@ -367,3 +411,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "files_panel_workspace_tests.rs"]
+mod workspace_tests;

@@ -30,12 +30,13 @@ pub const SIDEBAR_MIN: f32 = 208.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
-/// Right ("Changes") pane drag-resize floor and default (px). Its runtime
-/// maximum is the window space remaining after the left sidebar and the
-/// conversation's [`CHAT_PANEL_MIN`] reservation.
+/// Independent file explorer width preference and drag bounds (px).
 pub const FILES_PANEL_DEFAULT: f32 = 286.0;
 pub const FILES_PANEL_MIN: f32 = 220.0;
 pub const FILES_PANEL_MAX: f32 = 440.0;
+
+/// Surface pane floor and default (px). Runtime sizing also reserves space
+/// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 /// Minimum width retained for the conversation when the right pane is open.

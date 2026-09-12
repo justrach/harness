@@ -1670,6 +1670,7 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
+        self.prune_file_explorers(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -2232,6 +2233,7 @@ impl Shell {
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
+        self.sync_explorer_selection(cx);
         cx.notify();
     }
 
@@ -2415,28 +2417,39 @@ impl Shell {
         let sub = cx.subscribe_in(
             &file,
             window,
-            move |this: &mut Self, _, event, window, cx| match event {
-                FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
-                FilesEvent::RevealFile(path) => {
-                    this.add_files_surface(window, cx);
-                    if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
-                        files.update(cx, |files, cx| files.reveal_file(path.clone(), cx));
+            move |this: &mut Self, source, event, window, cx| {
+                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
+                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                {
+                    return;
+                }
+                match event {
+                    FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::RevealFile(path) => {
+                        this.add_files_surface(window, cx);
+                        if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
+                            files.update(cx, |files, cx| {
+                                files.reveal_file_explicit(path.clone(), cx)
+                            });
+                        }
+                    }
+                    FilesEvent::TitleChanged => cx.notify(),
+                    FilesEvent::FileRenamed { old_path, new_path } => {
+                        this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
+                    }
+                    FilesEvent::WordWrapChanged(word_wrap) => {
+                        this.set_files_word_wrap(*word_wrap, window, cx)
+                    }
+                    FilesEvent::ShowAllFilesChanged(show_all_files) => {
+                        this.set_files_show_all(*show_all_files, cx)
+                    }
+                    FilesEvent::CloseReady => {
+                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
+                    }
+                    FilesEvent::CloseCancelled => {
+                        this.cancel_file_close(RightSurface::File(id), cx)
                     }
                 }
-                FilesEvent::TitleChanged => cx.notify(),
-                FilesEvent::FileRenamed { old_path, new_path } => {
-                    this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
-                }
-                FilesEvent::WordWrapChanged(word_wrap) => {
-                    this.set_files_word_wrap(*word_wrap, window, cx)
-                }
-                FilesEvent::ShowAllFilesChanged(show_all_files) => {
-                    this.set_files_show_all(*show_all_files, cx)
-                }
-                FilesEvent::CloseReady => {
-                    this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
-                }
-                FilesEvent::CloseCancelled => this.cancel_file_close(RightSurface::File(id), cx),
             },
         );
         self.file_surfaces.insert(id, file);

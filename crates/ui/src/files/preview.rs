@@ -3194,6 +3194,20 @@ mod tests {
 
 #[cfg(test)]
 impl FilesSurface {
+    pub(crate) fn test_document_text(&self, path: &str) -> Option<String> {
+        self.preview
+            .documents
+            .get(path)?
+            .file
+            .as_ref()?
+            .text
+            .clone()
+    }
+
+    pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
+        Some(format!("{:?}", self.preview.documents.get(path)?.phase))
+    }
+
     pub(crate) fn seed_pending_exit_test_document(&mut self, failed: bool) {
         let mut document = FileDocument::loading(DocumentKey {
             chat_id: "test".into(),

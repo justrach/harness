@@ -135,7 +135,10 @@ impl BrowserSurface {
             };
             content = content.child(
                 div()
-                    .id(gpui::SharedString::from(format!("preview-row-{}", service.id)))
+                    .id(gpui::SharedString::from(format!(
+                        "preview-row-{}",
+                        service.id
+                    )))
                     .w_full()
                     .h(px(56.0))
                     .px(px(14.0))
@@ -527,7 +530,8 @@ impl Render for BrowserSurface {
                         move |bounds, _, window, cx| {
                             let native = std::rc::Rc::downgrade(&native);
                             let mut mask = window.content_mask().bounds;
-                            let right = (window.viewport_size().width - right_occlusion).max(mask.left());
+                            let right =
+                                (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
                             let dragging = cx.has_active_drag();
                             window.on_present(move || {
