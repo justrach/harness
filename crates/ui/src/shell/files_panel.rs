@@ -244,8 +244,19 @@ impl Shell {
             .occlude()
             .border_l_1()
             .border_color(theme.border)
-            .bg(theme.bg)
+            // Match the left sidebar's subtle wash over the shell frost.
+            // An overlay needs its own tint and blur over the covered content.
+            .bg(if overlay {
+                theme.glass_overlay()
+            } else {
+                crate::theme::wash(0.05)
+            })
             .children(content);
+        let inner = if overlay {
+            crate::frost::frosted(0.0, crate::frost::MENU_BLUR, inner).into_any_element()
+        } else {
+            inner.into_any_element()
+        };
         div()
             .id("files-panel")
             .h_full()
