@@ -156,6 +156,7 @@ pub enum FilesCloseDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilesPresentation {
     Browser,
+    Explorer,
     Editor,
 }
 
@@ -205,107 +206,8 @@ pub struct FilesSurface {
 impl Render for FilesSurface {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::Theme::of(cx).clone();
-        let phase = self.tree.node("").map(|root| root.load.clone());
-        let content = if !self.search_state.query.is_empty() {
-            self.render_search_results(cx)
-        } else if let Some(error) = self.error.clone().filter(|_| !self.tree_has_content()) {
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .px(px(28.0))
-                .child(
-                    div()
-                        .text_center()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_muted)
-                        .child(error),
-                )
-                .child(
-                    div()
-                        .id("files-retry-root")
-                        .h(px(28.0))
-                        .px(px(12.0))
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(crate::theme::wash(0.04))
-                        .hover(|style| style.bg(crate::theme::wash(0.09)))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .text_size(px(11.5))
-                        .text_color(theme.text)
-                        .child("Retry")
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_root(cx))),
-                )
-                .into_any_element()
-        } else if !self.tree_has_content()
-            && matches!(
-                phase.as_ref(),
-                Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
-            )
-        {
-            div().flex_1().into_any_element()
-        } else {
-            self.render_tree(cx)
-        };
         let split_editor = self.presentation.is_editor() && self.preview.has_active();
-        let watch_error = self.watch_error.clone();
-        let tree_pane = div()
-            .size_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .when(!split_editor, |pane| {
-                pane.child(self.render_header(&theme, cx))
-            })
-            .when_some(watch_error, |element, error| {
-                element.child(
-                    div()
-                        .h(px(27.0))
-                        .flex_none()
-                        .px(px(10.0))
-                        .border_b_1()
-                        .border_color(theme.warning.opacity(0.22))
-                        .bg(theme.warning.opacity(0.045))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.warning_muted)
-                        .child(
-                            crate::icons::icon(crate::icons::REFRESH)
-                                .size(px(10.5))
-                                .flex_none(),
-                        )
-                        .child(div().min_w_0().flex_1().truncate().child(error))
-                        .child(
-                            div()
-                                .id("files-watch-refresh-now")
-                                .h(px(20.0))
-                                .flex_none()
-                                .px(px(6.0))
-                                .rounded(px(5.0))
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .role(gpui::Role::Button)
-                                .aria_label("Refresh workspace files now")
-                                .text_color(theme.text_muted)
-                                .hover(|style| style.bg(crate::theme::wash(0.07)))
-                                .child("Refresh now")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.refresh(cx);
-                                    this.reconcile_open_documents(cx);
-                                })),
-                        ),
-                )
-            })
-            .child(content);
+        let tree_pane = self.render_explorer(&theme, !split_editor, cx);
         let is_editor = self.presentation.is_editor();
         let mut header = None;
         let body = if split_editor {
@@ -428,6 +330,135 @@ impl Render for FilesSurface {
 }
 
 impl FilesSurface {
+    fn render_explorer(
+        &mut self,
+        theme: &crate::theme::Theme,
+        show_header: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let phase = self.tree.node("").map(|root| root.load.clone());
+        let content = if !self.search_state.query.is_empty() {
+            self.render_search_results(cx)
+        } else if let Some(error) = self.error.clone().filter(|_| !self.tree_has_content()) {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.0))
+                .px(px(28.0))
+                .child(
+                    div()
+                        .text_center()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_muted)
+                        .child(error),
+                )
+                .child(
+                    div()
+                        .id("files-retry-root")
+                        .h(px(28.0))
+                        .px(px(12.0))
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(crate::theme::wash(0.04))
+                        .hover(|style| style.bg(crate::theme::wash(0.09)))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.5))
+                        .text_color(theme.text)
+                        .child("Retry")
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_root(cx))),
+                )
+                .into_any_element()
+        } else if !self.tree_has_content()
+            && matches!(
+                phase.as_ref(),
+                Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
+            )
+        {
+            div().flex_1().into_any_element()
+        } else {
+            self.render_tree(cx)
+        };
+        let watch_error = self.watch_error.clone();
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .when(show_header, |pane| {
+                pane.child(self.render_header(theme, cx))
+            })
+            .when_some(watch_error, |element, error| {
+                element.child(
+                    div()
+                        .h(px(27.0))
+                        .flex_none()
+                        .px(px(10.0))
+                        .border_b_1()
+                        .border_color(theme.warning.opacity(0.22))
+                        .bg(theme.warning.opacity(0.045))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.warning_muted)
+                        .child(
+                            crate::icons::icon(crate::icons::REFRESH)
+                                .size(px(10.5))
+                                .flex_none(),
+                        )
+                        .child(div().min_w_0().flex_1().truncate().child(error))
+                        .child(
+                            div()
+                                .id("files-watch-refresh-now")
+                                .h(px(20.0))
+                                .flex_none()
+                                .px(px(6.0))
+                                .rounded(px(5.0))
+                                .flex()
+                                .items_center()
+                                .cursor_pointer()
+                                .role(gpui::Role::Button)
+                                .aria_label("Refresh workspace files now")
+                                .text_color(theme.text_muted)
+                                .hover(|style| style.bg(crate::theme::wash(0.07)))
+                                .child("Refresh now")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.refresh(cx);
+                                    this.reconcile_open_documents(cx);
+                                })),
+                        ),
+                )
+            })
+            .child(content)
+    }
+
+    /// A persistent explorer: opening a path always delegates to the shell.
+    pub fn new_explorer(
+        state: Entity<AppState>,
+        chat_id: String,
+        show_all_files: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_presentation(
+            state,
+            chat_id,
+            FilesPresentation::Explorer,
+            None,
+            false,
+            1000,
+            13.0,
+            false,
+            show_all_files,
+            cx,
+        )
+    }
+
     pub fn new(
         state: Entity<AppState>,
         chat_id: String,
@@ -725,6 +756,10 @@ impl FilesSurface {
         {
             self.open_file(path, cx);
         }
+        self.ensure_tree_loaded(cx);
+    }
+
+    fn ensure_tree_loaded(&mut self, cx: &mut Context<Self>) {
         if self.started {
             return;
         }
@@ -765,7 +800,7 @@ impl FilesSurface {
     }
 
     pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
-        if self.presentation.is_editor() {
+        if self.presentation != FilesPresentation::Browser {
             cx.emit(FilesEvent::OpenFile(path));
             return;
         }
@@ -1001,5 +1036,38 @@ impl FilesSurface {
                     }),
                 ),
             )
+    }
+}
+
+#[cfg(test)]
+mod explorer_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn explorer_open_delegates_without_becoming_an_editor(cx: &mut TestAppContext) {
+        let surface = cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            FilesSurface::new_explorer(state, "chat".into(), false, cx)
+        });
+        let paths = Rc::new(RefCell::new(Vec::new()));
+        let emitted = paths.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(&surface, move |_, event, _| {
+                if let FilesEvent::OpenFile(path) = event {
+                    emitted.borrow_mut().push(path.clone());
+                }
+            })
+        });
+        surface.update(cx, |surface, cx| {
+            surface.open_tree_file("src/main.rs".into(), cx);
+            surface.open_tree_file("README.md".into(), cx);
+            assert_eq!(surface.presentation, FilesPresentation::Explorer);
+            assert!(surface.editor_path.is_none());
+            assert!(!surface.preview.has_active());
+            assert!(!surface.preview.has_unsaved_changes());
+        });
+        assert_eq!(*paths.borrow(), ["src/main.rs", "README.md"]);
     }
 }
