@@ -39,6 +39,28 @@ pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
     }
 }
 
+struct PanelTitlebarWidths {
+    surface_reveal: f32,
+    files_controls: f32,
+}
+
+fn panel_titlebar_widths(
+    surfaces_visible: f32,
+    files_visible: f32,
+    available: f32,
+    right_pad: f32,
+) -> PanelTitlebarWidths {
+    // Caption controls occupy the far-right panel first. Subtract their
+    // clearance once across the combined header, then split it at Files.
+    // The folder toggle keeps one slot even when its panel is closed.
+    let files_controls = (files_visible - right_pad).max(28.0);
+    let surfaces = surfaces_visible + files_visible - right_pad - files_controls;
+    PanelTitlebarWidths {
+        surface_reveal: (surfaces.min(available - files_controls) - 28.0).max(0.0),
+        files_controls,
+    }
+}
+
 impl Shell {
     /// Navigation requests focus once the destination composer renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
@@ -220,7 +242,18 @@ impl Shell {
             content_left
         };
         let files_width = self.files_visible_width(cx);
-        let files_slot = files_width.max(28.0);
+        let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
+        // The title row's gaps are outside the fixed-width panel controls.
+        let gap_budget = if takeover { 8.0 } else { 16.0 };
+        let right_visible = (self.eval_tween(self.right_tween, self.right_target(cx))
+            - self.files_overlay_width(cx))
+        .max(0.0);
+        let widths = panel_titlebar_widths(
+            right_visible,
+            files_width,
+            self.viewport_width - row_left - right_pad - gap_budget,
+            right_pad,
+        );
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -233,19 +266,6 @@ impl Shell {
                 .flex_row()
                 .items_center();
             if right_open {
-                let right_now = (self.eval_tween(self.right_tween, self.right_target(cx))
-                    - self.files_overlay_width(cx))
-                .max(0.0);
-                let pr = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
-                // The row's own left padding is part of its content box: a strip
-                // wider than what's left after it overflows and clips at the right
-                // edge (flex_none never shrinks) — cap to the available width. The
-                // row's 8px child gaps sit OUTSIDE the strip's width (one before
-                // the strip in takeover, two with the title row present): without
-                // budgeting them the capped strip overflows by exactly one gap and
-                // the buttons slide right on expand (user report).
-                let gap_budget = if takeover { 8.0 } else { 16.0 };
-                let avail = self.viewport_width - files_slot - row_left - pr - gap_budget;
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
@@ -254,10 +274,9 @@ impl Shell {
                 // sidebar control. Only the tabs + expand section reveals to
                 // its left; including the toggle in this animated width
                 // compressed both icons into the same clipped box at open.
-                let animated_width = ((right_now - pr).min(avail) - 28.0).max(0.0);
                 controls = controls.child(
                     div()
-                        .w(px(animated_width))
+                        .w(px(widths.surface_reveal))
                         .h_full()
                         .flex_none()
                         .flex()
@@ -298,9 +317,7 @@ impl Shell {
                     ))
                     .child(
                         div()
-                            .w(px((files_slot
-                                - self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET))
-                            .max(28.0)))
+                            .w(px(widths.files_controls))
                             .h_full()
                             .flex_none()
                             .flex()
@@ -349,7 +366,7 @@ impl Shell {
             .pt(px(Theme::TITLEBAR_TOP_PAD))
             .gap(px(8.0))
             .pl(px(row_left))
-            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
+            .pr(px(right_pad))
             // In panel takeover the header strip spans the whole band — the
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.
@@ -405,6 +422,71 @@ impl Shell {
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod panel_titlebar_tests {
+    use super::*;
+
+    #[test]
+    fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {
+        let viewport = 1400.0;
+        for right_pad in [6.0, 40.0, 92.0, 114.0] {
+            for files in [0.0, 10.0, 28.0, 100.0, 220.0, 286.0, 440.0] {
+                let widths = panel_titlebar_widths(520.0, files, 1100.0, right_pad);
+                let controls_left =
+                    viewport - right_pad - widths.files_controls - 28.0 - widths.surface_reveal;
+                assert_eq!(
+                    controls_left,
+                    viewport - files - 520.0,
+                    "caption clearance {right_pad}, Files width {files}"
+                );
+                assert!(widths.files_controls >= 28.0);
+                if files >= right_pad + 28.0 {
+                    assert_eq!(
+                        viewport - right_pad - widths.files_controls,
+                        viewport - files
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_tabs_clear_the_left_controls_without_reserving_captions_twice() {
+        for right_pad in [6.0, 92.0, 114.0] {
+            let viewport = 1400.0;
+            let files = 286.0;
+            // With the sidebar open, the header starts exactly at its seam.
+            // With it collapsed, leave room for the window/nav controls.
+            for (sidebar, row_left) in [(256.0, 248.0), (0.0, 180.0)] {
+                let widths = panel_titlebar_widths(
+                    viewport - sidebar - files,
+                    files,
+                    viewport - row_left - right_pad - 8.0,
+                    right_pad,
+                );
+                let controls_left =
+                    viewport - right_pad - widths.files_controls - 28.0 - widths.surface_reveal;
+                assert_eq!(controls_left, sidebar.max(row_left + 8.0));
+            }
+        }
+    }
+
+    #[test]
+    fn overlaid_files_and_tight_headers_keep_nonnegative_reveal_widths() {
+        // A 286px overlay covers the right end of a 520px surface.
+        let widths = panel_titlebar_widths(234.0, 286.0, 600.0, 92.0);
+        assert_eq!(
+            1000.0 - 92.0 - widths.files_controls - 28.0 - widths.surface_reveal,
+            480.0
+        );
+        for available in [-20.0, 0.0, 28.0, 56.0, 100.0] {
+            let widths = panel_titlebar_widths(0.0, 0.0, available, 114.0);
+            assert_eq!(widths.surface_reveal, 0.0);
+            assert_eq!(widths.files_controls, 28.0);
+        }
     }
 }
 

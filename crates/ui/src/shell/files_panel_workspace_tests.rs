@@ -238,6 +238,28 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .unwrap();
                 frame(window, cx, output.as_deref(), "02-editor-files").await;
                 window
+                    .update(cx, |shell, window, cx| {
+                        shell.add_file_surface("README.md".into(), window, cx);
+                    })
+                    .unwrap();
+                frame(window, cx, output.as_deref(), "02b-two-file-tabs").await;
+                window
+                    .update(cx, |shell, window, cx| shell.toggle_files_panel(window, cx))
+                    .unwrap();
+                frame(
+                    window,
+                    cx,
+                    output.as_deref(),
+                    "02c-two-file-tabs-explorer-hidden",
+                )
+                .await;
+                window
+                    .update(cx, |shell, window, cx| {
+                        shell.toggle_files_panel(window, cx);
+                        shell.add_file_surface("src/nested/main.rs".into(), window, cx);
+                    })
+                    .unwrap();
+                window
                     .update(cx, |shell, _, cx| shell.toggle_right_pane_expand(cx))
                     .unwrap();
                 frame(window, cx, output.as_deref(), "03-expanded-files").await;
