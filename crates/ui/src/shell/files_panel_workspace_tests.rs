@@ -210,6 +210,27 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "01-chat-files").await;
                 window
                     .update(cx, |shell, window, cx| {
+                        shell.settings.files_panel_width = FILES_PANEL_MAX;
+                        shell.settings.right_pane_width = 760.0;
+                        shell.toggle_right_pane(cx);
+                        window.resize(gpui::size(px(1200.0), px(800.0)));
+                        window.bounds_changed(cx);
+                    })
+                    .unwrap();
+                frame(window, cx, output.as_deref(), "01b-picker-files-overlay").await;
+                window
+                    .update(cx, |shell, window, cx| {
+                        assert!(shell.files_overlay_width(cx) > 0.0);
+                        assert!(shell.right_surface_rows(cx).is_empty());
+                        shell.toggle_right_pane(cx);
+                        shell.settings.files_panel_width = FILES_PANEL_DEFAULT;
+                        shell.settings.right_pane_width = RIGHT_PANE_DEFAULT;
+                        window.resize(gpui::size(px(1400.0), px(800.0)));
+                        window.bounds_changed(cx);
+                    })
+                    .unwrap();
+                window
+                    .update(cx, |shell, window, cx| {
                         shell.add_file_surface("src/nested/main.rs".into(), window, cx)
                     })
                     .unwrap();

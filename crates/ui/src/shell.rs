@@ -7177,6 +7177,9 @@ impl Shell {
             .items_center()
             .justify_center()
             .p(px(16.0))
+            // The responsive Files drawer covers the right end of this
+            // surface. Center the picker in the remaining visible region.
+            .pr(px(16.0 + self.files_overlay_width(cx)))
             .child(
                 div()
                     .w_full()
