@@ -49,6 +49,7 @@ pub(crate) fn render_comment_card<T: 'static>(
     comment: &ReviewComment,
     theme: &Theme,
     cx: &Context<T>,
+    edit: fn(&mut T, &str, &mut gpui::Window, &mut Context<T>),
     remove: fn(&mut T, &str, &mut Context<T>),
     column: Option<CommentContentColumn>,
 ) -> AnyElement {
@@ -106,6 +107,7 @@ pub(crate) fn render_comment_card<T: 'static>(
                                 .text_color(theme.text_faint)
                                 .child(SharedString::from(comment.location())),
                         )
+                        .child(render_comment_edit(comment, group.clone(), theme, cx, edit))
                         .child(
                             div()
                                 .id(SharedString::from(format!("cmt-remove-{}", comment.id)))
@@ -142,6 +144,40 @@ pub(crate) fn render_comment_card<T: 'static>(
         .into_any_element()
 }
 
+pub(crate) fn render_comment_edit<T: 'static>(
+    comment: &ReviewComment,
+    group: SharedString,
+    theme: &Theme,
+    cx: &Context<T>,
+    edit: fn(&mut T, &str, &mut gpui::Window, &mut Context<T>),
+) -> AnyElement {
+    let id = comment.id.clone();
+    div()
+        .id(SharedString::from(format!("cmt-edit-{id}")))
+        .flex_none()
+        .size(px(16.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label("Edit comment")
+        .opacity(0.0)
+        .group_hover(group, |style| style.opacity(1.0))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            edit(this, &id, window, cx);
+        }))
+        .child(
+            crate::icons::icon(crate::icons::PEN)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        )
+        .into_any_element()
+}
+
 fn comment_accent_bar(color: gpui::Hsla) -> gpui::Div {
     div().w(px(ACCENT_BAR_WIDTH)).h_full().flex_none().bg(color)
 }
@@ -151,6 +187,7 @@ pub(crate) fn render_comment_draft<T: 'static>(
     path: &str,
     line: u32,
     input: Entity<ComposerInput>,
+    editing: bool,
     theme: &Theme,
     cx: &Context<T>,
     cancel: fn(&mut T, &mut Context<T>),
@@ -236,8 +273,13 @@ pub(crate) fn render_comment_draft<T: 'static>(
                                 .on_click(cx.listener(move |this, _, _, cx| cancel(this, cx))),
                         )
                         .child(
-                            comment_action("cmt-commit", "Comment", true, theme)
-                                .on_click(cx.listener(move |this, _, _, cx| commit(this, cx))),
+                            comment_action(
+                                "cmt-commit",
+                                if editing { "Save" } else { "Comment" },
+                                true,
+                                theme,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| commit(this, cx))),
                         ),
                 ),
         )
