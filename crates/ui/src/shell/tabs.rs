@@ -245,9 +245,7 @@ impl Shell {
         let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
         // The title row's gaps are outside the fixed-width panel controls.
         let gap_budget = if takeover { 8.0 } else { 16.0 };
-        let right_visible = (self.eval_tween(self.right_tween, self.right_target(cx))
-            - self.files_overlay_width(cx))
-        .max(0.0);
+        let right_visible = self.right_visible_width(cx);
         let widths = panel_titlebar_widths(
             right_visible,
             files_width,
@@ -475,8 +473,8 @@ mod panel_titlebar_tests {
     }
 
     #[test]
-    fn overlaid_files_and_tight_headers_keep_nonnegative_reveal_widths() {
-        // A 286px overlay covers the right end of a 520px surface.
+    fn narrow_panels_and_tight_headers_keep_nonnegative_reveal_widths() {
+        // A narrow surface and Files share a 520px header.
         let widths = panel_titlebar_widths(234.0, 286.0, 600.0, 92.0);
         assert_eq!(
             1000.0 - 92.0 - widths.files_controls - 28.0 - widths.surface_reveal,

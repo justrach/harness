@@ -217,10 +217,13 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         window.bounds_changed(cx);
                     })
                     .unwrap();
-                frame(window, cx, output.as_deref(), "01b-picker-files-overlay").await;
+                frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert!(shell.files_overlay_width(cx) > 0.0);
+                        assert_eq!(shell.files_visible_width(cx), 284.0);
+                        assert_eq!(shell.files_reserved_width(cx), 284.0);
+                        assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
+                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_MAX);
                         assert!(shell.right_surface_rows(cx).is_empty());
                         shell.toggle_right_pane(cx);
                         shell.settings.files_panel_width = FILES_PANEL_DEFAULT;
@@ -294,8 +297,27 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "04-narrow-files").await;
                 window
                     .update(cx, |shell, _, cx| {
-                        assert!(shell.files_overlay_width(cx) > 0.0);
-                        assert_eq!(shell.files_reserved_width(cx), 0.0);
+                        let files = shell.files_visible_width(cx);
+                        let surface = shell.right_visible_width(cx);
+                        let sidebar = shell.eval_tween(shell.sidebar_tween, shell.sidebar_target());
+                        assert_eq!(shell.files_reserved_width(cx), files);
+                        assert!(files > 0.0 && surface > 0.0);
+                        assert!(sidebar + files + surface < shell.viewport_width);
+                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_DEFAULT);
+                    })
+                    .unwrap();
+                window
+                    .update(cx, |shell, _, cx| shell.toggle_right_pane_expand(cx))
+                    .unwrap();
+                frame(window, cx, output.as_deref(), "04b-expanded-narrow-files").await;
+                window
+                    .update(cx, |shell, _, cx| {
+                        assert_eq!(shell.files_visible_width(cx), FILES_PANEL_DEFAULT);
+                        assert_eq!(
+                            shell.right_visible_width(cx),
+                            1000.0 - 256.0 - FILES_PANEL_DEFAULT
+                        );
+                        shell.toggle_right_pane_expand(cx);
                     })
                     .unwrap();
                 // A browser surface coexists with the explorer and keeps its own tab.

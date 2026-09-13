@@ -434,8 +434,8 @@ pub enum Route {
 /// floor. On unusually small windows this deliberately falls below the right
 /// pane's preferred minimum: the chat remains usable and the side surface
 /// yields the scarce space.
-fn right_pane_max_width(viewport: f32, sidebar: f32) -> f32 {
-    (viewport - sidebar - CHAT_PANEL_MIN).max(0.0)
+fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
+    (viewport - sidebar - chat_floor).max(0.0)
 }
 
 /// Width used by right-pane takeover. Unlike manual resizing, takeover is
@@ -2005,10 +2005,9 @@ impl Shell {
                     sidebar_now,
                 )
             } else {
-                self.settings.right_pane_width.min(right_pane_max_width(
-                    self.viewport_width - self.files_reserved_width(cx),
-                    sidebar_now,
-                ))
+                self.settings
+                    .right_pane_width
+                    .min(self.surface_max_width(cx))
             }
         }
     }
@@ -2023,7 +2022,7 @@ impl Shell {
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
         // Reverse from the visible width when toggled during an animation.
-        let from = self.eval_tween(self.right_tween, self.right_target(cx));
+        let from = self.right_visible_width(cx);
         let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
         let from_main = conversation_width(
             self.viewport_width - self.files_reserved_width(cx),
@@ -2993,12 +2992,8 @@ impl Shell {
     ) {
         let viewport = f32::from(window.viewport_size().width);
         let width = viewport - self.files_reserved_width(cx) - f32::from(event.event.position.x);
-        // No arbitrary percentage ceiling, but retain the chat's usable 300px
-        // floor instead of allowing the conversation to collapse to zero.
-        let max = right_pane_max_width(
-            viewport - self.files_reserved_width(cx),
-            self.sidebar_target(),
-        );
+        // Use the same shared budget as rendering, including compact windows.
+        let max = self.surface_max_width(cx);
         self.settings.right_pane_width = if max >= RIGHT_PANE_MIN {
             width.clamp(RIGHT_PANE_MIN, max)
         } else {
@@ -4165,6 +4160,7 @@ impl Shell {
         &self,
         tween: Option<WidthTween>,
         target: f32,
+        visible: f32,
         inner: AnyElement,
     ) -> AnyElement {
         let takeover_width = self
@@ -4177,7 +4173,7 @@ impl Shell {
             .flex_none()
             .relative()
             .overflow_hidden()
-            .w(px(self.eval_tween(tween, target)))
+            .w(px(visible))
             .child(
                 div()
                     .absolute()
@@ -7133,6 +7129,7 @@ impl Shell {
         self.right_pane_container(
             self.right_tween,
             target,
+            self.right_visible_width(cx),
             div().h_full().relative().child(panel).into_any_element(),
         )
     }
@@ -7177,9 +7174,6 @@ impl Shell {
             .items_center()
             .justify_center()
             .p(px(16.0))
-            // The responsive Files drawer covers the right end of this
-            // surface. Center the picker in the remaining visible region.
-            .pr(px(16.0 + self.files_overlay_width(cx)))
             .child(
                 div()
                     .w_full()
@@ -9077,11 +9071,11 @@ mod tests {
 
     #[test]
     fn right_pane_ceiling_preserves_the_chat_floor() {
-        assert_eq!(right_pane_max_width(1200.0, 256.0), 644.0);
+        assert_eq!(right_pane_max_width(1200.0, 256.0, CHAT_PANEL_MIN), 644.0);
         assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
         // The chat floor wins over the right pane's preferred 360px minimum
         // when the whole window is unusually narrow.
-        assert_eq!(right_pane_max_width(800.0, 256.0), 244.0);
+        assert_eq!(right_pane_max_width(800.0, 256.0, CHAT_PANEL_MIN), 244.0);
         assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
     }
 

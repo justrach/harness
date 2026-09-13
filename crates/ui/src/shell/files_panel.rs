@@ -5,14 +5,13 @@ use crate::settings::{FILES_PANEL_DEFAULT, FILES_PANEL_MAX, FILES_PANEL_MIN};
 
 pub(super) struct FilesPanelResize;
 
-/// Resolve the explorer against the space required by its neighboring panes.
-/// `visible` is the sampled animation width; the preferred width determines
-/// the breakpoint so an opening drawer never changes modes halfway through.
+/// Allocate a real column to Files. Reduce its preferred width before taking
+/// space from the chat/editor minima; below those minima, share the shortage
+/// proportionally so no open panel covers another.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct FilesPanelLayout {
     width: f32,
-    reserved: f32,
-    overlay: bool,
+    surface_max: f32,
 }
 
 fn files_panel_layout(
@@ -24,22 +23,30 @@ fn files_panel_layout(
     expanded: bool,
 ) -> FilesPanelLayout {
     let available = (viewport - sidebar).max(0.0);
-    let content_min = if surfaces_open {
-        RIGHT_PANE_MIN + if expanded { 0.0 } else { CHAT_PANEL_MIN }
+    let chat_min = if surfaces_open && expanded {
+        0.0
     } else {
         CHAT_PANEL_MIN
     };
-    let overlay = available < preferred + content_min;
-    let max_width = if overlay {
-        viewport.max(0.0)
+    let surface_min = if surfaces_open { RIGHT_PANE_MIN } else { 0.0 };
+    let scale = if preferred > 0.0 {
+        (available / (chat_min + surface_min + preferred.min(FILES_PANEL_MIN))).min(1.0)
     } else {
-        (available - content_min).max(0.0)
+        // Preserve the existing chat floor when Files is closed.
+        1.0
     };
+    let max_width = (available - (chat_min + surface_min) * scale).max(0.0);
     let width = visible.max(0.0).min(max_width);
+    // As Files animates closed, return its space to the remaining columns
+    // smoothly instead of changing their minima when the tween finishes.
+    let content_scale = if preferred > 0.0 {
+        ((available - width) / (chat_min + surface_min)).min(1.0)
+    } else {
+        1.0
+    };
     FilesPanelLayout {
         width,
-        reserved: if overlay { 0.0 } else { width },
-        overlay,
+        surface_max: right_pane_max_width(viewport - width, sidebar, chat_min * content_scale),
     }
 }
 
@@ -54,7 +61,11 @@ impl Shell {
         files_panel_layout(
             self.viewport_width,
             self.eval_tween(self.sidebar_tween, self.sidebar_target()),
-            self.settings.files_panel_width,
+            if self.files_panel_open(cx) || self.tween_active(self.files_tween) {
+                self.settings.files_panel_width
+            } else {
+                0.0
+            },
             visible,
             self.right_pane_open(cx),
             self.right_pane_expanded,
@@ -82,12 +93,21 @@ impl Shell {
     }
 
     pub(super) fn files_reserved_width(&self, cx: &App) -> f32 {
-        self.files_layout(self.files_visible_width(cx), cx).reserved
+        self.files_visible_width(cx)
     }
 
-    pub(super) fn files_overlay_width(&self, cx: &App) -> f32 {
-        let layout = self.files_layout(self.files_visible_width(cx), cx);
-        if layout.overlay { layout.width } else { 0.0 }
+    pub(super) fn surface_max_width(&self, cx: &App) -> f32 {
+        self.files_layout(self.files_visible_width(cx), cx)
+            .surface_max
+    }
+
+    pub(super) fn right_visible_width(&self, cx: &App) -> f32 {
+        let available = (self.viewport_width
+            - self.eval_tween(self.sidebar_tween, self.sidebar_target())
+            - self.files_visible_width(cx))
+        .max(0.0);
+        self.eval_tween(self.right_tween, self.right_target(cx))
+            .min(available)
     }
 
     fn clear_surface_transitions(&mut self) {
@@ -236,7 +256,6 @@ impl Shell {
         let target = self.files_target(cx);
         let content_width =
             stable_panel_content_width(target, self.active_tween_endpoints(self.files_tween));
-        let overlay = self.files_layout(target, cx).overlay;
         let inner = div()
             .w(px(content_width))
             .h_full()
@@ -245,24 +264,13 @@ impl Shell {
             .border_l_1()
             .border_color(theme.border)
             // Match the left sidebar's subtle wash over the shell frost.
-            // An overlay needs its own tint and blur over the covered content.
-            .bg(if overlay {
-                theme.glass_overlay()
-            } else {
-                crate::theme::wash(0.05)
-            })
+            .bg(crate::theme::wash(0.05))
             .children(content);
-        let inner = if overlay {
-            crate::frost::frosted(0.0, crate::frost::MENU_BLUR, inner).into_any_element()
-        } else {
-            inner.into_any_element()
-        };
         div()
             .id("files-panel")
             .h_full()
             .flex_none()
             .relative()
-            .when(overlay, |panel| panel.absolute().right_0().top_0())
             .child(
                 div()
                     .h_full()
@@ -294,61 +302,81 @@ mod tests {
     use gpui::{AppContext, TestAppContext};
 
     #[test]
-    fn files_layout_reserves_space_or_overlays_without_squeezing_the_chat() {
+    fn files_layout_shrinks_the_tree_before_the_chat_or_editor() {
         let docked = files_panel_layout(1400.0, 256.0, 286.0, 286.0, true, false);
         assert_eq!(
             docked,
             FilesPanelLayout {
                 width: 286.0,
-                reserved: 286.0,
-                overlay: false
+                surface_max: 558.0,
             }
         );
-        let narrow = files_panel_layout(1100.0, 256.0, 286.0, 286.0, true, false);
+        let narrow = files_panel_layout(1200.0, 256.0, 440.0, 440.0, true, false);
         assert_eq!(
             narrow,
             FilesPanelLayout {
-                width: 286.0,
-                reserved: 0.0,
-                overlay: true
+                width: 284.0,
+                surface_max: 360.0,
             }
         );
-        assert_eq!(right_pane_max_width(1100.0 - narrow.reserved, 256.0), 544.0);
-        // Without a surface, the same window can dock Files beside the chat.
-        assert!(!files_panel_layout(1100.0, 256.0, 286.0, 286.0, false, false).overlay);
-        // Takeover may collapse the chat but reserves room for Files.
-        let expanded = files_panel_layout(1100.0, 256.0, 286.0, 286.0, true, true);
-        assert!(!expanded.overlay);
         assert_eq!(
-            right_pane_takeover_width(1100.0 - expanded.reserved, 256.0),
-            558.0
+            1200.0 - 256.0 - narrow.width - narrow.surface_max,
+            CHAT_PANEL_MIN
+        );
+        // Closing the surface or expanding it releases space for the tree.
+        assert_eq!(
+            files_panel_layout(1200.0, 256.0, 440.0, 440.0, false, false).width,
+            440.0
+        );
+        let expanded = files_panel_layout(1100.0, 256.0, 286.0, 286.0, true, true);
+        assert_eq!(expanded.width, 286.0);
+        assert_eq!(expanded.surface_max, 558.0);
+        // Growing the viewport restores the preferred width.
+        assert_eq!(
+            files_panel_layout(1600.0, 256.0, 440.0, 440.0, true, false).width,
+            440.0
         );
     }
 
     #[test]
-    fn files_layout_keeps_its_mode_through_animation_and_clamps_tiny_windows() {
-        for width in [0.0, 1.0, 140.0, 286.0] {
-            let layout = files_panel_layout(1100.0, 256.0, 286.0, width, true, false);
-            assert!(layout.overlay);
-            assert_eq!(layout.width, width);
-            assert_eq!(layout.reserved, 0.0);
+    fn files_layout_returns_space_smoothly_during_close() {
+        let mut previous_chat = 0.0;
+        for visible in [186.0, 140.0, 84.0, 40.0, 0.0] {
+            let layout = files_panel_layout(1000.0, 256.0, 286.0, visible, true, false);
+            let chat = 744.0 - layout.width - layout.surface_max;
+            assert!(chat >= previous_chat && chat <= CHAT_PANEL_MIN);
+            previous_chat = chat;
         }
-        for viewport in [0.0, 120.0, 280.0, 600.0, 1000.0, 1600.0] {
+        assert_eq!(
+            files_panel_layout(1000.0, 256.0, 286.0, 0.0, true, false),
+            files_panel_layout(1000.0, 256.0, 0.0, 0.0, true, false),
+        );
+    }
+
+    #[test]
+    fn files_layout_shares_tight_windows_without_covering_any_column() {
+        let compact = files_panel_layout(1000.0, 256.0, 440.0, 440.0, true, false);
+        let chat = 1000.0 - 256.0 - compact.width - compact.surface_max;
+        assert!((compact.width / FILES_PANEL_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
+        assert!((compact.surface_max / RIGHT_PANE_MIN - chat / CHAT_PANEL_MIN).abs() < 0.001);
+        for viewport in [0.0, 120.0, 280.0, 600.0, 1000.0, 1200.0, 1600.0] {
             for sidebar in [0.0, 256.0, 400.0] {
                 for surfaces in [false, true] {
                     for expanded in [false, true] {
-                        let layout =
-                            files_panel_layout(viewport, sidebar, 286.0, 286.0, surfaces, expanded);
-                        assert!(layout.width >= 0.0 && layout.width <= viewport);
-                        assert!(layout.reserved >= 0.0 && layout.reserved <= layout.width);
-                        if !layout.overlay {
-                            let content = viewport - sidebar - layout.reserved;
-                            let required = if surfaces {
-                                RIGHT_PANE_MIN + if expanded { 0.0 } else { CHAT_PANEL_MIN }
-                            } else {
-                                CHAT_PANEL_MIN
-                            };
-                            assert!(content >= required);
+                        for visible in [0.0, 1.0, 140.0, 440.0] {
+                            let layout = files_panel_layout(
+                                viewport, sidebar, 440.0, visible, surfaces, expanded,
+                            );
+                            let available = (viewport - sidebar).max(0.0);
+                            assert!(layout.width >= 0.0 && layout.width <= visible);
+                            assert!(layout.surface_max >= 0.0);
+                            assert!(layout.width + layout.surface_max <= available + 0.001);
+                            if available > 0.0 && surfaces {
+                                assert!(layout.surface_max > 0.0, "the editor must remain visible");
+                                if visible > 0.0 {
+                                    assert!(layout.width > 0.0, "the tree must remain visible");
+                                }
+                            }
                         }
                     }
                 }
