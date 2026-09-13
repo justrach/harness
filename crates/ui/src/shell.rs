@@ -1286,6 +1286,11 @@ pub struct Shell {
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
+    /// Startup-aware durable connectivity notification baseline.
+    connectivity_notifications: crate::sound::ConnectivityNotificationState,
+    /// Persistent across AppState observer callbacks so simultaneous session
+    /// failures and connectivity degradation produce one attention sound.
+    attention_sound_gate: crate::sound::AttentionSoundGate,
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
@@ -1617,6 +1622,8 @@ impl Shell {
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
+            connectivity_notifications: Default::default(),
+            attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
@@ -1839,7 +1846,7 @@ impl Shell {
                 });
             }
         }
-        // Banners and chimes share one detector. Completion markers survive
+        // Banners and chimes share one session detector. Completion markers survive
         // queue handoffs and never advance for interrupts or stale activity.
         // A row's first appearance seeds the baseline silently (boot/replay).
         // Pending sends consume completion changes silently, while questions
@@ -1852,9 +1859,9 @@ impl Shell {
                 bool,
                 Option<String>,
             );
-            let sessions: Vec<Ping> = {
+            let (sessions, connectivity, connectivity_observed) = {
                 let state = state.read(cx);
-                state
+                let sessions: Vec<Ping> = state
                     .sessions
                     .iter()
                     .map(|s| {
@@ -1867,7 +1874,12 @@ impl Shell {
                             .and_then(|c| c.title.clone());
                         (s.chat_id.clone(), status, send_pending, title)
                     })
-                    .collect()
+                    .collect();
+                (
+                    sessions,
+                    state.connectivity.state,
+                    state.connectivity_observed,
+                )
             };
             // Background-only banners: `active_window()` is app-level (any
             // Zeron window being key), so a ping for a *background chat* in a
@@ -1879,8 +1891,14 @@ impl Shell {
                 if let Some(prev) = prev
                     && let Some(sound) = status.sound_since(&prev, send_pending)
                 {
-                    if self.settings.sound_enabled {
-                        crate::sound::play(sound);
+                    if self.settings.session_sound_enabled(sound) {
+                        let should_play = sound != crate::sound::Sound::Attention
+                            || self
+                                .attention_sound_gate
+                                .should_play(std::time::Instant::now());
+                        if should_play {
+                            crate::sound::play(sound);
+                        }
                     }
                     if self.settings.notifications_enabled
                         && !(self.settings.notifications_background_only && app_focused)
@@ -1889,9 +1907,32 @@ impl Shell {
                         let body = match sound {
                             crate::sound::Sound::Done => "Run finished",
                             crate::sound::Sound::Request => "Waiting on your input",
+                            crate::sound::Sound::Attention => "Run failed",
                         };
                         crate::notify::post(&title, body);
                     }
+                }
+            }
+            if let Some(sound) = self.connectivity_notifications.update(
+                connectivity,
+                connectivity_observed,
+                std::time::Instant::now(),
+            ) {
+                if self.settings.session_sound_enabled(sound)
+                    && self
+                        .attention_sound_gate
+                        .should_play(std::time::Instant::now())
+                {
+                    crate::sound::play(sound);
+                }
+                if self.settings.notifications_enabled
+                    && !(self.settings.notifications_background_only && app_focused)
+                {
+                    let body = match connectivity {
+                        zeron_proto::ConnectivityState::Offline => "Your device is offline",
+                        _ => "Zeron is trying to reconnect",
+                    };
+                    crate::notify::post("Connection unavailable", body);
                 }
             }
         }
@@ -3347,6 +3388,9 @@ impl Shell {
                     let page = cx.new(|cx| {
                         NotificationsPage::new(
                             self.settings.sound_enabled,
+                            self.settings.sound_completion_enabled,
+                            self.settings.sound_input_enabled,
+                            self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
                             cx,
@@ -3358,10 +3402,16 @@ impl Shell {
                         |this: &mut Shell, _, event: &NotificationsEvent, cx| {
                             let NotificationsEvent::Changed {
                                 sound,
+                                completion_sound,
+                                input_sound,
+                                attention_sound,
                                 desktop,
                                 background_only,
                             } = *event;
                             this.settings.sound_enabled = sound;
+                            this.settings.sound_completion_enabled = completion_sound;
+                            this.settings.sound_input_enabled = input_sound;
+                            this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
                             this.schedule_save(cx);
