@@ -322,16 +322,15 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .when(files_width >= 120.0, |slot| {
-                                slot.border_l_1()
-                                    .border_color(theme.border)
-                                    .pl(px(10.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(12.0))
-                                            .text_color(theme.text_muted)
-                                            .child("Files"),
-                                    )
+                                // The full-height Files panel already paints this seam.
+                                // Preserve the label inset without drawing a second border.
+                                slot.pl(px(11.0)).child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child("Files"),
+                                )
                             })
                             .child(
                                 header_icon_button(
