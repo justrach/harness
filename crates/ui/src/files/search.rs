@@ -242,6 +242,24 @@ fn append_search_rows(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RevealIntent {
+    #[default]
+    SynchronizeSelection,
+    ActivateDirectory,
+    OpenFile,
+}
+
+impl RevealIntent {
+    fn clears_search(self) -> bool {
+        self != Self::SynchronizeSelection
+    }
+
+    fn opens_file(self) -> bool {
+        self == Self::OpenFile
+    }
+}
+
 #[derive(Default)]
 pub(super) struct FileSearchState {
     pub query: String,
@@ -253,7 +271,7 @@ pub(super) struct FileSearchState {
     pub task: Option<Task<()>>,
     pub reveal_task: Option<Task<()>>,
     reveal_generation: u64,
-    reveal_opens_file: bool,
+    reveal_intent: RevealIntent,
     reveal_scroll_pending: bool,
     tree: SearchTreeModel,
 }
@@ -274,7 +292,7 @@ impl FilesSurface {
         if self.search_state.query == query {
             return;
         }
-        if self.search_state.reveal_opens_file {
+        if self.search_state.reveal_intent.clears_search() {
             self.cancel_reveal();
         }
         self.search_state.generation = self.search_state.generation.wrapping_add(1);
@@ -406,7 +424,7 @@ impl FilesSurface {
     pub(super) fn cancel_reveal(&mut self) {
         self.search_state.reveal_generation = self.search_state.reveal_generation.wrapping_add(1);
         self.search_state.reveal_task = None;
-        self.search_state.reveal_opens_file = false;
+        self.search_state.reveal_intent = RevealIntent::default();
         self.search_state.reveal_scroll_pending = false;
     }
 
@@ -415,10 +433,19 @@ impl FilesSurface {
         result: WorkspaceFileSearchMatch,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_path(result.path, result.kind == WorkspaceEntryKind::File, cx);
+        let intent = match result.kind {
+            WorkspaceEntryKind::Directory => RevealIntent::ActivateDirectory,
+            WorkspaceEntryKind::File | WorkspaceEntryKind::Symlink => RevealIntent::OpenFile,
+        };
+        self.reveal_path(result.path, intent, cx);
     }
 
-    pub(super) fn reveal_path(&mut self, path: String, open: bool, cx: &mut Context<Self>) {
+    pub(super) fn reveal_path(
+        &mut self,
+        path: String,
+        intent: RevealIntent,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_reveal();
         let Some(context) = self.request_context.clone() else {
             return;
@@ -443,7 +470,7 @@ impl FilesSurface {
         let reveal_generation = self.search_state.reveal_generation;
         let include_ignored = self.tree.include_ignored();
         let client = WorkspaceFilesClient::new(engine, context.clone());
-        self.search_state.reveal_opens_file = open;
+        self.search_state.reveal_intent = intent;
         self.search_state.reveal_task = Some(cx.spawn(async move |this, cx| {
             let mut pages = Vec::with_capacity(directories.len());
             for (index, directory) in directories.into_iter().enumerate() {
@@ -485,8 +512,8 @@ impl FilesSurface {
                 }
                 surface.tree.select(path.clone());
                 surface.sync_tree_list();
-                surface.search_state.reveal_opens_file = false;
-                surface.finish_reveal(path, open, cx);
+                surface.search_state.reveal_intent = RevealIntent::default();
+                surface.finish_reveal(path, intent, cx);
             });
         }));
     }
@@ -502,10 +529,12 @@ impl FilesSurface {
             && self.search_state.reveal_generation == reveal_generation
     }
 
-    fn finish_reveal(&mut self, path: String, open: bool, cx: &mut Context<Self>) {
-        if open {
-            self.selected_editor_path = Some(path.clone());
+    fn finish_reveal(&mut self, path: String, intent: RevealIntent, cx: &mut Context<Self>) {
+        if intent.clears_search() {
             self.search.update(cx, |search, cx| search.set_text("", cx));
+        }
+        if intent.opens_file() {
+            self.selected_editor_path = Some(path.clone());
             self.open_tree_file(path, cx);
         }
         if self.search_state.query.is_empty() {
@@ -807,20 +836,49 @@ mod reveal_tests {
                 .update(cx, |search, cx| search.set_text("config", cx));
         });
         surface.update(cx, |surface, cx| {
-            surface.finish_reveal("src/main.rs".into(), false, cx);
+            surface.finish_reveal("src/main.rs".into(), RevealIntent::SynchronizeSelection, cx);
             assert_eq!(surface.search.read(cx).text(), "config");
             assert_eq!(surface.search_state.query, "config");
             assert!(surface.search_state.reveal_scroll_pending);
         });
         assert!(opened.borrow().is_empty());
         surface.update(cx, |surface, cx| {
-            surface.finish_reveal("src/config.rs".into(), true, cx);
+            surface.finish_reveal("src/config.rs".into(), RevealIntent::OpenFile, cx);
         });
         assert_eq!(*opened.borrow(), ["src/config.rs"]);
         surface.read_with(cx, |surface, cx| {
             assert!(surface.search.read(cx).text().is_empty());
             assert!(!surface.search_state.reveal_scroll_pending);
         });
+    }
+
+    #[gpui::test]
+    fn activating_a_directory_clears_search_without_opening_a_file(cx: &mut TestAppContext) {
+        let surface = cx.new(|cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new_explorer(state, "chat".into(), false, cx)
+        });
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let events = opened.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(&surface, move |_, event, _| {
+                if let FilesEvent::OpenFile(path) = event {
+                    events.borrow_mut().push(path.clone());
+                }
+            })
+        });
+        surface.update(cx, |surface, cx| {
+            surface
+                .search
+                .update(cx, |search, cx| search.set_text("emptydir", cx));
+            surface.finish_reveal("emptydir".into(), RevealIntent::ActivateDirectory, cx);
+        });
+        surface.read_with(cx, |surface, cx| {
+            assert!(surface.search.read(cx).text().is_empty());
+            assert!(surface.search_state.query.is_empty());
+            assert!(!surface.search_state.reveal_scroll_pending);
+        });
+        assert!(opened.borrow().is_empty());
     }
 
     #[gpui::test]

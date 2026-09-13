@@ -733,7 +733,7 @@ impl FilesSurface {
             return;
         }
         self.selected_editor_path = Some(path.clone());
-        self.reveal_path(path, false, cx);
+        self.reveal_path(path, search::RevealIntent::SynchronizeSelection, cx);
     }
 
     pub(crate) fn reveal_file_explicit(&mut self, path: String, cx: &mut Context<Self>) {
