@@ -263,8 +263,7 @@ impl Shell {
             .occlude()
             .border_l_1()
             .border_color(theme.border)
-            // Match the left sidebar's subtle wash over the shell frost.
-            .bg(crate::theme::wash(0.05))
+            .bg(theme.panel_bg())
             .children(content);
         div()
             .id("files-panel")

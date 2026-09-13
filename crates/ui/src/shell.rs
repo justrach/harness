@@ -7175,7 +7175,6 @@ impl Shell {
     /// an embedded terminal, or the surface picker when no tabs exist.
     fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let bg = theme.bg;
         let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
         {
             match self.resolved_right_active(cx) {
@@ -7274,11 +7273,7 @@ impl Shell {
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
         // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = if theme.is_glass() {
-            bg.opacity(0.4)
-        } else {
-            bg
-        };
+        let panel_bg = theme.panel_bg();
         let panel = div()
             .size_full()
             .flex()
