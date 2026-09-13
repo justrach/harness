@@ -1203,7 +1203,7 @@ pub struct Shell {
     /// entity from the bottom drawer's (own PTYs, own grid geometry; one
     /// panel can only size one visible grid at a time).
     right_terminal: Option<Entity<TerminalPanel>>,
-    /// The surface-tab strip's `+` menu (Files / Terminal / Diffs / History rows).
+    /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
@@ -7352,13 +7352,6 @@ impl Shell {
                     .flex_col()
                     .gap(px(8.0))
                     .child(
-                        row("surface-card-files", icons::FOLDER_WITH_FILES, "Files").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.add_files_surface(window, cx);
-                            }),
-                        ),
-                    )
-                    .child(
                         row("surface-card-browser", icons::GLOBE, "Browser").on_click(cx.listener(
                             |this, _, window, cx| this.add_browser_surface(None, window, cx),
                         )),
@@ -7834,20 +7827,6 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-files")
-                                .id("right-plus-files-row")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_files_surface(window, cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::FOLDER_WITH_FILES)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Files")),
-                        )
                         .child(
                             popover::menu_row(&theme, false, "right-plus-browser")
                                 .id("right-plus-browser-row")
