@@ -4457,9 +4457,9 @@ impl Shell {
     /// The unified window titlebar: chat → the session tab strip; settings →
     /// the section label. Full-width on the glass shell; the traffic lights
     /// and control cluster overlay its left end.
-    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_title_bar(&mut self, viewport_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         match self.route {
-            Route::Chat => self.render_session_title_bar(cx),
+            Route::Chat => self.render_session_title_bar(viewport_height, cx),
             Route::Settings(_) => {
                 let inner = div()
                     .size_full()
@@ -9165,7 +9165,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(cx);
+                let title_bar = self.render_title_bar(window.viewport_size().height, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar,
                 // spanning the FULL window height (under the traffic lights,
                 // through the titlebar, down to the bottom edge). Its width

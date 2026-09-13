@@ -16,6 +16,21 @@ struct ProjectActionContext {
     target_device_id: Option<String>,
 }
 
+/// Reserve the titlebar, trigger gap and window margin even on short windows.
+fn project_actions_menu_surface(
+    theme: &Theme,
+    viewport_height: Pixels,
+    scroll: &gpui::ScrollHandle,
+) -> gpui::Stateful<gpui::Div> {
+    popover::popover_card(theme)
+        .id("project-actions-scroll")
+        .w(px(280.0))
+        .max_h((viewport_height - px(Theme::TITLEBAR_HEIGHT + 6.0 + 16.0)).max(px(0.0)))
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
 impl Shell {
     pub(super) fn attach_worktree_setup(
         &mut self,
@@ -138,6 +153,9 @@ impl Shell {
             return;
         }
         self.project_actions.menu.open(());
+        self.project_actions
+            .menu_scroll
+            .set_offset(gpui::point(px(0.0), px(0.0)));
         if let Some(context) = self.project_action_context(cx) {
             self.refresh_project_actions(context, cx);
         }
@@ -497,6 +515,7 @@ impl Shell {
     pub(super) fn render_project_actions_control(
         &mut self,
         available_titlebar_width: f32,
+        viewport_height: Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.ensure_project_actions(cx);
@@ -623,7 +642,7 @@ impl Shell {
         }
 
         if menu_mounted && (has_actions || has_imports || !can_run) {
-            let menu = self.render_project_actions_menu(&status, &snapshot, cx);
+            let menu = self.render_project_actions_menu(&status, &snapshot, viewport_height, cx);
             control = control.child(popover::anchored_menu_below(
                 "project-actions-menu",
                 menu,
@@ -637,13 +656,17 @@ impl Shell {
         &mut self,
         status: &ProjectActionsStatus,
         snapshot: &ProjectActionsSnapshot,
+        viewport_height: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let mut card = popover::popover_card(&theme)
-            .w(px(280.0))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_actions_menu(cx)))
-            .child(popover::menu_heading(&theme, "Project actions"));
+        let mut card = project_actions_menu_surface(
+            &theme,
+            viewport_height,
+            &self.project_actions.menu_scroll,
+        )
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_project_actions_menu(cx)))
+        .child(popover::menu_heading(&theme, "Project actions"));
         if let ProjectActionsStatus::Unavailable { message, .. } = status {
             let retry = self.project_action_context(cx);
             card = card
@@ -1042,4 +1065,123 @@ fn action_field_label(theme: &Theme, label: &str) -> gpui::Div {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
         .child(SharedString::from(label.to_string()))
+}
+
+#[cfg(test)]
+mod project_actions_scroll_tests {
+    use super::*;
+    use gpui::{ScrollHandle, TestAppContext, point};
+
+    struct MenuTestView {
+        scroll: ScrollHandle,
+        background: ScrollHandle,
+        count: usize,
+        added: bool,
+    }
+
+    impl Render for MenuTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx);
+            let mut menu =
+                project_actions_menu_surface(theme, window.viewport_size().height, &self.scroll)
+                    .child(popover::menu_heading(theme, "Project actions"));
+            for index in 0..self.count {
+                let id = SharedString::from(format!("action-{index}"));
+                menu = menu.child(
+                    popover::menu_row(theme, false, id.clone())
+                        .id(id)
+                        .child(format!("Action {index}"))
+                        .child(div().size(px(22.0))),
+                );
+            }
+            menu = menu
+                .child(popover::menu_separator())
+                .child(popover::menu_heading(theme, "Import from zeron.json"))
+                .child(
+                    popover::menu_row(theme, false, "import")
+                        .id("import")
+                        .child("Import action"),
+                )
+                .child(popover::menu_separator())
+                .child(
+                    popover::menu_row(theme, false, "add")
+                        .id("add")
+                        .debug_selector(|| "add-action".into())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.added = true;
+                            cx.notify();
+                        }))
+                        .child("Add action"),
+                );
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("background")
+                        .absolute()
+                        .inset_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.background)
+                        .child(div().h(px(3000.0))),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(Theme::TITLEBAR_HEIGHT + 6.0))
+                        .child(menu),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn fifty_actions_scroll_to_add_without_leaving_the_window(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (view, cx) = cx.add_window_view(|_, _| MenuTestView {
+            scroll: ScrollHandle::new(),
+            background: ScrollHandle::new(),
+            count: 50,
+            added: false,
+        });
+        let (scroll, background) =
+            view.read_with(cx, |view, _| (view.scroll.clone(), view.background.clone()));
+        for height in [760.0, 300.0, 200.0] {
+            cx.simulate_resize(gpui::size(px(1100.0), px(height)));
+            cx.run_until_parked();
+            assert!(scroll.bounds().bottom() <= px(height - 8.0));
+            assert!(scroll.max_offset().y > px(0.0));
+            for _ in 0..2 {
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: scroll.bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-10_000.0))),
+                    ..Default::default()
+                });
+                cx.run_until_parked();
+            }
+            assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+            assert_eq!(
+                background.offset().y,
+                px(0.0),
+                "menu wheel must not scroll the background"
+            );
+            let add = cx.debug_bounds("add-action").unwrap();
+            assert!(add.top() >= scroll.bounds().top());
+            assert!(add.bottom() <= scroll.bounds().bottom());
+            view.update(cx, |view, _| view.added = false);
+            cx.simulate_click(add.center(), Default::default());
+            cx.run_until_parked();
+            assert!(view.read_with(cx, |view, _| view.added));
+        }
+        view.update(cx, |view, cx| {
+            view.count = 1;
+            cx.notify();
+        });
+        cx.simulate_resize(gpui::size(px(1100.0), px(760.0)));
+        cx.run_until_parked();
+        assert_eq!(scroll.max_offset().y, px(0.0));
+        assert_eq!(scroll.offset().y, px(0.0));
+        assert!(
+            scroll.bounds().size.height < px(300.0),
+            "short menus should stay compact"
+        );
+    }
 }

@@ -339,12 +339,13 @@ fn launch_project_action_with_environment(
     if always_include_worktree || cwd != project_root {
         environment.insert("ZERON_WORKTREE_PATH".to_string(), root_string(cwd));
     }
-    let session = terminals.open_with_environment(&root_string(cwd), cols, rows, &environment)?;
-    let input = format!("{}\r", action.command);
-    if let Err(err) = terminals.write_bytes(&session.id, input.as_bytes()) {
-        let _ = terminals.close(&session.id);
-        return Err(err);
-    }
+    let session = terminals.open_with_command(
+        &root_string(cwd),
+        cols,
+        rows,
+        &environment,
+        &action.command,
+    )?;
     Ok(ProjectActionRun {
         action_id: action.id.clone(),
         action_name: action.name.clone(),
