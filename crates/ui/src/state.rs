@@ -597,6 +597,10 @@ pub struct AppState {
     /// Live edge posture (WatchConnectivity): drives the connection pill,
     /// composer honesty ("will queue"), and the Queued send badges.
     pub connectivity: zeron_proto::Connectivity,
+    /// Whether this runtime's connectivity watch has delivered its first
+    /// frame. The default `Disabled` value is only a placeholder and must not
+    /// seed notification decisions before the watch is authoritative.
+    pub(crate) connectivity_observed: bool,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -717,6 +721,7 @@ impl AppState {
             device_presentation: None,
             session_presence_presentation: Vec::new(),
             connectivity: zeron_proto::Connectivity::default(),
+            connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
@@ -785,6 +790,18 @@ impl AppState {
                 self.review_comments.remove(key);
                 self.review_comment_flushes.remove(key);
             }
+        }
+    }
+
+    /// Update only a staged comment's body. A stale editor must never recreate
+    /// a comment that has already been removed or sent to the agent.
+    pub fn update_review_comment_body(&mut self, key: &str, id: &str, body: String) {
+        if let Some(comment) = self
+            .review_comments
+            .get_mut(key)
+            .and_then(|comments| comments.iter_mut().find(|comment| comment.id == id))
+        {
+            comment.body = body;
         }
     }
 
@@ -929,6 +946,7 @@ impl AppState {
 
     pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
         self.connectivity = connectivity;
+        self.connectivity_observed = true;
     }
 
     /// Is this chat's delivery path degraded — will a send QUEUE rather than
@@ -1654,6 +1672,10 @@ impl AppState {
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
+        // The attachment notification precedes the first connectivity frame.
+        // Make that bootstrap gap explicit so the shell resets its alert
+        // baseline instead of comparing the new runtime with the old one.
+        self.connectivity_observed = false;
         let engine_info = handle.engine_info();
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
@@ -3967,6 +3989,30 @@ mod tests {
     }
 
     #[test]
+    fn review_comment_body_updates_are_scoped_and_keep_current_metadata() {
+        let mut state = AppState::new();
+        let original = ReviewComment::file("a.rs", 2, "Original");
+        state.add_review_comment("chat-1", original.clone());
+        state.add_review_comment("chat-2", original.clone());
+        state.begin_review_comment_flush("chat-1", 1);
+        state.update_review_comment_line("chat-1", &original.id, 9);
+        state.rename_review_comment_path("chat-1", "a.rs", "renamed.rs");
+        state.update_review_comment_body("chat-1", &original.id, "Revised".into());
+        let mut expected = original.clone();
+        expected.path = "renamed.rs".into();
+        expected.line = 9;
+        expected.body = "Revised".into();
+        assert_eq!(state.review_comments("chat-1"), &[expected]);
+        assert_eq!(state.review_comments("chat-2"), &[original.clone()]);
+        assert!(state.review_comment_flush_pending("chat-1"));
+        state.remove_review_comment("chat-1", &original.id);
+        state.update_review_comment_body("chat-1", &original.id, "Stale".into());
+        state.update_review_comment_body("missing-chat", &original.id, "Stale".into());
+        assert!(state.review_comments("chat-1").is_empty());
+        assert!(state.review_comments("missing-chat").is_empty());
+    }
+
+    #[test]
     fn review_comment_flush_waits_for_every_file_surface() {
         let mut state = AppState::new();
 
@@ -4112,5 +4158,13 @@ mod tests {
         assert!(!s.send_queued("c-remote", now));
         // …but the explicit undelivered flag still tells the truth.
         assert!(s.send_undelivered("c-remote", now));
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+impl AppState {
+    /// Keep fixture documents deterministic while using the real attachment RPC.
+    pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
+        self.engine = Some(engine);
     }
 }
