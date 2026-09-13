@@ -31,6 +31,7 @@ use zeron_proto::{
 };
 use zeron_rpc::{RpcError, methods};
 
+use crate::appshots::{self, CapturedAppshot};
 use crate::attachments::{self, StagedAttachment};
 use crate::motion;
 use crate::pickers::Pickers;
@@ -484,6 +485,56 @@ fn modified_submit_target(has_content: bool) -> ModifiedSubmitTarget {
         ModifiedSubmitTarget::SubmitContent
     } else {
         ModifiedSubmitTarget::ActivateQueueHead
+    }
+}
+
+pub const APPSHOT_TILE_MIN_WIDTH: f32 = 96.0;
+pub const APPSHOT_IMAGE_INSET: f32 = 12.0;
+pub const APPSHOT_PREVIEW_HEIGHT: f32 = 148.0;
+pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
+pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
+pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
+
+struct AppshotActionTooltip(SharedString);
+
+impl Render for AppshotActionTooltip {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.surface_raised)
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
+}
+
+/// Give ordinary captures a shared height while their width follows the
+/// source window. Extreme panoramas and narrow composers cap width without
+/// cropping. Explicit dimensions also bound the native image while decoding.
+pub fn appshot_contained_size(dimensions: Option<(u32, u32)>, max_width: f32) -> (f32, f32) {
+    let max_width = if max_width.is_finite() {
+        max_width.clamp(1.0, APPSHOT_IMAGE_MAX_WIDTH)
+    } else {
+        APPSHOT_IMAGE_MAX_WIDTH
+    };
+    let (width, height) = dimensions
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .unwrap_or((16, 10));
+    let scale = (max_width / width as f32).min(APPSHOT_IMAGE_MAX_HEIGHT / height as f32);
+    (width as f32 * scale, height as f32 * scale)
+}
+
+pub fn appshot_strip_height(count: usize) -> f32 {
+    if count == 0 {
+        0.0
+    } else {
+        STRIP_PAD_TOP + APPSHOT_TILE_HEIGHT
     }
 }
 
@@ -1579,6 +1630,8 @@ pub struct ComposerInput {
     follow_cursor: bool,
     text_size: f32,
     configured_line_height: f32,
+    single_line: bool,
+    scroll_left: f32,
     // -- measured state (written during layout/paint) --
     last_lines: Vec<WrappedLine>,
     line_starts: Vec<usize>,
@@ -1670,6 +1723,8 @@ impl ComposerInput {
             follow_cursor: true,
             text_size: INPUT_TEXT_SIZE,
             configured_line_height: INPUT_LINE_HEIGHT,
+            single_line: false,
+            scroll_left: 0.0,
             last_lines: Vec::new(),
             line_starts: vec![0],
             last_bounds: None,
@@ -1705,6 +1760,12 @@ impl ComposerInput {
         self.configured_line_height = line_height;
         self.line_height = px(line_height);
         self.content_height = line_height;
+        self
+    }
+
+    /// Keep compact fields on one row and reveal the caret horizontally.
+    pub fn with_single_line(mut self) -> Self {
+        self.single_line = true;
         self
     }
 
@@ -1920,12 +1981,16 @@ impl ComposerInput {
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.invalidate_mention_tooltip();
         self.content = text.into();
+        if self.single_line {
+            self.content = self.content.replace(['\r', '\n'], " ");
+        }
         self.refresh_projection();
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_top = 0.0;
+        self.scroll_left = 0.0;
         self.follow_cursor = true;
         // Programmatic replacement (draft load, clear-on-submit) is a new
         // document, not an edit — undo must not reach back past it.
@@ -2504,7 +2569,7 @@ impl ComposerInput {
             return;
         }
         if let Some(text) = item.text() {
-            // Multiline input: newlines are welcome (unlike the single-line example).
+            // Compact fields normalize newlines in the input handler.
             self.replace_text_in_range(None, &text, window, cx);
         }
     }
@@ -2669,7 +2734,7 @@ impl ComposerInput {
             return 0;
         };
         let local = point(
-            position.x - bounds.left(),
+            position.x - bounds.left() + px(self.scroll_left),
             position.y - bounds.top() + px(self.scroll_top),
         );
         self.index_for_point(local)
@@ -2973,7 +3038,13 @@ impl ComposerInput {
 
         let lines = window
             .text_system()
-            .shape_text(display, font_size, &runs, Some(width), None)
+            .shape_text(
+                display,
+                font_size,
+                &runs,
+                (!self.single_line).then_some(width),
+                None,
+            )
             .map(|small| small.into_vec())
             .unwrap_or_default();
 
@@ -3041,6 +3112,17 @@ impl ComposerInput {
 
     /// Keep the cursor visible when content exceeds the element height.
     fn clamp_scroll(&mut self, element_height: f32) -> bool {
+        if self.single_line {
+            let previous = self.scroll_left;
+            let width = (self.last_width - 2.0).max(1.0);
+            if let Some(cursor) = self.point_for_index(self.cursor_offset()) {
+                let x = f32::from(cursor.x);
+                self.scroll_left = self.scroll_left.min(x).max(x - width).max(0.0);
+            }
+            self.scroll_left = self.scroll_left.min((self.max_line_width - width).max(0.0));
+            self.scroll_top = 0.0;
+            return self.scroll_left != previous;
+        }
         let previous = self.scroll_top;
         if self.follow_cursor {
             if let Some(cursor) = self.point_for_index(self.cursor_offset()) {
@@ -3121,6 +3203,13 @@ impl EntityInputHandler for ComposerInput {
         if self.read_only {
             return;
         }
+        let single_line_text;
+        let new_text = if self.single_line {
+            single_line_text = new_text.replace(['\r', '\n'], " ");
+            single_line_text.as_str()
+        } else {
+            new_text
+        };
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -3158,6 +3247,13 @@ impl EntityInputHandler for ComposerInput {
         if self.read_only {
             return;
         }
+        let single_line_text;
+        let new_text = if self.single_line {
+            single_line_text = new_text.replace(['\r', '\n'], " ");
+            single_line_text.as_str()
+        } else {
+            new_text
+        };
         let range = range_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -3207,7 +3303,7 @@ impl EntityInputHandler for ComposerInput {
             .normalize_range(self.range_from_utf16(&range_utf16));
         let start = self.point_for_index(range.start)?;
         let origin = point(
-            bounds.left() + start.x,
+            bounds.left() + start.x - px(self.scroll_left),
             bounds.top() + start.y - px(self.scroll_top),
         );
         Some(Bounds::new(origin, size(px(2.0), self.line_height)))
@@ -3344,7 +3440,7 @@ impl gpui::Element for ComposerTextElement {
         let input = self.input.read(cx);
         let paint_bounds = input.paint_bounds(bounds);
         let scroll = px(input.scroll_top);
-        let origin = point(bounds.left(), bounds.top() - scroll);
+        let origin = point(bounds.left() - px(input.scroll_left), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
         let caret_color = Theme::of(cx).caret;
         // The inline-code recipe: chips use the spectrum wash like `code` spans.
@@ -3524,11 +3620,12 @@ impl gpui::Element for ComposerTextElement {
 
         // WrappedLine isn't Clone — temporarily take the shaped lines out of the
         // entity for painting, then put them back for mouse mapping.
-        let (lines, line_height, scroll) = self.input.update(cx, |input, _| {
+        let (lines, line_height, scroll, scroll_left) = self.input.update(cx, |input, _| {
             (
                 std::mem::take(&mut input.last_lines),
                 input.line_height,
                 input.scroll_top,
+                input.scroll_left,
             )
         });
 
@@ -3548,7 +3645,7 @@ impl gpui::Element for ComposerTextElement {
                 for line in &lines {
                     let height = line.size(line_height).height;
                     let _ = line.paint(
-                        point(bounds.left(), y),
+                        point(bounds.left() - px(scroll_left), y),
                         line_height,
                         gpui::TextAlign::Left,
                         Some(bounds),
@@ -3654,6 +3751,13 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, _| {
+                // Capture runs before the clicked control handles the press, so
+                // another input can take focus normally during bubbling.
+                if event.button == MouseButton::Left && this.focus_handle.is_focused(window) {
+                    window.blur();
+                }
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
@@ -3862,7 +3966,7 @@ pub struct Composer {
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
     /// Draft displaced while a queued message occupies the composer.
-    pub(crate) queue_edit_draft: Option<(String, Vec<StagedAttachment>)>,
+    pub(crate) queue_edit_draft: Option<(String, Vec<StagedAttachment>, Vec<CapturedAppshot>)>,
     /// Composer actions row: repo/branch/harness-model/traits (§1.7).
     /// Shared with the shell's new-session canvas, which renders the
     /// device/project target selectors ([`Pickers::render_target_selectors`]).
@@ -3872,6 +3976,11 @@ pub struct Composer {
     /// Staged-but-unsent attachments per chat key (use-attachments.ts `stash`):
     /// navigating away and back restores them; memory-only, like the original.
     pub(crate) attachments: HashMap<String, Vec<StagedAttachment>>,
+    /// Rich window captures keyed exactly like drafts and ordinary staged
+    /// attachments. Each owns one screenshot that joins the existing upload
+    /// path only at send time.
+    pub(crate) appshots: HashMap<String, Vec<CapturedAppshot>>,
+    appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it; the input
@@ -3912,11 +4021,6 @@ pub struct Composer {
     answered_requests: HashSet<String>,
     advance_task: Option<Task<()>>,
     send_task: Option<Task<()>>,
-    /// Chats whose durable Interrupt command has been accepted or is still
-    /// being queued. Kept independently so stopping one chat cannot replace
-    /// another chat's request when the user navigates quickly.
-    interrupting: HashSet<String>,
-    interrupt_tasks: HashMap<String, Task<()>>,
     /// The queued message being edited in the composer (see
     /// [`Composer::begin_queue_edit`]).
     pub(crate) editing_queued: Option<String>,
@@ -3931,11 +4035,13 @@ pub struct Composer {
     pub(crate) queue_edit_finishing: bool,
     pub(crate) queue_edit_task: Option<Task<()>>,
     pub(crate) queue_edit_renew_task: Option<Task<()>>,
-    /// Apply focus on the next render after opening or closing an edit.
-    pub(crate) queue_edit_focus_pending: bool,
+    /// Focus once on mount, navigation, or after opening/closing a queue edit.
+    pub(crate) focus_pending: bool,
     /// Live drag over the queue panel: which row, and where it would land.
     pub(crate) queue_drag: Option<crate::queue::QueueDragState>,
     pub(crate) queue_scroll: gpui::ScrollHandle,
+    pub(crate) queue_full_preview: Option<Task<()>>,
+    pub(crate) queue_previews: HashMap<(String, String), crate::queue::QueuePreview>,
     /// Rows awaiting a host-authoritative removal acknowledgement. They stay
     /// visible but inert until the host wins the race against queue delivery.
     pub(crate) queue_removing: HashSet<String>,
@@ -3947,6 +4053,11 @@ pub struct Composer {
     /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
     /// a send grinds" shape).
     action_task: Option<Task<()>>,
+    /// Chats whose durable Interrupt command has been accepted or is still
+    /// being queued. Kept independently so stopping one chat cannot replace
+    /// another chat's request when the user navigates quickly.
+    interrupting: HashSet<String>,
+    interrupt_tasks: HashMap<String, Task<()>>,
     // -- compact/expanded flip state (hysteresis; see `composer_flip`) --
     /// Current layout mode (persisted across frames — never derived fresh).
     expanded_mode: bool,
@@ -3984,6 +4095,7 @@ pub struct Composer {
     route_snap_until: Option<Instant>,
     _observe: Subscription,
     _pickers_observe: Subscription,
+    _picker_focus: Subscription,
     _input_events: Subscription,
 }
 
@@ -4017,6 +4129,8 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| this.release_queue_previews(cx))
+            .detach();
         let input = cx.new(|cx| {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
@@ -4028,6 +4142,13 @@ impl Composer {
         // by the composer from picker state — a pickers-side notify (refs
         // loaded, popover toggled, pick made) must repaint the composer too.
         let pickers_observe = cx.observe(&pickers, |_, _, cx| cx.notify());
+        let picker_focus = cx.subscribe(
+            &pickers,
+            |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
+                this.focus_pending = true;
+                cx.notify();
+            },
+        );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.on_submit(cx),
@@ -4077,6 +4198,8 @@ impl Composer {
             pickers,
             drafts: HashMap::new(),
             attachments: HashMap::new(),
+            appshots: HashMap::new(),
+            appshot_entrances: HashMap::new(),
             preview: None,
             preview_focus: cx.focus_handle(),
             preview_focus_pending: false,
@@ -4111,9 +4234,11 @@ impl Composer {
             queue_edit_finishing: false,
             queue_edit_task: None,
             queue_edit_renew_task: None,
-            queue_edit_focus_pending: false,
+            focus_pending: true,
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
+            queue_full_preview: None,
+            queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
             queue_shortcut_revealed: false,
             expanded_mode: false,
@@ -4132,6 +4257,7 @@ impl Composer {
             route_snap_until: None,
             _observe: observe,
             _pickers_observe: pickers_observe,
+            _picker_focus: picker_focus,
             _input_events: input_events,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
@@ -4154,10 +4280,10 @@ impl Composer {
             if std::env::var("ZERON_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
             {
-                composer.preview = Some(attachments::PreviewImage {
-                    name: first.name.clone().into(),
-                    image: first.image.clone(),
-                });
+                composer.preview = Some(attachments::PreviewImage::new(
+                    first.name.clone(),
+                    first.image.clone(),
+                ));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -4196,6 +4322,100 @@ impl Composer {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn queue_preview_limit(&self) -> usize {
+        if self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) < 520.0 {
+            1
+        } else {
+            2
+        }
+    }
+
+    pub(crate) fn show_queue_image(
+        &mut self,
+        preview: attachments::PreviewImage,
+        cx: &mut Context<Self>,
+    ) {
+        self.preview = Some(preview);
+        self.preview_focus_pending = true;
+        cx.notify();
+    }
+
+    pub(crate) fn staged_appshots(&self) -> &[CapturedAppshot] {
+        self.appshots
+            .get(&self.current_key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn stage_appshot(&mut self, appshot: CapturedAppshot, cx: &mut Context<Self>) {
+        self.stage_appshot_for(self.current_key.clone(), appshot, cx);
+    }
+
+    pub fn stage_appshot_for(
+        &mut self,
+        key: String,
+        appshot: CapturedAppshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let staged_bytes = self
+            .appshots
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .map(|shot| shot.screenshot.bytes().len() as u64)
+            .sum::<u64>();
+        let saved_bytes = self
+            .queue_edit_draft
+            .as_ref()
+            .filter(|_| key == self.current_key)
+            .map(|(_, _, shots)| {
+                shots
+                    .iter()
+                    .map(|shot| shot.screenshot.bytes().len() as u64)
+                    .sum::<u64>()
+            })
+            .unwrap_or_default();
+        let staged_bytes = staged_bytes.saturating_add(saved_bytes);
+        let incoming = appshot.screenshot.bytes().len() as u64;
+        if incoming > attachments::MAX_ATTACHMENT_BYTES
+            || staged_bytes.saturating_add(incoming) > appshots::MAX_STAGED_APPSHOT_BYTES
+        {
+            self.failure = Some(
+                "Remove an Appshot before adding another (96 MB staged Appshot limit).".into(),
+            );
+            self.failure_key = Some(key);
+            cx.notify();
+            return false;
+        }
+        self.appshot_entrances
+            .retain(|_, start| start.elapsed().as_secs_f32() < motion::speed_scale());
+        if !motion::reduced_motion(cx) {
+            self.appshot_entrances
+                .insert(appshot.id.clone(), Instant::now());
+        }
+        // A capture completing while a queue edit is being saved belongs to
+        // the displaced draft; it must not be lost or change the in-flight edit.
+        if self.queue_edit_finishing && key == self.current_key {
+            if let Some((_, _, saved_appshots)) = &mut self.queue_edit_draft {
+                saved_appshots.push(appshot);
+            } else {
+                self.appshots.entry(key).or_default().push(appshot);
+            }
+        } else {
+            self.appshots.entry(key).or_default().push(appshot);
+        }
+        self.failure = None;
+        self.failure_key = None;
+        cx.notify();
+        true
+    }
+
+    pub fn show_appshot_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.failure = Some(message.into());
+        self.failure_key = Some(self.current_key.clone());
+        cx.notify();
+    }
+
     fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
         if self.queue_edit_finishing {
             return;
@@ -4207,6 +4427,7 @@ impl Composer {
             .entry(self.current_key.clone())
             .or_default()
             .extend(staged);
+        self.focus_pending = true;
         cx.notify();
     }
 
@@ -4266,10 +4487,44 @@ impl Composer {
         cx.notify();
     }
 
+    fn restore_failed_appshots(
+        &mut self,
+        sent: &[CapturedAppshot],
+        failed_key: &str,
+        restore_key: &str,
+    ) {
+        if sent.is_empty() {
+            return;
+        }
+        let mut merged = sent.to_vec();
+        for key in [failed_key, restore_key] {
+            for shot in self.appshots.remove(key).unwrap_or_default() {
+                if !merged.iter().any(|existing| existing.id == shot.id) {
+                    merged.push(shot);
+                }
+            }
+        }
+        self.appshots.insert(restore_key.to_string(), merged);
+    }
+
+    fn remove_appshot(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.queue_edit_finishing {
+            return;
+        }
+        if let Some(list) = self.appshots.get_mut(&self.current_key) {
+            list.retain(|appshot| appshot.id != id);
+            if list.is_empty() {
+                self.appshots.remove(&self.current_key);
+            }
+        }
+        cx.notify();
+    }
+
     /// Drop a deleted chat's per-chat composer state — staged attachments hold
     /// raw image bytes, and a deleted chat's stage could never be sent again.
     pub fn purge_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         self.attachments.remove(chat_id);
+        self.appshots.remove(chat_id);
         self.state.update(cx, |state, _| {
             state.purge_review_comments(chat_id);
         });
@@ -4327,10 +4582,7 @@ impl Composer {
             .pt(px(STRIP_PAD_TOP));
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage {
-                name: att.name.clone().into(),
-                image: att.image.clone(),
-            };
+            let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
             let remove_id = att.id.clone();
             strip = strip.child(
                 div()
@@ -4347,6 +4599,7 @@ impl Composer {
                             .border_color(crate::theme::hairline(0.10))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                preview.viewer.reset();
                                 this.preview = Some(preview.clone());
                                 this.preview_focus_pending = true;
                                 cx.notify();
@@ -4406,6 +4659,235 @@ impl Composer {
         Some(strip)
     }
 
+    fn render_appshot_strip(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let appshots = self.staged_appshots();
+        if appshots.is_empty() {
+            return None;
+        }
+        let mut strip = div()
+            .id("composer-appshots-strip")
+            .flex()
+            .flex_row()
+            .gap(px(STRIP_GAP))
+            .px(px(STRIP_PAD_X))
+            .pt(px(STRIP_PAD_TOP))
+            .overflow_x_scroll();
+        let max_image_width = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH)
+            - 2.0 * Theme::SPACE_LG
+            - 2.0
+            - 2.0 * STRIP_PAD_X
+            - 2.0 * APPSHOT_IMAGE_INSET;
+        for (ix, appshot) in appshots.iter().enumerate() {
+            let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
+            let preview = crate::attachments::PreviewImage::new(
+                appshot.screenshot.name.clone(),
+                appshot.screenshot.image.clone(),
+            );
+            let preview_on_key = preview.clone();
+            let preview_on_a11y = preview.clone();
+            let composer_for_preview = cx.entity().downgrade();
+            let remove_id = appshot.id.clone();
+            let remove_on_key_id = remove_id.clone();
+            let remove_on_a11y_id = remove_id.clone();
+            let composer_for_remove = cx.entity().downgrade();
+            let source: SharedString = appshot
+                .window_title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| appshot.app_name.clone())
+                .into();
+            let preview_label: SharedString = format!("Preview {source}").into();
+            let remove_label: SharedString = format!("Remove {source}").into();
+            let preview_aria = preview_label.clone();
+            let remove_aria = remove_label.clone();
+            let (image_width, image_height) =
+                appshot_contained_size(appshot.screenshot_dimensions, max_image_width);
+            let tile_width = (image_width + 2.0 * APPSHOT_IMAGE_INSET).max(APPSHOT_TILE_MIN_WIDTH);
+            let mut card = div()
+                .id(("composer-appshot", ix))
+                .group(group.clone())
+                .relative()
+                .w(px(tile_width))
+                .h(px(APPSHOT_TILE_HEIGHT))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_center()
+                .rounded(px(14.0))
+                .overflow_hidden()
+                .cursor_pointer()
+                .hover(|style| style.bg(crate::theme::ink(0.045)))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| AppshotActionTooltip(preview_label.clone()))
+                        .into()
+                })
+                .role(gpui::Role::Button)
+                .aria_label(preview_aria)
+                .tab_index(0)
+                .focus_visible(|style| {
+                    style
+                        .bg(crate::theme::ink(0.06))
+                        .border_1()
+                        .border_color(theme.accent)
+                })
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        preview_on_key.viewer.reset();
+                        this.preview = Some(preview_on_key.clone());
+                        this.preview_focus_pending = true;
+                        cx.notify();
+                    }
+                }))
+                .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                    composer_for_preview
+                        .update(cx, |this, cx| {
+                            preview_on_a11y.viewer.reset();
+                            this.preview = Some(preview_on_a11y.clone());
+                            this.preview_focus_pending = true;
+                            cx.notify();
+                        })
+                        .ok();
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    preview.viewer.reset();
+                    this.preview = Some(preview.clone());
+                    this.preview_focus_pending = true;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id(("composer-appshot-preview", ix))
+                        .w(px(tile_width))
+                        .h(px(APPSHOT_PREVIEW_HEIGHT))
+                        .relative()
+                        .flex_none()
+                        .flex()
+                        .items_end()
+                        .justify_center()
+                        .overflow_hidden()
+                        .rounded(px(12.0))
+                        .child(
+                            div()
+                                .w(px(image_width))
+                                .h(px(image_height))
+                                .flex_none()
+                                .overflow_hidden()
+                                .rounded(px(4.0))
+                                .shadow_sm()
+                                .child(crate::edge_fade::edge_faded(
+                                    44.0,
+                                    false,
+                                    true,
+                                    img(appshot.screenshot.image.clone())
+                                        .w(px(image_width))
+                                        .h(px(image_height))
+                                        .object_fit(ObjectFit::Contain),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(20.0))
+                        .max_w(px(tile_width - 20.0))
+                        .truncate()
+                        .text_center()
+                        .text_size(px(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(source),
+                );
+            if let Some(icon) = &appshot.app_icon {
+                card = card.child(crate::frost::layered(
+                    div()
+                        .absolute()
+                        .top(px(APPSHOT_PREVIEW_HEIGHT - 22.0))
+                        .left(px((tile_width - 28.0) / 2.0))
+                        .size(px(28.0))
+                        .rounded(px(7.0))
+                        .bg(theme.bg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            img(icon.clone())
+                                .size(px(24.0))
+                                .rounded(px(5.0))
+                                .object_fit(ObjectFit::Contain),
+                        ),
+                ));
+            }
+            card = card.child(crate::frost::layered(
+                div()
+                    .id(("composer-appshot-remove", ix))
+                    .absolute()
+                    .top(px(6.0))
+                    .right(px(6.0))
+                    .size(px(22.0))
+                    .rounded_full()
+                    .bg(theme.bg.opacity(0.92))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .shadow_sm()
+                    .opacity(0.0)
+                    .group_hover(group, |style| style.opacity(1.0))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| AppshotActionTooltip(remove_label.clone()))
+                            .into()
+                    })
+                    .role(gpui::Role::Button)
+                    .aria_label(remove_aria)
+                    .tab_index(0)
+                    .focus_visible(|style| style.opacity(1.0).border_1().border_color(theme.accent))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                            this.remove_appshot(&remove_on_key_id, cx);
+                        }
+                    }))
+                    .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+                        composer_for_remove
+                            .update(cx, |this, cx| {
+                                this.remove_appshot(&remove_on_a11y_id, cx);
+                            })
+                            .ok();
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_appshot(&remove_id, cx);
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::CLOSE_CIRCLE)
+                            .size(px(15.0))
+                            .text_color(theme.text_muted),
+                    ),
+            ));
+            // Entity-owned timestamps prevent the entrance replaying on route remount.
+            if let Some(start) = self.appshot_entrances.get(&appshot.id) {
+                let raw = (start.elapsed().as_secs_f32() / (0.24 * motion::speed_scale()))
+                    .clamp(0.0, 1.0);
+                if raw < 1.0 && !motion::reduced_motion(cx) {
+                    let progress =
+                        motion::MotionSpec::new(240, motion::EASE_OUT_EXPO).progress(raw);
+                    card = card.opacity(progress).top(px(8.0 * (1.0 - progress)));
+                    window.request_animation_frame();
+                }
+            }
+            strip = strip.child(card);
+        }
+        Some(strip.into_any_element())
+    }
+
     /// Paperclip: the native image picker (the original's hidden
     /// `<input type=file accept=image/* multiple>`).
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
@@ -4416,10 +4898,16 @@ impl Composer {
             prompt: Some("Attach".into()),
         });
         self.picker_task = Some(cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                this.update(cx, |composer, cx| composer.add_paths(paths, cx))
-                    .ok();
-            }
+            let result = rx.await;
+            this.update(cx, |composer, cx| {
+                if let Ok(Ok(Some(paths))) = result {
+                    composer.add_paths(paths, cx);
+                }
+                // Both Attach and Cancel return to the draft.
+                composer.focus_pending = true;
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
@@ -4645,6 +5133,14 @@ impl Composer {
             .w_full()
             .max_h(px(320.0))
             .overflow_hidden()
+            // Completion choices belong to the input. Keep it focused until
+            // mouse-up can accept a choice (or while dragging the scrollbar).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.input.focus_handle(cx), cx);
+                }),
+            )
             // GPUI dispatches this captured stream while the thumb is
             // dragged, including when the pointer has left the popup.
             .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
@@ -4962,6 +5458,12 @@ impl Composer {
             .w_full()
             .max_h(px(320.0))
             .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.input.focus_handle(cx), cx);
+                }),
+            )
             // GPUI dispatches this captured stream while the thumb is
             // dragged, including when the pointer has left the popup.
             .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
@@ -5229,7 +5731,9 @@ impl Composer {
             self.failure =
                 Some("The queued message was removed; your edit remains in the composer".into());
             // Recover both drafts when another device removes the reserved row.
-            if let Some((draft, mut attachments)) = self.queue_edit_draft.take() {
+            if let Some((draft, mut attachments, mut appshots)) = self.queue_edit_draft.take() {
+                appshots.extend(self.appshots.remove(&self.current_key).unwrap_or_default());
+                self.appshots.insert(self.current_key.clone(), appshots);
                 let edited = self.input.read(cx).text().to_string();
                 let text = [draft, edited]
                     .into_iter()
@@ -5344,10 +5848,8 @@ impl Composer {
         )
     }
 
-    /// New-chat sends need a project: with none picked (empty device, or a
-    /// selection healed away) the send button dims and submit is a no-op —
-    /// project-less `~`-cwd sessions are no longer mintable from the canvas.
-    /// Existing chats carry their own project, so they always send.
+    /// New chats need a runnable agent, but may target the device's home
+    /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
         if self.queue_edit_finishing {
             return true;
@@ -5359,11 +5861,11 @@ impl Composer {
         if state.selected_chat.is_some() {
             return false;
         }
-        // New-chat canvas: needs a project AND a runnable agent. The
+        // New-chat canvas: needs a runnable agent. The
         // no-agents check only fires once the catalog is loaded — offline
         // and still-loading states must not block (the harness resolves from
         // the remembered default and the engine reports real failures).
-        state.selected_space_row().is_none() || self.pickers.read(cx).no_agents_available()
+        self.pickers.read(cx).no_agents_available()
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -5372,7 +5874,7 @@ impl Composer {
         }
         let has_text = composer_has_content(
             self.input.read(cx).text(),
-            self.staged().len(),
+            self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
         send_button_mode(self.run_live(cx), has_text)
@@ -5392,8 +5894,11 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().trim().to_string();
-        let no_content =
-            !composer_has_content(&text, self.staged().len(), self.staged_comments(cx).len());
+        let no_content = !composer_has_content(
+            &text,
+            self.staged().len() + self.staged_appshots().len(),
+            self.staged_comments(cx).len(),
+        );
         match self.button_mode(cx) {
             SendButtonMode::Stop => self.interrupt_selected(cx),
             _ if no_content => {}
@@ -5413,7 +5918,7 @@ impl Composer {
         }
         let has_content = composer_has_content(
             self.input.read(cx).text(),
-            self.staged().len(),
+            self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
         match modified_submit_target(has_content) {
@@ -5486,7 +5991,7 @@ impl Composer {
         let space_id = space.as_ref().map(|s| s.id.clone());
         let space_path = space.as_ref().map(|s| s.path.clone());
         if queue && !is_new {
-            let capability = if self.staged().is_empty() {
+            let capability = if self.staged().is_empty() && self.staged_appshots().is_empty() {
                 capabilities::MESSAGE_QUEUE_V1
             } else {
                 capabilities::MESSAGE_QUEUE_ATTACHMENTS_V1
@@ -5503,10 +6008,17 @@ impl Composer {
         // Snapshot-and-clear NOW (use-attachments.ts takeAttachments): the
         // strip empties the instant you hit send; a failure hands the files
         // back into the chat's stash.
-        let staged = self
+        let ordinary_staged = self
             .attachments
             .remove(&self.current_key)
             .unwrap_or_default();
+        let staged_appshots = self.appshots.remove(&self.current_key).unwrap_or_default();
+        let mut staged = ordinary_staged.clone();
+        staged.extend(
+            staged_appshots
+                .iter()
+                .map(|appshot| appshot.screenshot.clone()),
+        );
         // `typed` keeps the user's own words for the failure hand-back below:
         // restoring the folded prompt would paste the comment block into the
         // input as literal text.
@@ -5549,7 +6061,10 @@ impl Composer {
             .is_some_and(|id| local_device_id.as_deref() != Some(id));
         // Queue rows do not carry upstream's attachment-transfer escort, so
         // they retain the proven host-upload path and store absolute refs.
-        let queued_flow = !queue && !staged.is_empty() && {
+        // Appshot XML attributes require escaped final paths. The engine's plain
+        // string replacement of pending refs cannot safely rewrite those, so
+        // rich captures use the existing upload-before-send path.
+        let queued_flow = !queue && staged_appshots.is_empty() && !staged.is_empty() && {
             let state = self.state.read(cx);
             let local_ok = local_device_id
                 .as_deref()
@@ -5586,7 +6101,15 @@ impl Composer {
                 .map(|att| format!("pending/{}/{}", att.id, att.name))
                 .collect()
         };
-        let echo_text = attachments::with_attachments(&text, &echo_paths);
+        let echo_appshot_paths: HashMap<String, String> = staged
+            .iter()
+            .zip(&echo_paths)
+            .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+            .collect();
+        let echo_text = attachments::with_attachments(
+            &appshots::with_appshots(&text, &staged_appshots, &echo_appshot_paths),
+            &echo_paths,
+        );
         // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
         // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
         // path the sender can't predict, but whose id8 it minted. The alias
@@ -5770,7 +6293,15 @@ impl Composer {
                             attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
                         }
                     }
-                    content = attachments::with_attachments(&text, &attachment_paths);
+                    let appshot_paths: HashMap<String, String> = staged
+                        .iter()
+                        .zip(&attachment_paths)
+                        .map(|(attachment, path)| (attachment.id.clone(), path.clone()))
+                        .collect();
+                    content = attachments::with_attachments(
+                        &appshots::with_appshots(&text, &staged_appshots, &appshot_paths),
+                        &attachment_paths,
+                    );
                     // A normal send already has an optimistic echo: refresh it
                     // in place with the uploaded refs so its thumbnails never
                     // flicker. A queued message has no transcript echo at all;
@@ -5926,12 +6457,15 @@ impl Composer {
                     // A queue row is editable UI state, so its text must stay
                     // free of the internal attachment-path trailer. The host
                     // rebuilds that transport when it promotes the row.
+                    let appshot_paths = staged.iter().zip(&attachment_paths)
+                        .map(|(attachment, path)| (attachment.id.clone(), path.clone())).collect();
+                    let queue_body = appshots::with_appshots(&text, &staged_appshots, &appshot_paths);
                     let queue_text = if !clean_queue_attachment_text {
                         content.as_str()
-                    } else if text.trim().is_empty() && !attachment_paths.is_empty() {
+                    } else if queue_body.trim().is_empty() && !attachment_paths.is_empty() {
                         attachments::ATTACHMENT_ONLY_TEXT
                     } else {
-                        text.as_str()
+                        queue_body.as_str()
                     };
                     let params = serde_json::json!({
                         "chatId": chat_id,
@@ -6129,12 +6663,12 @@ impl Composer {
                         // no further swap will fire). Set the input directly.
                         composer.input.update(cx, |input, cx| input.set_text(restore_text, cx));
                     }
-                    if !staged.is_empty() {
+                    if !ordinary_staged.is_empty() {
                         // Merge by id (stashAttachments): files the user staged
                         // while the send was in flight survive the hand-back —
                         // draining the minted chat's slot too when the restore
                         // target is the canvas.
-                        let mut merged = staged.clone();
+                        let mut merged = ordinary_staged.clone();
                         for key in [err_chat_id.clone(), restore_key.clone()] {
                             if let Some(slot) = composer.attachments.get_mut(&key) {
                                 let fresh: Vec<_> = slot
@@ -6144,8 +6678,9 @@ impl Composer {
                                 merged.extend(fresh);
                             }
                         }
-                        composer.attachments.insert(restore_key, merged);
+                        composer.attachments.insert(restore_key.clone(), merged);
                     }
+                    composer.restore_failed_appshots(&staged_appshots, &err_chat_id, &restore_key);
                 }
                 cx.notify();
             })
@@ -6183,6 +6718,10 @@ impl Composer {
             }
         });
         self.interrupt_tasks.insert(chat_id, task);
+    }
+
+    pub(crate) fn is_interrupting(&self, chat_id: &str) -> bool {
+        self.interrupting.contains(chat_id)
     }
 
     // ---- wizard glue ----
@@ -6572,9 +7111,8 @@ impl Composer {
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
-                // Dimmed and inert while no project is picked or no agent is
-                // runnable (`send_blocked` also gates `on_submit`, so Enter
-                // is a no-op too).
+                // Share the submission guard with Enter, including pending
+                // edits and the new-session runnable-agent check.
                 let blocked = self.send_blocked(cx);
                 div()
                     .id("composer-send")
@@ -6612,8 +7150,8 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.queue_edit_focus_pending {
-            self.queue_edit_focus_pending = false;
+        if self.focus_pending {
+            self.focus_pending = false;
             let focus = self.input.focus_handle(cx);
             window.focus(&focus, cx);
         }
@@ -6890,7 +7428,7 @@ impl Render for Composer {
             && !self.pickers.read(cx).is_open()
             && !composer_has_content(
                 self.input.read(cx).text(),
-                self.staged().len(),
+                self.staged().len() + self.staged_appshots().len(),
                 self.staged_comments(cx).len(),
             );
         let container = container.when_some(
@@ -6938,6 +7476,7 @@ impl Render for Composer {
         // for the outer container padding and the pill's 1px borders.
         let strip_width_hint =
             self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) - 2.0 * Theme::SPACE_LG - 2.0;
+        let appshot_count = self.staged_appshots().len();
         let strip_h = attachment_strip_height(staged_count, strip_width_hint);
         let comment_strip_h = comment_strip_height(self.staged_comments(cx).len());
         let base_height = if expanded {
@@ -6945,7 +7484,8 @@ impl Render for Composer {
         } else {
             COMPACT_TOTAL_HEIGHT
         };
-        let target_height = base_height + strip_h + comment_strip_h;
+        let target_height =
+            base_height + strip_h + appshot_strip_height(appshot_count) + comment_strip_h;
         self.height_morph = flip_morph_step(
             self.height_morph,
             (target_height - self.last_target_height).abs() > 0.5,
@@ -6975,8 +7515,13 @@ impl Render for Composer {
         }
         self.last_rendered_height = pill_height;
         let text_pt = morph_text_pad(morph_t);
-        let textarea_height =
-            (pill_height - strip_h - comment_strip_h - PILL_BORDER_V - ACTIONS_ROW_HEIGHT).max(0.0);
+        let textarea_height = (pill_height
+            - strip_h
+            - appshot_strip_height(appshot_count)
+            - comment_strip_h
+            - PILL_BORDER_V
+            - ACTIONS_ROW_HEIGHT)
+            .max(0.0);
         self.input.update(cx, |input, cx| {
             let height = if expanded {
                 (textarea_height - text_pt - 4.0).max(0.0)
@@ -7039,6 +7584,7 @@ impl Render for Composer {
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
+        let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
         // The pill chrome (zeron composer.tsx): `rounded-[26px] border
@@ -7050,6 +7596,16 @@ impl Render for Composer {
         // shows through as an inner glow (theme.rs's card_selected_shadows
         // lesson; user report).
         let pill = div()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    // Padding and action controls are part of the text composer.
+                    // Open menus keep their own keyboard/search focus.
+                    if !this.pickers.read(cx).is_open() {
+                        window.focus(&this.input.focus_handle(cx), cx);
+                    }
+                }),
+            )
             .rounded(px(COMPOSER_RADIUS))
             .bg(pill_bg)
             .border_1()
@@ -7078,6 +7634,7 @@ impl Render for Composer {
                 .flex()
                 .flex_col()
                 .children(comments_chip)
+                .children(appshot_strip)
                 .children(strip)
                 .child(
                     div()
@@ -7140,6 +7697,7 @@ impl Render for Composer {
                 .flex_col()
                 .justify_end()
                 .children(comments_chip)
+                .children(appshot_strip)
                 .children(strip)
                 .child(
                     div()
@@ -7246,7 +7804,7 @@ impl Render for Composer {
             }
             let weak = cx.weak_entity();
             return container.child(attachments::lightbox(
-                window.viewport_size(),
+                window,
                 &preview,
                 &self.preview_focus,
                 move |window, cx| {
@@ -7260,6 +7818,7 @@ impl Render for Composer {
                         window.focus(&input_focus, cx);
                     }
                 },
+                cx,
             ));
         }
         container
@@ -7269,6 +7828,247 @@ impl Render for Composer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn composer_focus_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (tempfile::TempDir, gpui::WindowHandle<Composer>) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Composer::new(state, cx)
+        });
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        (dir, window)
+    }
+
+    #[gpui::test]
+    fn composer_padding_and_file_prompt_restore_focus(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let image_path = dir.path().join("attachment.png");
+        let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=").unwrap();
+        std::fs::write(&image_path, png).unwrap();
+        let input = handle
+            .read_with(cx, |composer, _| composer.input.clone())
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.blur();
+            window.draw(cx).clear();
+            let bounds = input.read(cx).last_bounds.unwrap();
+            // Click padding immediately left of the actual editor.
+            let position = point(bounds.left() - px(4.0), bounds.center().y);
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(input.read(cx).focus_handle.is_focused(window));
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        for accepted in [false, true] {
+            handle
+                .update(cx, |composer, window, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("Keep this draft", cx));
+                    window.blur();
+                    composer.open_file_picker(cx);
+                })
+                .unwrap();
+            assert!(cx.did_prompt_for_paths());
+            let path = image_path.clone();
+            cx.simulate_path_prompt_response(move |_| accepted.then(|| vec![path]));
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                assert!(input.read(cx).focus_handle.is_focused(window));
+                assert_eq!(input.read(cx).text(), "Keep this draft");
+            })
+            .unwrap();
+            assert_eq!(
+                handle
+                    .read_with(cx, |composer, _| composer.staged().len())
+                    .unwrap(),
+                usize::from(accepted)
+            );
+        }
+        // The same staging path handles external file drops.
+        handle
+            .update(cx, |composer, window, cx| {
+                window.blur();
+                composer.add_paths(vec![image_path], cx);
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            assert!(input.read(cx).focus_handle.is_focused(window));
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn composer_picker_escape_restores_focus_but_click_away_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let input = handle
+            .read_with(cx, |composer, _| composer.input.clone())
+            .unwrap();
+        for escape in [true, false] {
+            handle
+                .update(cx, |composer, window, cx| {
+                    composer
+                        .pickers
+                        .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                assert!(!input.read(cx).focus_handle.is_focused(window));
+            })
+            .unwrap();
+            if escape {
+                cx.simulate_keystrokes(handle.into(), "escape");
+            } else {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseDown(MouseDownEvent {
+                            button: MouseButton::Left,
+                            position: point(px(5.0), window.viewport_size().height - px(1.0)),
+                            click_count: 1,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .unwrap();
+            }
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                assert_eq!(input.read(cx).focus_handle.is_focused(window), escape);
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn inputs_release_focus_on_click_away(cx: &mut gpui::TestAppContext) {
+        struct Inputs(Vec<Entity<ComposerInput>>);
+        impl Render for Inputs {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().children(
+                    self.0
+                        .iter()
+                        .map(|input| div().w(px(200.0)).child(input.clone())),
+                )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let host = cx.add_window(|_, cx| {
+            Inputs(vec![
+                cx.new(|cx| ComposerInput::new("Composer", cx)),
+                cx.new(|cx| ComposerInput::new("URL", cx).with_single_line()),
+            ])
+        });
+        cx.run_until_parked();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let inputs = host.read_with(cx, |host, _| host.0.clone()).unwrap();
+        // Visit both fields and return to the first: click-away capture must
+        // never clear focus acquired by the clicked input during bubbling.
+        for index in [0, 1, 0] {
+            let position =
+                inputs[index].read_with(cx, |input, _| input.last_bounds.unwrap().center());
+            cx.update_window(host.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                assert!(inputs[index].read(cx).focus_handle.is_focused(window));
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+        }
+        cx.update_window(host.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(400.0), px(300.0)),
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            assert!(window.focused(cx).is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn projectless_composer_allows_send_and_enter_submission(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        // A device with no projects is a valid home-directory target too.
+        composer.update(cx, |composer, cx| assert!(!composer.send_blocked(cx)));
+        state.update(cx, |state, cx| state.select_space(None, cx));
+        composer.update(cx, |composer, cx| {
+            composer.input.update(cx, |input, cx| {
+                input.set_text("Hello without a project", cx);
+            });
+            assert_eq!(composer.button_mode(cx), SendButtonMode::Send);
+            assert!(
+                !composer.send_blocked(cx),
+                "The Send button must be enabled without a project"
+            );
+            composer.on_submit(cx);
+            // With no engine attached, reaching the normal send error proves
+            // Enter dispatched instead of silently stopping at the UI gate.
+            assert_eq!(composer.failure.as_deref(), Some("Engine not connected"));
+            composer.queue_edit_finishing = true;
+            assert!(
+                composer.send_blocked(cx),
+                "Pending edits must still block submission"
+            );
+        });
+    }
 
     /// The press intent is judged by eye everywhere except here: that a
     /// multi-click leaves the drag disarmed is invisible until a selection
@@ -7770,6 +8570,37 @@ mod tests {
     }
 
     #[test]
+    fn appshot_strip_height_tracks_cards() {
+        assert_eq!(appshot_strip_height(0), 0.0);
+        assert_eq!(appshot_strip_height(1), STRIP_PAD_TOP + APPSHOT_TILE_HEIGHT);
+        assert_eq!(appshot_strip_height(2), appshot_strip_height(1));
+    }
+
+    #[test]
+    fn appshot_images_share_height_and_adapt_width_without_losing_aspect_ratio() {
+        let landscape = appshot_contained_size(Some((1600, 900)), 320.0);
+        assert!((landscape.0 - 234.66667).abs() < 0.01);
+        assert_eq!(landscape.1, APPSHOT_IMAGE_MAX_HEIGHT);
+        let portrait = appshot_contained_size(Some((900, 1600)), 320.0);
+        assert!((portrait.0 - 74.25).abs() < 0.01);
+        assert_eq!(portrait.1, landscape.1);
+        assert_eq!(
+            appshot_contained_size(Some((1000, 1000)), 320.0),
+            (132.0, 132.0)
+        );
+        // Narrow side-by-side layouts and panoramas fit without distortion.
+        let narrow = appshot_contained_size(Some((1600, 900)), 160.0);
+        assert_eq!(narrow, (160.0, 90.0));
+        assert_eq!(
+            appshot_contained_size(Some((4000, 1000)), 900.0),
+            (320.0, 80.0)
+        );
+        let fallback = appshot_contained_size(None, 320.0);
+        assert!((fallback.0 - 211.2).abs() < 0.01);
+        assert_eq!(fallback.1, 132.0);
+    }
+
+    #[test]
     fn input_wheel_scroll_uses_gpui_direction_and_clamps() {
         // Positive wheel delta moves toward the start; negative moves down.
         assert_eq!(input_scroll_offset(40.0, 20.0, 200.0, 100.0), 20.0);
@@ -7880,6 +8711,67 @@ mod tests {
                 assert_eq!(changes.get(), settled, "unchanged draws must not schedule more layout");
                 cx.update(|cx| cx.quit());
             }).detach();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn single_line_address_reveals_caret_and_maps_scrolled_pointer() {
+        gpui_platform::headless().run(|cx| {
+            cx.set_global(Theme::dark());
+            let handle = cx
+                .open_window(gpui::WindowOptions::default(), |_, cx| {
+                    cx.new(|cx| {
+                        ComposerInput::new("Address", cx)
+                            .with_single_line()
+                            .with_text_metrics(11.0, 16.0)
+                    })
+                })
+                .unwrap();
+            handle
+                .update(cx, |input, window, cx| {
+                    let style = window.text_style();
+                    input.set_text(
+                        "http://device.a-very-long-project-name.localhost:7331/path",
+                        cx,
+                    );
+                    input.layout_text(px(100.0), &style, window, cx);
+                    assert_eq!(input.content_height, 16.0, "long hostnames must not wrap");
+                    input.clamp_scroll(16.0);
+                    assert!(input.scroll_left > 0.0);
+                    let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(16.0)));
+                    input.last_bounds = Some(bounds);
+                    let caret = input
+                        .bounds_for_range(
+                            input.content.len()..input.content.len(),
+                            bounds,
+                            window,
+                            cx,
+                        )
+                        .unwrap();
+                    assert!(caret.left() >= bounds.left() && caret.right() <= bounds.right());
+                    assert_eq!(
+                        input.index_for_mouse_position(caret.origin),
+                        input.content.len()
+                    );
+                    input.selected_range = 0..0;
+                    input.clamp_scroll(16.0);
+                    assert_eq!(input.scroll_left, 0.0, "Home must reveal the URL start");
+                    input.replace_text_in_range(None, "one\r\ntwo", window, cx);
+                    assert!(!input.content.contains(['\r', '\n']));
+                    input.set_text("short", cx);
+                    input.layout_text(px(100.0), &style, window, cx);
+                    input.clamp_scroll(16.0);
+                    assert_eq!(
+                        input.scroll_left, 0.0,
+                        "short replacement must reset scrolling"
+                    );
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
         });
     }
 
@@ -8456,5 +9348,87 @@ mod tests {
         let t = vec![entry(Some(MessageStatus::Streaming), vec![resolved])];
         assert!(input_request_resolved(&t, "r1"));
         assert!(!input_request_resolved(&t, "other"));
+    }
+}
+
+#[cfg(test)]
+mod appshot_rebase_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn appshot_only_draft_counts_as_content_and_removal_clears_it(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            let shot = appshots::tests::shot();
+            composer.stage_appshot(shot.clone(), cx);
+            assert!(composer_has_content(
+                "",
+                composer.staged().len() + composer.staged_appshots().len(),
+                0
+            ));
+            composer.remove_appshot(&shot.id, cx);
+            assert!(composer.staged_appshots().is_empty());
+            assert!(!composer_has_content(
+                "",
+                composer.staged().len() + composer.staged_appshots().len(),
+                0
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn failed_send_restores_complete_appshots_without_duplicates(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            let original = appshots::tests::shot();
+            let mut fresh = original.clone();
+            fresh.id = "fresh".into();
+            composer.stage_appshot_for("minted".into(), original.clone(), cx);
+            composer.stage_appshot(fresh, cx);
+            composer.restore_failed_appshots(&[original.clone()], "minted", "");
+            assert_eq!(composer.staged_appshots().len(), 2);
+            assert_eq!(
+                composer.staged_appshots()[0].accessibility,
+                original.accessibility
+            );
+            assert_eq!(
+                composer.staged_appshots()[0].screenshot.id,
+                original.screenshot.id
+            );
+            assert_eq!(composer.staged_appshots()[1].id, "fresh");
+            assert!(!composer.appshots.contains_key("minted"));
+        });
+    }
+
+    #[gpui::test]
+    fn remote_queue_removal_recovers_both_appshot_drafts(cx: &mut TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            let original = appshots::tests::shot();
+            let mut edited = original.clone();
+            edited.id = "edited".into();
+            composer.stage_appshot(edited, cx);
+            composer.queue_edit_draft = Some(("original".into(), vec![], vec![original]));
+            composer.editing_queued = Some("removed-row".into());
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("edited", cx));
+            composer.on_state_changed(cx);
+            assert!(composer.editing_queued.is_none());
+            assert_eq!(composer.staged_appshots().len(), 2);
+            assert_eq!(composer.input.read(cx).text(), "original\n\nedited");
+        });
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+impl Composer {
+    pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
+        self.appshots.clear();
+        cx.notify();
     }
 }

@@ -435,25 +435,11 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
         });
-        let address = div()
+        let address = surface_chrome::input()
             .id("browser-address")
-            .flex_1()
-            .min_w_0()
-            .h(px(26.0))
-            .px(px(7.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(if self.validation.is_some() {
-                theme.danger
-            } else if focused {
-                theme.border_strong
-            } else {
-                theme.border
+            .when(self.validation.is_some(), |el| {
+                el.border_1().border_color(theme.danger)
             })
-            .bg(theme.surface_raised.opacity(0.65))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -475,7 +461,7 @@ impl Render for BrowserSurface {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .h(px(18.0))
+                    .h(px(16.0))
                     .overflow_hidden()
                     .child(self.address.clone()),
             )
@@ -524,13 +510,16 @@ impl Render for BrowserSurface {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .bg(theme.bg);
+            // Empty tabs share the shell's glass, like the sidebar tab picker.
+            // Keep an opaque backing while native web content is loading.
+            .when(has_page, |body| body.bg(theme.bg));
         #[cfg(target_os = "macos")]
         let body = if let Some(native) = &self.native {
             if self.page.error.is_some() {
                 body.child(self.empty_body(&theme, cx))
             } else {
                 let native = native.handle();
+                let resize_inset = self.resize_inset;
                 body.child(
                     gpui::canvas(
                         |_, _, _| (),
@@ -540,7 +529,9 @@ impl Render for BrowserSurface {
                             let dragging = cx.has_active_drag();
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {
-                                    native.borrow_mut().sync(bounds, mask, dragging);
+                                    native
+                                        .borrow_mut()
+                                        .sync(bounds, mask, dragging, resize_inset);
                                 }
                             });
                         },

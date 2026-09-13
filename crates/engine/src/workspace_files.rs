@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,8 @@ struct WorkspaceFileKey {
 struct CheckoutWatch {
     checkout_id: String,
     root: PathBuf,
-    sequence: AtomicU64,
+    // Serializes publication with subscription baselines, including lag recovery.
+    sequence: Mutex<u64>,
     subscribers: AtomicUsize,
     changes_tx: broadcast::Sender<WorkspaceFileChanges>,
     cancel: CancellationToken,
@@ -385,6 +386,26 @@ impl WorkspaceFiles {
         result
     }
 
+    pub async fn read_image(
+        &self,
+        request: zeron_proto::ReadWorkspaceImageRequest,
+    ) -> Result<zeron_proto::WorkspaceImageChunk, WorkspaceFilesError> {
+        let workspace = self.resolve_target(&request.target).await?;
+        if request.expected_checkout_id.is_empty()
+            || request.expected_checkout_id != workspace.checkout_id
+        {
+            return Err(WorkspaceFilesError::Authorization(
+                "Workspace changed before image read".into(),
+            ));
+        }
+        let relative = WorkspaceRelativePath::file(&request.path)?;
+        tokio::task::spawn_blocking(move || {
+            read_image_blocking(&workspace.root, &relative, &request)
+        })
+        .await
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?
+    }
+
     pub async fn write_file(
         &self,
         request: WriteWorkspaceFileRequest,
@@ -548,7 +569,7 @@ impl CheckoutWatch {
         let watch = Arc::new(Self {
             checkout_id,
             root,
-            sequence: AtomicU64::new(0),
+            sequence: Mutex::new(0),
             subscribers: AtomicUsize::new(0),
             changes_tx,
             cancel,
@@ -568,25 +589,35 @@ impl CheckoutWatch {
 
     fn subscribe(self: &Arc<Self>, owner: Weak<WorkspaceFilesInner>) -> WorkspaceFileSubscription {
         self.subscribers.fetch_add(1, Ordering::AcqRel);
-        let initial = self.resync();
+        let (receiver, initial) = self.subscribe_with_baseline();
         WorkspaceFileSubscription {
-            receiver: self.changes_tx.subscribe(),
+            receiver,
             watch: self.clone(),
             owner,
             initial: Some(initial),
         }
     }
 
-    fn resync(&self) -> WorkspaceFileChanges {
-        WorkspaceFileChanges {
-            sequence: self.sequence.fetch_add(1, Ordering::AcqRel) + 1,
+    fn subscribe_with_baseline(
+        &self,
+    ) -> (
+        broadcast::Receiver<WorkspaceFileChanges>,
+        WorkspaceFileChanges,
+    ) {
+        let sequence = lock(&self.sequence);
+        let receiver = self.changes_tx.subscribe();
+        let baseline = WorkspaceFileChanges {
+            sequence: *sequence,
             resync_required: true,
             changes: Vec::new(),
-        }
+        };
+        (receiver, baseline)
     }
 
     fn publish(&self, resync_required: bool, changes: Vec<WorkspaceFileChange>) {
-        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut counter = lock(&self.sequence);
+        *counter += 1;
+        let sequence = *counter;
         tracing::trace!(
             checkout_id = %self.checkout_id,
             sequence,
@@ -616,7 +647,11 @@ impl WorkspaceFileSubscription {
         };
         match received {
             Ok(changes) => Some(changes),
-            Err(broadcast::error::RecvError::Lagged(_)) => Some(self.watch.resync()),
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let (receiver, baseline) = self.watch.subscribe_with_baseline();
+                self.receiver = receiver;
+                Some(baseline)
+            }
             Err(broadcast::error::RecvError::Closed) => None,
         }
     }
@@ -1150,6 +1185,98 @@ fn compare_workspace_search_matches(
         .cmp(&left.score)
         .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
         .then_with(|| left.path.cmp(&right.path))
+}
+
+fn read_image_blocking(
+    root: &Path,
+    relative: &WorkspaceRelativePath,
+    request: &zeron_proto::ReadWorkspaceImageRequest,
+) -> Result<zeron_proto::WorkspaceImageChunk, WorkspaceFilesError> {
+    use base64::Engine as _;
+    use std::io::Read;
+    use zeron_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
+    let mime = match relative
+        .as_path()
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => {
+            return Err(WorkspaceFilesError::Unsupported(
+                "Unsupported workspace image format".into(),
+            ));
+        }
+    };
+    if request.offset > 0 && request.expected_content_hash.is_none() {
+        return Err(bad_path("Image continuation requires a content hash"));
+    }
+    let before = checked_file_metadata(root, relative)?;
+    if before.len() > MAX_WORKSPACE_IMAGE_BYTES as u64 {
+        return Err(WorkspaceFilesError::Unsupported(
+            "Image exceeds 8 MiB preview limit".into(),
+        ));
+    }
+    let mut file = std::fs::File::open(root.join(relative.as_path()))
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    let opened = file
+        .metadata()
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    if !same_file_revision(&before, &opened) {
+        return Err(WorkspaceFilesError::Io("Image changed before open".into()));
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    let after = checked_file_metadata(root, relative)?;
+    let handle_after = file
+        .metadata()
+        .map_err(|e| WorkspaceFilesError::Io(e.to_string()))?;
+    if bytes.len() > MAX_WORKSPACE_IMAGE_BYTES
+        || !same_file_revision(&before, &after)
+        || !same_file_revision(&opened, &handle_after)
+        || bytes.len() as u64 != after.len()
+    {
+        return Err(WorkspaceFilesError::Io(
+            "Image changed during read or exceeds preview limit".into(),
+        ));
+    }
+    let hash = hash_bytes(&bytes);
+    if request
+        .expected_content_hash
+        .as_ref()
+        .is_some_and(|expected| expected != &hash)
+    {
+        return Err(WorkspaceFilesError::Io(
+            "Image changed between chunks; reload preview".into(),
+        ));
+    }
+    if request.offset > bytes.len() {
+        return Err(bad_path("Invalid image offset"));
+    }
+    let end = request
+        .offset
+        .saturating_add(WORKSPACE_IMAGE_CHUNK_BYTES)
+        .min(bytes.len());
+    Ok(zeron_proto::WorkspaceImageChunk {
+        checkout_id: request.expected_checkout_id.clone(),
+        content_hash: hash,
+        mime_type: mime.into(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes[request.offset..end]),
+        next_offset: end,
+        size: bytes.len(),
+        done: end == bytes.len(),
+    })
 }
 
 fn read_file_blocking(
@@ -2401,6 +2528,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_subscribers_do_not_create_sequence_gaps_for_existing_subscribers() {
+        let root = tempfile::tempdir().unwrap();
+        let watch = CheckoutWatch::start(
+            "checkout".into(),
+            root.path().into(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut first = watch.subscribe(Weak::new());
+        let baseline = first.recv().await.unwrap();
+        watch.publish(false, Vec::new());
+        let first_event = first.recv().await.unwrap();
+        assert_eq!(first_event.sequence, baseline.sequence + 1);
+        let mut second = watch.subscribe(Weak::new());
+        assert_eq!(second.recv().await.unwrap().sequence, first_event.sequence);
+        watch.publish(false, Vec::new());
+        assert_eq!(
+            first.recv().await.unwrap().sequence,
+            first_event.sequence + 1
+        );
+        assert_eq!(
+            second.recv().await.unwrap().sequence,
+            first_event.sequence + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn lag_recovery_drops_old_frames_without_advancing_shared_sequence() {
+        let root = tempfile::tempdir().unwrap();
+        let watch = CheckoutWatch::start(
+            "checkout".into(),
+            root.path().into(),
+            true,
+            CancellationToken::new(),
+        );
+        let mut slow = watch.subscribe(Weak::new());
+        let mut fast = watch.subscribe(Weak::new());
+        slow.recv().await.unwrap();
+        fast.recv().await.unwrap();
+        let mut last = 0;
+        for _ in 0..WATCH_BROADCAST_BUFFER + 2 {
+            watch.publish(false, Vec::new());
+            last = fast.recv().await.unwrap().sequence;
+        }
+        let recovery = slow.recv().await.unwrap();
+        assert!(recovery.resync_required);
+        assert_eq!(recovery.sequence, last);
+        watch.publish(false, Vec::new());
+        assert_eq!(slow.recv().await.unwrap().sequence, last + 1);
+        assert_eq!(fast.recv().await.unwrap().sequence, last + 1);
+    }
+
+    #[tokio::test]
     async fn watch_starts_with_resync_and_shares_one_checkout_entry() {
         let root = tempfile::tempdir().unwrap();
         let canonical = std::fs::canonicalize(root.path()).unwrap();
@@ -2571,5 +2751,81 @@ mod tests {
         let mut subscription = watch.subscribe(Weak::<WorkspaceFilesInner>::new());
         assert!(subscription.recv().await.unwrap().resync_required);
         watch.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use zeron_proto::{ReadWorkspaceImageRequest, WORKSPACE_IMAGE_CHUNK_BYTES, WorkspaceTarget};
+    fn request() -> ReadWorkspaceImageRequest {
+        ReadWorkspaceImageRequest {
+            target: WorkspaceTarget {
+                chat_id: Some("chat".into()),
+                space_id: None,
+                checkout_path: None,
+            },
+            path: "image.png".into(),
+            expected_checkout_id: "checkout".into(),
+            offset: 0,
+            expected_content_hash: None,
+        }
+    }
+    #[test]
+    fn workspace_image_chunks_are_bounded_and_versioned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("image.png"),
+            vec![1; WORKSPACE_IMAGE_CHUNK_BYTES + 1],
+        )
+        .unwrap();
+        let path = WorkspaceRelativePath::file("image.png").unwrap();
+        let mut request = request();
+        let first = read_image_blocking(&root, &path, &request).unwrap();
+        assert!(!first.done);
+        assert_eq!(first.next_offset, WORKSPACE_IMAGE_CHUNK_BYTES);
+        assert!(first.data.len() < 1024 * 1024);
+        request.offset = first.next_offset;
+        assert!(read_image_blocking(&root, &path, &request).is_err());
+        request.expected_content_hash = Some(first.content_hash);
+        assert!(read_image_blocking(&root, &path, &request).unwrap().done);
+        std::fs::write(
+            root.join("image.png"),
+            vec![2; WORKSPACE_IMAGE_CHUNK_BYTES + 1],
+        )
+        .unwrap();
+        assert!(read_image_blocking(&root, &path, &request).is_err());
+        request.expected_content_hash = None;
+        request.offset = usize::MAX;
+        assert!(read_image_blocking(&root, &path, &request).is_err());
+    }
+    #[test]
+    fn workspace_images_reject_large_files_and_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = std::fs::File::create(root.join("image.png")).unwrap();
+        file.set_len(zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            read_image_blocking(
+                &root,
+                &WorkspaceRelativePath::file("image.png").unwrap(),
+                &request()
+            )
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", root.join("link.png")).unwrap();
+            assert!(
+                read_image_blocking(
+                    &root,
+                    &WorkspaceRelativePath::file("link.png").unwrap(),
+                    &request()
+                )
+                .is_err()
+            );
+        }
     }
 }

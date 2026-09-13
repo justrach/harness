@@ -378,18 +378,23 @@ impl Shell {
     /// Close the space-filter dropdown through the exit animation (no-op when
     /// it isn't open). Every close path funnels here so the menu always
     /// animates out instead of vanishing.
-    fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
         if self.spaces_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
             cx.notify();
         }
     }
 
-    /// Land in a just-added space: filter the sidebar to it and open the
-    /// new-session canvas there.
+    /// Open the new-session canvas in a just-added space, preserving the
+    /// sidebar's current project filter.
     pub(super) fn land_in_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        self.settings.space_filter = Some(space_id.clone());
+        self.focus_composer(cx);
+        // "All" stays as-is; an explicit project filter follows the new
+        // project so the first send lands in a visible session.
+        if self.settings.space_filter.is_some() {
+            self.settings.space_filter = Some(space_id.clone());
+        }
         self.settings.last_space_id = Some(space_id.clone());
         self.state.update(cx, |s, cx| {
             s.select_space(Some(space_id), cx);
@@ -496,6 +501,7 @@ impl Shell {
         match key {
             popover::MenuKey::Escape => {
                 self.close_spaces_menu(cx);
+                cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.spaces_menu_rows(cx).len();
@@ -2056,6 +2062,7 @@ impl Shell {
             popover::MenuKey::Escape => {
                 self.add_space = None;
                 cx.notify();
+                cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.add_space_filtered(cx).len();
@@ -2945,6 +2952,7 @@ impl Shell {
                     if ev.keystroke.key == "escape" {
                         this.rename_space_dialog = None;
                         cx.notify();
+                        cx.stop_propagation();
                     }
                 }))
                 .child(popover::dialog_title(&theme, "Rename project"))

@@ -269,15 +269,15 @@ struct DiffHorizontalGeometry {
 }
 
 impl DiffHorizontalGeometry {
-    fn from_files(files: &[FileDiff]) -> Self {
-        let max_code_columns = files
+    fn from_file(file: &FileDiff) -> Self {
+        let max_code_columns = file
+            .hunks
             .iter()
-            .flat_map(|file| &file.hunks)
             .flat_map(|hunk| &hunk.lines)
             .map(|line| visual_columns(&line.text))
             .max()
             .unwrap_or(0);
-        let max_gutter_width = files.iter().map(gutter_width).fold(GUTTER_WIDTH, f32::max);
+        let max_gutter_width = gutter_width(file);
         Self {
             max_code_columns,
             max_gutter_width,
@@ -965,7 +965,10 @@ fn comment_state_key(
     comments: &[ReviewComment],
     draft: Option<&(String, CommentSide, u32)>,
 ) -> u64 {
-    let mut parts: Vec<String> = comments.iter().map(|comment| comment.id.clone()).collect();
+    let mut parts: Vec<String> = comments
+        .iter()
+        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
+        .collect();
     if let Some((path, side, line)) = draft {
         parts.push(format!("draft:{path}:{}:{line}", side.tag()));
     }
@@ -1133,6 +1136,20 @@ fn full_highlights(
 // Entity
 // ---------------------------------------------------------------------------
 
+struct FileHorizontalState {
+    geometry: DiffHorizontalGeometry,
+    scroll: gpui::ScrollHandle,
+}
+
+impl FileHorizontalState {
+    fn new(file: &FileDiff) -> Self {
+        Self {
+            geometry: DiffHorizontalGeometry::from_file(file),
+            scroll: gpui::ScrollHandle::new(),
+        }
+    }
+}
+
 struct ParsedDiff {
     /// `checkout_id:checksum` — identity of the parsed content.
     key: String,
@@ -1140,7 +1157,8 @@ struct ParsedDiff {
     additions: u32,
     deletions: u32,
     file_count: usize,
-    horizontal_geometry: DiffHorizontalGeometry,
+    /// Indexed like `files`; survives row virtualization and folding.
+    horizontal: Vec<FileHorizontalState>,
     files: Arc<Vec<FileDiff>>,
 }
 
@@ -1204,6 +1222,20 @@ pub enum DiffRow {
 }
 
 impl DiffRow {
+    fn file(self) -> usize {
+        match self {
+            Self::FileHeader { file }
+            | Self::Notice { file, .. }
+            | Self::HunkHeader { file, .. }
+            | Self::Line { file, .. }
+            | Self::SplitLine { file, .. }
+            | Self::CommentCard { file, .. }
+            | Self::CommentDraft { file }
+            | Self::BodyPad { file }
+            | Self::FoldingBody { file } => file as usize,
+        }
+    }
+
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
     fn height(self, comments: &[ReviewComment]) -> f32 {
@@ -1501,6 +1533,7 @@ struct HoverRow {
 }
 
 struct CommentDraft {
+    editing_id: Option<String>,
     /// Composer the note will stage onto, captured when the card opened. A
     /// draft belongs to the checkout it was written over, so it must not
     /// follow the user onto whatever chat is selected by commit time.
@@ -1540,9 +1573,6 @@ pub struct Changes {
     /// once their tween window elapses.
     fold_settle: Option<Task<()>>,
     list: ListState,
-    /// Shared by every code viewport; row chrome stays outside these tracked
-    /// scrollers so virtualization never moves gutters or headers on x.
-    horizontal_scroll: gpui::ScrollHandle,
     /// What the pane diffs against (toolbar dropdown).
     scope: DiffScope,
     /// Unified or side-by-side (toolbar toggle, persisted per user).
@@ -1632,7 +1662,6 @@ impl Changes {
             // Rows are single lines now — a deep overdraw is cheap and keeps
             // fast wheel flicks from outrunning measurement.
             list: ListState::new(0, ListAlignment::Top, px(1024.0)),
-            horizontal_scroll: gpui::ScrollHandle::new(),
             scope: DiffScope::default(),
             base_ref: None,
             branches: Vec::new(),
@@ -2019,10 +2048,18 @@ impl Changes {
         }));
     }
 
+    fn reset_horizontal_scroll(&self) {
+        if let Some(parsed) = &self.parsed {
+            for file in &parsed.horizontal {
+                reset_horizontal_scroll(&file.scroll);
+            }
+        }
+    }
+
     fn set_scope(&mut self, scope: DiffScope, cx: &mut Context<Self>) {
         if self.scope != scope {
             self.scope = scope;
-            reset_horizontal_scroll(&self.horizontal_scroll);
+            self.reset_horizontal_scroll();
             if scope == DiffScope::History {
                 self.history_pane(cx)
                     .update(cx, |history, cx| history.ensure_loaded(cx));
@@ -2139,7 +2176,6 @@ impl Changes {
         self.ensure_scoped(cx);
         let Some(diff) = self.active_diff(cx) else {
             if self.parsed.take().is_some() {
-                reset_horizontal_scroll(&self.horizontal_scroll);
                 self.rows.clear();
                 self.row_ranges.clear();
                 self.list.reset(0);
@@ -2176,7 +2212,7 @@ impl Changes {
                 } else {
                     files.len()
                 };
-                let horizontal_geometry = DiffHorizontalGeometry::from_files(&files);
+                let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
                 changes.highlights.clear();
                 let staged = changes.staged_comments(cx);
@@ -2199,14 +2235,13 @@ impl Changes {
                     .reset_with_uniform_height(rows.len(), px(DIFF_LINE_HEIGHT));
                 changes.rows = rows;
                 changes.row_ranges = ranges;
-                reset_horizontal_scroll(&changes.horizontal_scroll);
                 changes.parsed = Some(ParsedDiff {
                     key,
                     truncated,
                     additions,
                     deletions,
                     file_count,
-                    horizontal_geometry,
+                    horizontal,
                     files: Arc::new(files),
                 });
                 cx.notify();
@@ -2459,7 +2494,7 @@ impl Changes {
     /// indices do not survive the re-pairing).
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = self.mode.toggled();
-        reset_horizontal_scroll(&self.horizontal_scroll);
+        self.reset_horizontal_scroll();
         let split = self.mode.is_split();
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             settings.diff_split = split;
@@ -2471,7 +2506,7 @@ impl Changes {
 
     fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
         self.wrap_lines = !self.wrap_lines;
-        reset_horizontal_scroll(&self.horizontal_scroll);
+        self.reset_horizontal_scroll();
         let wrap = self.wrap_lines;
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             settings.diff_wrap = wrap;
@@ -2542,7 +2577,17 @@ impl Changes {
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
-        state.review_comments(&state.composer_key()).to_vec()
+        state
+            .review_comments(&state.composer_key())
+            .iter()
+            .filter(|comment| {
+                self.draft
+                    .as_ref()
+                    .and_then(|draft| draft.editing_id.as_ref())
+                    != Some(&comment.id)
+            })
+            .cloned()
+            .collect()
     }
 
     fn comments_for(&self, path: &str, cx: &App) -> Vec<ReviewComment> {
@@ -2686,6 +2731,7 @@ impl Changes {
         let key = self.state.read(cx).composer_key();
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
+            editing_id: None,
             key,
             path,
             old_path,
@@ -2695,6 +2741,32 @@ impl Changes {
             _events: events,
         });
         window.focus(&handle, cx);
+        self.sync_comment_rows(cx);
+        cx.notify();
+    }
+
+    fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(comment) = state
+            .review_comments(&state.composer_key())
+            .iter()
+            .find(|comment| comment.id == id && !comment.is_file())
+            .cloned()
+        else {
+            return;
+        };
+        let Some((side, line)) = comment.diff_anchor() else {
+            return;
+        };
+        self.open_draft(comment.path.clone(), side, line, window, cx);
+        let draft = self.draft.as_mut().unwrap();
+        draft.editing_id = Some(comment.id);
+        if let comments::CommentSource::Diff { old_path, .. } = comment.source {
+            draft.old_path = old_path;
+        }
+        draft
+            .input
+            .update(cx, |input, cx| input.set_text(comment.body, cx));
         self.sync_comment_rows(cx);
         cx.notify();
     }
@@ -2715,13 +2787,18 @@ impl Changes {
             cx.notify();
             return;
         }
-        let comment = ReviewComment::new(draft.path, draft.side, draft.line, body)
-            .renamed_from(draft.old_path);
+
         // `draft.key`, not the live one: the note stages onto the composer it
         // was written against even if the selection moved under it.
         let key = draft.key;
         self.state.update(cx, |state, cx| {
-            state.add_review_comment(&key, comment);
+            if let Some(id) = draft.editing_id {
+                state.update_review_comment_body(&key, &id, body);
+            } else {
+                let comment = ReviewComment::new(draft.path, draft.side, draft.line, body)
+                    .renamed_from(draft.old_path);
+                state.add_review_comment(&key, comment);
+            }
             cx.notify();
         });
         self.sync_comment_rows(cx);
@@ -2748,6 +2825,20 @@ impl Changes {
         if self.ref_menu.begin_close() {
             popover::reap_popup(cx, |changes: &mut Self| &mut changes.ref_menu);
         }
+    }
+
+    /// Handle Escape before focused descendants such as a terminal receive it.
+    /// A popup in its exit animation remains a blocker until it unmounts.
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.ref_menu.is_open() {
+            self.close_ref_menu(cx);
+            return true;
+        }
+        if self.scope_menu.is_open() {
+            self.close_scope_menu(cx);
+            return true;
+        }
+        self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
     }
 
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2807,7 +2898,10 @@ impl Changes {
             event.keystroke.modifiers.control,
         );
         match key {
-            popover::MenuKey::Escape => self.close_ref_menu(cx),
+            popover::MenuKey::Escape => {
+                self.close_ref_menu(cx);
+                cx.stop_propagation();
+            }
             popover::MenuKey::Up | popover::MenuKey::Down => {
                 let count = self.ref_menu_rows(cx).len();
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
@@ -2978,13 +3072,14 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
+        let horizontal = &parsed.horizontal[row.file()];
         let code_width = if self.wrap_lines {
             DiffCodeWidth::Wrapped
         } else {
-            DiffCodeWidth::Scrollable(parsed.horizontal_geometry.resolve(&theme, window))
+            DiffCodeWidth::Scrollable(horizontal.geometry.resolve(&theme, window))
         };
         let code_scroll = DiffCodeScrollContext {
-            handle: self.horizontal_scroll.clone(),
+            handle: horizontal.scroll.clone(),
             prefix: SharedString::from(format!("changes-code-row-{ix}")),
         };
         match row {
@@ -3169,7 +3264,14 @@ impl Changes {
                 };
                 let comments = self.comments_for(&file_diff.path, cx);
                 match comments.get(card as usize) {
-                    Some(comment) => render_comment_card(comment, &theme, cx),
+                    Some(comment) => crate::comment_ui::render_comment_card(
+                        comment,
+                        &theme,
+                        cx,
+                        Self::edit_comment,
+                        Self::remove_comment,
+                        None,
+                    ),
                     None => gpui::Empty.into_any_element(),
                 }
             }
@@ -3184,12 +3286,16 @@ impl Changes {
                 {
                     // Header cites the same path the staged card and the
                     // prompt bullet will.
-                    Some(draft) => render_comment_draft(
+                    Some(draft) => crate::comment_ui::render_comment_draft(
                         draft_cite_path(draft),
                         draft.line,
                         draft.input.clone(),
+                        draft.editing_id.is_some(),
                         &theme,
                         cx,
+                        Self::cancel_draft,
+                        Self::commit_draft,
+                        None,
                     ),
                     None => gpui::Empty.into_any_element(),
                 }
@@ -3213,7 +3319,7 @@ impl Changes {
                     self.mode,
                     code_width,
                     Some(DiffCodeScrollContext {
-                        handle: self.horizontal_scroll.clone(),
+                        handle: code_scroll.handle.clone(),
                         prefix: SharedString::from(format!(
                             "changes-fold-code-{file}-{}",
                             fold.epoch
@@ -4060,7 +4166,7 @@ fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
 
 /// The only part of a diff row allowed to exceed its viewport. The outer
 /// element keeps row chrome fixed; the inner element owns the intrinsic code
-/// width and is the only plane moved by the shared horizontal scroll handle.
+/// width and is the only plane moved by the file's horizontal scroll handle.
 fn code_text_viewport(
     text: String,
     runs: Vec<gpui::TextRun>,
@@ -4468,118 +4574,12 @@ fn render_comment_adder(
     cx: &Context<Changes>,
 ) -> AnyElement {
     let target = path.to_string();
-    div()
-        .id(SharedString::from(format!(
-            "cmt-add-{path}-{}-{line}",
-            side.tag()
-        )))
-        .size(px(COMMENT_ADDER_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(theme.solid)
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.open_draft(target.clone(), side, line, window, cx);
-        }))
-        .child(
-            crate::icons::icon(crate::icons::PLUS)
-                .size(px(11.0))
-                .text_color(theme.on_solid),
-        )
-        .into_any_element()
-}
-
-fn render_comment_card(
-    comment: &ReviewComment,
-    theme: &Theme,
-    cx: &Context<Changes>,
-) -> AnyElement {
-    let group: SharedString = format!("cmt-card-{}", comment.id).into();
-    let id = comment.id.clone();
-    div()
-        .group(group.clone())
-        .h(px(comments::card_height(&comment.body)))
-        .w_full()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .bg(crate::theme::ink(0.05))
-        // A bar, not a border: it must match ACCENT_BAR_WIDTH exactly or the
-        // card's edge steps in and out of the column.
-        .child(comment_accent_bar(theme.solid.opacity(0.35)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .px(px(Theme::SPACE_LG))
-                .py(px(comments::CARD_PAD_V / 2.0))
-                .child(
-                    div()
-                        .h(px(comments::CARD_HEADER_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(comment.location())),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("cmt-remove-{}", comment.id)))
-                                .flex_none()
-                                .size(px(16.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .opacity(0.0)
-                                .group_hover(group, |s| s.opacity(1.0))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.remove_comment(&id, cx)),
-                                )
-                                .child(
-                                    crate::icons::icon(crate::icons::CLOSE_CIRCLE)
-                                        .size(px(12.0))
-                                        .text_color(theme.text_muted),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        // Height is analytic, so an over-long body clips
-                        // inside the card rather than past the fold height.
-                        .overflow_hidden()
-                        .text_size(px(12.0))
-                        .line_height(px(comments::CARD_LINE_HEIGHT))
-                        .text_color(theme.text_dim)
-                        .child(SharedString::from(comment.body.clone())),
-                ),
-        )
-        .into_any_element()
-}
-
-fn comment_accent_bar(color: gpui::Hsla) -> gpui::Div {
-    div().w(px(ACCENT_BAR_WIDTH)).h_full().flex_none().bg(color)
+    crate::comment_ui::render_comment_adder(
+        format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
+        theme,
+        cx,
+        move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
+    )
 }
 
 /// Mirrors [`ReviewComment::cite_path`] for the not-yet-staged note.
@@ -4588,113 +4588,6 @@ fn draft_cite_path(draft: &CommentDraft) -> &str {
         CommentSide::Old => draft.old_path.as_deref().unwrap_or(&draft.path),
         CommentSide::New => &draft.path,
     }
-}
-
-/// Fixed height, so an open draft never fights the fold tween.
-fn render_comment_draft(
-    path: &str,
-    line: u32,
-    input: Entity<ComposerInput>,
-    theme: &Theme,
-    cx: &Context<Changes>,
-) -> AnyElement {
-    div()
-        .h(px(comments::DRAFT_CARD_HEIGHT))
-        .w_full()
-        .flex_none()
-        .flex()
-        .flex_row()
-        .bg(crate::theme::ink(0.08))
-        .child(comment_accent_bar(theme.solid.opacity(0.7)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .px(px(Theme::SPACE_LG))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .h(px(comments::CARD_HEADER_HEIGHT))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_faint),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(theme.font_mono.clone())
-                                .text_size(px(11.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(format!("{path}:{line}"))),
-                        ),
-                )
-                .child(
-                    div()
-                        .h(px(46.0))
-                        .flex_none()
-                        .overflow_hidden()
-                        .text_size(px(12.0))
-                        .child(input.into_any_element()),
-                )
-                .child(
-                    div()
-                        .h(px(28.0))
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .child(
-                            comment_action("cmt-cancel", "Cancel", false, theme)
-                                .on_click(cx.listener(|this, _, _, cx| this.cancel_draft(cx))),
-                        )
-                        .child(
-                            comment_action("cmt-commit", "Comment", true, theme)
-                                .on_click(cx.listener(|this, _, _, cx| this.commit_draft(cx))),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn comment_action(
-    id: &'static str,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .when(primary, |el| el.bg(theme.solid).text_color(theme.on_solid))
-        .when(!primary, |el| {
-            el.text_color(motion::hover_blend(id, theme.text_muted, theme.text))
-                .bg(motion::hover_blend(
-                    id,
-                    gpui::transparent_black(),
-                    theme.element_hover,
-                ))
-                .on_hover(motion::hover_listener(id))
-        })
-        .child(SharedString::from(label))
 }
 
 /// The expanded body of one file section: notices, hunk headers, +/-/context
@@ -5023,6 +4916,74 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui::test]
+    fn editing_staged_diff_comments_preserves_identity_and_cancellation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Changes::new(state, cx)
+        });
+        window
+            .update(cx, |changes, window, cx| {
+                for side in [CommentSide::Old, CommentSide::New] {
+                    let original =
+                        ReviewComment::new("new.rs", side, 7, "Original 🦀\nSecond line")
+                            .renamed_from(Some("old.rs"));
+                    changes.state.update(cx, |state, _| {
+                        state.add_review_comment("", original.clone())
+                    });
+                    changes.edit_comment(&original.id, window, cx);
+                    let draft = changes.draft.as_ref().unwrap();
+                    assert_eq!(draft.input.read(cx).text(), original.body);
+                    assert_eq!(draft_cite_path(draft), original.cite_path());
+                    assert!(draft.input.read(cx).focus_handle(cx).is_focused(window));
+                    let input = draft.input.clone();
+                    input.update(cx, |input, cx| input.set_text("Cancelled", cx));
+                    assert_eq!(changes.state.read(cx).review_comments("")[0], original);
+                    changes.cancel_draft(cx);
+                    assert_eq!(
+                        changes.state.read(cx).review_comments(""),
+                        &[original.clone()]
+                    );
+
+                    changes.edit_comment(&original.id, window, cx);
+                    changes
+                        .draft
+                        .as_ref()
+                        .unwrap()
+                        .input
+                        .clone()
+                        .update(cx, |input, cx| {
+                            input.set_text("  Revised\nMore detail  ", cx)
+                        });
+                    changes.commit_draft(cx);
+                    let mut expected = original.clone();
+                    expected.body = "Revised\nMore detail".into();
+                    assert_eq!(
+                        changes.state.read(cx).review_comments(""),
+                        &[expected.clone()]
+                    );
+                    assert_ne!(
+                        comment_state_key(&[original], None),
+                        comment_state_key(&[expected.clone()], None)
+                    );
+                    changes.edit_comment(&expected.id, window, cx);
+                    let sent = changes
+                        .state
+                        .update(cx, |state, _| state.take_review_comments(""));
+                    assert!(comments::with_comments("", &sent).contains("Revised\n  More detail"));
+                    changes.commit_draft(cx);
+                    assert!(changes.state.read(cx).review_comments("").is_empty());
+                }
+            })
+            .unwrap();
+    }
 
     const PATCH: &str = "\
 diff --git a/src/main.rs b/src/main.rs
@@ -5629,7 +5590,7 @@ rename to new_name.rs
         assert_eq!(visual_columns("e\u{301}"), 1);
 
         let files = parse_patch("diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+ab\t界\n");
-        let geometry = DiffHorizontalGeometry::from_files(&files);
+        let geometry = DiffHorizontalGeometry::from_file(&files[0]);
         assert_eq!(geometry.max_code_columns, 6);
         assert_eq!(geometry.max_gutter_width, GUTTER_WIDTH);
     }
@@ -5652,6 +5613,53 @@ rename to new_name.rs
             ACCENT_BAR_WIDTH + gutter + SPLIT_MARKER_WIDTH + metrics.split_content_width(gutter)
         };
         assert_eq!(split_total(narrow), split_total(wide));
+    }
+
+    #[test]
+    fn horizontal_scroll_and_width_are_independent_per_file() {
+        let files = parse_patch(
+            "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+short\n\
+             diff --git a/b b/b\n@@ -1 +1 @@\n-old\n+a much longer source line\n",
+        );
+        let states: Vec<_> = files.iter().map(FileHorizontalState::new).collect();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].geometry.max_code_columns, 5);
+        assert_eq!(states[1].geometry.max_code_columns, 25);
+
+        let row = DiffRow::Line {
+            file: 0,
+            hunk: 0,
+            line: 0,
+            flat: 0,
+        };
+        let folding = DiffRow::FoldingBody { file: 0 };
+        let split = DiffRow::SplitLine {
+            file: 1,
+            hunk: 0,
+            left: Some(0),
+            right: Some(1),
+        };
+        let first = DiffCodeScrollContext {
+            handle: states[row.file()].scroll.clone(),
+            prefix: "first".into(),
+        };
+        let second = DiffCodeScrollContext {
+            handle: states[split.file()].scroll.clone(),
+            prefix: "second".into(),
+        };
+        first
+            .slot("unified")
+            .handle
+            .set_offset(gpui::Point::new(px(-96.0), px(0.0)));
+        assert_eq!(states[folding.file()].scroll.offset().x, px(-96.0));
+        assert_eq!(second.slot("old").handle.offset(), gpui::Point::default());
+
+        second
+            .slot("old")
+            .handle
+            .set_offset(gpui::Point::new(px(-48.0), px(0.0)));
+        assert_eq!(second.slot("new").handle.offset().x, px(-48.0));
+        assert_eq!(first.slot("unified").handle.offset().x, px(-96.0));
     }
 
     #[test]

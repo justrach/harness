@@ -383,9 +383,15 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
-    /// Session notification chimes (done / awaiting-input). `ZERON_DISABLE_SOUND`
-    /// overrides.
+    /// Master switch for session notification chimes. `ZERON_DISABLE_SOUND`
+    /// overrides every per-event preference below.
     pub sound_enabled: bool,
+    /// Chime when an agent run completes successfully.
+    pub sound_completion_enabled: bool,
+    /// Chime when an agent is waiting for user input.
+    pub sound_input_enabled: bool,
+    /// Chime when a run fails or the durable connection state degrades.
+    pub sound_attention_enabled: bool,
     /// Desktop banner notifications on the same transitions.
     /// `ZERON_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
@@ -402,6 +408,17 @@ pub struct UiSettings {
     pub terminal_open: bool,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
+    /// macOS viewer-side Appshot capture. Device-local because the shortcut
+    /// and TCC permissions belong to this desktop.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshots_enabled: bool,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshot_sound_enabled: bool,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshot_destination: crate::appshots::AppshotDestination,
+    /// Whether bare Escape stops the active agent after contextual consumers
+    /// decline it. Device-local and opt-in.
+    pub escape_stops_active_agent: bool,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
     /// Optional columns shown in every Git History pane.
@@ -464,6 +481,9 @@ impl Default for UiSettings {
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
+            sound_completion_enabled: true,
+            sound_input_enabled: true,
+            sound_attention_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
@@ -471,7 +491,11 @@ impl Default for UiSettings {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             terminal_open: false,
             keymap: KeymapConfig::default(),
+            escape_stops_active_agent: false,
             composer_send_behavior: ComposerSendBehavior::default(),
+            appshots_enabled: false,
+            appshot_sound_enabled: true,
+            appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
@@ -524,6 +548,7 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 /// rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
+    CaptureAppshot,
     SaveFile,
     BrowserReload,
     ToggleSidebar,
@@ -537,7 +562,8 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 9 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 10 + JUMP_SLOTS] = [
+        ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -558,9 +584,14 @@ impl ShortcutId {
         ShortcutId::JumpSession(8),
     ];
 
+    pub fn available(self) -> bool {
+        self != Self::CaptureAppshot || crate::appshots::is_desktop()
+    }
+
     /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
     pub fn label(self) -> &'static str {
         match self {
+            ShortcutId::CaptureAppshot => "Capture Appshot",
             ShortcutId::SaveFile => "Save file",
             ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
@@ -583,6 +614,8 @@ impl ShortcutId {
     /// this guards against only exists off macOS).
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
+            ShortcutId::CaptureAppshot if mac => "ctrl-alt-space",
+            ShortcutId::CaptureAppshot => "mod-alt-space",
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
             ShortcutId::ToggleSidebar => "mod-b",
@@ -625,6 +658,8 @@ impl ShortcutId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub capture_appshot: String,
     pub save_file: String,
     pub browser_reload: String,
     pub toggle_sidebar: String,
@@ -644,6 +679,7 @@ pub struct KeymapConfig {
 impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
+            capture_appshot: ShortcutId::CaptureAppshot.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
@@ -661,6 +697,7 @@ impl Default for KeymapConfig {
 impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
+            ShortcutId::CaptureAppshot => &self.capture_appshot,
             ShortcutId::SaveFile => &self.save_file,
             ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
@@ -680,6 +717,7 @@ impl KeymapConfig {
 
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
+            ShortcutId::CaptureAppshot => self.capture_appshot = combo,
             ShortcutId::SaveFile => self.save_file = combo,
             ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
@@ -787,10 +825,11 @@ pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
         .into_iter()
         .filter(|&id| {
             let combo = keymap.get(id);
-            !combo.is_empty()
+            id.available()
+                && !combo.is_empty()
                 && ShortcutId::ALL
                     .into_iter()
-                    .any(|other| other != id && keymap.get(other) == combo)
+                    .any(|other| other.available() && other != id && keymap.get(other) == combo)
         })
         .collect()
 }
@@ -903,6 +942,17 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
 }
 
 impl UiSettings {
+    /// Whether this session event may produce audio. Appshot capture has its
+    /// own feature-local preference once the Appshots contribution lands.
+    pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
+        self.sound_enabled
+            && match sound {
+                crate::sound::Sound::Done => self.sound_completion_enabled,
+                crate::sound::Sound::Request => self.sound_input_enabled,
+                crate::sound::Sound::Attention => self.sound_attention_enabled,
+            }
+    }
+
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
         if self.sidebar_organization == SidebarOrganization::ByProject {
@@ -945,6 +995,15 @@ impl UiSettings {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
+                    if let Some(settings) = value.as_object_mut() {
+                        let previous_sound = settings
+                            .get("soundEnabled")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true);
+                        settings
+                            .entry("appshotSoundEnabled")
+                            .or_insert(serde_json::Value::Bool(previous_sound));
+                    }
                     if let Some(keymap) = value
                         .get_mut("keymap")
                         .and_then(serde_json::Value::as_object_mut)
@@ -1071,6 +1130,91 @@ mod tests {
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
+        for sound in [
+            crate::sound::Sound::Done,
+            crate::sound::Sound::Request,
+            crate::sound::Sound::Attention,
+        ] {
+            assert!(!loaded.session_sound_enabled(sound));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn appshot_shortcut_defaults_round_trip_and_reset() {
+        assert_eq!(
+            ShortcutId::CaptureAppshot.default_combo_on(true),
+            "ctrl-alt-space"
+        );
+        assert_eq!(
+            ShortcutId::CaptureAppshot.default_combo_on(false),
+            "mod-alt-space"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap":{"newSession":"mod-shift-n"}}"#,
+        )
+        .unwrap();
+        let mut settings = UiSettings::load(dir.path());
+        assert_eq!(
+            settings.keymap.capture_appshot,
+            ShortcutId::CaptureAppshot.default_combo()
+        );
+        assert_eq!(settings.keymap.new_session, "mod-shift-n");
+        settings
+            .keymap
+            .set(ShortcutId::CaptureAppshot, "mod-alt-k".into());
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let mut restored = UiSettings::load(dir.path());
+        assert_eq!(restored.keymap.capture_appshot, "mod-alt-k");
+        restored.keymap.reset(ShortcutId::CaptureAppshot);
+        assert_eq!(
+            restored.keymap.capture_appshot,
+            ShortcutId::CaptureAppshot.default_combo()
+        );
+    }
+
+    #[test]
+    fn appshot_settings_are_serialized_only_on_desktop() {
+        let value = serde_json::to_value(UiSettings::default()).unwrap();
+        for key in [
+            "appshotsEnabled",
+            "appshotSoundEnabled",
+            "appshotDestination",
+        ] {
+            assert_eq!(
+                value.get(key).is_some(),
+                crate::appshots::is_desktop(),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            value["keymap"].get("captureAppshot").is_some(),
+            crate::appshots::is_desktop()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn appshot_sound_migrates_mute_and_persists_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"soundEnabled":false}"#).unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert!(!loaded.appshot_sound_enabled);
+        loaded.appshot_sound_enabled = true;
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            serde_json::to_vec(&loaded).unwrap(),
+        )
+        .unwrap();
+        let restored = UiSettings::load(dir.path());
+        assert!(restored.appshot_sound_enabled);
+        assert!(!restored.sound_enabled);
     }
 
     #[test]
@@ -1114,6 +1258,9 @@ mod tests {
             )]),
             space_order: vec!["space-2".to_string(), "space-1".to_string()],
             sound_enabled: false,
+            sound_completion_enabled: false,
+            sound_input_enabled: true,
+            sound_attention_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
             right_pane_width: 700.0,
@@ -1124,7 +1271,11 @@ mod tests {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
             },
+            escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            appshots_enabled: false,
+            appshot_sound_enabled: true,
+            appshot_destination: crate::appshots::AppshotDestination::NewSession,
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -1255,6 +1406,9 @@ mod tests {
         assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled, "other keys still parse");
+        assert!(loaded.sound_completion_enabled);
+        assert!(loaded.sound_input_enabled);
+        assert!(loaded.sound_attention_enabled);
         assert_eq!(
             loaded.files_autosave_delay_ms,
             FILES_AUTOSAVE_DELAY_DEFAULT_MS
@@ -1273,6 +1427,10 @@ mod tests {
         assert!(
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
+        );
+        assert!(
+            !loaded.escape_stops_active_agent,
+            "preference files default Escape stopping off"
         );
         assert_eq!(
             loaded.git_history_columns,
@@ -1294,6 +1452,30 @@ mod tests {
             GitHistoryAuthorDisplay::Avatar,
             "pre-author-display files default to avatars"
         );
+    }
+
+    #[test]
+    fn session_sound_preferences_round_trip_and_gate_each_event() {
+        let settings = UiSettings {
+            sound_enabled: true,
+            sound_completion_enabled: false,
+            sound_input_enabled: true,
+            sound_attention_enabled: false,
+            ..Default::default()
+        };
+        assert!(!settings.session_sound_enabled(crate::sound::Sound::Done));
+        assert!(settings.session_sound_enabled(crate::sound::Sound::Request));
+        assert!(!settings.session_sound_enabled(crate::sound::Sound::Attention));
+
+        let value = serde_json::to_value(&settings).unwrap();
+        let restored: UiSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, settings);
+
+        let muted = UiSettings {
+            sound_enabled: false,
+            ..settings
+        };
+        assert!(!muted.session_sound_enabled(crate::sound::Sound::Request));
     }
 
     #[test]
@@ -1459,6 +1641,7 @@ mod tests {
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
+        assert!(!d.escape_stops_active_agent);
     }
 
     #[test]
@@ -1698,6 +1881,22 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.keymap, KeymapConfig::default());
         assert!(!loaded.sidebar_grouped);
+        assert!(!loaded.escape_stops_active_agent);
+    }
+
+    #[test]
+    fn escape_stopping_is_opt_in_for_old_and_partial_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+        )
+        .unwrap();
+
+        let loaded = UiSettings::load(dir.path());
+        assert!(!loaded.escape_stops_active_agent);
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert!(!loaded.sound_enabled);
     }
 
     #[test]

@@ -57,6 +57,7 @@ struct Inner {
     stop: CancellationToken,
     ice_servers: Vec<RTCIceServer>,
 }
+const PAIR_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct Peers(Arc<Inner>);
 impl Peers {
@@ -86,10 +87,25 @@ impl Peers {
             receiver,
         )
     }
+    /// Replace STUN servers; an empty list pairs over host candidates only.
+    /// Must be called before the handle is shared.
+    pub fn set_ice_servers(&mut self, urls: Vec<String>) -> anyhow::Result<()> {
+        let inner = Arc::get_mut(&mut self.0).context("preview peers already shared")?;
+        inner.ice_servers = if urls.is_empty() {
+            Vec::new()
+        } else {
+            vec![RTCIceServer {
+                urls,
+                ..Default::default()
+            }]
+        };
+        Ok(())
+    }
     async fn send(&self, to: &str, signal: Signal) -> anyhow::Result<()> {
         tokio::select! { _ = self.0.stop.cancelled() => anyhow::bail!("preview networking stopped"), result = self.0.output.send(OutgoingSignal { to: to.into(), signal }) => { result?; Ok(()) } }
     }
     async fn create(&self, session: String, initiator: bool) -> anyhow::Result<Arc<Peer>> {
+        tracing::debug!(initiator, "creating preview peer");
         let (ready, receiver) = watch::channel(None);
         let (gathered, gathering) = watch::channel(false);
         let stop = self.0.stop.child_token();
@@ -120,6 +136,7 @@ impl Peers {
             let channel = pc.create_data_channel("zeron-preview-v1", None).await?;
             handler.attach(channel);
         }
+        tracing::debug!(initiator, "created preview peer");
         Ok(Arc::new(Peer {
             session,
             pc,
@@ -129,25 +146,49 @@ impl Peers {
         }))
     }
     async fn description(&self, peer: &Peer, offer: bool) -> anyhow::Result<RTCSessionDescription> {
+        tracing::debug!(offer, "creating preview description");
         let description = if offer {
             peer.pc.create_offer(None).await?
         } else {
             peer.pc.create_answer(None).await?
         };
         peer.pc.set_local_description(description).await?;
-        // Include the gathered ICE candidates in SDP. This avoids candidate /
-        // remote-description races and keeps reconnect messages self-contained.
+        tracing::debug!(offer, "gathering preview candidates");
+        // Include candidates gathered so far. A STUN probe on an unreachable
+        // interface/server may never report Complete; that must not discard
+        // usable host or server-reflexive candidates from the other probes.
         let mut gathered = peer.gathered.clone();
-        tokio::time::timeout(Duration::from_secs(12), gathered.wait_for(|done| *done)).await??;
-        peer.pc
+        match tokio::time::timeout(Duration::from_secs(3), gathered.wait_for(|done| *done)).await {
+            Ok(result) => {
+                result.context("preview candidate gathering stopped")?;
+            }
+            Err(_) => {
+                tracing::warn!("preview STUN discovery incomplete; trying available ICE candidates")
+            }
+        }
+        let description = peer
+            .pc
             .local_description()
             .await
-            .context("missing local preview SDP")
+            .context("missing local preview SDP")?;
+        tracing::debug!(offer, "sending preview description");
+        anyhow::ensure!(
+            description.sdp.contains("a=candidate:"),
+            "No local preview connection candidates are available"
+        );
+        Ok(description)
     }
-    async fn offer(&self, device: &str, session: String) -> anyhow::Result<()> {
+    /// `requested` marks an offer made because the other device asked for one.
+    async fn offer(&self, device: &str, session: String, requested: bool) -> anyhow::Result<()> {
         let mut peers = self.0.peers.lock().await;
-        if peers.get(device).is_some_and(|p| !p.stop.is_cancelled()) {
-            return Ok(());
+        if let Some(existing) = peers.get(device) {
+            // A live peer is reused, unless the other device asked to pair
+            // under a new session: it has dropped its side, so ours is a
+            // zombie whose failure would only surface once ICE consent
+            // expires (~30s), stalling every request until then.
+            if !existing.stop.is_cancelled() && (!requested || existing.session == session) {
+                return Ok(());
+            }
         }
         anyhow::ensure!(
             peers.len() < 16 || peers.contains_key(device),
@@ -188,7 +229,7 @@ impl Peers {
                     self.0.device.as_str() < device && signal.sdp.is_none(),
                     "invalid preview initiator"
                 );
-                self.offer(device, signal.session).await?;
+                self.offer(device, signal.session, true).await?;
             }
             "offer" => {
                 anyhow::ensure!(
@@ -257,25 +298,20 @@ impl Peers {
     ) -> anyhow::Result<Stream> {
         let device = device.to_owned();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
-            let existing = self.0.peers.lock().await.get(&device).cloned();
-            if existing.as_ref().is_none_or(|p| p.stop.is_cancelled() || p.ready.borrow().as_ref().is_some_and(Mux::is_closed)) {
-                if let Some(peer) = existing { peer.close().await; }
-                let session = uuid::Uuid::new_v4().to_string();
-                if self.0.device < device { self.offer(&device, session).await?; }
-                else {
-                    let should_request = {
-                        let mut requested = self.0.requested.lock().await;
-                        let now = tokio::time::Instant::now();
-                        if requested.get(&device).is_some_and(|at| now.duration_since(*at) < Duration::from_secs(10)) { false }
-                        else { requested.insert(device.clone(), now); true }
-                    };
-                    if should_request { self.send(&device, Signal { kind: "connect".into(), session, sdp: None }).await?; }
-                }
-            }
+            // A failed or transport-dead peer is closed here; the loop below
+            // pairs afresh.
+            let stale = self.0.peers.lock().await.get(&device).cloned().filter(|p| {
+                p.stop.is_cancelled() || p.ready.borrow().as_ref().is_some_and(Mux::is_closed)
+            });
+            if let Some(peer) = stale { peer.close().await; }
             loop {
                 let changed = self.0.changed.notified();
                 let mux = self.0.peers.lock().await.get(&device).and_then(|peer| peer.ready.borrow().clone());
                 if let Some(mux) = mux.filter(|m| !m.is_closed()) { return mux.open(service, websocket).await; }
+                // Pairing is re-attempted while waiting, so one lost signal or
+                // a stalled attempt costs at most the pacing interval rather
+                // than the whole timeout.
+                self.pair(&device).await?;
                 tokio::select! { _ = self.0.stop.cancelled() => anyhow::bail!("preview networking stopped"), _ = changed => {}, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
             }
         }).await;
@@ -283,6 +319,35 @@ impl Peers {
             self.remove(&device).await;
         }
         result.context("Could not connect directly to this device. Check that both devices are online and their networks allow WebRTC.")?
+    }
+    /// Starts (or asks the initiating device to start) a pairing attempt, at
+    /// most once per pacing interval per device. `remove` resets the pacing.
+    async fn pair(&self, device: &str) -> anyhow::Result<()> {
+        {
+            let mut requested = self.0.requested.lock().await;
+            let now = tokio::time::Instant::now();
+            if requested
+                .get(device)
+                .is_some_and(|at| now.duration_since(*at) < PAIR_INTERVAL)
+            {
+                return Ok(());
+            }
+            requested.insert(device.to_owned(), now);
+        }
+        let session = uuid::Uuid::new_v4().to_string();
+        if self.0.device.as_str() < device {
+            self.offer(device, session, false).await
+        } else {
+            self.send(
+                device,
+                Signal {
+                    kind: "connect".into(),
+                    session,
+                    sdp: None,
+                },
+            )
+            .await
+        }
     }
     pub async fn remove(&self, device: &str) {
         self.0.requested.lock().await.remove(device);
@@ -424,6 +489,105 @@ mod tests {
             });
             Ok(Box::new(client))
         }
+    }
+    #[tokio::test]
+    async fn unreachable_stun_does_not_block_usable_peer_candidates() {
+        // Accept UDP without answering: gathering cannot complete, although
+        // both peers have usable host candidates. This reproduces a laptop
+        // whose STUN requests time out while its remote host is reachable.
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stop = CancellationToken::new();
+        let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
+        let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        let servers = vec![RTCIceServer {
+            urls: vec![format!("stun:{}", blackhole.local_addr().unwrap())],
+            ..Default::default()
+        }];
+        Arc::get_mut(&mut a.0).unwrap().ice_servers = servers.clone();
+        Arc::get_mut(&mut b.0).unwrap().ice_servers = servers;
+        let peer_b = b.clone();
+        let forward_a = tokio::spawn(async move {
+            while let Some(message) = a_out.recv().await {
+                peer_b.signal("a", message.signal).await.unwrap();
+            }
+        });
+        let peer_a = a.clone();
+        let forward_b = tokio::spawn(async move {
+            while let Some(message) = b_out.recv().await {
+                peer_a.signal("b", message.signal).await.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut stream = b.open("a", "service", false).await.unwrap();
+            stream
+                .write_all(b"preview through available candidates")
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            assert_eq!(bytes, b"preview through available candidates");
+        })
+        .await;
+        stop.cancel();
+        a.clear().await;
+        b.clear().await;
+        forward_a.abort();
+        forward_b.abort();
+        result.expect("a failed STUN probe must not prevent peer setup");
+    }
+    async fn echo_round(peers: &Peers, device: &str) {
+        let mut stream = peers.open(device, "service", false).await.unwrap();
+        stream.write_all(b"ping").await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"ping");
+    }
+    #[tokio::test]
+    async fn a_dropped_peer_pairs_again_without_waiting_for_ice_failure() {
+        // The device that drops its peer (sleep, network roam, coordinator
+        // lease reset) must be served promptly by the other side, whose own
+        // peer object still looks healthy until ICE consent expires.
+        let stop = CancellationToken::new();
+        let (mut a, mut a_out) = Peers::new("a".into(), Arc::new(Echo), stop.clone());
+        let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(Echo), stop.clone());
+        a.set_ice_servers(Vec::new()).unwrap();
+        b.set_ice_servers(Vec::new()).unwrap();
+        let peer_b = b.clone();
+        let forward_a = tokio::spawn(async move {
+            while let Some(message) = a_out.recv().await {
+                let _ = peer_b.signal("a", message.signal).await;
+            }
+        });
+        let peer_a = a.clone();
+        let forward_b = tokio::spawn(async move {
+            while let Some(message) = b_out.recv().await {
+                let _ = peer_a.signal("b", message.signal).await;
+            }
+        });
+        let result = tokio::time::timeout(Duration::from_secs(40), async {
+            echo_round(&b, "a").await;
+            // Non-initiator drops: its connect request must replace a's peer.
+            b.remove("a").await;
+            tokio::time::timeout(Duration::from_secs(8), echo_round(&b, "a"))
+                .await
+                .expect("re-pair after the requester dropped its peer stalled");
+            // Initiator drops: it offers again and b replaces its peer.
+            a.remove("b").await;
+            tokio::time::timeout(Duration::from_secs(8), echo_round(&a, "b"))
+                .await
+                .expect("re-pair after the initiator dropped its peer stalled");
+            // Both directions still work over the final pair.
+            echo_round(&b, "a").await;
+        })
+        .await;
+        stop.cancel();
+        a.clear().await;
+        b.clear().await;
+        forward_a.abort();
+        forward_b.abort();
+        result.expect("re-pairing test stalled");
     }
     #[tokio::test]
     async fn actual_webrtc_pair_streams_in_both_directions() {

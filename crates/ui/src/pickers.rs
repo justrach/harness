@@ -81,8 +81,6 @@ pub struct DraftConfig {
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
-    /// option id → choice id (only non-defaults are meaningful).
-    pub model_options: serde_json::Map<String, serde_json::Value>,
     /// The picked ref (base branch in NewWorktree mode; a worktree's branch
     /// when reusing one). `None` = the repo's current branch.
     pub branch: Option<String>,
@@ -231,6 +229,24 @@ pub fn traits_summary(
     } else {
         Some(parts.join(" · "))
     }
+}
+
+/// Keep only the picks `model` still offers. Remembered picks outlive the
+/// model they were made on, and harnesses apply some options blindly (Claude
+/// appends `[1m]` to any model id when `contextWindow` is "1m").
+pub fn offered_options(
+    model: &Model,
+    mut selections: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    selections.retain(|id, choice| {
+        model.options.iter().any(|option| {
+            option.id == *id
+                && choice
+                    .as_str()
+                    .is_some_and(|choice| option.choices.iter().any(|c| c.id == choice))
+        })
+    });
+    selections
 }
 
 /// Whether any trait departs from its default — the trigger brightens only
@@ -431,6 +447,10 @@ pub enum PickerKind {
     Device,
 }
 
+pub(crate) struct ReturnComposerFocus;
+
+impl gpui::EventEmitter<ReturnComposerFocus> for Pickers {}
+
 pub struct Pickers {
     state: Entity<AppState>,
     config: DraftConfig,
@@ -546,7 +566,6 @@ impl Pickers {
                 this.config.harness = None;
                 this.config.model = None;
                 this.config.reasoning = None;
-                this.config.model_options.clear();
                 this.switch_error = None;
             }
             // A space switch invalidates the branch draft + cache — the folder
@@ -757,16 +776,34 @@ impl Pickers {
     }
 
     /// The explicit (non-default) option picks: the chat's persisted
-    /// selections for existing chats, the draft's for the new-chat canvas.
+    /// selections for existing chats, the remembered picks for the model the
+    /// new-chat canvas resolves to (same id [`Self::resolved`] sends).
     fn explicit_options(&self, cx: &App) -> serde_json::Map<String, serde_json::Value> {
-        match self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .and_then(|c| c.config.as_ref())
-        {
-            Some(config) => config.model_options.clone(),
-            None => self.config.model_options.clone(),
+        if let Some(chat) = self.state.read(cx).selected_chat_row() {
+            return chat
+                .config
+                .as_ref()
+                .map(|c| c.model_options.clone())
+                .unwrap_or_default();
+        }
+        let Some(harness) = self.effective_harness(cx) else {
+            return Default::default();
+        };
+        match self.selected_model(cx) {
+            Some(model) => offered_options(
+                model,
+                self.defaults
+                    .model_options_for(harness, &model.id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            // Catalog not loaded (or failed): the picks were validated for
+            // this exact model when made, so they are safe to send as-is.
+            None => self
+                .effective_model_id(cx)
+                .and_then(|id| self.defaults.model_options_for(harness, id))
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -817,10 +854,19 @@ impl Pickers {
 
     /// Begin the exit animation (shared by every close path).
     fn animate_close(&mut self, cx: &mut Context<Self>) {
+        if self.is_open() {
+            cx.emit(ReturnComposerFocus);
+        }
+        self.dismiss(cx);
+    }
+
+    /// Outside clicks and navigation keep focus at the clicked destination.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.model_bar = popover::MenuScrollbarState::default();
         if self.open.begin_close() {
             popover::reap_popup(cx, |pickers: &mut Self| &mut pickers.open);
         }
+        cx.notify();
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -860,6 +906,9 @@ impl Pickers {
         let pressed_open = self.open.take_press_was_open();
         if self.open_kind() == Some(kind) || pressed_open {
             self.animate_close(cx);
+            if pressed_open {
+                cx.emit(ReturnComposerFocus);
+            }
             cx.notify();
             return;
         }
@@ -1321,7 +1370,6 @@ impl Pickers {
             // defaults fallback; a foreign pick must not linger.
             self.config.model = None;
             self.config.reasoning = None;
-            self.config.model_options.clear();
         }
         self.config.harness = Some(harness);
         self.defaults.harness = Some(harness);
@@ -1388,12 +1436,21 @@ impl Pickers {
                         .insert(option_id, serde_json::Value::String(choice_id));
                 }
             });
-        } else if default {
-            self.config.model_options.remove(&option_id);
-        } else {
-            self.config
-                .model_options
-                .insert(option_id, serde_json::Value::String(choice_id));
+        } else if let Some(harness) = self.effective_harness(cx)
+            && let Some(model) = self
+                .selected_model(cx)
+                .filter(|m| m.options.iter().any(|o| o.id == option_id))
+                .map(|m| m.id.clone())
+        {
+            // New chat: the pick is the sticky memory for the catalog model
+            // that offered it — never stored unvalidated.
+            let options = self.defaults.model_options_mut(harness, &model);
+            if default {
+                options.remove(&option_id);
+            } else {
+                options.insert(option_id, serde_json::Value::String(choice_id));
+            }
+            self.save_defaults();
         }
         cx.notify();
     }
@@ -1441,6 +1498,16 @@ impl Pickers {
             }
             if !ladder.is_empty() {
                 config.reasoning = clamp_reasoning(config.reasoning, &ladder);
+            }
+            // Options likewise: a model switch must not carry picks the new
+            // model doesn't offer (e.g. a 1M context onto Haiku).
+            if let Some(model) = config
+                .model
+                .as_deref()
+                .and_then(|id| models.iter().find(|m| m.id == id))
+            {
+                config.model_options =
+                    offered_options(model, std::mem::take(&mut config.model_options));
             }
         }
         self.state.update(cx, |state, cx| {
@@ -2006,7 +2073,7 @@ impl Pickers {
         let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
             .id("project-new")
             .on_click(cx.listener(|this, _, window, cx| {
-                this.close(cx);
+                this.dismiss(cx);
                 window.dispatch_action(Box::new(crate::shell::AddSpacePalette), cx);
             }))
             .child(
@@ -2098,6 +2165,7 @@ impl Pickers {
             MenuKey::Escape => {
                 self.animate_close(cx);
                 cx.notify();
+                cx.stop_propagation();
             }
             MenuKey::Up | MenuKey::Down => {
                 let delta = if key == MenuKey::Up { -1 } else { 1 };
@@ -2599,7 +2667,20 @@ impl Pickers {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
             }))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.is_open() && !this.focus.contains_focused(window, cx) {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.dismiss(cx);
+                if this.focus.contains_focused(window, cx) {
+                    window.blur();
+                }
+            }))
             .flex()
             .flex_col()
             .child(content)
@@ -2622,7 +2703,20 @@ impl Pickers {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
             }))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.is_open() && !this.focus.contains_focused(window, cx) {
+                        window.focus(&this.focus, cx);
+                    }
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.dismiss(cx);
+                if this.focus.contains_focused(window, cx) {
+                    window.blur();
+                }
+            }))
             .flex()
             .flex_col()
             .child(content)
@@ -3966,6 +4060,18 @@ impl Render for Pickers {
             }
         }
 
+        if self.is_open() {
+            let search = self.search.focus_handle(cx);
+            let frame = self.focus.clone();
+            window.defer(cx, move |window, cx| {
+                // Loading, empty, and error states can omit the search box.
+                // Keep Escape/arrow keys on the mounted menu in those states.
+                if search.is_focused(window) && !frame.contains(&search, window) {
+                    window.focus(&frame, cx);
+                }
+            });
+        }
+
         // Eager-load the harness catalog + every offered harness's models so
         // the chip reads "Fable 5" (a concrete pick) before any popover
         // opens, and rail switches inside the picker are instant.
@@ -4142,6 +4248,61 @@ mod tests {
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     #[gpui::test]
+    fn picker_completion_and_dismissal_have_distinct_focus_behavior(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        let returned = Rc::new(Cell::new(0));
+        let observed = returned.clone();
+        let _sub = cx.update(|cx| {
+            cx.subscribe(
+                &handle.entity(cx).unwrap(),
+                move |_, _: &ReturnComposerFocus, _| observed.set(observed.get() + 1),
+            )
+        });
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.open.open(PickerKind::Checkout);
+                pickers.pick_checkout(CheckoutKind::Local, cx);
+            })
+            .unwrap();
+        assert_eq!(returned.get(), 1);
+        handle
+            .update(cx, |pickers, _, cx| {
+                pickers.open.open(PickerKind::HarnessModel);
+                pickers.pick_model("test-model".into(), cx);
+                assert!(
+                    pickers.is_open(),
+                    "model options remain available after a selection"
+                );
+                pickers.dismiss(cx);
+            })
+            .unwrap();
+        assert_eq!(
+            returned.get(),
+            1,
+            "outside clicks must not request composer focus"
+        );
+        handle
+            .update(cx, |pickers, window, cx| {
+                pickers.open.open(PickerKind::Checkout);
+                pickers.open.note_trigger_press();
+                pickers.dismiss(cx); // Capture closes before the trigger's click.
+                pickers.toggle(PickerKind::Checkout, window, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            returned.get(),
+            2,
+            "closing via the trigger returns to the composer"
+        );
+    }
+
+    #[gpui::test]
     fn projectless_picker_clears_checkout_and_supports_keyboard_selection(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4194,6 +4355,64 @@ mod tests {
             reasoning_levels: Vec::new(),
             options: Vec::new(),
         }
+    }
+
+    #[gpui::test]
+    fn remembered_options_stay_valid_for_the_sent_model_without_a_catalog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let one_m = serde_json::Value::String("1m".into());
+        let mut opus = bare_model("opus", "Opus");
+        opus.options.push(ModelOption {
+            id: "contextWindow".into(),
+            label: "Context window".into(),
+            choices: ["200k", "1m"]
+                .map(|id| ModelOptionChoice {
+                    id: id.into(),
+                    label: id.into(),
+                })
+                .into(),
+            default_choice: "200k".into(),
+        });
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults.harness = Some(HarnessId::ClaudeCode);
+            pickers.models.insert(
+                HarnessId::ClaudeCode,
+                Loadable::Ready(vec![opus.clone(), bare_model("haiku", "Haiku")]),
+            );
+            pickers.pick_model("opus".into(), cx);
+            pickers.pick_option("contextWindow".into(), "1m".into(), false, cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.model.as_deref(), Some("opus"));
+            assert_eq!(resolved.model_options.get("contextWindow"), Some(&one_m));
+
+            pickers.pick_model("haiku".into(), cx);
+            assert!(pickers.resolved(cx).model_options.is_empty());
+
+            // Restart (draft cleared) and send before the catalog is usable.
+            for catalog in [
+                Loadable::Idle,
+                Loadable::Loading,
+                Loadable::Error("down".into()),
+            ] {
+                pickers.config = DraftConfig::default();
+                pickers.models.insert(HarnessId::ClaudeCode, catalog);
+                let resolved = pickers.resolved(cx);
+                assert_eq!(resolved.model.as_deref(), Some("haiku"));
+                assert!(
+                    resolved.model_options.is_empty(),
+                    "Opus's 1M pick must not ride along with Haiku"
+                );
+            }
+
+            // The Opus memory itself survives for when Opus is picked again.
+            pickers.pick_model("opus".into(), cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.model.as_deref(), Some("opus"));
+            assert_eq!(resolved.model_options.get("contextWindow"), Some(&one_m));
+        });
     }
 
     fn descriptor(id: HarnessId, name: &str) -> HarnessDescriptor {
@@ -4458,6 +4677,16 @@ mod tests {
             traits_summary(Some(&model), None, &stale),
             Some("Standard · Normal".to_string())
         );
+        // Remembered picks drop what the model doesn't offer before sending.
+        let mut remembered = selections.clone();
+        remembered.insert(
+            "speed".into(),
+            serde_json::Value::String("ludicrous".into()),
+        );
+        remembered.insert("fastMode".into(), serde_json::Value::String("on".into()));
+        let mut want = serde_json::Map::new();
+        want.insert("context".into(), serde_json::Value::String("1m".into()));
+        assert_eq!(offered_options(&model, remembered), want);
         // Reasoning shows without a model too.
         assert_eq!(
             traits_summary(

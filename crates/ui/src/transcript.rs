@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels,
-    Point, ScrollHandle, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun,
-    Window, canvas, div, img, list, prelude::*, px, quad,
+    Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window, canvas,
+    div, img, list, prelude::*, px, quad,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -95,7 +95,7 @@ const TOOL_TEXT_SIZE: f32 = 12.0;
 ///
 /// GPUI list offsets increase toward the document bottom. The quadratic ramp
 /// keeps entry into the edge zone gentle and reaches full speed at the edge.
-fn selection_scroll_step(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
+pub(crate) fn selection_scroll_step(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
     let height = f32::from(bounds.size.height);
     if height <= 0.0 {
         return 0.0;
@@ -2259,12 +2259,6 @@ struct SavedViewportCache {
     recency: VecDeque<String>,
 }
 
-#[derive(Default)]
-struct CodeFenceRuntime {
-    scroll: ScrollHandle,
-    scrollbar: crate::popover::HorizontalScrollbarState,
-}
-
 impl SavedViewportCache {
     fn insert(&mut self, chat_id: String, viewport: SavedViewport) {
         if self.by_chat.contains_key(&chat_id) {
@@ -2449,7 +2443,7 @@ pub struct Transcript {
     /// Keys use the transcript's stable row identity, so streaming → settled
     /// rerenders keep their local scroll position without leaking state for
     /// blocks no longer present in the selected chat.
-    code_fences: HashMap<SharedString, CodeFenceRuntime>,
+    code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     /// Entry whose hover action is showing transient copied-check feedback.
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
@@ -2457,6 +2451,7 @@ pub struct Transcript {
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
+    attachment_preview_return_focus: Option<gpui::FocusHandle>,
     /// In-flight ReadAttachmentChunk loads, keyed `(deviceId, path)` — one per
     /// source; results land in the global attachment cache.
     attachment_loads: HashMap<(String, String), Task<()>>,
@@ -2644,6 +2639,7 @@ impl Transcript {
             copied_message_clear: None,
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
+            attachment_preview_return_focus: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
@@ -4518,6 +4514,7 @@ impl Transcript {
         &mut self,
         row_id: &SharedString,
         atts: &[crate::attachments::UserImageAttachment],
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
@@ -4565,6 +4562,151 @@ impl Transcript {
                         .then(|| self.state.read(cx).upload_progress_percent())
                         .flatten()
                 });
+            if let Some(appshot) = &att.appshot {
+                let has_image = matches!(&state, AttachmentSnapshot::Loaded(_));
+                let theme = Theme::of(cx).clone();
+                let accent = theme.accent;
+                let width = 240.0;
+                let mut card = div()
+                    .id(SharedString::from(format!("{row_id}-appshot-{aix}")))
+                    .w(px(width))
+                    .max_w_full()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .rounded(px(14.0))
+                    .p(px(8.0))
+                    .gap(px(6.0))
+                    .hover(|style| style.bg(crate::theme::ink(0.045)));
+                let image_frame = div()
+                    .w_full()
+                    .h(px(128.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .overflow_hidden();
+                card = match state {
+                    AttachmentSnapshot::Loaded(image) => {
+                        let preview =
+                            crate::attachments::PreviewImage::new(image.name, image.image.clone());
+                        card.role(gpui::Role::Button)
+                            .aria_label(format!(
+                                "Preview {} Appshot: {}",
+                                appshot.app_name,
+                                appshot.title()
+                            ))
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .focus_visible(move |style| style.border_2().border_color(accent))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.attachment_preview_return_focus = window.focused(cx);
+                                preview.viewer.reset();
+                                this.attachment_preview = Some(preview.clone());
+                                window.focus(&this.attachment_preview_focus, cx);
+                                cx.notify();
+                            }))
+                            .child(
+                                image_frame.child(crate::edge_fade::edge_faded(
+                                    32.0,
+                                    false,
+                                    true,
+                                    img(image.image)
+                                        .w_full()
+                                        .h(px(126.0))
+                                        .rounded(px(5.0))
+                                        .object_fit(ObjectFit::Contain),
+                                )),
+                            )
+                    }
+                    AttachmentSnapshot::Loading => card.child(
+                        image_frame.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child(if sending {
+                                    "Uploading Appshot…"
+                                } else {
+                                    "Loading Appshot…"
+                                }),
+                        ),
+                    ),
+                    AttachmentSnapshot::Error { .. } => card.child(
+                        image_frame.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child(if sending {
+                                    "Uploading Appshot…"
+                                } else {
+                                    "Appshot unavailable"
+                                }),
+                        ),
+                    ),
+                };
+                card = card
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .max_w_full()
+                            .child(
+                                div()
+                                    .size(px(24.0))
+                                    .flex_none()
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(match crate::appshots::presentation_icon(appshot) {
+                                        Some(icon) => img(icon)
+                                            .size(px(24.0))
+                                            .object_fit(ObjectFit::Contain)
+                                            .into_any_element(),
+                                        None => crate::icons::icon(crate::icons::MONITOR)
+                                            .size(px(15.0))
+                                            .text_color(theme.text_muted)
+                                            .into_any_element(),
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(format!(
+                                        "{} · Appshot",
+                                        appshot.app_name
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_center()
+                            .text_size(px(12.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(appshot.title().to_string())),
+                    );
+                if sending && (has_image || uploading.is_some()) {
+                    card = card.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(
+                                uploading
+                                    .map(|pct| format!("Uploading {pct}%"))
+                                    .unwrap_or_else(|| "Uploading…".into()),
+                            )),
+                    );
+                }
+                strip = strip.child(card);
+                continue;
+            }
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
@@ -4573,10 +4715,10 @@ impl Transcript {
                 .overflow_hidden();
             let thumb: AnyElement = match state {
                 AttachmentSnapshot::Loaded(image) => {
-                    let preview = crate::attachments::PreviewImage {
-                        name: image.name.clone(),
-                        image: image.image.clone(),
-                    };
+                    let preview = crate::attachments::PreviewImage::new(
+                        image.name.clone(),
+                        image.image.clone(),
+                    );
                     frame
                         .id(SharedString::from(format!("{row_id}#att{aix}")))
                         .relative()
@@ -4585,6 +4727,8 @@ impl Transcript {
                         .bg(crate::theme::ink(0.035))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            this.attachment_preview_return_focus = window.focused(cx);
+                            preview.viewer.reset();
                             this.attachment_preview = Some(preview.clone());
                             window.focus(&this.attachment_preview_focus, cx);
                             cx.notify();
@@ -4873,7 +5017,12 @@ impl Transcript {
                 // HStack); image-only sends show no bubble at all.
                 let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
-                    column = column.child(self.render_user_attachments(&row.id, &attachments, cx));
+                    column = column.child(self.render_user_attachments(
+                        &row.id,
+                        &attachments,
+                        window,
+                        cx,
+                    ));
                 }
                 if !badges.is_empty() {
                     column = column.child(
@@ -4929,6 +5078,8 @@ impl Transcript {
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
+                    tasks: None,
+                    media: None,
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
@@ -4974,6 +5125,8 @@ impl Transcript {
                         .clone()
                 });
                 let opts = RenderOptions {
+                    tasks: None,
+                    media: None,
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
@@ -5212,121 +5365,14 @@ impl Transcript {
     ) -> render::CodeUi {
         let key: SharedString = format!("{row_id}#code{block_ix}").into();
         let runtime = self.code_fences.entry(key.clone()).or_default();
-        let scroll = runtime.scroll.clone();
-        let fit_content = crate::settings::current(cx).code_fences_fit_content;
-        let scrollbar = (!fit_content)
-            .then(|| runtime.scrollbar.metrics(&scroll))
-            .flatten()
-            .filter(|_| runtime.scrollbar.visible())
-            .map(|metrics| render::CodeScrollbarUi {
-                metrics,
-                active: runtime.scrollbar.active(),
-                hover: {
-                    let entity = cx.weak_entity();
-                    let key = key.clone();
-                    Rc::new(move |hovered, _window, cx| {
-                        entity
-                            .update(cx, |this, cx| {
-                                let Some(runtime) = this.code_fences.get_mut(&key) else {
-                                    return;
-                                };
-                                if runtime.scrollbar.set_bar_hovered(hovered) {
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    })
-                },
-                press: {
-                    let entity = cx.weak_entity();
-                    let key = key.clone();
-                    Rc::new(move |pointer_x, _window, cx| {
-                        entity
-                            .update(cx, |this, cx| {
-                                let Some(runtime) = this.code_fences.get_mut(&key) else {
-                                    return;
-                                };
-                                let scroll = runtime.scroll.clone();
-                                if runtime.scrollbar.begin_press(&scroll, pointer_x) {
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    })
-                },
-                release: {
-                    let entity = cx.weak_entity();
-                    let key = key.clone();
-                    Rc::new(move |_window, cx| {
-                        entity
-                            .update(cx, |this, cx| {
-                                let Some(runtime) = this.code_fences.get_mut(&key) else {
-                                    return;
-                                };
-                                runtime.scrollbar.end_press();
-                                cx.notify();
-                            })
-                            .ok();
-                    })
-                },
-            });
-
-        render::CodeUi {
-            key: key.clone(),
-            fit_content,
-            scroll,
-            scrollbar,
-            toggle_fit: {
-                Rc::new(move |_window, cx| {
-                    let fit = !crate::settings::current(cx).code_fences_fit_content;
-                    crate::settings::update(
-                        crate::settings::SavePolicy::Immediate,
-                        cx,
-                        |settings| settings.code_fences_fit_content = fit,
-                    );
-                    // Every Transcript observes the generation change during
-                    // its next render and resets its own local runtime state.
-                    cx.refresh_windows();
-                })
-            },
-            viewport_hover: {
-                let entity = cx.weak_entity();
-                let key = key.clone();
-                Rc::new(move |hovered, _window, cx| {
-                    entity
-                        .update(cx, |this, cx| {
-                            let Some(runtime) = this.code_fences.get_mut(&key) else {
-                                return;
-                            };
-                            if runtime.scrollbar.set_viewport_hovered(hovered) {
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-            },
-            drag_move: {
-                let entity = cx.weak_entity();
-                Rc::new(move |pointer_x, _window, cx| {
-                    entity
-                        .update(cx, |this, cx| {
-                            let Some(runtime) = this.code_fences.get_mut(&key) else {
-                                return;
-                            };
-                            let scroll = runtime.scroll.clone();
-                            if runtime.scrollbar.drag_to(&scroll, pointer_x) {
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-            },
-        }
+        render::code_ui_for(
+            key,
+            crate::settings::current(cx).code_fences_fit_content,
+            runtime,
+            cx.weak_entity(),
+            |transcript| &mut transcript.code_fences,
+        )
     }
-
-    /// Provision independent interaction state for every fence nested below
-    /// one virtualized Markdown row (top-level, quoted, or listed).
     fn code_uis_for(
         &mut self,
         row_id: &SharedString,
@@ -6117,6 +6163,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
+        ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
 }
@@ -6997,16 +7044,20 @@ impl Render for Transcript {
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
             return root.child(crate::attachments::lightbox(
-                window.viewport_size(),
+                window,
                 &preview,
                 &self.attachment_preview_focus,
-                move |_, cx| {
-                    weak.update(cx, |this, cx| {
+                move |window, cx| {
+                    if let Ok(focus) = weak.update(cx, |this, cx| {
                         this.attachment_preview = None;
                         cx.notify();
-                    })
-                    .ok();
+                        this.attachment_preview_return_focus.take()
+                    }) && let Some(focus) = focus
+                    {
+                        window.focus(&focus, cx);
+                    }
                 },
+                cx,
             ));
         }
         root
@@ -8418,6 +8469,7 @@ mod tests {
                     this.rail_enabled = false;
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
+                            last_completed_turn: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),
                             status: zeron_proto::SessionStatus::Working,
@@ -10127,5 +10179,13 @@ mod tests {
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
         assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+impl Transcript {
+    pub fn fixture_appshots_start(&mut self, cx: &mut Context<Self>) {
+        self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
     }
 }
