@@ -178,6 +178,19 @@ pub fn run_app(config: UiConfig) {
             }
         })
         .detach();
+        // Banner clicks land on the notified chat. The AppKit delegate fires
+        // mid-event, so hop through a channel rather than updating inline.
+        let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
+        notify::on_click(move |chat_id| {
+            let _ = click_tx.unbounded_send(chat_id);
+        });
+        let click_state = state.clone();
+        cx.spawn(async move |cx| {
+            while let Some(chat_id) = click_rx.next().await {
+                let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
+            }
+        })
+        .detach();
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
@@ -214,6 +227,32 @@ pub fn run_app(config: UiConfig) {
         cx.set_menus(app_menus::app_menus());
         cx.activate(true);
     });
+}
+
+/// A clicked banner: bring Zeron forward on that chat through the sidebar's
+/// own path (chat route + composer focus), reopening the main window first if
+/// ⌘W closed it.
+fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+    cx.activate(true);
+    if cx.windows().is_empty()
+        && let Some(reopen) = cx.try_global::<ReopenState>()
+    {
+        let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
+        open_main_window(state, boot, cx);
+    }
+    let shell = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>());
+    match shell {
+        Some(shell) => {
+            let _ = shell.update(cx, |shell, window, cx| {
+                window.activate_window();
+                shell.open_chat(chat_id, cx);
+            });
+        }
+        None => state.update(cx, |state, cx| state.select_chat(Some(chat_id), cx)),
+    }
 }
 
 /// Open the 1320×880 main window (min 900×600) with [`shell::Shell`] as the

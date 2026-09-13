@@ -90,6 +90,9 @@ jobs:
             frame-source-tests
       - name: Check macOS application
         run: cargo check --release --locked -p zeron
+      - name: Native notification click regressions
+        run: |
+          cargo test --release --locked -p zeron-ui --lib notify::tests:: -- --test-threads=1
       - name: Build native browser fixture
         run: cargo build --release --locked -p zeron-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots
