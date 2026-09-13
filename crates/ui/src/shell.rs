@@ -1883,7 +1883,7 @@ impl Shell {
             // Zeron; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
             for (chat_id, status, send_pending, title) in sessions {
-                let prev = self.sound_prev.insert(chat_id, status.clone());
+                let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
                 if let Some(prev) = prev
                     && let Some(sound) = status.sound_since(&prev, send_pending)
                 {
@@ -1905,7 +1905,7 @@ impl Shell {
                             crate::sound::Sound::Request => "Waiting on your input",
                             crate::sound::Sound::Attention => "Run failed",
                         };
-                        crate::notify::post(&title, body);
+                        crate::notify::post(&title, body, Some(&chat_id));
                     }
                 }
             }
@@ -1928,7 +1928,7 @@ impl Shell {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
                         _ => "Zeron is trying to reconnect",
                     };
-                    crate::notify::post("Connection unavailable", body);
+                    crate::notify::post("Connection unavailable", body, None);
                 }
             }
         }

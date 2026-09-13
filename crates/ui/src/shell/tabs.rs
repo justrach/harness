@@ -93,7 +93,7 @@ impl Shell {
     }
 
     /// Open a session from the sidebar: select it, the main area follows.
-    pub(super) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
