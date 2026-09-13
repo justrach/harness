@@ -1167,9 +1167,6 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
-    /// External image or workspace-path drag hovering the conversation
-    /// column; a drop stages an image or inserts a file-mention chip.
-    file_drag_active: bool,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under — written by a
     /// paint-time canvas each frame, read the NEXT frame for the fade inset,
@@ -1558,7 +1555,6 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
-            file_drag_active: false,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -6822,9 +6818,11 @@ impl Shell {
         // + composer, not just the pill). OS images keep using the upload
         // pipeline; workspace files/directories and file tabs become the same
         // projected file-mention chips the composer already understands.
-        // `has_active_drag` gates the veil so a drag that left the window
-        // cannot strand it.
-        let file_drag_active = self.file_drag_active && cx.has_active_drag();
+        // The veil itself uses typed `drag_over` styles below. Do not cache
+        // drag presence in shell state: the platform's `FileDrop::Exited`
+        // clears GPUI's external payload without sending one last mouse-move,
+        // so a cached bit can survive and reappear during an unrelated drag
+        // such as a pane resize.
         div()
             .id("chat-dropzone")
             .relative()
@@ -6833,52 +6831,21 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            .on_drag_move::<gpui::ExternalPaths>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                this.file_drag_active = false;
                 let paths = paths.paths().to_vec();
                 this.composer
                     .update(cx, |composer, cx| composer.add_paths(paths, cx));
                 cx.notify();
             }))
-            .on_drag_move::<WorkspacePathDrag>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<WorkspacePathDrag>, _, cx| {
-                    let inside = e.bounds.contains(&e.event.position);
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop::<WorkspacePathDrag>(cx.listener(
                 |this, payload: &WorkspacePathDrag, window, cx| {
-                    this.file_drag_active = false;
                     this.composer.update(cx, |composer, cx| {
                         composer.add_workspace_path(&payload.path, payload.is_directory, window, cx)
                     });
                     cx.notify();
                 },
             ))
-            .on_drag_move::<RightTabDrag>(cx.listener(
-                |this, e: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
-                    let inside =
-                        e.bounds.contains(&e.event.position) && e.drag(cx).workspace_path.is_some();
-                    if this.file_drag_active != inside {
-                        this.file_drag_active = inside;
-                        cx.notify();
-                    }
-                },
-            ))
             .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, window, cx| {
-                this.file_drag_active = false;
                 if let Some(path) = &payload.workspace_path {
                     this.composer.update(cx, |composer, cx| {
                         composer.add_workspace_path(&path.path, path.is_directory, window, cx)
@@ -6962,20 +6929,33 @@ impl Shell {
                     })
                     .child(self.render_terminal_container(cx))
             })
-            .when(file_drag_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .bg(theme.scrim().opacity(0.4 / 0.6))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .child("Drop to attach"),
-                )
-            })
+            .child(
+                div()
+                    .id("attachment-drop-overlay")
+                    .absolute()
+                    .inset_0()
+                    .opacity(0.0)
+                    .bg(theme.scrim().opacity(0.4 / 0.6))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.text)
+                    // GPUI matches these styles against the active payload's
+                    // concrete TypeId. Resize markers therefore cannot reveal
+                    // this overlay, even after an external drag exits without
+                    // another move event.
+                    .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
+                    .drag_over::<WorkspacePathDrag>(|style, _, _, _| style.opacity(1.0))
+                    .drag_over::<RightTabDrag>(|style, tab, _, _| {
+                        if tab.workspace_path.is_some() {
+                            style.opacity(1.0)
+                        } else {
+                            style
+                        }
+                    })
+                    .child("Drop to attach"),
+            )
             .into_any_element()
     }
 
