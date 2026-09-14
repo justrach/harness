@@ -509,14 +509,14 @@ pub fn composer_has_content(text: &str, attachments: usize, comments: usize) -> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModifiedSubmitTarget {
     SubmitContent,
-    ActivateQueueHead,
+    ActivateLatestQueued,
 }
 
 fn modified_submit_target(has_content: bool) -> ModifiedSubmitTarget {
     if has_content {
         ModifiedSubmitTarget::SubmitContent
     } else {
-        ModifiedSubmitTarget::ActivateQueueHead
+        ModifiedSubmitTarget::ActivateLatestQueued
     }
 }
 
@@ -5996,8 +5996,8 @@ impl Composer {
     }
 
     /// Cmd/Ctrl+Enter remains an ordinary submit while the composer carries
-    /// content. With a truly empty composer it instead advances the queue's
-    /// first actionable row, and never turns an empty chord into Stop.
+    /// content. With a truly empty composer it instead activates the most
+    /// recently queued row, and never turns an empty chord into Stop.
     fn on_modified_submit(&mut self, cx: &mut Context<Self>) {
         if self.commit_queue_edit(cx) {
             return;
@@ -6009,7 +6009,7 @@ impl Composer {
         );
         match modified_submit_target(has_content) {
             ModifiedSubmitTarget::SubmitContent => self.on_submit(cx),
-            ModifiedSubmitTarget::ActivateQueueHead => self.queue_pop_head(cx),
+            ModifiedSubmitTarget::ActivateLatestQueued => self.activate_latest_queued(cx),
         }
     }
 
@@ -7442,7 +7442,7 @@ impl Render for Composer {
         // What is waiting to be sent, stacked directly above the box it was
         // typed in — the queue is a property of this composer, not a panel
         // somewhere else.
-        let show_queue_head_shortcut = self.queue_shortcut_revealed
+        let show_queue_latest_shortcut = self.queue_shortcut_revealed
             && self.editing_queued.is_none()
             && !self.pickers.read(cx).is_open()
             && !composer_has_content(
@@ -7451,7 +7451,7 @@ impl Render for Composer {
                 self.staged_comments(cx).len(),
             );
         let container = container.when_some(
-            self.render_queue_panel(show_queue_head_shortcut, window, cx),
+            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
             |el, panel| {
                 el.child(motion::fade_quick(
                     "composer-queue",
@@ -9311,7 +9311,7 @@ mod tests {
     }
 
     #[test]
-    fn modified_submit_sends_content_and_advances_only_when_empty() {
+    fn modified_submit_sends_content_and_activates_latest_queue_row_when_empty() {
         assert_eq!(
             modified_submit_target(composer_has_content("message", 0, 0)),
             ModifiedSubmitTarget::SubmitContent
@@ -9326,7 +9326,7 @@ mod tests {
         );
         assert_eq!(
             modified_submit_target(composer_has_content("  ", 0, 0)),
-            ModifiedSubmitTarget::ActivateQueueHead
+            ModifiedSubmitTarget::ActivateLatestQueued
         );
     }
 
