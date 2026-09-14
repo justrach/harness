@@ -2,6 +2,8 @@
 //! local-only without credentials. `zeron login` and `zeron logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod auth_cli;
 mod daemon;
 mod paths;
@@ -112,11 +114,9 @@ fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
     #[cfg(windows)]
-    if cli.command.is_none() {
-        detach_desktop_console();
-    }
+    attach_parent_console();
+    let cli = Cli::parse();
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
@@ -244,15 +244,26 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn detach_desktop_console() {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+fn attach_parent_console() {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
 
-    // Explorer creates a console for this combined desktop/CLI executable.
-    // Detach only if we own it alone; preserve a terminal used to launch us.
-    let mut process = 0;
+    // The GUI subsystem prevents Explorer from creating a console at startup.
+    // Reuse an existing parent's console for CLI output and cargo run, without
+    // allocating one. Attach before Clap so help and argument errors work too.
+    // Preserve redirected pipes/files: attaching may replace standard handles.
     unsafe {
-        if GetConsoleProcessList(&mut process, 1) == 1 {
-            FreeConsole();
+        let saved = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .map(|id| (id, GetStdHandle(id)));
+        if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+            for (id, handle) in saved {
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetStdHandle(id, handle);
+                }
+            }
         }
     }
 }
