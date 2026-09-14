@@ -23,8 +23,10 @@ pub mod changes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+mod composer_dock;
 mod context_usage;
 pub mod edge_fade;
+pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod history;
@@ -35,6 +37,9 @@ pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
+mod new_thread_background_effects;
+mod new_thread_background_image;
+mod new_thread_background_mask;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
@@ -178,6 +183,19 @@ pub fn run_app(config: UiConfig) {
             }
         })
         .detach();
+        // Banner clicks land on the notified chat. The AppKit delegate fires
+        // mid-event, so hop through a channel rather than updating inline.
+        let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
+        notify::on_click(move |chat_id| {
+            let _ = click_tx.unbounded_send(chat_id);
+        });
+        let click_state = state.clone();
+        cx.spawn(async move |cx| {
+            while let Some(chat_id) = click_rx.next().await {
+                let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
+            }
+        })
+        .detach();
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
@@ -216,6 +234,32 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
+/// A clicked banner: bring Zeron forward on that chat through the sidebar's
+/// own path (chat route + composer focus), reopening the main window first if
+/// ⌘W closed it.
+fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+    cx.activate(true);
+    if cx.windows().is_empty()
+        && let Some(reopen) = cx.try_global::<ReopenState>()
+    {
+        let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
+        open_main_window(state, boot, cx);
+    }
+    let shell = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>());
+    match shell {
+        Some(shell) => {
+            let _ = shell.update(cx, |shell, window, cx| {
+                window.activate_window();
+                shell.open_chat(chat_id, cx);
+            });
+        }
+        None => state.update(cx, |state, cx| state.select_chat(Some(chat_id), cx)),
+    }
+}
+
 /// Open the 1320×880 main window (min 900×600) with [`shell::Shell`] as the
 /// root view. Called at boot and again from `on_reopen` if the dock icon is
 /// clicked after ⌘W closed the window.
@@ -248,8 +292,8 @@ fn open_main_window(
                 titlebar: Some(TitlebarOptions {
                     title: None,
                     appears_transparent: true,
-                    // Centered on the titlebar's content line (40px bar, content
-                    // shifted 4px down, lights ~12px tall → center 22).
+                    // Native lights are 14px tall: top 14 → center 21, matching
+                    // the 38px titlebar row with 4px top-only content padding.
                     traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
