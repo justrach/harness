@@ -2770,6 +2770,16 @@ impl Transcript {
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }
+
+    pub(crate) fn link_ui(&self) -> Option<render::LinkUi> {
+        self.workspace_link.clone().map(|mut link| {
+            if link.source_session.is_none() {
+                link.source_session = self.chat_id.clone();
+            }
+            link
+        })
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::build(state, None, true, cx)
     }
@@ -5451,7 +5461,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.workspace_link.clone(),
+                    link: self.link_ui(),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -5499,7 +5509,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.workspace_link.clone(),
+                    link: self.link_ui(),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
