@@ -789,6 +789,11 @@ impl ProcessRunner for SystemProcessRunner {
         if request.program == "gh" {
             zeron_harness::compose_login_shell_path(&mut command);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.as_std_mut().creation_flags(0x08000000);
+        }
         command
             .args(&request.args)
             .current_dir(&request.cwd)
