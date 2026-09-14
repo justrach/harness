@@ -26,19 +26,30 @@
 
 const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";
 
-/// Post a desktop banner. Call from the main thread (the macOS native path
-/// talks to AppKit); slow paths (spawning a CLI) hop to a background thread.
-/// Silently a no-op when disabled or no notifier is available.
-pub fn post(title: &str, body: &str) {
+/// Post a desktop banner, optionally linked to `chat_id`'s session. Call from the main thread
+/// (the macOS native path talks to AppKit); slow paths (spawning a CLI) hop to
+/// a background thread. Silently a no-op when disabled or no notifier is
+/// available.
+pub fn post(title: &str, body: &str, chat_id: Option<&str>) {
     if std::env::var_os(DISABLE_ENV).is_some() {
         return;
     }
-    post_impl(title, body);
+    post_impl(title, body, chat_id);
+}
+
+/// Route banner clicks: `handler` receives the clicked banner's chat id.
+/// Main thread only; replaces any previous handler. Only the native macOS
+/// path reports clicks (osascript and notify-send banners can't).
+pub fn on_click(handler: impl Fn(String) + 'static) {
+    #[cfg(target_os = "macos")]
+    delegate::CLICK.with_borrow_mut(|slot| *slot = Some(Box::new(handler)));
+    #[cfg(not(target_os = "macos"))]
+    drop(handler);
 }
 
 #[cfg(target_os = "macos")]
-fn post_impl(title: &str, body: &str) {
-    if post_user_notification(title, body) {
+fn post_impl(title: &str, body: &str, chat_id: Option<&str>) {
+    if post_user_notification(title, body, chat_id) {
         return;
     }
     let script = format!(
@@ -65,11 +76,15 @@ fn post_impl(title: &str, body: &str) {
 #[cfg(target_os = "macos")]
 const MACOS_BUNDLE_ID: &std::ffi::CStr = c"sh.zeron.app";
 
+/// `userInfo` key carrying the banner's chat id back to the click handler.
+#[cfg(target_os = "macos")]
+const CHAT_ID_KEY: &std::ffi::CStr = c"chatId";
+
 /// Deliver through the app's notification center; false when the process has
 /// no bundle (dev runs — `defaultUserNotificationCenter` is nil there) and
 /// the installed-app identity can't be adopted either.
 #[cfg(target_os = "macos")]
-fn post_user_notification(title: &str, body: &str) -> bool {
+fn post_user_notification(title: &str, body: &str, chat_id: Option<&str>) -> bool {
     use objc::runtime::{Class, Object};
     use objc::{class, msg_send, sel, sel_impl};
     // Defensive lookup (not `class!`, which panics if the class is ever
@@ -77,9 +92,10 @@ fn post_user_notification(title: &str, body: &str) -> bool {
     let Some(center_class) = Class::get("NSUserNotificationCenter") else {
         return false;
     };
-    let (Ok(title), Ok(body)) = (
+    let (Ok(title), Ok(body), Ok(chat_id)) = (
         std::ffi::CString::new(title.replace('\0', "")),
         std::ffi::CString::new(body.replace('\0', "")),
+        chat_id.map(std::ffi::CString::new).transpose(),
     ) else {
         return false;
     };
@@ -100,10 +116,29 @@ fn post_user_notification(title: &str, body: &str) -> bool {
         let _: () = msg_send![note, setTitle: ns_title];
         let ns_body: *mut Object = msg_send![class!(NSString), stringWithUTF8String: body.as_ptr()];
         let _: () = msg_send![note, setInformativeText: ns_body];
+        if let Some(chat_id) = chat_id {
+            tag_chat(note, &chat_id);
+        }
         let _: () = msg_send![center, deliverNotification: note];
         let _: () = msg_send![note, release];
     }
     true
+}
+
+/// Stamp `note` with the chat id [`delegate`] reads back on click.
+#[cfg(target_os = "macos")]
+unsafe fn tag_chat(note: *mut objc::runtime::Object, chat_id: &std::ffi::CStr) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let ns_chat_id: *mut Object =
+            msg_send![class!(NSString), stringWithUTF8String: chat_id.as_ptr()];
+        let key: *mut Object =
+            msg_send![class!(NSString), stringWithUTF8String: CHAT_ID_KEY.as_ptr()];
+        let info: *mut Object =
+            msg_send![class!(NSDictionary), dictionaryWithObject: ns_chat_id forKey: key];
+        let _: () = msg_send![note, setUserInfo: info];
+    }
 }
 
 /// The center delegate: `shouldPresentNotification:` → YES, unconditionally.
@@ -111,13 +146,21 @@ fn post_user_notification(title: &str, body: &str) -> bool {
 /// frontmost — a policy that lived outside our settings; presenting always
 /// moves the whole decision into the caller (`shell::on_state_changed`
 /// checks `notifications_background_only` + window focus before posting).
+/// `didActivateNotification:` hands a clicked banner's chat id to
+/// [`super::on_click`]'s handler.
 #[cfg(target_os = "macos")]
 mod delegate {
+    use std::cell::RefCell;
+    use std::ffi::{CStr, c_char};
     use std::sync::OnceLock;
 
     use objc::declare::ClassDecl;
     use objc::runtime::{BOOL, Object, Sel, YES};
     use objc::{class, msg_send, sel, sel_impl};
+
+    thread_local! {
+        pub(super) static CLICK: RefCell<Option<Box<dyn Fn(String)>>> = const { RefCell::new(None) };
+    }
 
     extern "C" fn should_present(
         _this: &Object,
@@ -126,6 +169,37 @@ mod delegate {
         _notification: *mut Object,
     ) -> BOOL {
         YES
+    }
+
+    /// AppKit calls this on the main thread, after activating the app.
+    extern "C" fn did_activate(
+        _this: &Object,
+        _sel: Sel,
+        _center: *mut Object,
+        notification: *mut Object,
+    ) {
+        let chat_id = unsafe {
+            let info: *mut Object = msg_send![notification, userInfo];
+            if info.is_null() {
+                return;
+            }
+            let key: *mut Object =
+                msg_send![class!(NSString), stringWithUTF8String: super::CHAT_ID_KEY.as_ptr()];
+            let value: *mut Object = msg_send![info, objectForKey: key];
+            if value.is_null() {
+                return;
+            }
+            let utf8: *const c_char = msg_send![value, UTF8String];
+            if utf8.is_null() {
+                return;
+            }
+            CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        };
+        CLICK.with_borrow(|handler| {
+            if let Some(handler) = handler {
+                handler(chat_id);
+            }
+        });
     }
 
     /// The leaked delegate singleton (as usize — raw pointers aren't `Sync`).
@@ -138,6 +212,10 @@ mod delegate {
             decl.add_method(
                 sel!(userNotificationCenter:shouldPresentNotification:),
                 should_present as extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,
+            );
+            decl.add_method(
+                sel!(userNotificationCenter:didActivateNotification:),
+                did_activate as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
             );
             let class = decl.register();
             let instance: *mut Object = msg_send![class, new];
@@ -234,7 +312,7 @@ fn applescript_escape(text: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn post_impl(title: &str, body: &str) {
+fn post_impl(title: &str, body: &str, _chat_id: Option<&str>) {
     let (title, body) = (title.to_string(), body.to_string());
     std::thread::spawn(move || {
         // `--` ends option parsing: session titles are model-generated, so a
@@ -253,7 +331,7 @@ fn post_impl(title: &str, body: &str) {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn post_impl(_title: &str, _body: &str) {}
+fn post_impl(_title: &str, _body: &str, _chat_id: Option<&str>) {}
 
 #[cfg(test)]
 mod tests {
@@ -268,5 +346,33 @@ mod tests {
         );
         // Raw newlines would end the AppleScript statement mid-literal.
         assert_eq!(applescript_escape("two\nlines\r\n"), "two lines  ");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clicked_banner_reports_its_chat_id() {
+        use objc::runtime::Object;
+        use objc::{class, msg_send, sel, sel_impl};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let clicked = Rc::new(RefCell::new(Vec::new()));
+        let sink = clicked.clone();
+        on_click(move |chat_id| sink.borrow_mut().push(chat_id));
+        unsafe {
+            let delegate = delegate::always_present();
+            let note: *mut Object = msg_send![class!(NSUserNotification), new];
+            tag_chat(note, c"chat-42");
+            let center: *mut Object = std::ptr::null_mut();
+            let _: () =
+                msg_send![delegate, userNotificationCenter: center didActivateNotification: note];
+            // A banner without a chat id (foreign or legacy) is ignored.
+            let bare: *mut Object = msg_send![class!(NSUserNotification), new];
+            let _: () =
+                msg_send![delegate, userNotificationCenter: center didActivateNotification: bare];
+            let _: () = msg_send![note, release];
+            let _: () = msg_send![bare, release];
+        }
+        assert_eq!(*clicked.borrow(), vec!["chat-42".to_string()]);
     }
 }

@@ -66,6 +66,8 @@ pub fn table_hairline() -> Hsla {
 
 /// Options for one rendered tree (a transcript row or a whole live message).
 pub struct RenderOptions {
+    pub tasks: Option<TaskUi>,
+    pub media: Option<MediaUi>,
     /// Stable row key — prefixes element ids (scroll state, animations).
     pub row_key: SharedString,
     /// Streaming veil state for a live row: newly appended text fades in via
@@ -85,10 +87,31 @@ pub struct RenderOptions {
     /// Optional owner-provided routing for links that belong inside the app.
     /// Returning true prevents the ordinary external URL opener from running.
     pub link: Option<LinkUi>,
+    /// Root used to distinguish a direct workspace-file link from an ordinary
+    /// web link. Transcript surfaces provide it; generic Markdown previews do
+    /// not acquire workspace-specific decoration.
+    pub workspace_root: Option<SharedString>,
     /// Agent-transcript-only fence layout controls and tracked horizontal
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
+}
+
+#[derive(Clone)]
+pub struct TaskUi {
+    pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
+}
+
+#[derive(Clone)]
+pub struct MediaUi {
+    pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramUi>>,
+    pub image: Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>,
+}
+
+pub struct DiagramUi {
+    pub body: AnyElement,
+    pub show_source: bool,
+    pub toggle_source: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -132,6 +155,123 @@ pub struct CodeScrollbarUi {
     pub release: ReleaseHandler,
 }
 
+#[derive(Default)]
+pub struct CodeFenceRuntime {
+    pub scroll: gpui::ScrollHandle,
+    pub scrollbar: crate::popover::HorizontalScrollbarState,
+}
+
+/// Build the interaction state shared by chat and file-preview code fences.
+/// The durable Fit choice is global; scroll and drag state stay with one fence.
+pub fn code_ui_for<V, F>(
+    key: SharedString,
+    fit_content: bool,
+    runtime: &mut CodeFenceRuntime,
+    entity: gpui::WeakEntity<V>,
+    runtimes: F,
+) -> CodeUi
+where
+    V: 'static,
+    F: Fn(&mut V) -> &mut HashMap<SharedString, CodeFenceRuntime> + Clone + 'static,
+{
+    let scroll = runtime.scroll.clone();
+    let scrollbar = (!fit_content)
+        .then(|| runtime.scrollbar.metrics(&scroll))
+        .flatten()
+        .filter(|_| runtime.scrollbar.visible())
+        .map(|metrics| CodeScrollbarUi {
+            metrics,
+            active: runtime.scrollbar.active(),
+            hover: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |hovered, _, cx| {
+                    let _ = entity.update(cx, |owner, cx| {
+                        if runtimes(owner)
+                            .get_mut(&key)
+                            .is_some_and(|runtime| runtime.scrollbar.set_bar_hovered(hovered))
+                        {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            press: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |pointer_x, _, cx| {
+                    let _ = entity.update(cx, |owner, cx| {
+                        let Some(runtime) = runtimes(owner).get_mut(&key) else {
+                            return;
+                        };
+                        let scroll = runtime.scroll.clone();
+                        if runtime.scrollbar.begin_press(&scroll, pointer_x) {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            release: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |_, cx| {
+                    let _ = entity.update(cx, |owner, cx| {
+                        if let Some(runtime) = runtimes(owner).get_mut(&key) {
+                            runtime.scrollbar.end_press();
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+        });
+
+    CodeUi {
+        key: key.clone(),
+        fit_content,
+        scroll,
+        scrollbar,
+        toggle_fit: Rc::new(move |_, cx| {
+            let fit = !crate::settings::current(cx).code_fences_fit_content;
+            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+                settings.code_fences_fit_content = fit
+            });
+            cx.refresh_windows();
+        }),
+        viewport_hover: {
+            let entity = entity.clone();
+            let key = key.clone();
+            let runtimes = runtimes.clone();
+            Rc::new(move |hovered, _, cx| {
+                let _ = entity.update(cx, |owner, cx| {
+                    if runtimes(owner)
+                        .get_mut(&key)
+                        .is_some_and(|runtime| runtime.scrollbar.set_viewport_hovered(hovered))
+                    {
+                        cx.notify();
+                    }
+                });
+            })
+        },
+        drag_move: {
+            Rc::new(move |pointer_x, _, cx| {
+                let _ = entity.update(cx, |owner, cx| {
+                    let Some(runtime) = runtimes(owner).get_mut(&key) else {
+                        return;
+                    };
+                    let scroll = runtime.scroll.clone();
+                    if runtime.scrollbar.drag_to(&scroll, pointer_x) {
+                        cx.notify();
+                    }
+                });
+            })
+        },
+    }
+}
+
 #[derive(Clone)]
 struct CodeScrollbarDrag {
     key: SharedString,
@@ -169,11 +309,14 @@ impl RenderOptions {
     pub fn settled(row_key: SharedString) -> Self {
         Self {
             row_key,
+            media: None,
+            tasks: None,
             veil: None,
             cache: None,
             now: Instant::now(),
             copy: None,
             link: None,
+            workspace_root: None,
             code: None,
         }
     }
@@ -388,31 +531,100 @@ pub fn render_block(
                 // Accent markers (the inline-code hue): ordered numbers as
                 // tinted text, unordered as a REAL 5px disc — the glyph "•"
                 // reads too small at 14px.
-                let marker: gpui::AnyElement = match ordered_start {
-                    Some(start) => div()
+                let task = item
+                    .first()
+                    .and_then(|block| match block {
+                        Block::Paragraph { runs } => runs.first()?.style.task.as_ref(),
+                        _ => None,
+                    })
+                    .filter(|_| opts.tasks.is_some());
+                let marker: gpui::AnyElement = if let Some(task) = task {
+                    let toggle = opts.tasks.as_ref().and_then(|ui| ui.toggle.clone());
+                    let marker = task.clone();
+                    let label: String = match &item[0] {
+                        Block::Paragraph { runs } => {
+                            runs.iter().skip(1).map(|r| r.text.as_str()).collect()
+                        }
+                        _ => String::new(),
+                    };
+                    div()
                         .flex_none()
                         .min_w(px(18.0))
-                        .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
-                        .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
-                        .text_color(theme.accent)
-                        .child(SharedString::from(format!("{}.", start + item_ix as u64)))
-                        .into_any_element(),
-                    None => div()
-                        .flex_none()
-                        .min_w(px(18.0))
-                        // Center the disc on the first text line's cap band.
                         .h(px(MD_LINE_HEIGHT))
                         .flex()
                         .items_center()
                         .child(
-                            div()
-                                .ml(px(1.0))
-                                .w(px(5.0))
-                                .h(px(5.0))
-                                .rounded_full()
-                                .bg(theme.accent),
+                            gpui_base::Checkbox::new(SharedString::from(format!(
+                                "{}-task-{}",
+                                opts.row_key, task.range.start
+                            )))
+                            .checked(task.checked)
+                            .disabled(toggle.is_none())
+                            .when(toggle.is_some(), |checkbox| checkbox.cursor_pointer())
+                            .focus_visible(|style| style.border_color(theme.text))
+                            .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .accessibility_label(label)
+                            .size(px(16.0))
+                            .border_1()
+                            .rounded(px(3.0))
+                            .border_color(if task.checked {
+                                theme.accent
+                            } else {
+                                theme.border
+                            })
+                            .bg(if task.checked {
+                                theme.accent
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(task.checked, |checkbox| {
+                                checkbox.child(
+                                    crate::icons::icon(crate::icons::CHECK)
+                                        .size(px(12.0))
+                                        .text_color(theme.bg),
+                                )
+                            })
+                            .on_change(move |_, _, window, cx| {
+                                cx.stop_propagation();
+                                if let Some(toggle) = &toggle {
+                                    toggle(&marker, window, cx);
+                                }
+                            }),
                         )
-                        .into_any_element(),
+                        .into_any_element()
+                } else {
+                    match ordered_start {
+                        Some(start) => div()
+                            .flex_none()
+                            .min_w(px(18.0))
+                            .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
+                            .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
+                            .text_color(theme.accent)
+                            .child(SharedString::from(format!("{}.", start + item_ix as u64)))
+                            .into_any_element(),
+                        None => div()
+                            .flex_none()
+                            .min_w(px(18.0))
+                            // Center the disc on the first text line's cap band.
+                            .h(px(MD_LINE_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .ml(px(1.0))
+                                    .w(px(5.0))
+                                    .h(px(5.0))
+                                    .rounded_full()
+                                    .bg(theme.accent),
+                            )
+                            .into_any_element(),
+                    }
                 };
                 div().flex().flex_row().gap(px(8.0)).child(marker).child(
                     div()
@@ -422,6 +634,18 @@ pub fn render_block(
                         .flex_col()
                         .gap(px(4.0))
                         .children(item.iter().enumerate().map(|(ci, child)| {
+                            let task_body;
+                            let child = if ci == 0 && task.is_some() {
+                                let Block::Paragraph { runs } = child else {
+                                    unreachable!()
+                                };
+                                task_body = Block::Paragraph {
+                                    runs: runs.iter().skip(1).cloned().collect(),
+                                };
+                                &task_body
+                            } else {
+                                child
+                            };
                             render_block(
                                 child,
                                 top_ix,
@@ -596,7 +820,22 @@ fn render_table(
                 TableAlign::Center => cell.text_center(),
                 TableAlign::Right => cell.text_right(),
             };
-            if let Some(flat) = cell_flat {
+            if opts.media.is_some()
+                && all[r]
+                    .get(c)
+                    .is_some_and(|runs| runs.iter().any(|run| run.style.image.is_some()))
+            {
+                cell = cell.child(text_element(
+                    &all[r][c],
+                    MD_TEXT_SIZE,
+                    MD_LINE_HEIGHT,
+                    has_header && r == 0,
+                    top_ix,
+                    table_cell_ix(ix, r, c),
+                    opts,
+                    theme,
+                ));
+            } else if let Some(flat) = cell_flat {
                 cell = cell.child(flat_text_element(
                     flat,
                     table_cell_ix(ix, r, c),
@@ -936,7 +1175,40 @@ pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
 pub fn selection_frame_reset() -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        |_, _, _, _| REGISTRY.with(|r| r.borrow_mut().clear()),
+        |_, _, _, _| {
+            REGISTRY.with(|r| {
+                r.borrow_mut()
+                    .retain(|e| !selection_scope(&e.key).is_empty())
+            })
+        },
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
+}
+
+fn selection_scope(key: &str) -> &str {
+    if key.starts_with("md-preview-") {
+        key.split_once('|').map_or("", |(scope, _)| scope)
+    } else {
+        ""
+    }
+}
+
+pub(crate) fn clear_selection_surface(prefix: &str) {
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .retain(|entry| !entry.key.starts_with(prefix))
+    });
+    if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
+        super::selection::clear_if_owner(&anchor);
+    }
+}
+
+pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, _, _| REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix))),
     )
     .absolute()
     .w(px(0.0))
@@ -949,8 +1221,12 @@ pub fn selection_frame_reset() -> impl IntoElement {
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
+        let anchor = super::selection::anchor_key().unwrap_or_default();
         let mut best: Option<(usize, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
+            if selection_scope(&entry.key) != selection_scope(&anchor) {
+                continue;
+            }
             let b = entry.layout.bounds();
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
@@ -980,11 +1256,23 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
 fn resolve_drag(head: (usize, usize)) -> bool {
     REGISTRY.with(|r| {
         let reg = r.borrow();
-        let elements: Vec<(&str, &str)> = reg
+        let Some(entry) = reg.get(head.0) else {
+            return false;
+        };
+        let scope = selection_scope(&entry.key);
+        let filtered: Vec<_> = reg
             .iter()
-            .map(|e| (e.key.as_ref(), e.text.as_ref()))
+            .enumerate()
+            .filter(|(_, e)| selection_scope(&e.key) == scope)
             .collect();
-        super::selection::update_drag(&elements, head)
+        let Some(index) = filtered.iter().position(|(ix, _)| *ix == head.0) else {
+            return false;
+        };
+        let elements: Vec<_> = filtered
+            .iter()
+            .map(|(_, e)| (e.key.as_ref(), e.text.as_ref()))
+            .collect();
+        super::selection::update_drag(&elements, (index, head.1))
     })
 }
 
@@ -1162,6 +1450,78 @@ fn text_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
+    if let Some(media) = &opts.media {
+        if runs.iter().any(|run| run.style.image.is_some()) {
+            let mut elements = Vec::new();
+            let mut start = 0;
+            for (index, run) in runs.iter().enumerate() {
+                if let Some(image) = &run.style.image {
+                    if start < index {
+                        elements.push(text_element(
+                            &runs[start..index],
+                            size,
+                            line_height,
+                            bold_default,
+                            top_ix,
+                            ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                            opts,
+                            theme,
+                        ));
+                    }
+                    elements.push((media.image)(
+                        image,
+                        format!("{}-image-{ix}-{index}", opts.row_key).into(),
+                        theme,
+                    ));
+                    start = index + 1;
+                }
+            }
+            if start < runs.len() {
+                elements.push(text_element(
+                    &runs[start..],
+                    size,
+                    line_height,
+                    bold_default,
+                    top_ix,
+                    ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                    opts,
+                    theme,
+                ));
+            }
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(elements)
+                .into_any_element();
+        }
+    }
+    if let Some(lines) = opts
+        .workspace_root
+        .as_deref()
+        .and_then(|root| plain_file_reference_lines(runs, root))
+    {
+        let style = runs[0].style.clone();
+        return div()
+            .flex()
+            .flex_col()
+            .children(lines.into_iter().enumerate().map(|(line_ix, text)| {
+                text_element(
+                    &[InlineRun {
+                        text,
+                        style: style.clone(),
+                    }],
+                    size,
+                    line_height,
+                    bold_default,
+                    top_ix,
+                    ix.wrapping_mul(4099).wrapping_add(line_ix + 2000),
+                    opts,
+                    theme,
+                )
+            }))
+            .into_any_element();
+    }
     let weight = if bold_default {
         FontWeight::SEMIBOLD
     } else {
@@ -1169,11 +1529,127 @@ fn text_element(
     };
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
     let inner = flat_text_element(&flat, ix, opts, theme);
+    let direct_file = opts
+        .workspace_root
+        .as_deref()
+        .and_then(|root| sole_file_reference(runs, root));
+    let content = if let Some(path) = direct_file {
+        div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .size(px(20.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .bg(crate::file_icons::well_bg(theme))
+                    .child(
+                        crate::file_icons::icon(
+                            crate::file_icons::FileIconIdentity::file(&path),
+                            theme.appearance,
+                        )
+                        .size(px(14.0)),
+                    ),
+            )
+            .child(div().min_w_0().flex_1().child(inner))
+            .into_any_element()
+    } else {
+        inner
+    };
     div()
         .text_size(crate::typography::ui_rems(size))
         .line_height(crate::typography::ui_rems(line_height))
-        .child(inner)
+        .child(content)
         .into_any_element()
+}
+
+/// A file icon belongs beside a link only when the whole visible paragraph is
+/// one safe workspace-file target. Mixed prose and external links retain the
+/// ordinary inline Markdown layout.
+fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
+    let mut target = None;
+    for run in runs.iter().filter(|run| !run.text.is_empty()) {
+        if run.style.image.is_some() || run.style.task.is_some() {
+            return None;
+        }
+        let link = run.style.link.as_deref()?;
+        if link == super::mend::PENDING_LINK_URL {
+            return None;
+        }
+        match target {
+            Some(previous) if previous != link => return None,
+            None => target = Some(link),
+            _ => {}
+        }
+    }
+    crate::workspace_links::resolve_workspace_file_link(target?, workspace_root)
+        .map(|link| link.path)
+}
+
+/// A model sometimes emits a bare filename after being asked for a file list
+/// instead of preserving the workspace link it would normally author. Treat a
+/// whole paragraph as a decorative file identity only when the token resolves
+/// safely within the workspace and the icon theme recognizes it. The stricter
+/// mapping check keeps version numbers, domains, and unknown dotted prose from
+/// acquiring file affordances; unlike a real link, this stays non-interactive.
+fn sole_plain_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
+    let mut text = String::new();
+    for run in runs.iter().filter(|run| !run.text.is_empty()) {
+        if run.style.link.is_some()
+            || run.style.image.is_some()
+            || run.style.task.is_some()
+            || run.style.code
+        {
+            return None;
+        }
+        text.push_str(&run.text);
+    }
+    let candidate = text.trim();
+    if candidate.is_empty() || candidate.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let path = crate::workspace_links::resolve_workspace_file_link(candidate, workspace_root)?.path;
+    crate::file_icons::has_specific_file_icon(&path).then_some(path)
+}
+
+/// Preserve hard-break file lists as one compact paragraph while giving each
+/// line its own icon. Limiting this path to one uniformly styled run avoids
+/// rewriting mixed inline formatting or ordinary wrapped prose.
+fn plain_file_reference_lines(runs: &[InlineRun], workspace_root: &str) -> Option<Vec<String>> {
+    let [run] = runs else { return None };
+    if run.style.link.is_some()
+        || run.style.image.is_some()
+        || run.style.task.is_some()
+        || run.style.code
+        || !run.text.contains('\n')
+    {
+        return None;
+    }
+    let lines = run
+        .text
+        .lines()
+        .map(str::trim)
+        .map(|candidate| {
+            if candidate.is_empty() || candidate.chars().any(char::is_whitespace) {
+                return None;
+            }
+            let path =
+                crate::workspace_links::resolve_workspace_file_link(candidate, workspace_root)?
+                    .path;
+            crate::file_icons::has_specific_file_icon(&path).then(|| candidate.to_owned())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (lines.len() > 1).then_some(lines)
+}
+
+fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<String> {
+    sole_workspace_file_link(runs, workspace_root)
+        .or_else(|| sole_plain_file_reference(runs, workspace_root))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1185,6 +1661,226 @@ fn render_code_block(
     opts: &RenderOptions,
     theme: &Theme,
     highlight: CodeHighlight,
+) -> AnyElement {
+    if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
+        if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
+            let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
+            let diagram = handler(code, frame_id.clone(), theme);
+            let toggle = diagram.toggle_source.clone();
+            let toggle_action = code_icon_action(
+                format!("{frame_id}-source-toggle").into(),
+                if diagram.show_source {
+                    "Show diagram"
+                } else {
+                    "Show source"
+                },
+                if diagram.show_source {
+                    crate::icons::EYE
+                } else {
+                    crate::icons::FILE_CODE
+                },
+                Rc::new(move |window, cx| toggle(window, cx)),
+                theme,
+            );
+            if diagram.show_source {
+                return render_code_block_source_with_actions(
+                    language,
+                    code,
+                    top_ix,
+                    ix,
+                    opts,
+                    theme,
+                    highlight,
+                    vec![toggle_action],
+                );
+            }
+            let mut actions = vec![toggle_action];
+            actions.extend(code_copy_button(code, ix, opts, theme));
+            return code_block_frame(frame_id, language, actions, diagram.body, theme)
+                .into_any_element();
+        }
+    }
+    render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
+}
+
+fn code_icon_action(
+    id: SharedString,
+    label: &'static str,
+    icon_path: &'static str,
+    handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    theme: &Theme,
+) -> AnyElement {
+    let fade_key = id.to_string();
+    div()
+        .id(id)
+        .size(px(CODE_ACTION_SIZE))
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(crate::motion::hover_blend(
+            &fade_key,
+            gpui::transparent_black(),
+            crate::theme::ink(0.08),
+        ))
+        .on_hover(crate::motion::hover_listener(fade_key))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            handler(window, cx);
+        })
+        .tooltip(move |_, cx| cx.new(move |_| CodeBlockTooltip(label)).into())
+        .child(
+            crate::icons::icon(icon_path)
+                .size(px(13.0))
+                .text_color(theme.text_muted),
+        )
+        .into_any_element()
+}
+
+fn code_copy_button(
+    code: &str,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    opts.copy.clone().map(|copy| {
+        let copied = copy.copied_ix == Some(ix);
+        let code_text: SharedString = code.to_string().into();
+        let handler = copy.handler.clone();
+        let fade_key = format!("{}-copy{ix}", opts.row_key);
+        div()
+            .id(SharedString::from(fade_key.clone()))
+            .h(px(CODE_ACTION_SIZE))
+            .px(px(6.0))
+            .rounded(px(5.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .cursor_pointer()
+            .bg(crate::motion::hover_blend(
+                &fade_key,
+                gpui::transparent_black(),
+                crate::theme::ink(0.08),
+            ))
+            .on_hover(crate::motion::hover_listener(fade_key))
+            .text_size(px(10.5))
+            .text_color(theme.text_muted)
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                handler(ix, code_text.clone(), window, cx);
+            })
+            .child(
+                crate::icons::icon(if copied {
+                    crate::icons::CHECK
+                } else {
+                    crate::icons::COPY
+                })
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+            )
+            .when(copied, |el| el.child(SharedString::from("Copied")))
+            .into_any_element()
+    })
+}
+
+fn code_block_header(
+    language: Option<&str>,
+    actions: Vec<AnyElement>,
+    theme: &Theme,
+) -> Option<gpui::Div> {
+    if language.is_none() && actions.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .h(px(CODE_HEADER_HEIGHT))
+            .flex_none()
+            .pl(px(CODE_PADDING_X))
+            .pr(px(5.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(crate::theme::ink(0.02))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .min_w_0()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .children(language.map(|lang| SharedString::from(lang.to_string()))),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(actions),
+            ),
+    )
+}
+
+/// Shared visual shell for ordinary code and generated diagram fences.
+fn code_block_frame(
+    id: SharedString,
+    language: Option<&str>,
+    actions: Vec<AnyElement>,
+    body: AnyElement,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .rounded(px(10.0))
+        .bg(crate::theme::ink(0.035))
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+        .relative()
+        .children(code_block_header(language, actions, theme))
+        .child(body)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_code_block_source(
+    language: Option<&str>,
+    code: &str,
+    top_ix: usize,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    highlight: CodeHighlight,
+) -> AnyElement {
+    render_code_block_source_with_actions(
+        language,
+        code,
+        top_ix,
+        ix,
+        opts,
+        theme,
+        highlight,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_code_block_source_with_actions(
+    language: Option<&str>,
+    code: &str,
+    top_ix: usize,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    highlight: CodeHighlight,
+    mut extra_actions: Vec<AnyElement>,
 ) -> AnyElement {
     let mono = font(theme.font_mono.clone());
     // Per-line strings + runs through the cross-frame cache (validity: code
@@ -1236,50 +1932,6 @@ fn render_code_block(
     let code_ui = opts.code.as_ref().and_then(|code| code.get(&ix)).cloned();
     let fit_content = code_ui.as_ref().is_some_and(|ui| ui.fit_content);
 
-    // Header actions stay in normal header flow so Fit and Copy never overlap.
-    // The feedback label may widen Copy, but the fixed header height keeps the
-    // virtual row stable.
-    let copy_button = opts.copy.clone().map(|copy| {
-        let copied = copy.copied_ix == Some(ix);
-        let code_text: SharedString = code.to_string().into();
-        let handler = copy.handler.clone();
-        let fade_key = format!("{}-copy{ix}", opts.row_key);
-        div()
-            .id(SharedString::from(fade_key.clone()))
-            .h(px(CODE_ACTION_SIZE))
-            .px(px(6.0))
-            .rounded(px(5.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            // Ghost-button hover wash fades over transition-colors like every
-            // other interactive chrome (crate::motion hover fades).
-            .bg(crate::motion::hover_blend(
-                &fade_key,
-                gpui::transparent_black(),
-                crate::theme::ink(0.08),
-            ))
-            .on_hover(crate::motion::hover_listener(fade_key))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                handler(ix, code_text.clone(), window, cx);
-            })
-            .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
-                } else {
-                    crate::icons::COPY
-                })
-                .size(px(12.0))
-                .text_color(theme.text_muted),
-            )
-            .when(copied, |el| el.child(SharedString::from("Copied")))
-    });
-
     let fit_button = code_ui.as_ref().map(|ui| {
         let toggle = ui.toggle_fit.clone();
         let fade_key = format!("{}-fit{ix}", opts.row_key);
@@ -1319,38 +1971,10 @@ fn render_code_block(
                     .text_color(theme.text_muted),
             )
     });
-
-    let show_header = language.is_some() || copy_button.is_some() || fit_button.is_some();
-    let header = show_header.then(|| {
-        div()
-            .h(px(CODE_HEADER_HEIGHT))
-            .pl(px(CODE_PADDING_X))
-            .pr(px(5.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(crate::theme::ink(0.02))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .children(language.map(|lang| SharedString::from(lang.to_string()))),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .children(fit_button)
-                    .children(copy_button),
-            )
-    });
+    let mut actions = Vec::new();
+    actions.extend(fit_button.map(IntoElement::into_any_element));
+    actions.append(&mut extra_actions);
+    actions.extend(code_copy_button(code, ix, opts, theme));
 
     let lines = div()
         .map(|el| {
@@ -1484,21 +2108,14 @@ fn render_code_block(
             )
         });
 
-    let mut block = div()
-        .id(SharedString::from(format!(
-            "{}-code-frame{ix}",
-            opts.row_key
-        )))
-        .rounded(px(10.0))
-        // Faint white wash over the near-black panel ≈ #101010 (zeron's code
-        // surface), with the hairline border.
-        .bg(crate::theme::ink(0.035))
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
-        .relative()
-        .children(header)
-        .child(div().w_full().relative().child(body).children(scrollbar));
+    let frame_body = div().w_full().relative().child(body).children(scrollbar);
+    let mut block = code_block_frame(
+        format!("{}-code-frame{ix}", opts.row_key).into(),
+        language,
+        actions,
+        frame_body.into_any_element(),
+        theme,
+    );
     if let Some(ui) = code_ui {
         let viewport_hover = ui.viewport_hover.clone();
         let drag_move = ui.drag_move.clone();
@@ -1587,6 +2204,123 @@ mod tests {
 
         let top_level = parse_full("paragraph\n\n```text\nvalue\n```\n");
         assert_eq!(code_block_indices(&top_level.blocks[1].block, 1), vec![1]);
+    }
+
+    #[test]
+    fn sole_workspace_link_gets_a_file_path() {
+        let runs = vec![InlineRun {
+            text: "slides.ts".into(),
+            style: InlineStyle {
+                link: Some("src/slides.ts#L12".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(
+            sole_workspace_file_link(&runs, "/work/comet"),
+            Some("src/slides.ts".into())
+        );
+    }
+
+    #[test]
+    fn direct_file_decoration_excludes_mixed_and_external_links() {
+        let linked = InlineRun {
+            text: "slides.ts".into(),
+            style: InlineStyle {
+                link: Some("src/slides.ts".into()),
+                ..Default::default()
+            },
+        };
+        let mixed = vec![
+            InlineRun {
+                text: "See ".into(),
+                style: InlineStyle::default(),
+            },
+            linked,
+        ];
+        assert_eq!(sole_workspace_file_link(&mixed, "/work/comet"), None);
+
+        let external = vec![InlineRun {
+            text: "website".into(),
+            style: InlineStyle {
+                link: Some("https://example.com/slides.ts".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(sole_workspace_file_link(&external, "/work/comet"), None);
+    }
+
+    #[test]
+    fn standalone_recognized_filename_gets_a_decorative_identity() {
+        let plain = vec![InlineRun {
+            text: "AudienceView.tsx".into(),
+            style: InlineStyle::default(),
+        }];
+        assert_eq!(
+            sole_file_reference(&plain, "/work/comet"),
+            Some("AudienceView.tsx".into())
+        );
+
+        let linked_unknown = vec![InlineRun {
+            text: "artifact.unknown".into(),
+            style: InlineStyle {
+                link: Some("build/artifact.unknown".into()),
+                ..Default::default()
+            },
+        }];
+        assert_eq!(
+            sole_file_reference(&linked_unknown, "/work/comet"),
+            Some("build/artifact.unknown".into())
+        );
+    }
+
+    #[test]
+    fn plain_file_decoration_rejects_prose_code_and_unknown_dotted_tokens() {
+        let plain = |text: &str| {
+            vec![InlineRun {
+                text: text.into(),
+                style: InlineStyle::default(),
+            }]
+        };
+        assert_eq!(
+            sole_file_reference(&plain("version 1.2"), "/work/comet"),
+            None
+        );
+        assert_eq!(
+            sole_file_reference(&plain("example.invalid"), "/work/comet"),
+            None
+        );
+
+        let code = vec![InlineRun {
+            text: "slides.ts".into(),
+            style: InlineStyle {
+                code: true,
+                ..Default::default()
+            },
+        }];
+        assert_eq!(sole_file_reference(&code, "/work/comet"), None);
+    }
+
+    #[test]
+    fn hard_break_file_list_resolves_every_recognized_line() {
+        let runs = vec![InlineRun {
+            text: "slides.ts\ncourseDecks.ts\nAudienceView.tsx\nglobals.css".into(),
+            style: InlineStyle::default(),
+        }];
+        assert_eq!(
+            plain_file_reference_lines(&runs, "/work/comet"),
+            Some(vec![
+                "slides.ts".into(),
+                "courseDecks.ts".into(),
+                "AudienceView.tsx".into(),
+                "globals.css".into(),
+            ])
+        );
+
+        let mixed = vec![InlineRun {
+            text: "slides.ts\nnot a file".into(),
+            style: InlineStyle::default(),
+        }];
+        assert_eq!(plain_file_reference_lines(&mixed, "/work/comet"), None);
     }
 
     /// Model GPUI's upstream affinity at a soft-wrap boundary: byte 5 is

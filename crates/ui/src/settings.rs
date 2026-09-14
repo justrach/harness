@@ -26,7 +26,7 @@ pub mod shortcuts;
 pub mod widgets;
 
 /// Sidebar drag-resize bounds (px).
-pub const SIDEBAR_MIN: f32 = 208.0;
+pub const SIDEBAR_MIN: f32 = 224.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
@@ -57,6 +57,57 @@ pub const FILES_EDITOR_FONT_SIZE_MIN: f32 = 9.0;
 pub const FILES_EDITOR_FONT_SIZE_MAX: f32 = 24.0;
 
 const FILE_NAME: &str = "ui-settings.json";
+const NEW_THREAD_BACKGROUND_DIR: &str = "new-thread-backgrounds";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewThreadComposerBackground {
+    /// Managed copy inside Zeron's device-local data directory.
+    pub path: String,
+    /// Original file name shown in Appearance settings.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NewThreadBackgroundEffect {
+    #[default]
+    None,
+    Dither,
+    Ascii,
+    Halftone,
+    Scanlines,
+}
+
+impl NewThreadBackgroundEffect {
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Dither,
+        Self::Ascii,
+        Self::Halftone,
+        Self::Scanlines,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Dither => "Dither",
+            Self::Ascii => "ASCII",
+            Self::Halftone => "Halftone",
+            Self::Scanlines => "Scanlines",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::None => "Shows the original artwork.",
+            Self::Dither => "Rebuilds the artwork with a dithered color palette.",
+            Self::Ascii => "Recreates the artwork with colored characters on black.",
+            Self::Halftone => "Recreates the artwork with colored print dots on black.",
+            Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -224,6 +275,115 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+/// Copy a selected image into Zeron's device-local data directory and make it
+/// the new-thread canvas background. A unique file name avoids stale image
+/// caches when the background is replaced.
+pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
+    let staged = crate::attachments::stage_file(source)?;
+    // Do not persist the candidate or retire the old managed file until the
+    // renderer's decoder has accepted the exact bytes we are about to save.
+    crate::new_thread_background_image::decode(staged.bytes()).map_err(|_| {
+        "This background image is unsupported or damaged. Choose a valid image such as PNG or JPEG.".to_string()
+    })?;
+    let data_dir = cx
+        .try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+        .ok_or_else(|| "Unable to save the image. Restart Zeron and try again.".to_string())?;
+    let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
+    std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
+        "Unable to save the image. Check folder permissions and try again.".to_string()
+    })?;
+
+    let extension = Path::new(&staged.name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("png");
+    let destination = backgrounds_dir.join(format!(
+        "new-thread-background-{}.{}",
+        uuid::Uuid::new_v4(),
+        extension
+    ));
+    let temporary = destination.with_extension(format!("{extension}.tmp"));
+    if std::fs::write(&temporary, staged.bytes())
+        .and_then(|_| std::fs::rename(&temporary, &destination))
+        .is_err()
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(
+            "Unable to save the image. Check folder permissions and try again.".to_string(),
+        );
+    }
+
+    let replacement = NewThreadComposerBackground {
+        path: destination.to_string_lossy().into_owned(),
+        name: staged.name,
+    };
+    let mut next = current(cx);
+    let previous = next
+        .new_thread_composer_background
+        .replace(replacement.clone());
+    // Persist the pointer before retiring the old file. `update(Immediate)`
+    // updates memory first and only logs an I/O failure; for a file-backed
+    // setting that order can leave disk pointing at an image we just deleted.
+    if next.save(&data_dir).is_err() {
+        let _ = std::fs::remove_file(&destination);
+        return Err(
+            "Unable to save the image. Check folder permissions and try again.".to_string(),
+        );
+    }
+    replace(next, SavePolicy::Immediate, cx);
+    remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
+    cx.refresh_windows();
+    Ok(())
+}
+
+pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String> {
+    let data_dir = cx
+        .try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
+        .ok_or_else(|| "Unable to remove the image. Restart Zeron and try again.".to_string())?;
+    let mut next = current(cx);
+    let previous = next.new_thread_composer_background.take();
+    if previous.is_none() {
+        return Ok(());
+    }
+    if next.save(&data_dir).is_err() {
+        return Err(
+            "Unable to remove the image. Check folder permissions and try again.".to_string(),
+        );
+    }
+    replace(next, SavePolicy::Immediate, cx);
+    remove_managed_new_thread_background(
+        previous.as_ref(),
+        &data_dir.join(NEW_THREAD_BACKGROUND_DIR),
+    );
+    cx.refresh_windows();
+    Ok(())
+}
+
+pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.new_thread_background_effect = effect;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+fn remove_managed_new_thread_background(
+    background: Option<&NewThreadComposerBackground>,
+    backgrounds_dir: &Path,
+) {
+    let Some(background) = background else {
+        return;
+    };
+    let path = Path::new(&background.path);
+    // Never delete an arbitrary legacy or hand-edited path. Only files copied
+    // directly into the directory owned by this setting are disposable.
+    if path.parent() == Some(backgrounds_dir) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Monotonic id of the global code-fence layout choice. Every transcript
 /// compares this during render so inactive subagent tabs can observe all mode
 /// transitions when they next become visible.
@@ -380,9 +540,15 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
-    /// Session notification chimes (done / awaiting-input). `ZERON_DISABLE_SOUND`
-    /// overrides.
+    /// Master switch for session notification chimes. `ZERON_DISABLE_SOUND`
+    /// overrides every per-event preference below.
     pub sound_enabled: bool,
+    /// Chime when an agent run completes successfully.
+    pub sound_completion_enabled: bool,
+    /// Chime when an agent is waiting for user input.
+    pub sound_input_enabled: bool,
+    /// Chime when a run fails or the durable connection state degrades.
+    pub sound_attention_enabled: bool,
     /// Desktop banner notifications on the same transitions.
     /// `ZERON_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
@@ -399,6 +565,14 @@ pub struct UiSettings {
     pub terminal_open: bool,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
+    /// macOS viewer-side Appshot capture. Device-local because the shortcut
+    /// and TCC permissions belong to this desktop.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshots_enabled: bool,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshot_sound_enabled: bool,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub appshot_destination: crate::appshots::AppshotDestination,
     /// Whether bare Escape stops the active agent after contextual consumers
     /// decline it. Device-local and opt-in.
     pub escape_stops_active_agent: bool,
@@ -440,6 +614,11 @@ pub struct UiSettings {
     pub accent: zeron_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: zeron_theme::SurfacePreference,
+    /// Optional device-local artwork behind the blank new-thread composer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_thread_composer_background: Option<NewThreadComposerBackground>,
+    /// Non-destructive treatment composited inside the artwork's fade mask.
+    pub new_thread_background_effect: NewThreadBackgroundEffect,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -463,6 +642,9 @@ impl Default for UiSettings {
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
+            sound_completion_enabled: true,
+            sound_input_enabled: true,
+            sound_attention_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
@@ -472,6 +654,9 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             composer_send_behavior: ComposerSendBehavior::default(),
+            appshots_enabled: false,
+            appshot_sound_enabled: true,
+            appshot_destination: crate::appshots::AppshotDestination::Automatic,
             appearance: crate::appearance::AppearanceMode::default(),
             git_history_columns: GitHistoryColumns::default(),
             git_history_column_widths: GitHistoryColumnWidths::default(),
@@ -490,6 +675,8 @@ impl Default for UiSettings {
             files_show_all: false,
             accent: zeron_theme::AccentSelection::default(),
             surface: zeron_theme::SurfacePreference::default(),
+            new_thread_composer_background: None,
+            new_thread_background_effect: NewThreadBackgroundEffect::None,
             legacy_accent_color: None,
         }
     }
@@ -524,6 +711,7 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 /// rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
+    CaptureAppshot,
     SaveFile,
     BrowserReload,
     ToggleSidebar,
@@ -537,7 +725,8 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 9 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 10 + JUMP_SLOTS] = [
+        ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -558,9 +747,14 @@ impl ShortcutId {
         ShortcutId::JumpSession(8),
     ];
 
+    pub fn available(self) -> bool {
+        self != Self::CaptureAppshot || crate::appshots::is_desktop()
+    }
+
     /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
     pub fn label(self) -> &'static str {
         match self {
+            ShortcutId::CaptureAppshot => "Capture Appshot",
             ShortcutId::SaveFile => "Save file",
             ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
@@ -583,6 +777,8 @@ impl ShortcutId {
     /// this guards against only exists off macOS).
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
+            ShortcutId::CaptureAppshot if mac => "ctrl-alt-space",
+            ShortcutId::CaptureAppshot => "mod-alt-space",
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
             ShortcutId::ToggleSidebar => "mod-b",
@@ -625,6 +821,8 @@ impl ShortcutId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), serde(skip))]
+    pub capture_appshot: String,
     pub save_file: String,
     pub browser_reload: String,
     pub toggle_sidebar: String,
@@ -644,6 +842,7 @@ pub struct KeymapConfig {
 impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
+            capture_appshot: ShortcutId::CaptureAppshot.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
@@ -661,6 +860,7 @@ impl Default for KeymapConfig {
 impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
+            ShortcutId::CaptureAppshot => &self.capture_appshot,
             ShortcutId::SaveFile => &self.save_file,
             ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
@@ -680,6 +880,7 @@ impl KeymapConfig {
 
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
+            ShortcutId::CaptureAppshot => self.capture_appshot = combo,
             ShortcutId::SaveFile => self.save_file = combo,
             ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
@@ -787,10 +988,11 @@ pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
         .into_iter()
         .filter(|&id| {
             let combo = keymap.get(id);
-            !combo.is_empty()
+            id.available()
+                && !combo.is_empty()
                 && ShortcutId::ALL
                     .into_iter()
-                    .any(|other| other != id && keymap.get(other) == combo)
+                    .any(|other| other.available() && other != id && keymap.get(other) == combo)
         })
         .collect()
 }
@@ -903,6 +1105,17 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
 }
 
 impl UiSettings {
+    /// Whether this session event may produce audio. Appshot capture has its
+    /// own feature-local preference once the Appshots contribution lands.
+    pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
+        self.sound_enabled
+            && match sound {
+                crate::sound::Sound::Done => self.sound_completion_enabled,
+                crate::sound::Sound::Request => self.sound_input_enabled,
+                crate::sound::Sound::Attention => self.sound_attention_enabled,
+            }
+    }
+
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
         if self.sidebar_organization == SidebarOrganization::ByProject {
@@ -945,6 +1158,15 @@ impl UiSettings {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
+                    if let Some(settings) = value.as_object_mut() {
+                        let previous_sound = settings
+                            .get("soundEnabled")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true);
+                        settings
+                            .entry("appshotSoundEnabled")
+                            .or_insert(serde_json::Value::Bool(previous_sound));
+                    }
                     if let Some(keymap) = value
                         .get_mut("keymap")
                         .and_then(serde_json::Value::as_object_mut)
@@ -1069,8 +1291,222 @@ mod tests {
 
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
+        assert!(loaded.new_thread_composer_background.is_none());
+        assert_eq!(
+            loaded.new_thread_background_effect,
+            NewThreadBackgroundEffect::None
+        );
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
+        for sound in [
+            crate::sound::Sound::Done,
+            crate::sound::Sound::Request,
+            crate::sound::Sound::Attention,
+        ] {
+            assert!(!loaded.session_sound_enabled(sound));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn appshot_shortcut_defaults_round_trip_and_reset() {
+        assert_eq!(
+            ShortcutId::CaptureAppshot.default_combo_on(true),
+            "ctrl-alt-space"
+        );
+        assert_eq!(
+            ShortcutId::CaptureAppshot.default_combo_on(false),
+            "mod-alt-space"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap":{"newSession":"mod-shift-n"}}"#,
+        )
+        .unwrap();
+        let mut settings = UiSettings::load(dir.path());
+        assert_eq!(
+            settings.keymap.capture_appshot,
+            ShortcutId::CaptureAppshot.default_combo()
+        );
+        assert_eq!(settings.keymap.new_session, "mod-shift-n");
+        settings
+            .keymap
+            .set(ShortcutId::CaptureAppshot, "mod-alt-k".into());
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let mut restored = UiSettings::load(dir.path());
+        assert_eq!(restored.keymap.capture_appshot, "mod-alt-k");
+        restored.keymap.reset(ShortcutId::CaptureAppshot);
+        assert_eq!(
+            restored.keymap.capture_appshot,
+            ShortcutId::CaptureAppshot.default_combo()
+        );
+    }
+
+    #[test]
+    fn appshot_settings_are_serialized_only_on_desktop() {
+        let value = serde_json::to_value(UiSettings::default()).unwrap();
+        for key in [
+            "appshotsEnabled",
+            "appshotSoundEnabled",
+            "appshotDestination",
+        ] {
+            assert_eq!(
+                value.get(key).is_some(),
+                crate::appshots::is_desktop(),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            value["keymap"].get("captureAppshot").is_some(),
+            crate::appshots::is_desktop()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn appshot_sound_migrates_mute_and_persists_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"soundEnabled":false}"#).unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert!(!loaded.appshot_sound_enabled);
+        loaded.appshot_sound_enabled = true;
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            serde_json::to_vec(&loaded).unwrap(),
+        )
+        .unwrap();
+        let restored = UiSettings::load(dir.path());
+        assert!(restored.appshot_sound_enabled);
+        assert!(!restored.sound_enabled);
+    }
+
+    #[test]
+    fn background_cleanup_only_removes_files_owned_by_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let backgrounds = dir.path().join(NEW_THREAD_BACKGROUND_DIR);
+        std::fs::create_dir(&backgrounds).unwrap();
+        let managed = backgrounds.join("new-thread-background-owned.png");
+        let unrelated = dir.path().join("keep.png");
+        std::fs::write(&managed, b"managed").unwrap();
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        remove_managed_new_thread_background(
+            Some(&NewThreadComposerBackground {
+                path: unrelated.to_string_lossy().into_owned(),
+                name: "keep.png".into(),
+            }),
+            &backgrounds,
+        );
+        assert!(unrelated.exists());
+        remove_managed_new_thread_background(
+            Some(&NewThreadComposerBackground {
+                path: managed.to_string_lossy().into_owned(),
+                name: "owned.png".into(),
+            }),
+            &backgrounds,
+        );
+        assert!(!managed.exists());
+    }
+
+    #[gpui::test]
+    fn invalid_background_replacement_preserves_previous_image_and_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 100, 200, 255]))
+            .save(&original)
+            .unwrap();
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            install_new_thread_composer_background(&original, cx).unwrap();
+            let before = current(cx);
+            let previous = PathBuf::from(&before.new_thread_composer_background.as_ref().unwrap().path);
+            let saved = std::fs::read(UiSettings::path(dir.path())).unwrap();
+            let previous_bytes = std::fs::read(&previous).unwrap();
+            for (name, bytes) in [
+                ("replacement.svg", br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#.as_slice()),
+                ("corrupt.png", b"not a PNG".as_slice()),
+                ("truncated.png", &previous_bytes[..previous_bytes.len() / 2]),
+            ] {
+                let candidate = dir.path().join(name);
+                std::fs::write(&candidate, bytes).unwrap();
+                let result = install_new_thread_composer_background(&candidate, cx);
+                assert!(result.is_err(), "accepted invalid replacement: {name}");
+                assert_eq!(current(cx), before);
+                assert_eq!(std::fs::read(UiSettings::path(dir.path())).unwrap(), saved);
+                assert_eq!(std::fs::read(&previous).unwrap(), previous_bytes);
+                assert_eq!(std::fs::read_dir(dir.path().join(NEW_THREAD_BACKGROUND_DIR)).unwrap().count(), 1);
+                assert!(candidate.exists(), "source files must never be deleted");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn valid_background_replacement_persists_renderable_image_before_retiring_previous(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.png");
+        let second = dir.path().join("second.jpg");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 100, 200, 255]))
+            .save(&first)
+            .unwrap();
+        image::RgbImage::from_pixel(12, 10, image::Rgb([200, 100, 20]))
+            .save(&second)
+            .unwrap();
+        cx.update(|cx| {
+            let initial = UiSettings {
+                new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+                ..Default::default()
+            };
+            init(initial, dir.path(), cx);
+            install_new_thread_composer_background(&first, cx).unwrap();
+            let old_path = current(cx).new_thread_composer_background.unwrap().path;
+            install_new_thread_composer_background(&second, cx).unwrap();
+            let settings = current(cx);
+            let replacement = settings.new_thread_composer_background.as_ref().unwrap();
+            assert_ne!(replacement.path, old_path);
+            let saved_image = std::fs::read(&replacement.path).unwrap();
+            assert_eq!(saved_image, std::fs::read(&second).unwrap());
+            let decoded = crate::new_thread_background_image::decode(&saved_image).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (12, 10));
+            assert_eq!(UiSettings::load(dir.path()), settings);
+            assert_eq!(
+                settings.new_thread_background_effect,
+                NewThreadBackgroundEffect::Ascii
+            );
+            assert!(!Path::new(&old_path).exists());
+            assert!(first.exists() && second.exists());
+            assert_eq!(
+                std::fs::read_dir(dir.path().join(NEW_THREAD_BACKGROUND_DIR))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn invalid_initial_background_import_does_not_create_managed_files_or_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("corrupt.png");
+        std::fs::write(&candidate, b"not a PNG").unwrap();
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            assert!(install_new_thread_composer_background(&candidate, cx).is_err());
+            assert!(current(cx).new_thread_composer_background.is_none());
+            assert!(!dir.path().join(NEW_THREAD_BACKGROUND_DIR).exists());
+            assert!(!UiSettings::path(dir.path()).exists());
+            assert!(candidate.exists());
+        });
     }
 
     #[test]
@@ -1110,6 +1546,9 @@ mod tests {
             )]),
             space_order: vec!["space-2".to_string(), "space-1".to_string()],
             sound_enabled: false,
+            sound_completion_enabled: false,
+            sound_input_enabled: true,
+            sound_attention_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
             right_pane_width: 700.0,
@@ -1122,6 +1561,9 @@ mod tests {
             },
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            appshots_enabled: false,
+            appshot_sound_enabled: true,
+            appshot_destination: crate::appshots::AppshotDestination::NewSession,
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -1155,6 +1597,11 @@ mod tests {
             files_show_all: true,
             accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
             surface: zeron_theme::SurfacePreference::Frosted,
+            new_thread_composer_background: Some(NewThreadComposerBackground {
+                path: "/tmp/zeron/new-thread-background.png".into(),
+                name: "background.png".into(),
+            }),
+            new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
@@ -1162,6 +1609,7 @@ mod tests {
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
+        assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
     }
 
     #[test]
@@ -1252,6 +1700,9 @@ mod tests {
         assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled, "other keys still parse");
+        assert!(loaded.sound_completion_enabled);
+        assert!(loaded.sound_input_enabled);
+        assert!(loaded.sound_attention_enabled);
         assert_eq!(
             loaded.files_autosave_delay_ms,
             FILES_AUTOSAVE_DELAY_DEFAULT_MS
@@ -1295,6 +1746,30 @@ mod tests {
             GitHistoryAuthorDisplay::Avatar,
             "pre-author-display files default to avatars"
         );
+    }
+
+    #[test]
+    fn session_sound_preferences_round_trip_and_gate_each_event() {
+        let settings = UiSettings {
+            sound_enabled: true,
+            sound_completion_enabled: false,
+            sound_input_enabled: true,
+            sound_attention_enabled: false,
+            ..Default::default()
+        };
+        assert!(!settings.session_sound_enabled(crate::sound::Sound::Done));
+        assert!(settings.session_sound_enabled(crate::sound::Sound::Request));
+        assert!(!settings.session_sound_enabled(crate::sound::Sound::Attention));
+
+        let value = serde_json::to_value(&settings).unwrap();
+        let restored: UiSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, settings);
+
+        let muted = UiSettings {
+            sound_enabled: false,
+            ..settings
+        };
+        assert!(!muted.session_sound_enabled(crate::sound::Sound::Request));
     }
 
     #[test]
@@ -1382,6 +1857,15 @@ mod tests {
         assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
         assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
         assert!(!loaded.code_fences_fit_content);
+        assert_eq!(
+            UiSettings {
+                sidebar_width: 1.0,
+                ..Default::default()
+            }
+            .clamped()
+            .sidebar_width,
+            SIDEBAR_MIN
+        );
         assert_eq!(
             UiSettings {
                 files_autosave_delay_ms: 1,

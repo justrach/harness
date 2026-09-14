@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.60"
+version = "0.2.63"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -64,16 +64,16 @@ loro-protocol = "0.3"
 # stopped vending CABackdropLayer for Selection — window blur went dead);
 # b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
 # Linux — the Metal path's snapshot/blur/composite, ported).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d", features = [
+# Paint-time rounded image masks (zeronsh/zui#9).
+gpui = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609" }
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
-# Keep gpui-base and the app on the same Zui revision to share GPUI types.
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "3a8c45875c79648242e42b8c87c80c473d366473" }
+gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "aa009411c2dbfb39556bff1b1febed0512fdf609" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "94c1bbaf6311b9f36f5e7438aaf5aeadd38740da" }
 
 # diffs
 similar = "2"
