@@ -4992,16 +4992,16 @@ impl Transcript {
                                 cx.notify();
                             }))
                             .child(
-                                image_frame.child(crate::edge_fade::edge_faded(
-                                    32.0,
-                                    false,
-                                    true,
+                                // Inherit the transcript's scroll fade. GPUI replaces
+                                // rather than composes nested edge-fade scopes, so a
+                                // decorative thumbnail fade would bypass the chrome fade.
+                                image_frame.child(
                                     img(image.image)
                                         .w_full()
                                         .h(px(126.0))
                                         .rounded(px(5.0))
                                         .object_fit(ObjectFit::Contain),
-                                )),
+                                ),
                             )
                     }
                     AttachmentSnapshot::Loading => card.child(
