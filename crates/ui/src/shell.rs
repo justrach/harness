@@ -8123,6 +8123,10 @@ impl Shell {
             .min_w_0()
             .overflow_x_scroll()
             .track_scroll(&self.right_tab_scroll)
+            // Windows caption hit-testing includes the scroll-only hitboxes
+            // behind each chip. Stop at the scroller so the titlebar cannot
+            // claim tab clicks, while wheel events still reach this scroller.
+            .when(cfg!(target_os = "windows"), |strip| strip.occlude())
             .on_drag_move::<RightTabDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
                     let payload = event.drag(cx);
@@ -11876,10 +11880,14 @@ mod right_tab_mouse_regressions {
 
     impl Render for TabHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(400.)).h(px(40.)).child(
-                self.shell
-                    .update(cx, |shell, cx| shell.render_right_tab_strip(cx)),
-            )
+            self.shell.update(cx, |shell, cx| {
+                let tabs = shell.render_right_tab_strip(cx);
+                shell.titlebar_drag_region(
+                    "right-tab-test-titlebar",
+                    div().w(px(400.)).h(px(40.)).child(tabs),
+                    cx,
+                )
+            })
         }
     }
 
@@ -11935,6 +11943,35 @@ mod right_tab_mouse_regressions {
             assert!(!shell.subagent_tabs.contains_key(&1));
             assert!(shell.subagent_tabs.contains_key(&2));
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+        });
+    }
+
+    #[gpui::test]
+    fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            for id in ["third", "fourth", "fifth", "sixth"] {
+                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    position: start,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
+                    modifiers: gpui::Modifiers::default(),
+                    touch_phase: gpui::TouchPhase::Moved,
+                }),
+                cx,
+            );
+        });
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                shell.right_tab_scroll.offset().x < px(0.),
+                "tab strip did not scroll"
+            );
         });
     }
 
