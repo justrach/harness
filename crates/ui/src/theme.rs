@@ -801,8 +801,9 @@ impl Theme {
     /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
     /// matches the perceived gap to the inset card below (border + card body).
     pub const TITLEBAR_HEIGHT: f32 = 38.0;
-    /// Downward shift of titlebar content within the bar.
-    pub const TITLEBAR_TOP_PAD: f32 = 2.0;
+    /// Top-only padding moves the flex center by half this value. On macOS,
+    /// 38 / 2 + 4 / 2 = 21 matches the native traffic lights' center.
+    pub const TITLEBAR_TOP_PAD: f32 = 4.0;
     /// Reserved status strip under the content outlet (zeron `h-6`) — the
     /// WorkingIndicator row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;
@@ -923,15 +924,13 @@ impl Theme {
             ))
     }
 
-    /// The composer pill / question panel fill. Light's `input_bg` is opaque
-    /// white (the elevation ladder on an opaque page) — over glass it read as
-    /// a solid slab in front of the frosted blur, so it thins to a
-    /// translucent tint there (0.6 and then 0.45 both still read too bright
-    /// over the 0.80 frost — lowered on user request). Dark's 3% white wash
-    /// is already glass-native.
+    /// Shared fill for the composer, queue tray, and input panels. Without
+    /// frost, composite the theme's input tint onto the page to preserve its
+    /// color while hiding the transcript and overlapping surfaces underneath.
+    /// Frosted surfaces retain their translucent, contrast-checked tint.
     pub fn input_glass_bg(&self) -> Hsla {
         if !self.is_frost() {
-            return self.input_bg;
+            return flatten(self.input_bg, self.bg);
         }
         let base = if matches!(self.appearance, Appearance::Light) {
             0.30
