@@ -63,6 +63,17 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
+
+fn jump_visibility(was_shown: bool, distance: f32) -> bool {
+    // Once offered, keep the control until close to the end. A single 320px
+    // threshold made it disappear halfway through a downward scroll gesture.
+    distance
+        > if was_shown {
+            AT_BOTTOM_PX
+        } else {
+            SCROLL_BUTTON_THRESHOLD_PX
+        }
+}
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
 /// Bound locally-authored queue ids waiting to become transcript prompts.
@@ -2545,6 +2556,9 @@ pub struct Transcript {
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
+    /// The shell may retain this already-laid-out view briefly for its exit.
+    /// Cleared as soon as the exit is invisible; never used for another chat.
+    retain_on_deselect: bool,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -2838,6 +2852,7 @@ impl Transcript {
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
+            retain_on_deselect: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
@@ -3160,7 +3175,7 @@ impl Transcript {
                     if this.pinned {
                         this.wake_spring();
                     }
-                    this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
+                    this.show_jump_button = jump_visibility(this.show_jump_button, distance)
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
                     cx.notify();
                     return;
@@ -3184,7 +3199,7 @@ impl Transcript {
                         this.wake_spring();
                     }
                 }
-                let show = distance > SCROLL_BUTTON_THRESHOLD_PX && !this.pinned;
+                let show = jump_visibility(this.show_jump_button, distance) && !this.pinned;
                 if show != this.show_jump_button {
                     this.show_jump_button = show;
                 }
@@ -3247,7 +3262,8 @@ impl Transcript {
         }
         if was_selecting {
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+            self.show_jump_button =
+                jump_visibility(self.show_jump_button, self.last_scroll_distance);
             cx.notify();
         }
     }
@@ -3298,7 +3314,7 @@ impl Transcript {
         self.begin_scroll_navigation();
         self.list.scroll_by(px(step));
         self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
         cx.notify();
         self.schedule_selection_scroll(cx);
     }
@@ -3464,7 +3480,7 @@ impl Transcript {
         self.own_turn_last_tick = None;
         self.remeasure_last_row();
         self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
         self.viewport_finalize_pending = true;
     }
 
@@ -3515,6 +3531,9 @@ impl Transcript {
     /// Advance the prompt glide or hand a filled reservation to tail-follow.
     /// Reservation sizing happens in the list layout, never in this callback.
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
+        if self.route_exit_pending(cx) {
+            return;
+        }
         self.own_turn_kick = false;
         // Layout moves the bottom too (pad refinement, streaming growth):
         // refresh the wheel handler's escape baseline every frame so only a
@@ -3812,6 +3831,9 @@ impl Transcript {
     /// delta, and park on landing. Runs from `window.on_next_frame`,
     /// i.e. after layout — measurements are fresh.
     fn step_spring(&mut self, cx: &mut Context<Self>) {
+        if self.route_exit_pending(cx) {
+            return;
+        }
         self.spring_kick = false;
         if !self.pinned {
             self.spring_last_tick = None;
@@ -3866,8 +3888,34 @@ impl Transcript {
         }
     }
 
+    pub(crate) fn retain_for_route_exit(&mut self) {
+        self.retain_on_deselect = true;
+    }
+
+    fn route_exit_pending(&self, cx: &gpui::App) -> bool {
+        self.retain_on_deselect
+            && self.doc_override.is_none()
+            && self.state.read(cx).selected_chat.is_none()
+            && self.chat_id.is_some()
+    }
+
+    pub(crate) fn finish_route_exit(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_none() && self.chat_id.is_some() {
+            self.retain_on_deselect = false;
+            self.sync(cx);
+            self.retain_on_deselect = true;
+        }
+    }
+
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        if self.retain_on_deselect
+            && self.doc_override.is_none()
+            && self.state.read(cx).selected_chat.is_none()
+            && self.chat_id.is_some()
+        {
+            return;
+        }
         let (selected, replay) = {
             let s = self.state.read(cx);
             match &self.doc_override {
@@ -4447,7 +4495,8 @@ impl Transcript {
         if raw >= 1.0 {
             self.user_collapse_scroll = None;
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
+            self.show_jump_button =
+                jump_visibility(self.show_jump_button, self.last_scroll_distance);
         }
         cx.notify();
     }
@@ -7483,7 +7532,10 @@ impl Render for Transcript {
         // frame while an anchor is live (not just on kicks) so viewport
         // resizes and streaming growth re-derive the reservation; the step
         // only notifies on change, so a settled hold schedules no next frame.
-        if (self.own_turn.is_some() || self.own_turn_kick) && !self.own_turn_scheduled {
+        if !self.route_exit_pending(cx)
+            && (self.own_turn.is_some() || self.own_turn_kick)
+            && !self.own_turn_scheduled
+        {
             self.own_turn_scheduled = true;
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
@@ -7498,7 +7550,8 @@ impl Render for Transcript {
         // Spring driver: one on_next_frame callback at a time; each tick
         // notifies, which re-enters render and schedules the next frame until
         // the spring parks. Reduced motion never schedules (sync snaps).
-        if self.pinned
+        if !self.route_exit_pending(cx)
+            && self.pinned
             && !motion::reduced_motion(cx)
             && !self.spring_scheduled
             && self.spring_should_run()
@@ -7536,7 +7589,7 @@ impl Render for Transcript {
                         }
                         let distance = this.distance_from_bottom();
                         this.last_scroll_distance = distance;
-                        this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
+                        this.show_jump_button = jump_visibility(this.show_jump_button, distance)
                             && !this.pinned
                             && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
                         if token.layout_settled(this.viewport_layout_revision) {
@@ -7639,6 +7692,44 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
+        let mut shown = false;
+        for distance in [500.0, 330.0, 319.0, 200.0, 100.0] {
+            shown = jump_visibility(shown, distance);
+            assert!(shown, "button vanished with {distance}px remaining");
+        }
+        assert!(!jump_visibility(shown, AT_BOTTOM_PX));
+        assert!(!jump_visibility(false, 319.0));
+        assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn departing_transcript_is_retained_only_until_hidden(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            transcript.update(cx, |transcript, cx| {
+                transcript.retain_for_route_exit();
+                transcript.chat_id = Some("departing".into());
+                transcript.last_source = None;
+                transcript.rows = vec![viewport_row("row", "message")];
+                transcript.list.reset(1);
+                transcript.sync(cx);
+                assert_eq!(transcript.rows.len(), 1);
+                assert!(transcript.route_exit_pending(cx));
+                transcript.finish_route_exit(cx);
+                assert!(transcript.rows.is_empty());
+                assert!(transcript.chat_id.is_none());
+                assert!(!transcript.route_exit_pending(cx));
+            });
+        });
+    }
     use zeron_doc::MessagePart;
 
     #[test]

@@ -361,6 +361,11 @@ pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
+/// Reversible new-thread ↔ session handoff. The shared composer moves and
+/// morphs on a fast-starting, soft-landing curve while the canvas/transcript
+/// crossfade is staged around it. Slightly longer than a utility transition,
+/// but still short enough to acknowledge a send immediately.
+pub const NEW_THREAD_TRANSITION: MotionSpec = MotionSpec::new(420, EASE_RESORT);
 /// Diff-pane chevron rotate: 200ms (§1.11; approximated as a crossfade — gpui
 /// divs have no rotation transform at the pinned rev, same caveat as scale).
 pub const CHEVRON: MotionSpec = MotionSpec::new(200, EASE);
@@ -380,6 +385,91 @@ pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
 
 // ---------------------------------------------------------------------------
+// Resize-edge feedback
+// ---------------------------------------------------------------------------
+
+/// Pane resize limits acknowledge a held pointer without persisting an
+/// out-of-range size. The small displacement is shared by the shell panes and
+/// nested surface splits so every seam has the same physical response.
+pub const RESIZE_EDGE_NUDGE: f32 = 5.0;
+pub const RESIZE_EDGE_BOUNCE_MS: u64 = 220;
+pub const RESIZE_EDGE_BOUNCE_OUT_FRACTION: f32 = 0.32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResizeDragSample {
+    pub width: f32,
+    pub edge: Option<ResizeEdge>,
+    pub starts_bounce: bool,
+}
+
+/// Clamp a resize sample while latching its constrained edge. A held pointer
+/// starts one bounce rather than restarting it for every drag event.
+pub fn resize_drag_sample(
+    requested: f32,
+    min: f32,
+    max: f32,
+    latched_edge: Option<ResizeEdge>,
+    reduced_motion: bool,
+) -> ResizeDragSample {
+    debug_assert!(min <= max);
+    let edge = if requested <= min {
+        Some(ResizeEdge::Min)
+    } else if requested >= max {
+        Some(ResizeEdge::Max)
+    } else {
+        None
+    };
+    ResizeDragSample {
+        width: requested.clamp(min, max),
+        starts_bounce: !reduced_motion && edge.is_some() && edge != latched_edge,
+        edge,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResizeEdgeBounce {
+    pub edge: ResizeEdge,
+    pub started: Instant,
+}
+
+impl ResizeEdgeBounce {
+    pub fn new(edge: ResizeEdge) -> Self {
+        Self {
+            edge,
+            started: Instant::now(),
+        }
+    }
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Rounded two-phase pulse: ease out to the overshoot, then take a little
+/// longer to ease home. Both joins have zero velocity.
+pub fn resize_bounce_offset(edge: ResizeEdge, raw: f32) -> f32 {
+    let raw = raw.clamp(0.0, 1.0);
+    let magnitude = if raw < RESIZE_EDGE_BOUNCE_OUT_FRACTION {
+        smoothstep(raw / RESIZE_EDGE_BOUNCE_OUT_FRACTION)
+    } else {
+        1.0 - smoothstep(
+            (raw - RESIZE_EDGE_BOUNCE_OUT_FRACTION) / (1.0 - RESIZE_EDGE_BOUNCE_OUT_FRACTION),
+        )
+    } * RESIZE_EDGE_NUDGE;
+    match edge {
+        ResizeEdge::Min => -magnitude,
+        ResizeEdge::Max => magnitude,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Element helpers (paint-layer entrances/exits)
 // ---------------------------------------------------------------------------
 
@@ -390,6 +480,19 @@ where
 {
     element.with_animation(id, FADE_IN.animation(), |el, t| {
         el.relative().opacity(t).top(px(4.0 * (1.0 - t)))
+    })
+}
+
+/// New-thread composition entrance: opacity 0→1 while settling 10px down into
+/// place over [`FADE_IN`]. Keeping the logo, target selectors, composer, and
+/// checkout row under one animation makes the blank canvas arrive as a single
+/// object instead of four independently moving pieces.
+pub fn settle_down<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, FADE_IN.animation(), |el, t| {
+        el.relative().opacity(t).top(px(-10.0 * (1.0 - t)))
     })
 }
 
@@ -846,6 +949,8 @@ mod tests {
         assert_eq!(RESIZE.duration_ms, 200);
         assert_eq!(TAB_SLIDE.duration_ms, 150);
         assert_eq!(COLLAPSE.duration_ms, 180);
+        assert_eq!(NEW_THREAD_TRANSITION.duration_ms, 420);
+        assert_eq!(NEW_THREAD_TRANSITION.curve, EASE_RESORT);
         assert_eq!(CHEVRON.duration_ms, 200);
         assert_eq!(ZERON_PULSE.duration_ms, 2400);
         assert_eq!(GRADIENT_SPIN.duration_ms, 750);
