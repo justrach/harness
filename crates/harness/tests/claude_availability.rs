@@ -67,16 +67,21 @@ fn claude_availability_honors_override_without_path_cli() {
     std::fs::write(&exe, if cfg!(windows) { b"MZ" } else { b"sh" }).unwrap();
     // PATH without any claude: only the override makes Claude installed.
     probe(dir.path(), Some(&exe), true);
-    probe(dir.path(), None, false);
+    if !system_wide_claude_present() {
+        probe(dir.path(), None, false);
+    }
+}
+
+/// Absolute Unix fallback locations would defeat an empty-PATH probe on
+/// machines that really have a claude there.
+fn system_wide_claude_present() -> bool {
+    std::path::Path::new("/opt/homebrew/bin/claude").exists()
+        || std::path::Path::new("/usr/local/bin/claude").exists()
 }
 
 #[test]
 fn claude_availability_reports_not_installed_without_any_cli() {
-    // Absolute Unix fallback locations would defeat the empty-PATH probe on
-    // machines that really have a claude there.
-    if std::path::Path::new("/opt/homebrew/bin/claude").exists()
-        || std::path::Path::new("/usr/local/bin/claude").exists()
-    {
+    if system_wide_claude_present() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();

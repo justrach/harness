@@ -126,6 +126,8 @@ fn codex_login_honors_override_only_installation() {
 
 /// The npm layout — a `codex.cmd` shim on PATH with the payload buried in
 /// `node_modules` — must log in through the same resolution the harness uses.
+/// `.cmd` discovery is a PATHEXT rule, so this only holds on Windows.
+#[cfg(windows)]
 #[test]
 fn codex_login_runs_the_npm_cmd_shim() {
     let dir = tempfile::tempdir().unwrap();

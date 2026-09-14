@@ -1123,11 +1123,16 @@ impl Harness for AcpHarness {
     /// adapter does NOT count when the CLI itself is missing. Explicit
     /// executables (tests, `*_EXECUTABLE` overrides) always count.
     fn installed(&self) -> bool {
-        if self.executable.is_some() {
-            return true;
+        // Overrides go through the same validation as `resolve_launch`, so an
+        // override that points at nothing reports not-installed instead of an
+        // agent that shows up in the composer and then fails to launch.
+        if let Some(p) = &self.executable {
+            return crate::executable::validate_native_override(p).is_ok();
         }
-        if std::env::var_os(self.spec.env_override).is_some_and(|v| !v.is_empty()) {
-            return true;
+        if let Some(p) = std::env::var_os(self.spec.env_override)
+            && !p.is_empty()
+        {
+            return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
     }

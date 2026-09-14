@@ -424,15 +424,15 @@ mod tests {
             Some(dir.join("agent.exe"))
         );
         // A reordered PATHEXT is honored, but non-launchable entries are ignored.
+        // The on-disk name matches PATHEXT's casing: Windows would also match
+        // `.CMD`, but this test runs on case-sensitive filesystems too.
         let reordered = env(&[
             ("PATH", path),
-            ("PATHEXT", OsString::from(".CMD;.VBS;.EXE")),
+            ("PATHEXT", OsString::from(".cmd;.VBS;.EXE")),
         ]);
         let found = find_on_paths_with("agent", Vec::new(), &reordered, None, Platform::Windows)
             .expect("shim variant resolves");
         assert_eq!(found.parent(), Some(dir.as_path()));
-        // The candidate keeps PATHEXT's casing; Windows matches file names
-        // case-insensitively, so it is the same on-disk shim.
         assert!(
             found
                 .file_name()
@@ -446,7 +446,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("tool.cmd"), b"@echo off").unwrap();
+        // Written with the exact casing the extra names below: Windows would
+        // also match `tool.cmd`, but this test runs on case-sensitive
+        // filesystems too.
+        std::fs::write(bin.join("tool.CmD"), b"@echo off").unwrap();
         // Extras are file candidates: an explicit extension is taken as given.
         assert_eq!(
             find_on_paths_with(
