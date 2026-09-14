@@ -1904,8 +1904,9 @@ fn format_kb(bytes: u64) -> String {
 // Working indicator flavour (pure; rendered by the shell strip)
 // ---------------------------------------------------------------------------
 
-/// Rotating flavour vocabulary (20 words / 7s, seeded per chat).
-pub const FLAVOUR_WORDS: [&str; 20] = [
+/// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
+pub const FLAVOUR_WORDS: [&str; 21] = [
+    "Zeroning",
     "Thinking",
     "Pondering",
     "Scheming",
