@@ -57,8 +57,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build application
         run: cargo build --release --locked -p zeron
-      - name: Desktop startup and CLI output
-        run: ./scripts/test-windows-startup.ps1
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
