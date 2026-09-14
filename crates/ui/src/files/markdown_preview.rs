@@ -50,6 +50,19 @@ pub(super) fn is_markdown(path: &str) -> bool {
         .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
 }
 
+fn preview_link_outcome(activation: &render::LinkActivation) -> render::LinkOutcome {
+    let target = &activation.target.original;
+    // File previews already support mail links; chat's web-only policy does
+    // not replace this surface's specialized routing.
+    if !target.chars().any(char::is_control)
+        && url::Url::parse(target).is_ok_and(|url| url.scheme() == "mailto")
+    {
+        render::LinkOutcome::External(target.clone())
+    } else {
+        activation.web_outcome(false)
+    }
+}
+
 /// URL path resolution is independent of the UI host's filesystem.
 pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, Option<String>)> {
     if let Some(target) = target.strip_prefix("zeron-file:") {
@@ -147,7 +160,10 @@ pub(super) struct MarkdownPreview {
     zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
     open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+    open_web_link: Option<WebLinkHandler>,
 }
+
+pub(super) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::App)>;
 
 impl MarkdownPreview {
     fn close_media_preview(&mut self, cx: &mut gpui::App) {
@@ -376,6 +392,7 @@ impl MarkdownPreview {
             loading: false,
             truncated: false,
             open_file,
+            open_web_link: None,
         }
     }
 
@@ -949,21 +966,31 @@ impl MarkdownPreview {
             .unwrap_or_else(|| gpui::Empty.into_any_element())
     }
 
-    fn render_rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+    pub(super) fn set_web_link_handler(&mut self, handler: WebLinkHandler) {
+        self.open_web_link = Some(handler);
+    }
+
+    pub(super) fn link_ui(&self, cx: &Context<Self>) -> LinkUi {
         let weak = cx.weak_entity();
-        let link = LinkUi {
-            handler: Rc::new(move |target, _, cx| {
+        let open_web_link = self.open_web_link.clone();
+        LinkUi {
+            source_session: None,
+            handler: Rc::new(move |activation, _, cx| {
+                if weak.upgrade().is_none() {
+                    return render::LinkOutcome::Rejected;
+                }
+                if activation.target.navigation.is_ok() {
+                    if let Some(open_web_link) = &open_web_link {
+                        // Emit through the owning FilesSurface before borrowing
+                        // this preview: selecting Browser can suspend this view.
+                        open_web_link(activation, cx);
+                        return render::LinkOutcome::Internal;
+                    }
+                }
+                let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
                     let Some((path, anchor)) = relative_target(&view.path, target) else {
-                        return !(target.starts_with("https://")
-                            || target.starts_with("http://")
-                            || target.starts_with("mailto:"));
+                        return preview_link_outcome(activation);
                     };
                     if path == view.path {
                         if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
@@ -976,11 +1003,21 @@ impl MarkdownPreview {
                     } else {
                         (view.open_file)(path, cx);
                     }
-                    true
+                    render::LinkOutcome::Internal
                 })
-                .unwrap_or(true)
+                .unwrap_or(render::LinkOutcome::Rejected)
             }),
-        };
+        }
+    }
+
+    fn render_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        let link = self.link_ui(cx);
         range
             .filter_map(|ix| {
                 let top = self.tree.blocks.get(ix)?.clone();
@@ -1086,9 +1123,13 @@ impl MarkdownPreview {
                                 el = el.child(
                                     super::toolbar_button("markdown-image-link", "Open image link")
                                         .on_click(move |_, window, cx| {
-                                            if !(link.handler)(&target, window, cx) {
-                                                cx.open_url(&target);
-                                            }
+                                            render::activate_link(
+                                                render::LinkTarget::new(&target, &target),
+                                                render::LinkAction::Primary,
+                                                Some(&link),
+                                                window,
+                                                cx,
+                                            );
                                         })
                                         .child(
                                             crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
@@ -1126,8 +1167,16 @@ impl MarkdownPreview {
                                 .text_color(theme.text_muted)
                                 .child(text)
                                 .when(external, |el| {
-                                    el.cursor_pointer()
-                                        .on_click(move |_, _, cx| cx.open_url(&target))
+                                    let link = image_link.clone();
+                                    el.cursor_pointer().on_click(move |_, window, cx| {
+                                        render::activate_link(
+                                            render::LinkTarget::new(&target, &target),
+                                            render::LinkAction::Primary,
+                                            Some(&link),
+                                            window,
+                                            cx,
+                                        );
+                                    })
                                 })
                                 .into_any_element()
                         }
@@ -1324,6 +1373,24 @@ impl Render for MarkdownPreview {
 mod tests {
     use super::*;
 
+    #[test]
+    fn preview_retains_mail_links_without_allowing_active_schemes() {
+        for (url, allowed) in [
+            ("mailto:reader@example.com", true),
+            ("https://example.com", true),
+            ("javascript:alert(1)", false),
+        ] {
+            let a = render::LinkActivation {
+                target: render::LinkTarget::new("label", url),
+                action: render::LinkAction::Internal,
+                source_session: None,
+            };
+            assert_eq!(
+                matches!(preview_link_outcome(&a), render::LinkOutcome::External(_)),
+                allowed
+            );
+        }
+    }
     #[test]
     fn comments_map_to_original_lines_and_containing_blocks() {
         let source = "# Título 🦀\r\n\r\nPárrafo\r\nsegunda línea\r\n\r\n- uno\r\n- dos\r\n\r\n```mermaid\r\ngraph TD; A-->B\r\n```\r\n";

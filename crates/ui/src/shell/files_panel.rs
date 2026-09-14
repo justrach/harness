@@ -178,6 +178,13 @@ impl Shell {
                     {
                         this.add_file_surface(path.clone(), window, cx);
                     }
+                    FilesEvent::OpenWebLink(activation) => {
+                        if let crate::markdown::render::LinkOutcome::External(url) =
+                            this.activate_session_link(activation, window, cx)
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
                     FilesEvent::ShowAllFilesChanged(show_all) => {
                         this.set_files_show_all(*show_all, cx)
                     }

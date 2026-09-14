@@ -933,6 +933,35 @@ impl Theme {
             ))
     }
 
+    /// Move toward the right pane tone while keeping the backdrop visible.
+    /// Solve the overlay in RGB: target = tint * alpha + canvas * (1 - alpha).
+    pub fn composer_sidebar_tint(&self) -> Hsla {
+        let target = if self.is_glass() {
+            flatten(self.bg.opacity(0.4), flatten(self.glass(), self.bg))
+        } else {
+            self.bg
+        };
+        // The transcript has no fill of its own: its canvas is the shell glass.
+        let canvas = flatten(self.glass(), self.bg);
+        let canvas = hsl_to_rgb(canvas.h, canvas.s, canvas.l);
+        let target = hsl_to_rgb(target.h, target.s, target.l);
+        let mut alpha: f32 = 0.60;
+        for (base, desired) in canvas.into_iter().zip(target) {
+            let needed = if desired > base {
+                (desired - base) / (1.0 - base).max(f32::EPSILON)
+            } else {
+                (base - desired) / base.max(f32::EPSILON)
+            };
+            alpha = alpha.max(needed);
+        }
+        let rgb = std::array::from_fn::<_, 3, _>(|i| {
+            ((target[i] - canvas[i] * (1.0 - alpha)) / alpha).clamp(0.0, 1.0)
+        });
+        let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
+        // Use the compensated hue, but leave 85% of the blurred backdrop visible.
+        hsla(h, s, l, 0.15)
+    }
+
     /// Shared fill for the composer, queue tray, and input panels. Without
     /// frost, composite the theme's input tint onto the page to preserve its
     /// color while hiding the transcript and overlapping surfaces underneath.
@@ -2631,6 +2660,36 @@ mod tests {
         assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
         // Out-of-range t clamps.
         assert_eq!(mix(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn composer_tint_moves_toward_sidebar_without_hiding_backdrop() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            for (canvas, shell) in [
+                (theme.bg, theme.surface),
+                (hsla(0.58, 0.3, 0.12, 1.0), hsla(0.62, 0.25, 0.22, 1.0)),
+                (hsla(0.12, 0.2, 0.93, 1.0), hsla(0.08, 0.15, 0.82, 1.0)),
+            ] {
+                theme.bg = canvas;
+                theme.surface = shell;
+                let tint = theme.composer_sidebar_tint();
+                let expected = if theme.is_glass() {
+                    flatten(theme.bg.opacity(0.4), flatten(theme.glass(), theme.bg))
+                } else {
+                    theme.bg
+                };
+                let actual = flatten(tint, flatten(theme.glass(), theme.bg));
+                let base = flatten(theme.glass(), theme.bg);
+                let base_rgb = hsl_to_rgb(base.h, base.s, base.l);
+                let target_rgb = hsl_to_rgb(expected.h, expected.s, expected.l);
+                let actual_rgb = hsl_to_rgb(actual.h, actual.s, actual.l);
+                for i in 0..3 {
+                    assert!(actual_rgb[i] >= base_rgb[i].min(target_rgb[i]) - 0.0001);
+                    assert!(actual_rgb[i] <= base_rgb[i].max(target_rgb[i]) + 0.0001);
+                }
+                assert_eq!(tint.a, 0.15);
+            }
+        }
     }
 
     #[test]

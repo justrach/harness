@@ -140,6 +140,7 @@ pub(crate) fn workspace_path_drag_ghost(
 pub enum FilesEvent {
     OpenFile(String),
     RevealFile(String),
+    OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
     FileRenamed { old_path: String, new_path: String },
     WordWrapChanged(bool),

@@ -605,6 +605,9 @@ pub struct UiSettings {
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
+    /// Open a normal web-link activation in the session Browser. Explicit
+    /// context-menu actions remain available regardless of this preference.
+    pub open_web_links_in_zeron: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -674,6 +677,7 @@ impl Default for UiSettings {
             diff_split: false,
             diff_wrap: false,
             code_fences_fit_content: false,
+            open_web_links_in_zeron: true,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1303,6 +1307,7 @@ mod tests {
 
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
+        assert!(loaded.open_web_links_in_zeron);
         assert!(loaded.new_thread_composer_background.is_none());
         assert_eq!(
             loaded.new_thread_background_effect,
@@ -1603,6 +1608,7 @@ mod tests {
             diff_split: true,
             diff_wrap: true,
             code_fences_fit_content: true,
+            open_web_links_in_zeron: false,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,
@@ -1622,6 +1628,7 @@ mod tests {
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
+        assert!(json.contains(r#""openWebLinksInZeron": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
     }
 
