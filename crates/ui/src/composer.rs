@@ -4117,6 +4117,8 @@ pub struct Composer {
     /// from here, so mid-flight reversals hand off without a jump.
     last_rendered_height: f32,
     dock_frame: Option<crate::composer_dock::DockFrame>,
+    /// The shared clock owns this frame's height, including its final step.
+    dock_height_changed: bool,
     dock_clearance_correction: f32,
     surface_bounds: crate::new_thread_background_mask::SurfaceBounds,
     last_target_height: f32,
@@ -4141,6 +4143,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         let changed = self.dock_frame != Some(frame);
+        self.dock_height_changed |= self
+            .dock_frame
+            .is_none_or(|previous| previous.amount != frame.amount);
         self.dock_frame = Some(frame);
         if frame.active {
             self.flip_morph = None;
@@ -4310,6 +4315,7 @@ impl Composer {
             flip_morph: None,
             last_rendered_height: 0.0,
             dock_frame: None,
+            dock_height_changed: false,
             dock_clearance_correction: 0.0,
             surface_bounds: Default::default(),
             last_target_height: 0.0,
@@ -7289,18 +7295,20 @@ impl Render for Composer {
         let route_snap = self
             .route_snap_until
             .is_some_and(|until| Instant::now() < until);
-        self.flip_morph = if self.dock_frame.is_some() {
-            None
-        } else {
-            flip_morph_step(
-                self.flip_morph,
-                committed_flip && !new_chat,
-                self.last_rendered_height,
-                now_ms,
-                motion::reduced_motion(cx),
-                route_snap,
-            )
-        };
+        let dock_height_changed = std::mem::take(&mut self.dock_height_changed);
+        self.flip_morph =
+            if dock_height_changed || self.dock_frame.is_some_and(|frame| frame.active) {
+                None
+            } else {
+                flip_morph_step(
+                    self.flip_morph,
+                    committed_flip && !new_chat,
+                    self.last_rendered_height,
+                    now_ms,
+                    motion::reduced_motion(cx),
+                    route_snap,
+                )
+            };
         let expanded = self.expanded_mode;
 
         // Chat-scoped failures render only under their own chat; a global
@@ -7479,15 +7487,21 @@ impl Render for Composer {
             }))
         });
 
-        // The shared main composer keeps one two-row body on both routes.
-        // Docking reduces its empty textarea by 16px without changing the
-        // input's origin or moving the controls through a second layout.
-        let expanded = expanded || new_chat || self.dock_frame.is_some();
+        // Route coordination must not force an established thread into the
+        // two-row layout. Short drafts keep the original skinny composer.
+        let session_expanded = expanded;
+        let expanded = expanded || new_chat;
         let dock_amount = self.dock_frame.map_or(0.0, |frame| frame.amount);
         let dock_height = |amount: f32| {
-            (content_height + TEXTAREA_PAD_V).clamp(TEXTAREA_MIN - 16.0 * amount, TEXTAREA_MAX)
-                + ACTIONS_ROW_HEIGHT
-                + PILL_BORDER_V
+            let hero = composer_total_height(content_height);
+            let session = if session_expanded {
+                (content_height + TEXTAREA_PAD_V).clamp(TEXTAREA_MIN - 16.0, TEXTAREA_MAX)
+                    + ACTIONS_ROW_HEIGHT
+                    + PILL_BORDER_V
+            } else {
+                COMPACT_TOTAL_HEIGHT
+            };
+            motion::lerp(hero, session, amount)
         };
 
         // Committed-height morph: the layout below is already the NEW mode's;
@@ -7536,20 +7550,21 @@ impl Render for Composer {
             || route_chrome_opacities(new_thread_chrome),
             |frame| (frame.selectors(), frame.footer()),
         );
-        self.height_morph = if self.dock_frame.is_some_and(|frame| frame.active) {
-            None
-        } else if coordinated_route_morph.is_some() {
-            coordinated_route_morph
-        } else {
-            flip_morph_step(
-                self.height_morph,
-                (target_height - self.last_target_height).abs() > 0.5,
-                self.last_rendered_height,
-                now_ms,
-                motion::reduced_motion(cx),
-                route_snap,
-            )
-        };
+        self.height_morph =
+            if dock_height_changed || self.dock_frame.is_some_and(|frame| frame.active) {
+                None
+            } else if coordinated_route_morph.is_some() {
+                coordinated_route_morph
+            } else {
+                flip_morph_step(
+                    self.height_morph,
+                    (target_height - self.last_target_height).abs() > 0.5,
+                    self.last_rendered_height,
+                    now_ms,
+                    motion::reduced_motion(cx),
+                    route_snap,
+                )
+            };
         self.last_target_height = target_height;
         let pill_height = self
             .height_morph
@@ -7577,19 +7592,33 @@ impl Render for Composer {
                 + comment_strip_h
                 - pill_height
         });
-        let text_pt = if self.dock_frame.is_some() {
-            16.0
-        } else {
-            morph_text_pad(morph_t)
-        };
+        // Route morphs use the dock's reversible clock; typing flips keep
+        // their existing local clock once the composer reaches its dock.
+        let layout_morph_t =
+            if self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded {
+                if expanded {
+                    1.0 - dock_amount
+                } else {
+                    dock_amount
+                }
+            } else {
+                morph_t
+            };
+        let text_pt = morph_text_pad(layout_morph_t);
         let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        let route_to_single_line =
+            self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
             - strip_h
             - appshot_strip_height(appshot_count)
             - comment_strip_h
             - PILL_BORDER_V
             - ACTIONS_ROW_HEIGHT)
-            .max(0.0);
+            .max(if route_to_single_line {
+                INPUT_LINE_HEIGHT + text_pt + 4.0
+            } else {
+                0.0
+            });
         self.input.update(cx, |input, cx| {
             let height = if expanded {
                 (textarea_height - text_pt - 4.0).max(0.0)
@@ -7597,7 +7626,13 @@ impl Render for Composer {
                 INPUT_LINE_HEIGHT
             };
             let settled_height = if expanded {
-                base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT - TEXTAREA_PAD_V
+                (base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT - TEXTAREA_PAD_V).max(
+                    if route_to_single_line {
+                        INPUT_LINE_HEIGHT
+                    } else {
+                        0.0
+                    },
+                )
             } else {
                 INPUT_LINE_HEIGHT
             };
@@ -7655,14 +7690,18 @@ impl Render for Composer {
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
-        // The pill chrome (zeron composer.tsx): `rounded-[26px] border
-        // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
-        // a hairline over a faint wash, never a solid grey box. Picker chips,
-        // attach, and the send circle all live INSIDE the pill.
-        let pill_bg = theme.input_glass_bg();
-        // No drop shadow on glass: it paints BEHIND the translucent fill and
-        // shows through as an inner glow (theme.rs's card_selected_shadows
-        // lesson; user report).
+        // A translucent cool silver/slate edge sits more naturally on frost
+        // than the general-purpose white/black separator color.
+        let pill_border = if theme.is_frost() {
+            match theme.appearance {
+                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+            }
+        } else {
+            theme.border
+        };
+        // Let the backdrop blur supply the glass surface without a color wash.
+        // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
             .on_mouse_down(
                 MouseButton::Left,
@@ -7675,16 +7714,17 @@ impl Render for Composer {
                 }),
             )
             .rounded(px(surface_radius))
-            .bg(pill_bg)
             .border_1()
-            .border_color(theme.border)
-            .when(!theme.is_frost(), |el| el.shadow_lg());
+            .border_color(pill_border)
+            .when(!theme.is_frost(), |el| {
+                el.bg(theme.input_glass_bg()).shadow_lg()
+            });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // (round-9 follow-up: the send/attach/chips must not ride the height,
         // and none of them fade — the full cluster stays visible throughout).
-        let cluster_dy = morph_cluster_dy(morph_t);
+        let cluster_dy = morph_cluster_dy(layout_morph_t);
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
@@ -7728,13 +7768,9 @@ impl Render for Composer {
                         // Send has a larger structural separation.
                         .gap(px(ACTION_PRIMARY_GAP))
                         .pl(px(12.0))
-                        .pr(px(if self.dock_frame.is_some() {
-                            12.0 - 2.0 * dock_amount
-                        } else {
-                            morph_cluster_inset(true, morph_t)
-                        }))
+                        .pr(px(morph_cluster_inset(true, layout_morph_t)))
                         .pt(px(4.0))
-                        .pb(px(10.0 - 2.0 * dock_amount))
+                        .pb(px(10.0))
                         .child(
                             div()
                                 .flex_1()
@@ -7758,9 +7794,13 @@ impl Render for Composer {
             // its expanded resting place via a decaying relative offset, and
             // the whole inline cluster (chips + attach/send) holds its spot at
             // full alpha (2.5px centering delta gliding in).
-            let text_glide = match self.flip_morph {
-                Some(m) if morphing => collapse_text_glide(m.from, morph_t),
-                _ => 0.0,
+            let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
+                collapse_text_glide(dock_height(0.0), dock_amount)
+            } else {
+                match self.flip_morph {
+                    Some(m) if morphing => collapse_text_glide(m.from, morph_t),
+                    _ => 0.0,
+                }
             };
             pill.h(px(pill_height))
                 .overflow_hidden()
@@ -7796,7 +7836,7 @@ impl Render for Composer {
                                 // the right inset alone glides 12→8.
                                 .gap(px(ACTION_PRIMARY_GAP))
                                 .pl(px(4.0))
-                                .pr(px(morph_cluster_inset(false, morph_t)))
+                                .pr(px(morph_cluster_inset(false, layout_morph_t)))
                                 .relative()
                                 .top(px(-cluster_dy))
                                 .child(
@@ -8006,42 +8046,51 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dock_morph_keeps_editor_origin_and_reserves_final_height(cx: &mut gpui::TestAppContext) {
+    fn dock_morph_restores_skinny_height_with_a_continuous_editor_origin(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (_dir, handle) = composer_focus_window(cx);
         let input = handle
             .read_with(cx, |composer, _| composer.input.clone())
             .unwrap();
-        let mut first_origin = None;
-        for amount in [0.0, 0.2, 0.6, 0.98, 1.0, 0.7, 0.0] {
-            handle
-                .update(cx, |composer, _, cx| {
-                    let mut frame = crate::composer_dock::DockFrame::settled(true);
-                    frame.amount = amount;
-                    frame.active = amount < 1.0;
-                    composer.set_dock_frame(frame, cx);
+        for docked in [true, false] {
+            let amounts = if docked {
+                [0.0, 0.2, 0.6, 0.98, 1.0]
+            } else {
+                [1.0, 0.98, 0.6, 0.2, 0.0]
+            };
+            for amount in amounts {
+                handle
+                    .update(cx, |composer, _, cx| {
+                        composer.state.update(cx, |state, _| {
+                            state.selected_chat = docked.then(|| "chat".into());
+                        });
+                        composer.on_state_changed(cx);
+                        composer
+                            .input
+                            .update(cx, |input, cx| input.set_text("Hi", cx));
+                        composer.expanded_mode = false;
+                        let mut frame = crate::composer_dock::DockFrame::settled(docked);
+                        frame.amount = amount;
+                        frame.active = amount != if docked { 1.0 } else { 0.0 };
+                        composer.set_dock_frame(frame, cx);
+                    })
+                    .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.draw(cx).clear();
                 })
                 .unwrap();
-            cx.update_window(handle.into(), |_, window, cx| {
-                window.draw(cx).clear();
-            })
-            .unwrap();
-            handle
-                .read_with(cx, |composer, cx| {
+                handle.read_with(cx, |composer, cx| {
                     assert_eq!(composer.input, input);
+                    let surface = composer.surface_bounds.get().unwrap();
                     let origin = input.read(cx).last_bounds.unwrap().origin;
-                    let first = *first_origin.get_or_insert(origin);
-                    assert!(
-                        (f32::from(origin.y - first.y)).abs() < 0.1,
-                        "editor jumped at {amount}"
-                    );
-                    assert!(
-                        (composer.last_rendered_height + composer.dock_clearance_correction
-                            - 108.0)
-                            .abs()
-                            < 0.1
-                    );
-                })
-                .unwrap();
+                    assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
+                        "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
+                    let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
+                    assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
+                    assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
+                }).unwrap();
+            }
         }
     }
 

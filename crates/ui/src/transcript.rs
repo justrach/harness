@@ -3924,6 +3924,9 @@ impl Transcript {
             && self.state.read(cx).selected_chat.is_none()
             && self.chat_id.is_some()
         {
+            // A quick return can reuse this entity before the exit finishes.
+            // Its next snapshot is still a replay, not newly arriving tools.
+            self.veil_attach_pending = true;
             return;
         }
         let (selected, replay) = {
@@ -3957,6 +3960,13 @@ impl Transcript {
         self.last_source = Some(source);
 
         let attached = selected != self.chat_id;
+        // Arm the replay baseline before classifying tool arrivals. Selection
+        // and replay may arrive in one sync; a retained same-chat entity can
+        // also see a fresh pending subscription without changing chat_id.
+        if attached || replay == TranscriptReplayState::Pending {
+            self.veil_baseline.clear();
+            self.veil_attach_pending = true;
+        }
         if attached {
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
@@ -4065,6 +4075,15 @@ impl Transcript {
         // live tool group; treating it as history prevents a whole existing
         // task tree from reanimating on every chat switch.
         let replay_baseline = self.veil_attach_pending && !entries_empty;
+        if replay_baseline {
+            // Retain explicit user pins, but never resume an old arrival or
+            // closing animation when revisiting the retained transcript.
+            self.tool_group_reveals.clear();
+            for fold in self.folds.values_mut() {
+                fold.toggled_at = None;
+                fold.disclosure_at = None;
+            }
+        }
         let previous_tool_counts: HashMap<SharedString, usize> = self
             .rows
             .iter()
@@ -4139,10 +4158,6 @@ impl Transcript {
         // first NON-EMPTY transcript after attach — the replay frame — never
         // the attach-time sync, whose transcript is still empty (selection
         // clears it; the doc watch refills it async).
-        if attached {
-            self.veil_baseline.clear();
-            self.veil_attach_pending = true;
-        }
         if self.veil_attach_pending && !entries_empty {
             self.veil_attach_pending = false;
             self.veil_baseline = new_rows
@@ -7741,6 +7756,168 @@ mod tests {
         });
     }
     use zeron_doc::MessagePart;
+
+    fn with_tool_group_navigation(
+        cx: &mut gpui::TestAppContext,
+        run: impl FnOnce(Entity<AppState>, Entity<Transcript>, &mut gpui::App),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            transcript.update(cx, |this, _| this.retain_for_route_exit());
+            replay_tool_group(&state, &transcript, "chat-a", cx);
+            run(state, transcript, cx);
+        });
+    }
+
+    fn replay_tool_group(
+        state: &Entity<AppState>,
+        transcript: &Entity<Transcript>,
+        chat: &str,
+        cx: &mut gpui::App,
+    ) {
+        state.update(cx, |state, _| {
+            state.selected_chat = Some(chat.into());
+            state.transcript_replayed = true;
+            state.transcript = vec![assistant(
+                "tools",
+                MessageStatus::Complete,
+                vec![tool_part("call", "pwd")],
+            )];
+            state.transcript_revision += 1;
+        });
+        transcript.update(cx, |this, cx| this.sync(cx));
+    }
+
+    fn assert_replayed_group_is_closed(transcript: &Entity<Transcript>, cx: &mut gpui::App) {
+        transcript.update(cx, |this, cx| {
+            let row = this
+                .rows
+                .iter()
+                .find(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+                .unwrap()
+                .clone();
+            let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+                unreachable!()
+            };
+            assert!(!auto_open);
+            let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+            let reveal = &this.tool_group_reveals[&row.id];
+            assert_eq!(
+                reveal.rendered_open,
+                Some(false),
+                "history flashed open on its first render"
+            );
+            assert_eq!(
+                reveal.rendered_height, 0.0,
+                "history replayed a stale closing tween"
+            );
+            assert!(reveal.header_started_at.is_none());
+            assert!(reveal.starts.iter().all(Option::is_none));
+        });
+    }
+
+    #[gpui::test]
+    fn tool_groups_stay_closed_on_populated_chat_attach(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            for chat in ["chat-b", "chat-a", "chat-b"] {
+                // Selection and cached replay can coalesce into a single sync.
+                replay_tool_group(&state, &transcript, chat, cx);
+                assert_replayed_group_is_closed(&transcript, cx);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn tool_groups_stay_closed_after_rapid_new_chat_navigation(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            for finish_exit in [false, true] {
+                transcript.update(cx, |this, _| {
+                    // Navigate away during the previous close animation.
+                    this.folds.insert(
+                        "tools#g0".into(),
+                        FoldState {
+                            open: Some(false),
+                            from: 120.0,
+                            toggled_at: Some(Instant::now()),
+                            disclosure_at: Some(Instant::now()),
+                            ..Default::default()
+                        },
+                    );
+                });
+                state.update(cx, |state, cx| state.select_chat(None, cx));
+                transcript.update(cx, |this, cx| {
+                    this.sync(cx);
+                    if finish_exit {
+                        this.finish_route_exit(cx);
+                    }
+                });
+                state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                replay_tool_group(&state, &transcript, "chat-a", cx);
+                assert_replayed_group_is_closed(&transcript, cx);
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn tool_group_navigation_keeps_user_pins_and_new_arrivals(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            transcript.update(cx, |this, _| {
+                this.folds.insert(
+                    "tools#g0".into(),
+                    FoldState {
+                        open: Some(true),
+                        ..Default::default()
+                    },
+                );
+            });
+            state.update(cx, |state, cx| state.select_chat(None, cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            // Cached replay can land without an intervening pending frame.
+            replay_tool_group(&state, &transcript, "chat-a", cx);
+            transcript.update(cx, |this, cx| {
+                let row = this.rows[0].clone();
+                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+                    panic!("expected tools")
+                };
+                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                assert_eq!(this.folds[&row.id].open, Some(true));
+                assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
+                assert!(
+                    this.tool_group_reveals[&row.id]
+                        .starts
+                        .iter()
+                        .all(Option::is_none)
+                );
+            });
+            state.update(cx, |state, _| {
+                state.transcript.push(assistant(
+                    "live-tools",
+                    MessageStatus::Streaming,
+                    vec![tool_part("new-call", "ls")],
+                ));
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                let row = this.rows.last().unwrap().clone();
+                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+                    panic!("expected tools")
+                };
+                assert!(*auto_open);
+                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                let reveal = &this.tool_group_reveals[&row.id];
+                assert!(reveal.header_started_at.is_some());
+                assert!(reveal.starts.iter().all(Option::is_some));
+                assert_eq!(reveal.rendered_open, Some(true));
+            });
+        });
+    }
 
     #[test]
     fn resizing_details_does_not_restart_group_disclosure() {
