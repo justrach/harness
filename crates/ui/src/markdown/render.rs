@@ -15,9 +15,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, InteractiveText, Render,
-    SharedString, StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point,
-    prelude::*, px, quad, size,
+    AnyElement, BorderStyle, Bounds, Context, FontStyle, FontWeight, Hsla, Render, SharedString,
+    StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
+    size,
 };
 use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
@@ -65,6 +65,7 @@ pub fn table_hairline() -> Hsla {
 }
 
 /// Options for one rendered tree (a transcript row or a whole live message).
+#[derive(Clone)]
 pub struct RenderOptions {
     pub tasks: Option<TaskUi>,
     pub media: Option<MediaUi>,
@@ -85,7 +86,7 @@ pub struct RenderOptions {
     /// (previews outside the transcript).
     pub copy: Option<CopyUi>,
     /// Optional owner-provided routing for links that belong inside the app.
-    /// Returning true prevents the ordinary external URL opener from running.
+    /// Routing is explicit: rejected links never reach the external opener.
     pub link: Option<LinkUi>,
     /// Root used to distinguish a direct workspace-file link from an ordinary
     /// web link. Transcript surfaces provide it; generic Markdown previews do
@@ -123,9 +124,37 @@ pub struct CopyUi {
     pub copied_ix: Option<usize>,
 }
 
+pub use super::links::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+
 #[derive(Clone)]
 pub struct LinkUi {
-    pub handler: Rc<dyn Fn(&str, &mut Window, &mut gpui::App) -> bool>,
+    pub source_session: Option<String>,
+    pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
+}
+
+pub fn activate_link(
+    target: LinkTarget,
+    action: LinkAction,
+    ui: Option<&LinkUi>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if action == LinkAction::Copy {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.original.clone()));
+        return;
+    }
+    let activation = LinkActivation {
+        target,
+        action,
+        source_session: ui.and_then(|ui| ui.source_session.clone()),
+    };
+    let outcome = ui.map_or_else(
+        || activation.web_outcome(false),
+        |ui| (ui.handler)(&activation, window, cx),
+    );
+    if let LinkOutcome::External(url) = outcome {
+        cx.open_url(&url);
+    }
 }
 
 type HoverHandler = Rc<dyn Fn(bool, &mut Window, &mut gpui::App)>;
@@ -769,6 +798,16 @@ fn render_table(
             };
             let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
             if !flat.text.is_empty() {
+                // Intrinsic table proportions use the same bounded link presentation;
+                // each cell then resolves its exact width during measured layout.
+                let measured = opts
+                    .link
+                    .as_ref()
+                    .filter(|ui| ui.source_session.is_some())
+                    .map(|_| {
+                        super::link_presentation::present(&flat, px(560.), px(MD_TEXT_SIZE), window)
+                    });
+                let flat = measured.as_ref().unwrap_or(&flat);
                 // Cell sources are single-line; guard anyway (same byte count,
                 // so the runs still cover the text exactly).
                 let line: SharedString = if flat.text.contains('\n') {
@@ -863,7 +902,9 @@ fn render_table(
 /// + inline-code ranges (their rounded washes are painted by a canvas UNDER
 /// the text — `TextRun::background_color` can only paint square boxes).
 /// `text` is a `SharedString` so cached reuse across frames is an Arc clone.
+#[derive(Clone)]
 pub struct FlatText {
+    pub original: Option<super::link_presentation::OriginalText>,
     pub text: SharedString,
     pub runs: Vec<TextRun>,
     pub links: Vec<(Range<usize>, String)>,
@@ -976,6 +1017,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         });
     }
     FlatText {
+        original: None,
         text: text.into(),
         runs: out,
         links,
@@ -1010,6 +1052,29 @@ fn flatten_cached(
 
 /// Veiled, clickable text for a flattened block (no sizing wrapper).
 fn flat_text_element(
+    flat: &Rc<FlatText>,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+) -> AnyElement {
+    if opts
+        .link
+        .as_ref()
+        .is_some_and(|ui| ui.source_session.is_some())
+        && !flat.links.is_empty()
+    {
+        return super::link_presentation::ResponsiveText {
+            flat: flat.clone(),
+            ix,
+            opts: opts.clone(),
+            theme: theme.clone(),
+        }
+        .into_any_element();
+    }
+    flat_text_presented_element(flat, ix, opts, theme)
+}
+
+pub(super) fn flat_text_presented_element(
     flat: &FlatText,
     ix: usize,
     opts: &RenderOptions,
@@ -1020,32 +1085,31 @@ fn flat_text_element(
     // Settled elements return no spans and reuse the cached runs unsplit.
     let text_runs = match &opts.veil {
         Some(veil) => {
-            let spans = veil.borrow_mut().advance(ix, &flat.text, opts.now);
+            let original = flat
+                .original
+                .as_ref()
+                .map_or(&flat.text, |original| &original.text);
+            let spans = veil.borrow_mut().advance(ix, original, opts.now);
+            let spans = if let Some(original) = &flat.original {
+                spans
+                    .into_iter()
+                    .filter_map(|(range, opacity)| {
+                        let range = original.offsets.displayed(range.start)
+                            ..original.offsets.displayed(range.end);
+                        (!range.is_empty()).then_some((range, opacity))
+                    })
+                    .collect()
+            } else {
+                spans
+            };
             apply_veil(flat.runs.clone(), &spans)
         }
         None => flat.runs.clone(),
     };
     let styled = StyledText::new(flat.text.clone()).with_runs(text_runs);
     let layout = styled.layout().clone();
-    let text_el: AnyElement = if flat.links.is_empty() {
-        styled.into_any_element()
-    } else {
-        let (ranges, urls): (Vec<_>, Vec<_>) = flat.links.iter().cloned().unzip();
-        let id: SharedString = format!("{}-t{ix}", opts.row_key).into();
-        let link_handler = opts.link.clone();
-        InteractiveText::new(id, styled)
-            .on_click(ranges, move |clicked_ix, window, cx| {
-                if let Some(url) = urls.get(clicked_ix) {
-                    let handled = link_handler
-                        .as_ref()
-                        .is_some_and(|link| (link.handler)(url, window, cx));
-                    if !handled {
-                        cx.open_url(url);
-                    }
-                }
-            })
-            .into_any_element()
-    };
+    let text_el = styled.into_any_element();
+    let link_layout = layout.clone();
     // Underlay canvas: inline-code washes + the selection wash, painted
     // BEFORE the text (earlier sibling ⇒ underneath), reading glyph geometry
     // from the text's own layout handle. Pure paint — never in layout. The
@@ -1053,7 +1117,14 @@ fn flat_text_element(
     // that drive text selection (round 18; see markdown/selection.rs).
     let sel_key: std::sync::Arc<str> = format!("{}:{ix}", opts.row_key).into();
     let code_ranges = flat.code_ranges.clone();
-    let flat_text = flat.text.clone();
+    let flat_text = flat
+        .original
+        .as_ref()
+        .map_or_else(|| flat.text.clone(), |original| original.text.clone());
+    let offsets = flat
+        .original
+        .as_ref()
+        .map(|original| original.offsets.clone());
     let wash = inline_code_wash(theme);
     let sel_wash = selection_wash(theme);
     let underlay = canvas(
@@ -1072,6 +1143,9 @@ fn flat_text_element(
                 }
             }
             if let Some(range) = super::selection::wash_range(&sel_key) {
+                let range = offsets
+                    .as_ref()
+                    .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
                 for rect in range_rects(&layout, &range, 0.0, 0.0) {
                     window.paint_quad(quad(
                         rect,
@@ -1091,18 +1165,55 @@ fn flat_text_element(
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
+                    offsets: offsets.clone(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout);
+            register_selection_listeners(window, &sel_key, &flat_text, &layout, offsets.clone());
         },
     )
     .absolute()
     .size_full();
-    div()
+    let child = div()
         .relative()
         .child(underlay)
         .child(text_el)
-        .into_any_element()
+        .into_any_element();
+    if flat.links.is_empty() {
+        return child;
+    }
+    super::link_interaction::LinkRanges {
+        id: format!(
+            "{}-{}-t{ix}",
+            opts.row_key,
+            opts.link
+                .as_ref()
+                .and_then(|ui| ui.source_session.as_deref())
+                .unwrap_or_default()
+        )
+        .into(),
+        child,
+        layout: link_layout,
+        links: flat
+            .links
+            .iter()
+            .map(|(range, url)| {
+                (
+                    range.clone(),
+                    LinkTarget::new(
+                        flat.original
+                            .as_ref()
+                            .map_or(&flat.text[range.clone()], |original| {
+                                &original.text[original.offsets.original(range.start)
+                                    ..original.offsets.original(range.end)]
+                            }),
+                        url,
+                    ),
+                )
+            })
+            .collect(),
+        ui: opts.link.clone(),
+    }
+    .into_any_element()
 }
 
 /// Selection tint shared with native inputs and the composer.
@@ -1139,9 +1250,10 @@ pub(crate) fn paint_text_selection(
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
+            offsets: None,
         })
     });
-    register_selection_listeners(window, key, text, layout);
+    register_selection_listeners(window, key, text, layout, None);
 }
 
 /// One painted text element, registered per frame in document order — the
@@ -1151,6 +1263,7 @@ struct RegEntry {
     key: std::sync::Arc<str>,
     text: SharedString,
     layout: gpui::TextLayout,
+    offsets: Option<super::link_presentation::OffsetMap>,
 }
 
 thread_local! {
@@ -1166,6 +1279,28 @@ pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
             .expect("text must be registered")
             .layout
             .bounds()
+    })
+}
+
+#[cfg(test)]
+pub(super) fn selection_test_snapshot(
+    key: &str,
+) -> (
+    SharedString,
+    gpui::TextLayout,
+    Option<super::link_presentation::OffsetMap>,
+) {
+    REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        let entry = registry
+            .iter()
+            .find(|entry| entry.key.as_ref() == key)
+            .expect("painted text");
+        (
+            entry.text.clone(),
+            entry.layout.clone(),
+            entry.offsets.clone(),
+        )
     })
 }
 
@@ -1246,7 +1381,10 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
         let ix = match reg[ei].layout.index_for_position(position) {
             Ok(ix) | Err(ix) => ix,
         };
-        Some((ei, ix))
+        Some((
+            ei,
+            reg[ei].offsets.as_ref().map_or(ix, |map| map.original(ix)),
+        ))
     })
 }
 
@@ -1294,6 +1432,7 @@ fn register_selection_listeners(
     key: &std::sync::Arc<str>,
     text: &SharedString,
     layout: &gpui::TextLayout,
+    offsets: Option<super::link_presentation::OffsetMap>,
 ) {
     use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
     {
@@ -1306,6 +1445,7 @@ fn register_selection_listeners(
                 let ix = match layout.index_for_position(e.position) {
                     Ok(ix) | Err(ix) => ix,
                 };
+                let ix = offsets.as_ref().map_or(ix, |map| map.original(ix));
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
@@ -2640,6 +2780,7 @@ mod tests {
             cache.flats.insert(
                 (row.into(), 0, 0),
                 Rc::new(FlatText {
+                    original: None,
                     text: "text".into(),
                     runs: Vec::new(),
                     links: Vec::new(),
@@ -2673,6 +2814,7 @@ mod tests {
         cache.flats.insert(
             ("row".into(), 0, 0),
             Rc::new(FlatText {
+                original: None,
                 text: "cached".into(),
                 runs: Vec::new(),
                 links: Vec::new(),
@@ -2688,4 +2830,10 @@ mod tests {
         );
         assert!(cache.code.is_empty());
     }
+}
+
+/// Native fixture access to actual shaped link ranges; absent in shipped builds.
+#[cfg(feature = "browser-fixture")]
+pub fn fixture_link(target: &str) -> Option<(gpui::Point<gpui::Pixels>, gpui::FocusHandle)> {
+    super::link_interaction::fixture_link(target)
 }

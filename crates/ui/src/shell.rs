@@ -690,11 +690,11 @@ const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
 /// New-thread controls float over the tail of a top-anchored image hero. The
-/// hero never occupies half the viewport, and its lower mask dissolves into
-/// the page before the otherwise empty lower canvas.
+/// hero reaches below the composer, giving its lower mask room to dissolve
+/// gradually into the otherwise empty lower canvas.
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
-const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.46;
-const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 440.0;
+const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
+const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -878,23 +878,36 @@ fn new_thread_background(
         .opacity((1.0 - dissolve) * opacity)
         // Alpha resolves into the real canvas, including translucent themes;
         // no theme-colored overlay bleaches or darkens the source pixels.
-        .child(
-            gpui::canvas(
-                |_, _, _| {},
-                move |bounds, _, window, _cx| {
-                    if let Some(composer) = composer_bounds.get() {
-                        crate::new_thread_background_mask::paint(
-                            artwork.clone(),
-                            bounds,
-                            composer,
-                            window,
-                        );
-                    }
-                },
-            )
-            .absolute()
-            .inset_0(),
-        )
+        .children([false, true].into_iter().map(|cutout| {
+            let artwork = artwork.clone();
+            let composer_bounds = composer_bounds.clone();
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(if cutout {
+                    1.0
+                } else {
+                    crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY
+                })
+                .child(
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, _cx| {
+                            if let Some(composer) = composer_bounds.get() {
+                                crate::new_thread_background_mask::paint(
+                                    artwork.clone(),
+                                    bounds,
+                                    composer,
+                                    cutout,
+                                    window,
+                                );
+                            }
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+        }))
         .into_any_element()
 }
 
@@ -1543,17 +1556,9 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let shell = cx.weak_entity();
+        let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(crate::markdown::render::LinkUi {
-                handler: std::rc::Rc::new(move |target, window, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.open_workspace_file_link(target, window, cx)
-                        })
-                        .unwrap_or(false)
-                }),
-            });
+            transcript.set_workspace_link_handler(links)
         });
         // Every send glides the prompt to the viewport top and reserves the
         // reply's space below it (notes-app parity).
@@ -2586,6 +2591,65 @@ impl Shell {
         cx.notify();
     }
 
+    fn session_links(
+        source_session: Option<String>,
+        cx: &Context<Self>,
+    ) -> crate::markdown::render::LinkUi {
+        let shell = cx.weak_entity();
+        crate::markdown::render::LinkUi {
+            source_session,
+            handler: std::rc::Rc::new(move |activation, window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.activate_session_link(activation, window, cx)
+                    })
+                    .unwrap_or(crate::markdown::render::LinkOutcome::Rejected)
+            }),
+        }
+    }
+
+    fn activate_session_link(
+        &mut self,
+        activation: &crate::markdown::render::LinkActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::markdown::render::LinkOutcome {
+        use crate::markdown::render::{LinkAction, LinkOutcome};
+        if self.active_chat.is_empty()
+            || activation.source_session.as_deref() != Some(self.active_chat.as_str())
+            || self.state.read(cx).selected_chat.as_deref() != Some(self.active_chat.as_str())
+        {
+            return LinkOutcome::Rejected;
+        }
+        if activation.target.navigation.is_err() {
+            return if matches!(
+                activation.action,
+                LinkAction::Primary | LinkAction::Internal
+            ) && self.open_workspace_file_link(&activation.target.original, window, cx)
+            {
+                LinkOutcome::Internal
+            } else {
+                LinkOutcome::Rejected
+            };
+        }
+        let mut resolved = activation.clone();
+        if resolved.action == LinkAction::Primary {
+            resolved.action = if crate::settings::current(cx).open_web_links_in_zeron {
+                LinkAction::Internal
+            } else {
+                LinkAction::External
+            };
+        }
+        let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
+        if outcome == LinkOutcome::Internal {
+            if !self.right_pane_open(cx) {
+                self.toggle_right_pane(cx);
+            }
+            self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
+        }
+        outcome
+    }
+
     /// Browser tabs are independent instances owned by the current session.
     fn add_browser_surface(
         &mut self,
@@ -2687,6 +2751,13 @@ impl Shell {
                 window,
                 move |this: &mut Self, _, event, window, cx| match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::OpenWebLink(activation) => {
+                        if let crate::markdown::render::LinkOutcome::External(url) =
+                            this.activate_session_link(activation, window, cx)
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
                     FilesEvent::TitleChanged => cx.notify(),
                     FilesEvent::FileRenamed { .. } => cx.notify(),
                     FilesEvent::WordWrapChanged(word_wrap) => {
@@ -2747,6 +2818,13 @@ impl Shell {
             window,
             move |this: &mut Self, _, event, window, cx| match event {
                 FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                FilesEvent::OpenWebLink(activation) => {
+                    if let crate::markdown::render::LinkOutcome::External(url) =
+                        this.activate_session_link(activation, window, cx)
+                    {
+                        cx.open_url(&url);
+                    }
+                }
                 FilesEvent::TitleChanged => cx.notify(),
                 FilesEvent::FileRenamed { old_path, new_path } => {
                     this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
@@ -2938,6 +3016,10 @@ impl Shell {
         // a frozen one reads top-down.
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
+        let links = Self::session_links(Some(self.active_chat.clone()), cx);
+        transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(links)
+        });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
         let fetch = if frozen {
             self.spawn_subagent_snapshot_fetch(&chat_id, &doc_id, cx)
@@ -3394,18 +3476,19 @@ impl Shell {
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
-        self.sync_background_settings(cx);
+        self.sync_independent_settings(cx);
         self.settings.ui_font_family = crate::typography::requested(cx);
         self.settings.ui_font_size = crate::typography::font_size(cx);
         settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
     }
 
-    /// Appearance owns these choices. A geometry save must never publish the
-    /// shell's older effect value over a selection made since its last render.
-    fn sync_background_settings(&mut self, cx: &App) {
+    /// Controls outside the Shell mutate these choices directly. A geometry
+    /// save must never publish the Shell's older values over those selections.
+    fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
+        self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -6608,7 +6691,28 @@ impl Shell {
         }
     }
 
-    fn on_key_down(&mut self, event: &gpui::KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Inputs and completion menus consume Tab first. Unhandled Tab walks
+        // accessible controls, including individual transcript link ranges.
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key == "tab"
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.platform
+        {
+            if modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         let selected_chat = self.state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
@@ -9202,7 +9306,7 @@ impl Render for Shell {
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
-        self.sync_background_settings(cx);
+        self.sync_independent_settings(cx);
         let theme = Theme::of(cx);
         // The shell frost sits over native desktop blur on macOS and Windows.
         // Content surfaces add their own backgrounds over this shared tint.
@@ -9886,10 +9990,11 @@ mod tests {
             new_thread_background_opacity(true),
             NEW_THREAD_BACKGROUND_FROSTED_OPACITY
         );
-        assert_eq!(new_thread_background_height(400.0), 184.0);
-        assert_eq!(new_thread_background_height(600.0), 276.0);
-        assert_eq!(new_thread_background_height(1_000.0), 440.0);
-        assert!(new_thread_background_height(848.0) < 848.0 / 2.0);
+        assert_eq!(new_thread_background_height(400.0), 288.0);
+        assert!((new_thread_background_height(600.0) - 432.0).abs() < 0.001);
+        assert_eq!(new_thread_background_height(1_000.0), 720.0);
+        assert_eq!(new_thread_background_height(1_200.0), 760.0);
+        assert!(new_thread_background_height(848.0) > 848.0 / 2.0);
     }
 
     #[test]
@@ -10939,9 +11044,7 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn panel_saves_preserve_background_effect_selected_after_shell_creation(
-        cx: &mut TestAppContext,
-    ) {
+    fn panel_saves_preserve_settings_selected_outside_the_shell(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -10972,7 +11075,11 @@ mod exit_regressions {
                 cx,
             )
         });
-        for effect in settings::NewThreadBackgroundEffect::ALL {
+        for (index, effect) in settings::NewThreadBackgroundEffect::ALL
+            .into_iter()
+            .enumerate()
+        {
+            let open_links_in_zeron = index % 2 == 0;
             window
                 .update(cx, |shell, _, cx| {
                     // Selection changes in Appearance, independently of the shell's
@@ -10980,16 +11087,24 @@ mod exit_regressions {
                     shell.settings.sidebar_width = 280.0;
                     shell.schedule_save(cx);
                     settings::set_new_thread_background_effect(effect, cx);
+                    settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.open_web_links_in_zeron = open_links_in_zeron;
+                    });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
                         shell.settings.right_pane_width = 540.0 + step as f32;
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         assert_eq!(settings::current(cx).new_thread_background_effect, effect);
+                        assert_eq!(
+                            settings::current(cx).open_web_links_in_zeron,
+                            open_links_in_zeron
+                        );
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.new_thread_background_effect, effect);
+                    assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
@@ -11232,6 +11347,232 @@ mod exit_regressions {
             .unwrap();
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let weak = window
+            .update(cx, |shell, window, cx| {
+                use crate::markdown::render::{
+                    LinkAction, LinkActivation, LinkOutcome, LinkTarget,
+                };
+                shell.active_chat = "first-session".into();
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                let mut activation = LinkActivation {
+                    target: LinkTarget::new("Docs", "https://example.com/docs"),
+                    action: LinkAction::Primary,
+                    source_session: Some("first-session".into()),
+                };
+                assert!(!shell.right_pane_open(cx));
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert!(shell.right_pane_open(cx));
+                let first = shell.browser_seq;
+                assert_eq!(
+                    shell.browsers[&first].read(cx).page.url.as_deref(),
+                    Some("https://example.com/docs")
+                );
+                assert_eq!(
+                    shell.resolved_right_active(cx),
+                    RightSurface::Browser(first)
+                );
+                shell.activate_session_link(&activation, window, cx);
+                assert_eq!(shell.browsers.len(), 2);
+                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings.open_web_links_in_zeron = false;
+                });
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::External("https://example.com/docs".into())
+                );
+                assert_eq!(shell.browsers.len(), 2);
+                activation.action = LinkAction::Internal;
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal,
+                    "the explicit internal action ignores the default preference"
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                activation.action = LinkAction::External;
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::External("https://example.com/docs".into())
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                activation.source_session = Some("other-session".into());
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                activation.source_session = Some("first-session".into());
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("switch-in-progress".into())
+                });
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Rejected
+                );
+                assert_eq!(shell.browsers.len(), 3);
+                shell.state.update(cx, |state, _| {
+                    state.selected_chat = Some("first-session".into())
+                });
+                shell.add_subagent_surface(
+                    "first-session".into(),
+                    "child-doc".into(),
+                    "Child".into(),
+                    true,
+                    cx,
+                );
+                let child = shell
+                    .subagent_tabs
+                    .values()
+                    .next()
+                    .unwrap()
+                    .transcript
+                    .clone();
+                let ui = child.read(cx).link_ui().unwrap();
+                assert_eq!(ui.source_session.as_deref(), Some("first-session"));
+                activation.action = LinkAction::Internal;
+                activation.source_session = ui.source_session;
+                assert_eq!(
+                    shell.activate_session_link(&activation, window, cx),
+                    LinkOutcome::Internal
+                );
+                assert_eq!(shell.browsers.len(), 4);
+                let weak = shell.browsers[&first].downgrade();
+                shell.close_right_surface(RightSurface::Browser(first), window, cx);
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[gpui::test]
+    fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let surfaces = window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "owner".into();
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("owner".into()));
+                shell.add_files_surface(window, cx);
+                shell.add_file_surface("README.md".into(), window, cx);
+                [
+                    shell.files[&shell.panel_key(cx)].clone(),
+                    shell.file_surfaces[&shell.file_surface_seq].clone(),
+                ]
+            })
+            .unwrap();
+        let mut last_external_url = None;
+        for (index, surface) in surfaces.iter().enumerate() {
+            let mut activation = LinkActivation {
+                target: LinkTarget::new("Docs", &format!("https://example.com/preview/{index}")),
+                action: LinkAction::Primary,
+                source_session: Some("owner".into()),
+            };
+            surface.update(cx, |_, cx| {
+                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.opened_url(), last_external_url);
+            window
+                .update(cx, |shell, _, cx| {
+                    assert!(shell.right_pane_open(cx));
+                    assert_eq!(shell.browsers.len(), index + 1);
+                    assert_eq!(
+                        shell.resolved_right_active(cx),
+                        RightSurface::Browser(shell.browser_seq)
+                    );
+                    assert_eq!(
+                        shell.browsers[&shell.browser_seq]
+                            .read(cx)
+                            .page
+                            .url
+                            .as_deref(),
+                        Some(activation.target.original.as_str())
+                    );
+                })
+                .unwrap();
+            activation.action = LinkAction::External;
+            surface.update(cx, |_, cx| {
+                cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some(activation.target.original.as_str())
+            );
+            last_external_url = Some(activation.target.original.clone());
+            activation.target = LinkTarget::new("Stale", "https://example.com/stale");
+            activation.source_session = Some("stale-owner".into());
+            for action in [LinkAction::Internal, LinkAction::External] {
+                activation.action = action;
+                surface.update(cx, |_, cx| {
+                    cx.emit(FilesEvent::OpenWebLink(activation.clone()))
+                });
+                cx.run_until_parked();
+                assert_eq!(cx.opened_url(), last_external_url);
+            }
+            window
+                .update(cx, |shell, _, _| {
+                    assert_eq!(shell.browsers.len(), index + 1)
+                })
+                .unwrap();
+        }
+    }
+
     #[gpui::test]
     fn browser_tabs_keep_session_ownership_and_release_on_close(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -11456,6 +11797,18 @@ mod exit_regressions {
 /// Native browser regression fixture hooks are excluded from shipped builds.
 #[cfg(feature = "browser-fixture")]
 impl Shell {
+    pub fn fixture_focus_mounted(&self, window: &Window, cx: &App) -> bool {
+        self.shortcut_focus.contains_focused(window, cx)
+    }
+    pub fn fixture_active_browser(
+        &self,
+        cx: &App,
+    ) -> Option<(u64, Entity<crate::browser::BrowserSurface>)> {
+        let RightSurface::Browser(id) = self.resolved_right_active(cx) else {
+            return None;
+        };
+        self.browsers.get(&id).cloned().map(|browser| (id, browser))
+    }
     pub fn fixture_open_browser(
         &mut self,
         url: Option<String>,
