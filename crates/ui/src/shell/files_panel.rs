@@ -60,7 +60,7 @@ impl Shell {
     fn files_layout(&self, visible: f32, cx: &App) -> FilesPanelLayout {
         files_panel_layout(
             self.viewport_width,
-            self.eval_tween(self.sidebar_tween, self.sidebar_target()),
+            self.sidebar_now(),
             if self.files_panel_open(cx) || self.tween_active(self.files_tween) {
                 self.settings.files_panel_width
             } else {
@@ -102,12 +102,9 @@ impl Shell {
     }
 
     pub(super) fn right_visible_width(&self, cx: &App) -> f32 {
-        let available = (self.viewport_width
-            - self.eval_tween(self.sidebar_tween, self.sidebar_target())
-            - self.files_visible_width(cx))
-        .max(0.0);
-        self.eval_tween(self.right_tween, self.right_target(cx))
-            .min(available)
+        let available =
+            (self.viewport_width - self.sidebar_now() - self.files_visible_width(cx)).max(0.0);
+        self.right_now(cx).min(available)
     }
 
     fn clear_surface_transitions(&mut self) {
@@ -231,9 +228,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.settings.files_panel_width = (f32::from(window.viewport_size().width)
-            - f32::from(event.event.position.x))
-        .clamp(FILES_PANEL_MIN, FILES_PANEL_MAX);
+        let requested = f32::from(window.viewport_size().width) - f32::from(event.event.position.x);
+        self.settings.files_panel_width = requested.clamp(FILES_PANEL_MIN, FILES_PANEL_MAX);
+        self.pane_resize_dragging = Some(PaneResizeKind::Files);
+        self.pane_resize_active = (requested > FILES_PANEL_MIN && requested < FILES_PANEL_MAX)
+            .then_some(PaneResizeKind::Files);
         self.files_tween = None;
         self.clear_surface_transitions();
         self.schedule_save(cx);
@@ -283,6 +282,7 @@ impl Shell {
                     panel.child(
                         self.resize_handle(
                             "files-panel-resize",
+                            PaneResizeKind::Files,
                             || FilesPanelResize,
                             |shell, _| shell.settings.files_panel_width = FILES_PANEL_DEFAULT,
                             cx,
