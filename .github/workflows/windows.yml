@@ -10,6 +10,7 @@ on:
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
   push:
     branches: [main]
@@ -21,6 +22,7 @@ on:
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
   workflow_dispatch:
     inputs:

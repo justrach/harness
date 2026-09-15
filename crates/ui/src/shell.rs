@@ -12082,6 +12082,9 @@ impl Shell {
             self.close_right_plus(cx);
         }
     }
+    pub fn fixture_browser_menu_mounted(&self) -> bool {
+        self.right_plus.get().is_some()
+    }
     pub fn fixture_expand_browser(&mut self, cx: &mut Context<Self>) {
         self.toggle_right_pane_expand(cx);
     }
