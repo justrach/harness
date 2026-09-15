@@ -580,3 +580,71 @@ async fn application_exit_without_destructors_kills_owned_processes() {
         handle.assert_exited().await;
     }
 }
+
+#[tokio::test]
+async fn batch_arguments_resist_shell_interpretation() {
+    use zeron_harness::process::Command;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("shim.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n\"{}\" --launch-report %*\r\n",
+            env!("CARGO_BIN_EXE_harness-native-fixture")
+        ),
+    )
+    .unwrap();
+    let arguments = [
+        "",
+        "plain",
+        "a b",
+        "日本語 😀",
+        "quote\"here",
+        "trailing \\",
+        "slashes\\\\\"quote",
+        "%ZERON_BATCH_ATTACK%",
+        "!ZERON_BATCH_ATTACK!",
+        "a\"&echo injected>injected.txt&rem \"b",
+        "& | < > ^ ( )",
+        "{\"model\":\"a&b\"}",
+    ];
+    for arg in arguments {
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(&script)
+                .arg(arg)
+                .current_dir(dir.path())
+                .env("ZERON_BATCH_ATTACK", "EXPANDED&echo injected>injected.txt")
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            !dir.path().join("injected.txt").exists(),
+            "command injection: {arg:?}"
+        );
+        assert!(
+            output.status.success(),
+            "{arg:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["argv"],
+            serde_json::json!([arg]),
+            "argument changed: {arg:?}"
+        );
+    }
+    for arg in [
+        "line\nbreak",
+        "line\rbreak",
+        "\"\n&echo injected>injected.txt",
+    ] {
+        assert_eq!(
+            Command::new(&script).arg(arg).spawn().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!dir.path().join("injected.txt").exists());
+    }
+}

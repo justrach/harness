@@ -118,9 +118,8 @@ impl Command {
         let executable = resolve(program, child_path, child_pathext)?;
         let (application, line) = if is_batch_script(&executable) {
             // npm exposes CLIs as `.cmd`/`.bat` shims. Run them through
-            // `cmd.exe /d /s /c` with cross-spawn-style per-argument escaping:
-            // the shim itself is the only interpreted layer, agent arguments
-            // stay literal, and the Job Object still owns the whole tree
+            // `cmd.exe` with Rust-style batch argument escaping:
+            // unsafe line breaks are rejected, and the Job Object owns the tree
             // through cmd.exe's membership.
             let command = batch_command(&executable, self.metadata.get_args())?;
             command
@@ -185,24 +184,35 @@ fn launchable_extensions(child_pathext: Option<&OsStr>) -> Vec<&'static str> {
     }
 }
 
-/// Build `"<cmd.exe>" /d /s /c "<shim> <args…>"`.
+/// Build a batch command with command extensions on and delayed expansion off.
 fn batch_command<'a>(
     batch: &Path,
     args: impl IntoIterator<Item = &'a OsStr>,
 ) -> io::Result<(Vec<u16>, Vec<u16>)> {
     let interpreter = system_directory()?.join("cmd.exe");
     let mut line = Vec::new();
-    quote_batch_argument(interpreter.as_os_str(), true, &mut line)?;
-    for flag in ["/d", "/s", "/c"] {
+    quote(interpreter.as_os_str(), &mut line)?;
+    for flag in ["/e:ON", "/v:OFF", "/d", "/c"] {
         line.push(b' ' as u16);
         line.extend(flag.encode_utf16());
     }
     line.push(b' ' as u16);
     line.push(b'"' as u16);
-    quote_batch_argument(batch.as_os_str(), true, &mut line)?;
+    // A script path is interpreted before batch arguments. Reject expansion
+    // syntax rather than silently launching a different path.
+    let script = wide(batch.as_os_str())?;
+    if script
+        .iter()
+        .any(|u| matches!(*u, 0x22 | 0x25 | 0x0a | 0x0d))
+    {
+        return Err(invalid(
+            "batch executable path contains shell expansion syntax",
+        ));
+    }
+    quote(batch.as_os_str(), &mut line)?;
     for arg in args {
         line.push(b' ' as u16);
-        quote_batch_argument(arg, false, &mut line)?;
+        quote_batch_argument(arg, &mut line)?;
     }
     line.push(b'"' as u16);
     Ok((wide(interpreter.as_os_str())?, line))
@@ -218,47 +228,37 @@ fn system_directory() -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_wide(&buffer)))
 }
 
-/// One cmd.exe argument, following cross-spawn's escaping: backslashes before
-/// a quote (and at the end) are doubled, embedded quotes are backslash-escaped,
-/// and everything is wrapped in quotes so spaces and `=`-shaped arguments stay
-/// whole. `metacharacters` (the shim path itself, never agent arguments) also
-/// neutralizes cmd's `()  %  !  ^  "  backtick  <  >  &  |` with carets and
-/// strips newlines and tabs — a path, unlike a prompt, never needs them.
-fn quote_batch_argument(arg: &OsStr, metacharacters: bool, line: &mut Vec<u16>) -> io::Result<()> {
+/// Escape batch arguments using the approach in Rust 1.94's standard library
+/// (MIT OR Apache-2.0), `sys/args/windows.rs::append_bat_arg`:
+/// https://github.com/rust-lang/rust/blob/1.94.0/library/std/src/sys/args/windows.rs
+/// CRT backslash-quote escaping alone is unsafe for cmd.exe. Double embedded
+/// quotes, neutralize percent expansion, and reject command separators CR/LF.
+/// `/e:ON /v:OFF` above is essential for percent escaping and literal `!`.
+fn quote_batch_argument(arg: &OsStr, line: &mut Vec<u16>) -> io::Result<()> {
     let encoded = wide(arg)?;
     let units = &encoded[..encoded.len() - 1];
+    if units.iter().any(|u| matches!(*u, 0x0d | 0x0a)) {
+        return Err(invalid("batch arguments cannot contain CR or LF"));
+    }
     line.push(b'"' as u16);
     let mut slashes = 0;
     for &unit in units {
         if unit == b'\\' as u16 {
             slashes += 1;
-            continue;
-        }
-        let escaped_quote = unit == b'"' as u16;
-        line.extend(std::iter::repeat_n(
-            b'\\' as u16,
-            if escaped_quote {
-                slashes * 2 + 1
-            } else {
-                slashes
-            },
-        ));
-        slashes = 0;
-        if metacharacters
-            && matches!(
-                unit as u8,
-                b'(' | b')' | b'%' | b'!' | b'^' | b'`' | b'<' | b'>' | b'&' | b'|'
-            )
-        {
-            line.push(b'^' as u16);
-        }
-        if metacharacters && matches!(unit, 0x0d | 0x0a | 0x09) {
-            line.push(b' ' as u16);
         } else {
-            line.push(unit);
+            if unit == b'"' as u16 {
+                line.extend(std::iter::repeat_n(b'\\' as u16, slashes));
+                line.push(b'"' as u16);
+            } else if unit == b'%' as u16 {
+                // A zero-length substring consumes cmd's expansion parser
+                // without expanding a user-provided %VARIABLE% reference.
+                line.extend("%%cd:~,".encode_utf16());
+            }
+            slashes = 0;
         }
+        line.push(unit);
     }
-    line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+    line.extend(std::iter::repeat_n(b'\\' as u16, slashes));
     line.push(b'"' as u16);
     Ok(())
 }

@@ -904,12 +904,12 @@ impl Theme {
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
     /// the desktop behind it, so it needs no compositor vibrancy — macOS
-    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D (other
-    /// wgpu platforms keep opaque floats until tested). Windows window chrome
+    /// rasterizes it in Metal and Linux in wgpu. The pinned Direct3D renderer
+    /// does not implement in-app blur yet. Windows window chrome
     /// can still use native Acrylic independently of these scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+            && cfg!(any(target_os = "macos", target_os = "linux"))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
