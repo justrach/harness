@@ -170,12 +170,16 @@ impl TextConnector for WsTextConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(crate::socket::pump(ws, out_rx, in_tx, WsMessage::Text, |frame| {
-                match frame {
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Text,
+                |frame| match frame {
                     WsMessage::Text(text) if text != "pong" => Some(text),
                     _ => None,
-                }
-            }));
+                },
+            ));
             Ok(TextPipe {
                 tx: out_tx,
                 rx: in_rx,

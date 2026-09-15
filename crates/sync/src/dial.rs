@@ -37,6 +37,19 @@ pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// [`crate::wake::notify_online`] so sibling sockets waiting out a reconnect
 /// backoff redial immediately instead of sleeping through the recovery.
 pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
+    // Bound DNS, all TCP attempts, TLS and HTTP upgrade together. Some
+    // callers (notably the host relay) have no outer connection deadline.
+    tokio::time::timeout(Duration::from_secs(20), connect_ws_inner(url))
+        .await
+        .map_err(|_| {
+            WsError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket dial timed out",
+            ))
+        })?
+}
+
+async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
     let request = url.into_client_request()?;
     let uri = request.uri();
     let host = uri
@@ -145,13 +158,19 @@ mod tests {
             std::future::pending::<()>().await;
         });
         let mut dial = tokio::spawn(async move { connect_ws(&url).await });
-        tokio::time::timeout(Duration::from_secs(5), accepted_rx).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
         // TCP is established. The peer never answers the HTTP upgrade.
         tokio::time::pause();
         let result = tokio::time::timeout(Duration::from_secs(21), &mut dial).await;
         server.abort();
         dial.abort();
-        let err = result.expect("dial remained stuck after 21 seconds").unwrap().unwrap_err();
+        let err = result
+            .expect("dial remained stuck after 21 seconds")
+            .unwrap()
+            .unwrap_err();
         assert!(matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
     }
 

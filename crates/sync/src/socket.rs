@@ -1,7 +1,7 @@
-//! WebSocket pump shared by the binary chat and text registry protocols.
+//! Bounded WebSocket pump for document sync and device relay sessions.
 
-use std::time::Duration;
 use futures::{SinkExt, StreamExt};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message as WsMessage};
@@ -11,53 +11,99 @@ const SILENCE_LEASE: Duration = Duration::from_secs(45);
 
 pub(crate) async fn pump<S, T>(
     ws: WebSocketStream<S>,
+    out_rx: mpsc::Receiver<T>,
+    in_tx: mpsc::Sender<T>,
+    encode: fn(T) -> WsMessage,
+    decode: fn(WsMessage) -> Option<T>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    pump_with_timing(
+        ws,
+        out_rx,
+        in_tx,
+        encode,
+        decode,
+        PING_INTERVAL,
+        SILENCE_LEASE,
+    )
+    .await;
+}
+
+/// Drive a session's ordered frames with independent reads and writes.
+///
+/// `lease` bounds transport silence, each write, and each delivery to the
+/// consumer. Expiry closes the entire session: callers must recover using
+/// their protocol's cursor or fail pending RPCs, never resume a partial send.
+/// Dropping this future or the inbound receiver releases both socket halves.
+pub async fn pump_with_timing<S, T>(
+    ws: WebSocketStream<S>,
     mut out_rx: mpsc::Receiver<T>,
     in_tx: mpsc::Sender<T>,
     encode: fn(T) -> WsMessage,
     decode: fn(WsMessage) -> Option<T>,
-)
-where
+    ping_interval: Duration,
+    lease: Duration,
+) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await;
-    let mut last_rx = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(bytes) => {
-                    if sink.send(encode(bytes)).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = sink.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            },
-            frame = stream.next() => match frame {
-                Some(Ok(frame)) => {
-                    last_rx = tokio::time::Instant::now();
-                    if let Some(value) = decode(frame) {
-                        if in_tx.send(value).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Some(Err(_)) | None => break,
-            },
-            _ = ping.tick() => {
-                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("chat2 socket silent past lease; treating as dead");
-                break;
+    // Each direction owns its await points. A full TCP send buffer must not
+    // stop reads or silence detection; a full actor inbox must not stop the
+    // writer's deadline. Neither future is detached from this session.
+    let writer = async {
+        let mut ping = tokio::time::interval(ping_interval);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await;
+        loop {
+            let frame = tokio::select! {
+                frame = out_rx.recv() => match frame {
+                    Some(value) => encode(value),
+                    // Tear down immediately: a close handshake can itself
+                    // block on the failed uplink we are trying to release.
+                    None => return,
+                },
+                _ = ping.tick() => WsMessage::Text("ping".into()),
+            };
+            // Never resume a canceled send on this socket: it may have
+            // written only part of a frame. The actor replays unacked data
+            // on a fresh connection using its existing deduplication IDs.
+            if !matches!(
+                tokio::time::timeout(lease, sink.send(frame)).await,
+                Ok(Ok(()))
+            ) {
+                tracing::warn!("socket write failed or exceeded deadline; reconnecting");
+                return;
             }
         }
+    };
+    let reader = async {
+        loop {
+            let frame = match tokio::time::timeout(lease, stream.next()).await {
+                Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => return,
+                Ok(Some(Ok(frame))) => frame,
+                _ => {
+                    tracing::warn!("socket read failed or silent past lease; reconnecting");
+                    return;
+                }
+            };
+            if let Some(value) = decode(frame) {
+                // Bound backpressure without dropping/reordering a live
+                // stream's rows. Disconnect makes the cursor replay them.
+                if !matches!(
+                    tokio::time::timeout(lease, in_tx.send(value)).await,
+                    Ok(Ok(()))
+                ) {
+                    tracing::warn!("socket consumer closed or stalled; reconnecting");
+                    return;
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = writer => {},
+        _ = reader => {},
+        _ = in_tx.closed() => {},
     }
 }
 
@@ -84,14 +130,23 @@ mod tests {
         let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
         let (tx, out) = mpsc::channel(2);
         let (incoming, rx) = mpsc::channel(1);
-        let task = tokio::spawn(pump(client, out, incoming, |v| v, |v| {
-            match v {
+        let task = tokio::spawn(pump(
+            client,
+            out,
+            incoming,
+            |v| v,
+            |v| match v {
                 WsMessage::Text(ref text) if text == "pong" => None,
                 WsMessage::Text(_) | WsMessage::Binary(_) => Some(v),
                 _ => None,
-            }
-        }));
-        Harness { server, tx, rx, task }
+            },
+        ));
+        Harness {
+            server,
+            tx,
+            rx,
+            task,
+        }
     }
 
     async fn stall(h: &Harness) {
@@ -100,9 +155,12 @@ mod tests {
     }
 
     async fn finishes(mut task: JoinHandle<()>, within: Duration) {
-        if tokio::time::timeout(within, &mut task).await.is_err() {
-            task.abort();
-            panic!("socket pump did not terminate within {within:?}");
+        match tokio::time::timeout(within, &mut task).await {
+            Ok(result) => result.expect("socket pump panicked"),
+            Err(_) => {
+                task.abort();
+                panic!("socket pump did not terminate within {within:?}");
+            }
         }
     }
 
@@ -167,15 +225,25 @@ mod tests {
                     WsMessage::Text(ref text) if text == "ping" => WsMessage::Text("pong".into()),
                     other => other,
                 };
-                if h.server.send(reply).await.is_err() { break; }
+                if h.server.send(reply).await.is_err() {
+                    break;
+                }
             }
         });
         let started = tokio::time::Instant::now();
         for i in 0..30 {
-            let frame = if i % 2 == 0 { WsMessage::Text(format!("row-{i}")) }
-                else { WsMessage::Binary(vec![i; 8]) };
+            let frame = if i % 2 == 0 {
+                WsMessage::Text(format!("row-{i}"))
+            } else {
+                WsMessage::Binary(vec![i; 8])
+            };
             h.tx.send(frame.clone()).await.unwrap();
-            assert_eq!(tokio::time::timeout(Duration::from_secs(10), h.rx.recv()).await.unwrap(), Some(frame));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), h.rx.recv())
+                    .await
+                    .unwrap(),
+                Some(frame)
+            );
         }
         assert!(started.elapsed() > SILENCE_LEASE);
         drop(h.tx);

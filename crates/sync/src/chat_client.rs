@@ -228,12 +228,16 @@ impl BinConnector for WsBinConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(crate::socket::pump(ws, out_rx, in_tx, WsMessage::Binary, |frame| {
-                match frame {
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Binary,
+                |frame| match frame {
                     WsMessage::Binary(bytes) => Some(bytes),
                     _ => None,
-                }
-            }));
+                },
+            ));
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
