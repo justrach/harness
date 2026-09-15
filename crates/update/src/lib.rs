@@ -176,15 +176,42 @@ pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
 fn http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many update redirects");
+            }
+            if attempt.previous().iter().any(|url| url.scheme() == "https")
+                && attempt.url().scheme() != "https"
+            {
+                return attempt.error("update redirect would downgrade HTTPS");
+            }
+            attempt.follow()
+        }))
         .build()
         .context("building http client")
+}
+
+fn validate_release_override(value: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(value.trim()).context("invalid update feed URL")?;
+    anyhow::ensure!(
+        url.scheme() == "https" && url.host_str().is_some(),
+        "update feed must use HTTPS"
+    );
+    anyhow::ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "update feed must be a base URL without credentials, query, or fragment"
+    );
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
         && !url.trim().is_empty()
     {
-        return Ok(url.trim_end_matches('/').to_owned());
+        return validate_release_override(&url);
     }
     #[cfg(windows)]
     if let Some(url) = windows::release_url()? {
@@ -805,6 +832,23 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_feed_override_requires_an_https_base_url() {
+        assert_eq!(
+            validate_release_override(" https://example.com/releases/ ").unwrap(),
+            "https://example.com/releases"
+        );
+        for url in [
+            "http://example.com/releases",
+            "file:///tmp/update",
+            "https://user:password@example.com",
+            "https://example.com?feed=x",
+            "https://example.com/#fragment",
+        ] {
+            assert!(validate_release_override(url).is_err(), "accepted {url}");
+        }
+    }
 
     #[test]
     fn version_compare() {

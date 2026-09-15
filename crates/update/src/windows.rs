@@ -37,11 +37,7 @@ pub(super) fn release_url() -> anyhow::Result<Option<String>> {
     }
     let config: Config = serde_json::from_slice(&std::fs::read(exe.with_file_name(CONFIG))?)
         .context("reading Windows update configuration")?;
-    ensure!(
-        config.releases_url.starts_with("https://"),
-        "update feed must use HTTPS"
-    );
-    Ok(Some(config.releases_url))
+    super::validate_release_override(&config.releases_url).map(Some)
 }
 
 pub fn artifact(version: &str) -> String {
