@@ -585,7 +585,7 @@ async fn application_exit_without_destructors_kills_owned_processes() {
 async fn batch_arguments_resist_shell_interpretation() {
     use zeron_harness::process::Command;
     let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("shim.cmd");
+    let script = dir.path().join("shim 日本語 Ħ &!.cmd");
     std::fs::write(
         &script,
         format!(
@@ -647,4 +647,18 @@ async fn batch_arguments_resist_shell_interpretation() {
         );
         assert!(!dir.path().join("injected.txt").exists());
     }
+}
+
+#[tokio::test]
+async fn batch_executable_path_rejects_percent_expansion() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("shim%ZERON_BATCH_NAME%.cmd");
+    std::fs::write(&script, "@exit /b 0\r\n").unwrap();
+    assert_eq!(
+        zeron_harness::process::Command::new(&script)
+            .spawn()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
 }
