@@ -545,3 +545,264 @@ mod tests {
         assert!(!target.to_string_lossy().contains(".."));
     }
 }
+
+/// Imported generated media: only these sanitized fields may leave the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedImage {
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
+const MAX_GENERATED_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+
+fn raster_signature(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("png", "image/png"))
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(("jpg", "image/jpeg"))
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some(("webp", "image/webp"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else {
+        None
+    }
+}
+
+fn same_generated_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if a.dev() != b.dev()
+            || a.ino() != b.ino()
+            || a.ctime() != b.ctime()
+            || a.ctime_nsec() != b.ctime_nsec()
+        {
+            return false;
+        }
+    }
+    a.is_file() && b.is_file() && a.len() == b.len() && a.modified().ok() == b.modified().ok()
+}
+
+/// Walk canonical descendants relative to a pinned directory descriptor. A
+/// concurrent directory/symlink replacement cannot redirect the source open.
+#[cfg(unix)]
+fn open_generated_file(root: &Path, relative: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)?;
+    let components: Vec<_> = relative.components().collect();
+    for (i, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::other("Invalid generated image path"));
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | if i + 1 < components.len() {
+                libc::O_DIRECTORY
+            } else {
+                0
+            };
+        // SAFETY: a live directory fd and a NUL-terminated component; ownership
+        // of the returned fd transfers exactly once into File.
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        file = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_generated_file(root: &Path, relative: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(root.join(relative))
+}
+
+impl Uploads {
+    /// Copy a Codex-owned raster into the active profile without exposing the
+    /// original path to the journal, document, RPC readers, or relay.
+    pub fn import_generated_image(
+        &self,
+        source: &Path,
+        allowed_root: &Path,
+        stable_key: &str,
+    ) -> Result<ImportedImage, EngineError> {
+        self.import_generated_image_after_copy(source, allowed_root, stable_key, || {})
+    }
+
+    fn import_generated_image_after_copy(
+        &self,
+        source: &Path,
+        allowed_root: &Path,
+        stable_key: &str,
+        after_copy: impl FnOnce(),
+    ) -> Result<ImportedImage, EngineError> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Write};
+        let invalid = || EngineError::Other("Generated image source is invalid or changed".into());
+        if !source.is_absolute() {
+            return Err(invalid());
+        }
+        let root = allowed_root.canonicalize()?;
+        let canonical = source.canonicalize()?;
+        let relative = canonical.strip_prefix(&root).map_err(|_| invalid())?;
+        if relative.as_os_str().is_empty() {
+            return Err(invalid());
+        }
+        let before = std::fs::metadata(&canonical)?;
+        if !before.is_file() || before.len() > MAX_GENERATED_IMAGE_BYTES {
+            return Err(invalid());
+        }
+        let mut input = open_generated_file(&root, relative)?;
+        if !same_generated_file(&before, &input.metadata()?) {
+            return Err(invalid());
+        }
+        let mut header = [0u8; 12];
+        let count = input.read(&mut header)?;
+        let (ext, mime) = raster_signature(&header[..count]).ok_or_else(invalid)?;
+        std::fs::create_dir_all(self.dir())?;
+        let uploads_root = self.dir().canonicalize()?;
+        let name = format!("generated.{ext}");
+        let hash = format!("{:x}", Sha256::digest(stable_key.as_bytes()));
+        let destination = uploads_root.join(format!("{hash}-{name}"));
+        let mut temporary = tempfile::NamedTempFile::new_in(&uploads_root)?;
+        temporary.write_all(&header[..count])?;
+        let copied = std::io::copy(
+            &mut (&mut input).take(MAX_GENERATED_IMAGE_BYTES + 1 - count as u64),
+            &mut temporary,
+        )? + count as u64;
+        after_copy();
+        // Check both the open inode and the name: replacement, growth, and
+        // same-size writes all invalidate this attempt before publication.
+        if copied != before.len()
+            || copied > MAX_GENERATED_IMAGE_BYTES
+            || !same_generated_file(&before, &input.metadata()?)
+            || source.canonicalize()? != canonical
+            || !same_generated_file(&before, &std::fs::metadata(&canonical)?)
+        {
+            return Err(invalid());
+        }
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&destination)
+            .map_err(|e| EngineError::Io(e.error))?;
+        Ok(ImportedImage {
+            path: destination.to_string_lossy().into_owned(),
+            name,
+            mime_type: mime.into(),
+            size: copied,
+        })
+    }
+}
+
+#[cfg(test)]
+mod generated_image_tests {
+    use super::*;
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+    #[test]
+    fn generated_image_formats_are_sniffed_and_replays_are_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        for (bytes, ext, mime) in [
+            (PNG, "png", "image/png"),
+            (b"\xff\xd8\xfffixture".as_slice(), "jpg", "image/jpeg"),
+            (b"RIFFxxxxWEBPfixture".as_slice(), "webp", "image/webp"),
+            (b"GIF89afixture".as_slice(), "gif", "image/gif"),
+        ] {
+            let source = root.path().join("wrong.extension");
+            std::fs::write(&source, bytes).unwrap();
+            let key = format!("chat\0{ext}:image");
+            let image = uploads
+                .import_generated_image(&source, root.path(), &key)
+                .unwrap();
+            let again = uploads
+                .import_generated_image(&source, root.path(), &key)
+                .unwrap();
+            assert_eq!(image, again);
+            assert_eq!(image.mime_type, mime);
+            assert_eq!(image.name, format!("generated.{ext}"));
+            assert_eq!(image.size, bytes.len() as u64);
+            assert_eq!(std::fs::read(&image.path).unwrap(), bytes);
+            assert!(source.exists());
+            let reply = uploads.read_chunk(&image.path, 0, &[]).unwrap();
+            assert_eq!(BASE64.decode(reply.data).unwrap(), bytes);
+            assert_eq!(reply.mime_type, mime);
+            assert!(reply.done);
+        }
+        assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn generated_image_rejects_untrusted_sources_without_publishing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), PNG).unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let unknown = root.path().join("bad.png");
+        std::fs::write(&unknown, b"not a raster").unwrap();
+        let big = root.path().join("big.png");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(MAX_GENERATED_IMAGE_BYTES + 1).unwrap();
+        let mut paths = vec![
+            PathBuf::from("relative.png"),
+            outside.path().into(),
+            root.path().into(),
+            unknown,
+            big,
+        ];
+        #[cfg(unix)]
+        {
+            let link = root.path().join("escape.png");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            paths.push(link);
+        }
+        for source in paths {
+            assert!(
+                uploads
+                    .import_generated_image(&source, root.path(), "key")
+                    .is_err(),
+                "accepted {source:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn generated_image_changed_during_copy_leaves_no_partial_final_or_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let source = root.path().join("source.png");
+        for replace in [false, true] {
+            std::fs::write(&source, PNG).unwrap();
+            let result =
+                uploads.import_generated_image_after_copy(&source, root.path(), "key", || {
+                    if replace {
+                        let replacement = root.path().join("replacement.png");
+                        std::fs::write(&replacement, PNG).unwrap();
+                        std::fs::rename(replacement, &source).unwrap();
+                    } else {
+                        std::fs::write(&source, b"changed").unwrap();
+                    }
+                });
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 0);
+        }
+    }
+}
