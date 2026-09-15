@@ -65,12 +65,14 @@ jobs:
         run: cargo test --release --locked -p zeron-engine -p zeron-harness --lib
       - name: Native harness integration tests
         run: cargo test --release --locked -p zeron-harness --features native-fixture --test codex_availability --test windows_native
-      - name: Harness catalog tests
-        run: cargo test --release --locked -p zeron-engine --test codex_catalog
+      - name: Harness catalog and login tests
+        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests
         run: cargo test --release --locked -p zeron-engine --test auth
       - name: UI tests
         run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+      - name: GUI subsystem and redirected CLI output
+        run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
         run: |
           # Exercise real path resolution without touching the runner's account.

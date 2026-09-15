@@ -224,20 +224,15 @@ fn pipe() -> io::Result<(File, File)> {
     Ok(unsafe { (File::from_raw_handle(read), File::from_raw_handle(write)) })
 }
 
-pub(super) fn open(
-    shell: &str,
-    cwd: &str,
-    size: PtySize,
-) -> anyhow::Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
-    // Only an executable name is accepted, matching Terminals::open_with_shell.
-    // Quotes cannot occur in a Windows file name; reject instead of interpreting.
-    anyhow::ensure!(!shell.contains('"'), "invalid shell executable name");
-    // Retain portable-pty's registry-refreshed Windows environment, including
-    // PATH updates made after Zeron started.
-    let builder = CommandBuilder::new(shell);
-    let executable = builder
-        .get_env("PATH")
-        .and_then(|path| {
+// Resolve before CreateProcessW: a partial lpApplicationName is completed
+// against the current directory. A missing PATH entry must not select a
+// workspace-planted shell. See Microsoft CreateProcessW documentation.
+fn resolve_shell(shell: &str, path: Option<&OsStr>) -> io::Result<std::path::PathBuf> {
+    let named = std::path::Path::new(shell);
+    let candidate = if named.is_absolute() || named.components().count() > 1 {
+        Some(named.to_path_buf())
+    } else {
+        path.and_then(|path| {
             std::env::split_paths(path)
                 .filter(|dir| !dir.as_os_str().is_empty())
                 .find_map(|dir| {
@@ -253,7 +248,55 @@ pub(super) fn open(
                     }
                 })
         })
-        .unwrap_or_else(|| shell.into());
+    }
+    .ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "shell executable not found on PATH",
+        )
+    })?;
+    std::path::absolute(candidate)
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[test]
+    fn missing_path_does_not_delegate_shell_search_to_windows() {
+        assert_eq!(
+            resolve_shell("cmd.exe", None).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            resolve_shell("cmd.exe", Some(OsStr::new("")))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("shell.exe");
+        std::fs::write(&exe, b"fixture").unwrap();
+        assert_eq!(
+            resolve_shell("shell", Some(dir.path().as_os_str())).unwrap(),
+            exe
+        );
+        assert_eq!(resolve_shell(exe.to_str().unwrap(), None).unwrap(), exe);
+    }
+}
+
+pub(super) fn open(
+    shell: &str,
+    cwd: &str,
+    size: PtySize,
+) -> anyhow::Result<(Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)> {
+    // Only an executable name is accepted, matching Terminals::open_with_shell.
+    // Quotes cannot occur in a Windows file name; reject instead of interpreting.
+    anyhow::ensure!(!shell.contains('"'), "invalid shell executable name");
+    // Retain portable-pty's registry-refreshed Windows environment, including
+    // PATH updates made after Zeron started.
+    let builder = CommandBuilder::new(shell);
+    let executable = resolve_shell(shell, builder.get_env("PATH"))?;
     let executable = wide(executable.as_os_str())?;
     let mut command = vec![b'"' as u16];
     command.extend_from_slice(&executable[..executable.len() - 1]);

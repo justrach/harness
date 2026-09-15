@@ -29,9 +29,11 @@ set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
 ACP, Claude, Codex, and opencode search PATH and known native installation
 directories. Discovery is PATHEXT-aware: npm's `.cmd` shims (and any `.bat`)
 resolve like `cmd.exe` would — per directory, extensions in PATHEXT order —
-and spawn through `cmd.exe /d /s /c` inside the same Job Object, so npm-
+and spawn through `cmd.exe /e:ON /v:OFF /d /c` inside the same Job Object, so npm-
 installed agents (`codex`, `opencode`, `pi-acp`, a bare `npm i -g grok`)
-work without following `node_modules` payloads. GUI launches additionally
+work without following `node_modules` payloads. Batch arguments containing
+CR/LF and batch executable paths containing percent expansion syntax are rejected.
+GUI launches additionally
 backfill `%APPDATA%\npm`, `%LOCALAPPDATA%\{pnpm,Programs\nodejs,Volta\bin}`,
 scoop shims, and `%USERPROFILE%\{.local\bin,.bun\bin}` from PATH. Managed
 JavaScript adapters run through Node; installation requires `node.exe` beside
@@ -43,7 +45,8 @@ only diagnostic. Terminals use ConPTY. Windows agents, login commands, adapter
 installs, and terminals own their child process trees through Job Objects.
 Terminal close waits up to five seconds for cleanup and reports failure;
 shutdown/drop log failures. Processes started through external services or
-brokers are outside this ownership.
+brokers are outside this ownership. Closing a terminal or exiting its shell also
+terminates processes detached inside that job (including `start` children).
 
 Frosted window chrome uses native Acrylic and requires Windows **Settings >
 Personalization > Colors > Transparency effects**. Content cards and popovers
