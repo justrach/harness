@@ -654,7 +654,6 @@ fn open_generated_file(
     relative: &Path,
 ) -> std::io::Result<(std::fs::File, Vec<std::fs::File>)> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    const FILE_READ_ATTRIBUTES: u32 = 0x80;
     const FILE_SHARE_READ: u32 = 1;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
@@ -662,7 +661,7 @@ fn open_generated_file(
     let invalid = || std::io::Error::other("Invalid generated image path");
     let open_directory = |path: &Path| -> std::io::Result<std::fs::File> {
         let file = std::fs::OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
+            .read(true)
             .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
