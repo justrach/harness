@@ -55,16 +55,16 @@ jobs:
           if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
+      - name: Native harness security and integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
       - name: Build application
         run: cargo build --release --locked -p zeron
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
         run: cargo test --release --locked -p zeron -p zeron-update
-      - name: Engine and harness unit tests
-        run: cargo test --release --locked -p zeron-engine -p zeron-harness --lib
-      - name: Native harness integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --test codex_availability --test windows_native
+      - name: Engine unit tests
+        run: cargo test --release --locked -p zeron-engine --lib
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests
