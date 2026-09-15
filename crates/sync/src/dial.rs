@@ -134,6 +134,27 @@ mod tests {
         s.parse().unwrap()
     }
 
+    #[tokio::test]
+    async fn stalled_upgrade_has_an_overall_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            accepted_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut dial = tokio::spawn(async move { connect_ws(&url).await });
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx).await.unwrap().unwrap();
+        // TCP is established. The peer never answers the HTTP upgrade.
+        tokio::time::pause();
+        let result = tokio::time::timeout(Duration::from_secs(21), &mut dial).await;
+        server.abort();
+        dial.abort();
+        let err = result.expect("dial remained stuck after 21 seconds").unwrap().unwrap_err();
+        assert!(matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
+    }
+
     #[test]
     fn interleaves_families_from_resolver_first_pick() {
         let ordered = interleave_families(vec![
