@@ -1000,8 +1000,16 @@ impl Theme {
     /// the re-apply in `appearance::apply` is what restores vibrancy when the
     /// user switches back to dark. See zed's `crates/zed/src/main.rs`, which
     /// runs the same loop on every settings change.
+    ///
+    /// Linux composites with alpha instead: the shell draws CSD chrome, and
+    /// rounded window corners (when floating) need the corner cutouts to be
+    /// genuinely transparent. The frost itself is opaque off macOS
+    /// ([`Self::GLASS_ALPHA`]), so nothing else shows through — only the
+    /// corners.
     pub fn window_background_appearance(&self) -> gpui::WindowBackgroundAppearance {
-        if self.is_glass() {
+        if cfg!(target_os = "linux") {
+            gpui::WindowBackgroundAppearance::Transparent
+        } else if self.is_glass() {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Opaque

@@ -48,6 +48,7 @@ use crate::markdown::parser::{
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
+use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
@@ -6697,65 +6698,21 @@ fn user_bubble_text(
         .into_any_element()
 }
 
-/// The transcript ErrorChip — a port of zeron chat-view.tsx `ErrorChip`
-/// (34px-minimum row, `rounded-[10px] border border-red-400/[0.16]
-/// bg-red-400/[0.05] px-2 text-[12px]`) with a 20px red-washed tile holding a
-/// 12px DangerTriangle (`bg-red-400/[0.12] text-red-300/80`), a medium
-/// "Error" label, then the human message at `text-foreground/80` — a subtle
-/// red-tinted wash, never a bare red-stroke box. Unlike the web port, the
-/// message WRAPS instead of truncating: startup-crash errors carry the
-/// agent's exit status and stderr, and a one-line ellipsis was exactly what
-/// made zeronsh/comet#95 undiagnosable from the screenshot.
+/// The transcript ErrorChip — the shared [`notice_chip`] in its tile
+/// treatment (a port of zeron chat-view.tsx `ErrorChip`, restacked for long
+/// payloads: header row with the red-washed tile and the medium "Error"
+/// label, then the human message below). Unlike the web port, the message
+/// WRAPS instead of truncating: startup-crash errors carry the agent's exit
+/// status and stderr, and a one-line ellipsis was exactly what made
+/// zeronsh/comet#95 undiagnosable from the screenshot.
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
-    let red_300 = theme.danger_muted; // tailwind red-300
-    let danger = theme.danger; // red-400
     div()
         .py(px(4.0))
         .w_full()
         .child(
-            div()
-                .min_h(px(34.0))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
+            notice_chip(theme, false, "Error", message, Tile)
                 .overflow_hidden()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(danger.opacity(0.16))
-                .bg(danger.opacity(0.05))
-                .px(px(8.0))
-                .py(px(7.0))
-                .text_size(px(12.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(20.0))
-                        .rounded(px(6.0))
-                        .bg(danger.opacity(0.12))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                                .size(px(12.0))
-                                .text_color(red_300.opacity(0.8)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(red_300.opacity(0.8))
-                        .child(SharedString::from("Error")),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_color(theme.text.opacity(0.8))
-                        .child(message),
-                ),
+                .w_full(),
         )
         .into_any_element()
 }

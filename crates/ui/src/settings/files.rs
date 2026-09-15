@@ -3,6 +3,7 @@
 use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
 
 use super::widgets;
+use crate::popover;
 use crate::{icons, theme::Theme};
 
 const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
@@ -18,6 +19,7 @@ pub enum FilesSettingsEvent {
 }
 
 pub struct FilesSettingsPage {
+    scroll: widgets::PageScroll,
     autosave_enabled: bool,
     autosave_delay_ms: u64,
     editor_font_size: f32,
@@ -37,6 +39,7 @@ impl FilesSettingsPage {
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            scroll: widgets::PageScroll::default(),
             autosave_enabled,
             autosave_delay_ms,
             editor_font_size,
@@ -59,6 +62,22 @@ impl FilesSettingsPage {
         }
         self.show_all_files = show_all_files;
         cx.notify();
+    }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for FilesSettingsPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
     }
 }
 
@@ -299,22 +318,32 @@ impl Render for FilesSettingsPage {
                     ),
             );
 
+        let scrollbar = popover::rail(self, "files-settings-page-scrollbar", &theme, cx);
         div()
-            .id("files-settings-page")
+            .id("files-settings-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(&theme, "Files", None))
+                div()
+                    .id("files-settings-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
                     .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Control how workspace files are displayed and saved while you edit.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
-                    .child(card),
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Files", None))
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Control how workspace files are displayed and saved while you edit.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
+                            )
+                            .child(card),
+                    ),
             )
+            .children(scrollbar)
     }
 }

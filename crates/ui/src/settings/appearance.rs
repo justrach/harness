@@ -37,11 +37,15 @@ struct ImportDialog {
 }
 
 pub struct AppearancePage {
+    scroll: crate::settings::widgets::PageScroll,
     selected_font: UiFontFamily,
     selected_size: UiFontSize,
     font_focus: FocusHandle,
     size_focus: FocusHandle,
     font_menu: Popup<()>,
+    /// Floating rail for the interface-font dropdown (the menu-scrollbar
+    /// treatment, on the menu's own scroll host).
+    font_list: widgets::PageScroll,
     size_menu: Popup<()>,
     font_menu_dismissed_at: Option<std::time::Instant>,
     size_menu_dismissed_at: Option<std::time::Instant>,
@@ -56,11 +60,13 @@ pub struct AppearancePage {
 impl AppearancePage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            scroll: crate::settings::widgets::PageScroll::default(),
             selected_font: typography::effective(cx),
             selected_size: typography::font_size(cx),
             font_focus: cx.focus_handle(),
             size_focus: cx.focus_handle(),
             font_menu: Popup::default(),
+            font_list: widgets::PageScroll::default(),
             size_menu: Popup::default(),
             font_menu_dismissed_at: None,
             size_menu_dismissed_at: None,
@@ -121,6 +127,9 @@ impl AppearancePage {
             self.close_font_menu(cx);
         } else if !just_dismissed {
             self.selected_font = typography::effective(cx);
+            // Every open starts at the top, and the rail's baseline with it —
+            // no reopen flash from the previous session's offset.
+            self.font_list.reset();
             self.font_menu.open(());
         }
         cx.notify();
@@ -422,6 +431,30 @@ impl AppearancePage {
             }
         }
         cx.notify();
+    }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+
+    fn on_font_list_hover(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.font_list.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for AppearancePage {
+    // The page's rail; the font dropdown's rail goes through [`widgets::rail`],
+    // which can serve a second scroll host on the same view.
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
     }
 }
 
@@ -2329,17 +2362,37 @@ impl Render for AppearancePage {
             })
             .collect();
 
+        // Card-bleed scroll host (see [`popover::menu_scroll_host`]): the
+        // menu card carries nothing but this host, so the bleed runs
+        // vertically too and the rail mounts as a sibling of the scroller,
+        // above its clip.
+        let font_menu_scrollbar = widgets::rail(
+            &mut self.font_list,
+            "interface-font-scrollbar",
+            &theme,
+            cx,
+            |page| &mut page.font_list,
+        );
         let font_menu = popover::popover_card(&theme)
-            .id("interface-font-scroll")
+            .id("interface-font-card")
             .w(px(220.0))
             .font_family(fixed.clone())
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_font_menu(cx)))
-            .max_h(px(320.0))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(font_rows)
+            .child(
+                popover::menu_scroll_host("interface-font-host")
+                    .my(px(-popover::CARD_INSET))
+                    .on_hover(cx.listener(Self::on_font_list_hover))
+                    .child(
+                        popover::menu_scroll_list("interface-font-scroll", &self.font_list.scroll)
+                            .max_h(px(320.0))
+                            .py(px(popover::CARD_INSET))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(font_rows),
+                    )
+                    .children(font_menu_scrollbar),
+            )
             .into_any_element();
 
         let font_trigger = div()
@@ -2473,95 +2526,108 @@ impl Render for AppearancePage {
                 ))
             });
 
+        let scrollbar = popover::rail(self, "appearance-page-scrollbar", &theme, cx);
         div()
-            .id("appearance-page")
+            .id("appearance-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(&theme, "Appearance", None))
+                div()
+                    .id("appearance-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
                     .child(
-                        widgets::page_subtitle(
-                            &theme,
-                            "Choose how Zeron looks. These settings stay on this device.",
-                        )
-                        .max_w(px(512.0))
-                        .line_height(px(20.0)),
-                    )
-                    .child(
-                        div()
-                            .mt(px(32.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .child(widgets::field_label(&theme, "Appearance"))
-                            .child(widgets::option_card_row().children(cards)),
-                    )
-                    .child(widgets::section_card(&theme).children(settings_rows))
-                    .child(
-                        div()
-                            .mt(px(36.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.0))
-                            .font_family(fixed.clone())
+                        widgets::page_column()
+                            .child(widgets::page_header(&theme, "Appearance", None))
+                            .child(
+                                widgets::page_subtitle(
+                                    &theme,
+                                    "Choose how Zeron looks. These settings stay on this device.",
+                                )
+                                .max_w(px(512.0))
+                                .line_height(px(20.0)),
+                            )
                             .child(
                                 div()
+                                    .mt(px(32.0))
                                     .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(24.0))
+                                    .flex_col()
+                                    .gap(px(12.0))
+                                    .child(widgets::field_label(&theme, "Appearance"))
+                                    .child(widgets::option_card_row().children(cards)),
+                            )
+                            .child(widgets::section_card(&theme).children(settings_rows))
+                            .child(
+                                div()
+                                    .mt(px(36.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.0))
+                                    .font_family(fixed.clone())
                                     .child(
                                         div()
-                                            .min_w_0()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(4.0))
-                                            .child(widgets::field_label(&theme, "Interface font"))
-                                            .child(
-                                                div()
-                                                    .max_w(px(520.0))
-                                                    .text_size(typography::ui_rems(12.0))
-                                                    .line_height(px(18.0))
-                                                    .text_color(theme.text_muted)
-                                                    .child(SharedString::from(
-                                                        "Used across the interface and conversations. Code, diffs, and terminal keep their current fonts and sizes.",
-                                                    )),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .gap(px(8.0))
-                                            .child(font_trigger)
-                                            .child(size_trigger),
-                                    ),
-                            )
-                            .when(requested_font != effective_font, |section| {
-                                section.child(
-                                    widgets::error_strip(
-                                        &theme,
-                                        "This font could not be loaded. Comet is using Geist.",
+                                            .justify_between()
+                                            .gap(px(24.0))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(4.0))
+                                                    .child(widgets::field_label(
+                                                        &theme,
+                                                        "Interface font",
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .max_w(px(520.0))
+                                                            .text_size(typography::ui_rems(12.0))
+                                                            .line_height(px(18.0))
+                                                            .text_color(theme.text_muted)
+                                                            .child(SharedString::from(
+                                                                "Used across the interface and conversations. Code, diffs, and terminal keep their current fonts and sizes.",
+                                                            )),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap(px(8.0))
+                                                    .child(font_trigger)
+                                                    .child(size_trigger),
+                                            ),
                                     )
-                                    .font_family(fixed.clone()),
+                                    .when(requested_font != effective_font, |section| {
+                                        section.child(
+                                            widgets::error_strip(
+                                                &theme,
+                                                "This font could not be loaded. Comet is using Geist.",
+                                            )
+                                            .font_family(fixed.clone()),
+                                        )
+                                    }),
+                            )
+                            .when_some(library_warning, |page, warning| {
+                                page.child(
+                                    div()
+                                        .mt(px(8.0))
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .text_color(theme.warning)
+                                        .child(warning),
                                 )
                             }),
-                    )
-                    .when_some(library_warning, |page, warning| {
-                        page.child(
-                            div()
-                                .mt(px(8.0))
-                                .text_size(crate::typography::ui_rems(11.5))
-                                .text_color(theme.warning)
-                                .child(warning),
-                        )
-                    }),
+                    ),
             )
+            .children(scrollbar)
             .children(modal)
     }
 }
