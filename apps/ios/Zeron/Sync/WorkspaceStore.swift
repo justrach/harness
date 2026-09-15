@@ -55,9 +55,10 @@ final class WorkspaceStore {
     @ObservationIgnored private var registryJoinedAt: Int64?
     private let config: AppConfig
 
-    init(config: AppConfig) {
+    init(config: AppConfig, doc: RegistryDoc? = nil) {
         self.config = config
-        self.doc = RegistryDoc(deviceId: config.deviceId)
+        self.doc = doc ?? RegistryDoc(deviceId: config.deviceId)
+        project()
     }
 
     func start() {
@@ -416,11 +417,11 @@ final class WorkspaceStore {
 
     // MARK: Derived views
 
-    /// state.rs `overview_chats`: every non-archived chat of a live space,
+    /// state.rs `overview_chats`: every non-archived projectless chat or chat of a live space,
     /// attention-sorted.
     var overviewChats: [Chat] {
         let liveSpaceIds = Set(spaces.map(\.id))
-        let live = chats.filter { !$0.archived && $0.spaceId.map(liveSpaceIds.contains) == true }
+        let live = chats.filter { !$0.archived && ($0.spaceId.map(liveSpaceIds.contains) ?? true) }
         return sortPinnedFirst(live, pinnedSessionIds: pinnedSessionIds)
     }
 
@@ -690,18 +691,30 @@ final class WorkspaceStore {
     @discardableResult
     func createChat(space: Space, config chatConfig: ChatConfig,
                     branch: String? = nil, cwd: String? = nil) -> String {
+        createChat(deviceId: space.deviceId, spaceId: space.id, cwd: cwd ?? space.path,
+                   config: chatConfig, branch: branch)
+    }
+
+    /// Same local registry write and offline outbox as project sessions.
+    @discardableResult
+    func createProjectlessChat(deviceId: String, config: ChatConfig) -> String {
+        createChat(deviceId: deviceId, spaceId: nil, cwd: "~", config: config, branch: nil)
+    }
+
+    private func createChat(deviceId: String, spaceId: String?, cwd: String,
+                            config chatConfig: ChatConfig, branch: String?) -> String {
         let chatId = UUID().uuidString.lowercased()
         var set: [String: JSONValue] = [
             "id": .string(chatId),
-            "deviceId": .string(space.deviceId),
+            "deviceId": .string(deviceId),
             "archived": .bool(false),
-            "cwd": .string(cwd ?? space.path),
-            "spaceId": .string(space.id),
+            "cwd": .string(cwd),
             "createdAt": .int(nowMs()),
             // Born on chat2 (workspace_host.rs create_chat): a brand-new
             // chat has an empty doc — nothing to seed, no migration race.
             "roomGen": .int(2),
         ]
+        if let spaceId { set["spaceId"] = .string(spaceId) }
         if let branch {
             set["branch"] = .string(branch)
         }

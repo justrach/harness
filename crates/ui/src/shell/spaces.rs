@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
-use gpui::FocusHandle;
+use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
 
@@ -313,7 +313,8 @@ fn compare_sidebar_chats(
 /// rows, keyboard highlight.
 pub(super) struct SpacesMenu {
     search: Entity<ComposerInput>,
-    /// Keyboard highlight within [`Shell::spaces_menu_rows`].
+    /// Keyboard highlight — an index into [`Shell::spaces_menu_rows`], or
+    /// that list's length when the pinned "New project…" footer holds it.
     active: usize,
     /// Tracked on the card — puts it on the keyboard dispatch path while the
     /// search input holds focus (the structure every working picker uses).
@@ -381,11 +382,6 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
     SidebarViewRow::ShowHarness,
 ];
 
-// With the search field and card insets, this lets the project picker grow to
-// roughly the same maximum footprint as the sidebar view-options menu while
-// retaining an internal scroll region for larger project lists.
-const SPACES_MENU_LIST_MAX_HEIGHT: f32 = 336.0;
-// Sidebar rhythm: every first-level surface shares Theme's 8px inline edge;
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
@@ -441,7 +437,9 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .child(chevron)
 }
 
-/// One row of the open dropdown, in display order.
+/// One activatable row of the open dropdown, in nav order. `AddSpace` names
+/// the card's pinned "New project…" footer, not a list row — keyboard nav
+/// maps the list-length index to it.
 #[derive(Clone, PartialEq)]
 pub(super) enum SpacesMenuRow {
     All,
@@ -531,6 +529,19 @@ pub(super) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
             theme.success.opacity(0.9) // emerald-400
         }
         ChatIndicator::Idle => crate::theme::ink(0.14),
+    }
+}
+
+// Handle-based rail host for the spaces dropdown: its list is a plain
+// tracked scroller, so the trait's default metrics/press/drag (off the live
+// ScrollHandle) apply unchanged.
+impl popover::ScrollRailHost for Shell {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        &mut self.spaces_menu_bar
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.spaces_menu.get().map(|menu| menu.list_scroll.clone())
     }
 }
 
@@ -654,6 +665,17 @@ impl Shell {
     pub(super) fn close_spaces_menu(&mut self, cx: &mut Context<Self>) {
         if self.spaces_menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.spaces_menu);
+            cx.notify();
+        }
+    }
+
+    fn on_spaces_menu_list_hover(
+        &mut self,
+        hovered: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.spaces_menu_bar.set_list_hovered(*hovered) {
             cx.notify();
         }
     }
@@ -938,9 +960,10 @@ impl Shell {
         cx.notify();
     }
 
-    /// The filter's display rows: "All projects", then spaces matching the
-    /// search (ranked — `popover::filter_indices`), then "New project…".
-    /// "All" only shows on an empty query (searching means hunting a space).
+    /// The filter's scrollable rows: "All projects", then spaces matching
+    /// the search (ranked — `popover::filter_indices`). "All" only shows on
+    /// an empty query (searching means hunting a space). The "New project…"
+    /// action is not a row here — the card renders it as a pinned footer.
     fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
         let query = self
             .spaces_menu
@@ -962,7 +985,6 @@ impl Shell {
                 .into_iter()
                 .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
         );
-        rows.push(SpacesMenuRow::AddSpace);
         rows
     }
 
@@ -990,6 +1012,9 @@ impl Shell {
             list_scroll: gpui::ScrollHandle::new(),
             _search_events: search_events,
         });
+        // Fresh handle at the top — don't let the stale rail baseline read
+        // the reopen as scrolling.
+        self.spaces_menu_bar.clear_scroll_baseline();
         let rows = self.spaces_menu_rows(cx);
         let start = match &current {
             None => 0,
@@ -1036,22 +1061,32 @@ impl Shell {
                 cx.stop_propagation();
             }
             popover::MenuKey::Up | popover::MenuKey::Down => {
-                let count = self.spaces_menu_rows(cx).len();
+                let rows = self.spaces_menu_rows(cx);
+                // +1: the pinned footer stays in the nav order, exactly as
+                // when it was the list's last row.
+                let count = rows.len() + 1;
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(menu) = self.spaces_menu.open_mut() {
                     menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
-                    menu.list_scroll.scroll_to_item(menu.active);
+                    // The footer renders below the scroller — only in-list
+                    // rows can be scrolled to (the footer index would leave
+                    // a request pending against a row that never exists).
+                    if menu.active < rows.len() {
+                        menu.list_scroll.scroll_to_item(menu.active);
+                    }
                     cx.notify();
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let row = {
-                    let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
-                    self.spaces_menu_rows(cx).get(active).cloned()
+                let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
+                let rows = self.spaces_menu_rows(cx);
+                // One past the scrollable rows is the pinned footer.
+                let row = if active < rows.len() {
+                    rows[active].clone()
+                } else {
+                    SpacesMenuRow::AddSpace
                 };
-                if let Some(row) = row {
-                    self.activate_spaces_menu_row(row, cx);
-                }
+                self.activate_spaces_menu_row(row, cx);
             }
             popover::MenuKey::Backspace | popover::MenuKey::Other => {}
         }
@@ -1466,95 +1501,88 @@ impl Shell {
             )
         };
         let rows = self.spaces_menu_rows(cx);
+        let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
         let filter = self.settings.space_filter.clone();
-        let now = Utc::now();
-        // (name, device tag) per space row — presence reuses the session
-        // rows' heartbeat signal.
-        let details: Vec<(SpacesMenuRow, SharedString, Option<SharedString>, bool)> = {
+        // (row, label, offline, selected) per scrollable row — same plain
+        // label-row treatment as the chat composer's project menu; an
+        // offline project wears only the tiny disconnect glyph. Consumes
+        // `rows` so the list children never re-clone per frame.
+        let details: Vec<(SpacesMenuRow, SharedString, bool, bool)> = {
             let state = self.state.read(cx);
-            rows.iter()
+            rows.into_iter()
                 .map(|row| match row {
-                    SpacesMenuRow::All => {
-                        (row.clone(), SharedString::from("All projects"), None, false)
-                    }
-                    SpacesMenuRow::Space(id) => match state.space_row(id) {
-                        Some(space) => {
-                            let (tag, offline) = state.space_device_tag(space, now);
-                            (
-                                row.clone(),
-                                space.display_name().to_string().into(),
-                                Some(tag.into()),
-                                offline,
-                            )
+                    SpacesMenuRow::All => (
+                        SpacesMenuRow::All,
+                        SharedString::from("All projects"),
+                        false,
+                        filter.is_none(),
+                    ),
+                    SpacesMenuRow::Space(id) => {
+                        let selected = filter.as_deref() == Some(id.as_str());
+                        match state.space_row(&id) {
+                            Some(space) => {
+                                let (_, offline) = state.space_device_tag(space, Utc::now());
+                                (
+                                    SpacesMenuRow::Space(id),
+                                    space.display_name().to_string().into(),
+                                    offline,
+                                    selected,
+                                )
+                            }
+                            None => (
+                                SpacesMenuRow::Space(id),
+                                SharedString::from("?"),
+                                false,
+                                selected,
+                            ),
                         }
-                        None => (row.clone(), SharedString::from("?"), None, false),
-                    },
-                    SpacesMenuRow::AddSpace => {
-                        (row.clone(), SharedString::from("New project…"), None, false)
                     }
+                    // spaces_menu_rows never yields this variant — the
+                    // footer is rendered by the card, not the list.
+                    SpacesMenuRow::AddSpace => unreachable!(),
                 })
                 .collect()
         };
+        // The pinned footer's keyboard-nav index: one past the last
+        // scrollable row, its permanent place at the end of the nav order.
+        let add_index = details.len();
 
-        let list =
-            div()
-                .id("spaces-menu-list")
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .max_h(px(SPACES_MENU_LIST_MAX_HEIGHT))
-                .overflow_y_scroll()
-                .track_scroll(&list_scroll)
-                .children(details.into_iter().enumerate().map(
-                    |(ix, (row, label, tag, offline))| {
-                        let is_selected = match &row {
-                            SpacesMenuRow::All => filter.is_none(),
-                            SpacesMenuRow::Space(id) => filter.as_deref() == Some(id.as_str()),
-                            SpacesMenuRow::AddSpace => false,
-                        };
-                        let leading = match &row {
-                            SpacesMenuRow::AddSpace => icons::PLUS,
-                            _ => icons::FOLDER,
-                        };
-                        let menu_space = match &row {
-                            SpacesMenuRow::Space(id) => Some(id.clone()),
-                            _ => None,
-                        };
-                        let activate = row.clone();
-                        popover::menu_row_nav(
-                            theme,
-                            is_selected,
-                            ix == active,
-                            format!("spaces-menu-row-{ix}"),
-                        )
-                        .id(("spaces-menu-row", ix))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.activate_spaces_menu_row(activate.clone(), cx);
-                        }))
-                        .when_some(menu_space, |el, space_id| {
-                            el.on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.space_menu.open((space_id.clone(), event.position));
-                                    cx.notify();
-                                }),
+        let list = popover::menu_scroll_host("spaces-menu-list-host")
+            .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
+            .child(
+                popover::menu_scroll_list("spaces-menu-list", &list_scroll)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    // Same scroll budget as the composer project menu.
+                    .max_h(px(224.0))
+                    .children(details.into_iter().enumerate().map(
+                        |(ix, (row, label, offline, selected))| {
+                            let menu_space = match &row {
+                                SpacesMenuRow::Space(id) => Some(id.clone()),
+                                _ => None,
+                            };
+                            let activate = row;
+                            popover::menu_row_nav(
+                                theme,
+                                selected,
+                                ix == active,
+                                format!("spaces-menu-row-{ix}"),
                             )
-                        })
-                        .child(
-                            icon(leading)
-                                .size(px(15.0))
-                                .flex_none()
-                                .text_color(theme.text_muted.opacity(0.8)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .when_some(tag, |el, tag| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(10.0))
-                                    .text_color(theme.text_muted.opacity(0.45))
-                                    .child(tag),
-                            )
+                            .id(("spaces-menu-row", ix))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_spaces_menu_row(activate.clone(), cx);
+                            }))
+                            .when_some(menu_space, |el, space_id| {
+                                el.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        this.space_menu.open((space_id.clone(), event.position));
+                                        cx.notify();
+                                    }),
+                                )
+                            })
+                            .child(div().flex_1().min_w_0().truncate().child(label))
                             // Disconnected glyph, not the word (user request).
                             .when(offline, |el| {
                                 el.child(
@@ -1564,11 +1592,12 @@ impl Shell {
                                         .text_color(theme.warning.opacity(0.8)),
                                 )
                             })
-                        })
-                        // No check glyph — the selected row's wash (menu_row's
-                        // active styling) is the selection signal.
-                    },
-                ));
+                            // No check glyph — the selected row's wash (menu_row's
+                            // active styling) is the selection signal.
+                        },
+                    )),
+            )
+            .children(scrollbar);
 
         popover::popover_card(theme)
             // Match the trigger row as the sidebar is resized. Both live
@@ -1583,11 +1612,53 @@ impl Shell {
             }))
             .flex()
             .flex_col()
+            // Same 2px rhythm as the composer project menu's root.
+            .gap(px(2.0))
             .child(popover::search_input_frame(
                 theme,
                 search.into_any_element(),
             ))
             .child(list)
+            // "New project…" is a pinned action row under the list (the
+            // chat composer's project menu treatment) — scrolling must
+            // never carry it away, and its nav index (`add_index`) keeps it
+            // LAST.
+            .child(
+                // Full-bleed through the card's 4px inset — a divider
+                // stopping short of the edges reads as a mistake (the
+                // composer project menu's treatment).
+                div()
+                    .my(px(2.0))
+                    .mx(px(-popover::CARD_INSET))
+                    .h(px(1.0))
+                    .flex_none()
+                    .bg(theme.border.opacity(0.6)),
+            )
+            .child(
+                popover::menu_row_nav(
+                    theme,
+                    false,
+                    active == add_index,
+                    "spaces-menu-add".to_string(),
+                )
+                .id("spaces-menu-add")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.activate_spaces_menu_row(SpacesMenuRow::AddSpace, cx);
+                }))
+                .child(
+                    icon(icons::PLUS)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted.opacity(0.7)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from("New project…")),
+                ),
+            )
             .into_any_element()
     }
 

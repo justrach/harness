@@ -3,16 +3,46 @@
 use gpui::{Bounds, ImageAlphaMask, Pixels, RenderImage, Window, point, px, size};
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
+// Reveal half-strength artwork through the cutout's darkest area. The main
+// masked pass preserves its contour, while this underlay softens its contrast.
+pub(crate) const CUTOUT_REVEAL_OPACITY: f32 = 0.5;
+
 pub(crate) type SurfaceBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
 
-fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>) -> ImageAlphaMask {
+fn mask(bounds: Bounds<Pixels>, composer: Bounds<Pixels>, cutout: bool) -> ImageAlphaMask {
     let height = f32::from(bounds.size.height);
+    // Keep the cleared area open through the hero's bottom. A taller image
+    // must not fade back in beneath the composer's rounded lower edge.
+    let cleared = Bounds::new(
+        composer.origin,
+        size(
+            composer.size.width,
+            composer.bottom().max(bounds.bottom()) - composer.top(),
+        ),
+    );
     ImageAlphaMask {
-        bounds: composer,
-        radius: px(crate::composer::COMPOSER_RADIUS),
-        feather: px((height * 0.52).clamp(120.0, 220.0)),
-        clearance: px(8.0),
-        bottom_fade: Some((bounds.bottom(), px((height * 0.22).max(1.0)))),
+        // The reveal pass has only the shared bottom fade. Its exclusion sits
+        // below the image, so it fills the cutout without changing its shape.
+        bounds: if cutout {
+            cleared
+        } else {
+            Bounds::new(point(bounds.left(), bounds.bottom() + px(1.0)), bounds.size)
+        },
+        radius: if cutout {
+            px(crate::composer::COMPOSER_RADIUS)
+        } else {
+            px(0.0)
+        },
+        feather: if cutout {
+            px((height * 0.52).clamp(120.0, 280.0))
+        } else {
+            px(1.0)
+        },
+        clearance: if cutout { px(8.0) } else { px(0.0) },
+        // Start fading at the image's top, rather than holding full opacity
+        // through its first 40% and compressing the transition near the bottom.
+        // Both passes use the full height, independently of the softer cutout.
+        bottom_fade: Some((bounds.bottom(), px(height.max(1.0)))),
     }
 }
 
@@ -23,6 +53,7 @@ pub(crate) fn paint(
     source: Arc<RenderImage>,
     bounds: Bounds<Pixels>,
     composer: Bounds<Pixels>,
+    cutout: bool,
     window: &mut Window,
 ) {
     let width = f32::from(bounds.size.width);
@@ -47,7 +78,7 @@ pub(crate) fn paint(
         source,
         0,
         false,
-        Some(mask(bounds, composer)),
+        Some(mask(bounds, composer, cutout)),
     );
 }
 
@@ -82,7 +113,7 @@ mod tests {
                             move |bounds, _, window, _| {
                                 painted.set(surface.get());
                                 if let Some(composer) = surface.get() {
-                                    paint(source, bounds, composer, window);
+                                    paint(source, bounds, composer, true, window);
                                 }
                             },
                         )
@@ -157,11 +188,47 @@ mod tests {
                     point(px(sidebar + 40.5), px(360.25)),
                     size(px(900.0 - sidebar - right_panel), px(124.0)),
                 );
-                let mask = mask(hero, composer);
+                let mask = mask(hero, composer, true);
                 assert_eq!(mask.bounds, composer);
-                assert_eq!(mask.bottom_fade, Some((px(480.0), px(96.8))));
-                assert_eq!(mask.feather, px(220.0));
+                assert_eq!(mask.bottom_fade, Some((px(480.0), px(440.0))));
+                assert_eq!(mask.feather, px(440.0 * 0.52));
                 assert_eq!(mask.clearance, px(8.0));
+            }
+        }
+    }
+
+    #[test]
+    fn taller_background_stays_cleared_below_the_composer() {
+        let hero = Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(691.2)));
+        let composer = Bounds::new(point(px(352.0), px(406.0)), size(px(736.0), px(124.0)));
+        let mask = mask(hero, composer, true);
+        assert_eq!(mask.bounds.origin, composer.origin);
+        assert_eq!(mask.bounds.size.width, composer.size.width);
+        assert_eq!(mask.bounds.bottom(), hero.bottom());
+        assert_eq!(mask.feather, px(280.0));
+    }
+    #[test]
+    fn new_thread_cutout_reveal_preserves_the_bottom_fade_and_image_extent() {
+        let hero = Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(691.2)));
+        let composer = Bounds::new(point(px(352.0), px(406.0)), size(px(736.0), px(124.0)));
+        let cutout = mask(hero, composer, true);
+        let reveal = mask(hero, composer, false);
+        assert_eq!(cutout.bottom_fade, reveal.bottom_fade);
+        assert!(reveal.bounds.top() - reveal.feather >= hero.bottom());
+        assert_eq!(reveal.radius, px(0.0));
+        assert_eq!(reveal.clearance, px(0.0));
+        assert_eq!(CUTOUT_REVEAL_OPACITY, 0.5);
+    }
+
+    #[test]
+    fn new_thread_main_fade_uses_the_full_height_at_every_window_size() {
+        for height in [288.0, 489.6, 691.2, 760.0] {
+            let hero = Bounds::new(point(px(224.25), px(40.5)), size(px(1000.0), px(height)));
+            let composer = Bounds::new(point(px(352.0), px(406.0)), size(px(736.0), px(124.0)));
+            for cutout in [false, true] {
+                let (end, feather) = mask(hero, composer, cutout).bottom_fade.unwrap();
+                assert!((f32::from(end - feather - hero.top())).abs() < 0.0001);
+                assert_eq!(end, hero.bottom());
             }
         }
     }

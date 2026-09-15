@@ -1,3 +1,5 @@
+#[path = "browser-fixture/transcript_links.rs"]
+mod transcript_links;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
@@ -166,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         let settings = settings::UiSettings::default();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
-        typography::init(settings.ui_font_family.clone(), settings.ui_font_size, fonts, cx);
+        typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx);
         appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection, settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths,
@@ -196,6 +198,9 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
+                    return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
+                }
                 state.update(cx, |s, cx| {
                     let entries = serde_json::from_value(serde_json::json!([
                         {"id":"fixture-user","role":"user","parts":[{"id":"text","kind":"text","text":"Build a calm, thoughtful workspace for Fieldnotes. Let’s preview the landing page beside this conversation."}],"createdAt":1788900000000_i64,"deviceId":"local"},

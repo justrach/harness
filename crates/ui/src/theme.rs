@@ -739,8 +739,14 @@ pub struct Theme {
     pub font_sans: SharedString,
     /// Fixed Geist chrome for code-adjacent surfaces and recovery controls.
     pub font_sans_fixed: SharedString,
-    /// Monospace family for code/terminal.
+    /// User-selected family for code, diffs, and file editors.
     pub font_mono: SharedString,
+    /// User-selected family for terminal output.
+    pub font_terminal: SharedString,
+    /// Absolute pixel sizes for those two surfaces. They live on the theme
+    /// because every render site that needs them already holds a `Theme`.
+    pub code_font_size: f32,
+    pub terminal_font_size: f32,
     /// Explicit system fallbacks, for callers that want to skip the lookup.
     pub font_sans_fallback: SharedString,
     pub font_mono_fallback: SharedString,
@@ -924,6 +930,35 @@ impl Theme {
             ))
     }
 
+    /// Move toward the right pane tone while keeping the backdrop visible.
+    /// Solve the overlay in RGB: target = tint * alpha + canvas * (1 - alpha).
+    pub fn composer_sidebar_tint(&self) -> Hsla {
+        let target = if self.is_glass() {
+            flatten(self.bg.opacity(0.4), flatten(self.glass(), self.bg))
+        } else {
+            self.bg
+        };
+        // The transcript has no fill of its own: its canvas is the shell glass.
+        let canvas = flatten(self.glass(), self.bg);
+        let canvas = hsl_to_rgb(canvas.h, canvas.s, canvas.l);
+        let target = hsl_to_rgb(target.h, target.s, target.l);
+        let mut alpha: f32 = 0.60;
+        for (base, desired) in canvas.into_iter().zip(target) {
+            let needed = if desired > base {
+                (desired - base) / (1.0 - base).max(f32::EPSILON)
+            } else {
+                (base - desired) / base.max(f32::EPSILON)
+            };
+            alpha = alpha.max(needed);
+        }
+        let rgb = std::array::from_fn::<_, 3, _>(|i| {
+            ((target[i] - canvas[i] * (1.0 - alpha)) / alpha).clamp(0.0, 1.0)
+        });
+        let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
+        // Use the compensated hue, but leave 85% of the blurred backdrop visible.
+        hsla(h, s, l, 0.15)
+    }
+
     /// Shared fill for the composer, queue tray, and input panels. Without
     /// frost, composite the theme's input tint onto the page to preserve its
     /// color while hiding the transcript and overlapping surfaces underneath.
@@ -971,8 +1006,16 @@ impl Theme {
     /// the re-apply in `appearance::apply` is what restores vibrancy when the
     /// user switches back to dark. See zed's `crates/zed/src/main.rs`, which
     /// runs the same loop on every settings change.
+    ///
+    /// Linux composites with alpha instead: the shell draws CSD chrome, and
+    /// rounded window corners (when floating) need the corner cutouts to be
+    /// genuinely transparent. The frost itself is opaque off macOS
+    /// ([`Self::GLASS_ALPHA`]), so nothing else shows through — only the
+    /// corners.
     pub fn window_background_appearance(&self) -> gpui::WindowBackgroundAppearance {
-        if self.is_glass() {
+        if cfg!(target_os = "linux") {
+            gpui::WindowBackgroundAppearance::Transparent
+        } else if self.is_glass() {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Opaque
@@ -1046,6 +1089,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1142,6 +1188,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1161,6 +1210,26 @@ impl Theme {
 
     fn with_font_sans(mut self, family: SharedString) -> Self {
         self.font_sans = family;
+        self
+    }
+
+    fn with_font_mono(mut self, family: SharedString) -> Self {
+        self.font_mono = family;
+        self
+    }
+
+    fn with_font_terminal(mut self, family: SharedString) -> Self {
+        self.font_terminal = family;
+        self
+    }
+
+    fn with_code_font_size(mut self, size: f32) -> Self {
+        self.code_font_size = size;
+        self
+    }
+
+    fn with_terminal_font_size(mut self, size: f32) -> Self {
+        self.terminal_font_size = size;
         self
     }
 
@@ -1300,7 +1369,11 @@ impl Theme {
             .is_some_and(|theme| theme.accent_color != accent);
         set_current_appearance(appearance);
         let next = Self::for_preferences(appearance, accent)
-            .with_font_sans(crate::typography::effective_family_name(cx));
+            .with_font_sans(crate::typography::effective_family_name(cx))
+            .with_font_mono(crate::typography::code_effective_family_name(cx))
+            .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+            .with_code_font_size(crate::typography::code_font_size(cx))
+            .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
@@ -1358,7 +1431,11 @@ impl Theme {
     ) {
         let next =
             Self::for_selection(appearance, variant_id, accent_selection, surface_preference)
-                .with_font_sans(crate::typography::effective_family_name(cx));
+                .with_font_sans(crate::typography::effective_family_name(cx))
+                .with_font_mono(crate::typography::code_effective_family_name(cx))
+                .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+                .with_code_font_size(crate::typography::code_font_size(cx))
+                .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
@@ -2622,6 +2699,36 @@ mod tests {
         assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
         // Out-of-range t clamps.
         assert_eq!(mix(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn composer_tint_moves_toward_sidebar_without_hiding_backdrop() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            for (canvas, shell) in [
+                (theme.bg, theme.surface),
+                (hsla(0.58, 0.3, 0.12, 1.0), hsla(0.62, 0.25, 0.22, 1.0)),
+                (hsla(0.12, 0.2, 0.93, 1.0), hsla(0.08, 0.15, 0.82, 1.0)),
+            ] {
+                theme.bg = canvas;
+                theme.surface = shell;
+                let tint = theme.composer_sidebar_tint();
+                let expected = if theme.is_glass() {
+                    flatten(theme.bg.opacity(0.4), flatten(theme.glass(), theme.bg))
+                } else {
+                    theme.bg
+                };
+                let actual = flatten(tint, flatten(theme.glass(), theme.bg));
+                let base = flatten(theme.glass(), theme.bg);
+                let base_rgb = hsl_to_rgb(base.h, base.s, base.l);
+                let target_rgb = hsl_to_rgb(expected.h, expected.s, expected.l);
+                let actual_rgb = hsl_to_rgb(actual.h, actual.s, actual.l);
+                for i in 0..3 {
+                    assert!(actual_rgb[i] >= base_rgb[i].min(target_rgb[i]) - 0.0001);
+                    assert!(actual_rgb[i] <= base_rgb[i].max(target_rgb[i]) + 0.0001);
+                }
+                assert_eq!(tint.a, 0.15);
+            }
+        }
     }
 
     #[test]

@@ -34,6 +34,7 @@ use zeron_rpc::{RpcError, methods};
 use crate::appshots::{self, CapturedAppshot};
 use crate::attachments::{self, StagedAttachment};
 use crate::motion;
+use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
 use crate::settings::{ComposerSendBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
@@ -3894,11 +3895,6 @@ fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
-/// Restart a popup's row stack at the top (fresh open / query / result set).
-fn reset_scroll_offset(scroll: &gpui::ScrollHandle) {
-    scroll.set_offset(gpui::Point::new(px(0.0), px(0.0)));
-}
-
 /// The `/` must open the input: slash commands are whole-prompt prefixes
 /// (`/compact`, `/goal ship it`), so only the first token triggers, and a
 /// query containing another `/` (a typed path) never does.
@@ -4117,6 +4113,8 @@ pub struct Composer {
     /// from here, so mid-flight reversals hand off without a jump.
     last_rendered_height: f32,
     dock_frame: Option<crate::composer_dock::DockFrame>,
+    /// The shared clock owns this frame's height, including its final step.
+    dock_height_changed: bool,
     dock_clearance_correction: f32,
     surface_bounds: crate::new_thread_background_mask::SurfaceBounds,
     last_target_height: f32,
@@ -4141,6 +4139,9 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         let changed = self.dock_frame != Some(frame);
+        self.dock_height_changed |= self
+            .dock_frame
+            .is_none_or(|previous| previous.amount != frame.amount);
         self.dock_frame = Some(frame);
         if frame.active {
             self.flip_morph = None;
@@ -4310,6 +4311,7 @@ impl Composer {
             flip_morph: None,
             last_rendered_height: 0.0,
             dock_frame: None,
+            dock_height_changed: false,
             dock_clearance_correction: 0.0,
             surface_bounds: Default::default(),
             last_target_height: 0.0,
@@ -5046,7 +5048,7 @@ impl Composer {
             self.mention.results.clear();
             self.mention.active = None;
             // Fresh open: the row stack restarts at the top.
-            reset_scroll_offset(&self.mention_scroll);
+            crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
@@ -5123,7 +5125,10 @@ impl Composer {
                             composer.mention.active = (!results.is_empty()).then_some(0);
                             composer.mention.results = results;
                             // New result set: the row stack restarts at the top.
-                            reset_scroll_offset(&composer.mention_scroll);
+                            crate::popover::reset_menu_scroll(
+                                &composer.mention_scroll,
+                                &mut composer.popup_bar,
+                            );
                         }
                         Err(err) => tracing::warn!(%err, "file mention response decode failed"),
                     },
@@ -5185,7 +5190,7 @@ impl Composer {
     }
 
     fn render_file_mention_popup(
-        &self,
+        &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
@@ -5202,9 +5207,6 @@ impl Composer {
                     window.focus(&this.input.focus_handle(cx), cx);
                 }),
             )
-            // GPUI dispatches this captured stream while the thumb is
-            // dragged, including when the pointer has left the popup.
-            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && self.mention.results.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -5313,12 +5315,7 @@ impl Composer {
                             .track_scroll(&self.mention_scroll)
                             .children(rows),
                     )
-                    .children(self.popup_scrollbar(
-                        "mention-scrollbar",
-                        &self.mention_scroll,
-                        theme,
-                        cx,
-                    )),
+                    .children(crate::popover::rail(self, "mention-scrollbar", theme, cx)),
             );
         }
         Some(crate::popover::full_width_menu_above(
@@ -5439,7 +5436,7 @@ impl Composer {
         self.slash.filtered = crate::popover::filter_indices(&query, &names);
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
         // A fresh query/reopen restarts the row stack at the top.
-        reset_scroll_offset(&self.slash_scroll);
+        crate::popover::reset_menu_scroll(&self.slash_scroll, &mut self.popup_bar);
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -5506,7 +5503,7 @@ impl Composer {
     }
 
     fn render_slash_popup(
-        &self,
+        &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
@@ -5530,9 +5527,6 @@ impl Composer {
                     window.focus(&this.input.focus_handle(cx), cx);
                 }),
             )
-            // GPUI dispatches this captured stream while the thumb is
-            // dragged, including when the pointer has left the popup.
-            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         if self.slash.loading && commands.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -5638,12 +5632,7 @@ impl Composer {
                             .track_scroll(&self.slash_scroll)
                             .children(rows),
                     )
-                    .children(self.popup_scrollbar(
-                        "slash-scrollbar",
-                        &self.slash_scroll,
-                        theme,
-                        cx,
-                    )),
+                    .children(crate::popover::rail(self, "slash-scrollbar", theme, cx)),
             );
         }
         // Full pill width above the composer, matching the file-mention popup.
@@ -5652,42 +5641,6 @@ impl Composer {
             card.into_any_element(),
             None,
         ))
-    }
-
-    /// The floating scrollbar rail for a composer popup's scroll host (the
-    /// model-list treatment). Callers pass the id and that popup's scroll
-    /// handle; the hover/drag interaction state is shared.
-    fn popup_scrollbar(
-        &self,
-        id: &'static str,
-        scroll: &gpui::ScrollHandle,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let metrics = self.popup_bar.metrics(scroll)?;
-        Some(
-            self.popup_bar
-                .render_rail(theme, metrics)?
-                .id(id)
-                .on_hover(cx.listener(Self::on_popup_bar_hover))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_down),
-                )
-                .on_drag(crate::popover::MenuScrollbarDrag, |_, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.new(|_| crate::popover::MenuScrollbarDragGhost)
-                })
-                .on_mouse_up_out(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_up),
-                )
-                .on_mouse_up(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_up),
-                )
-                .into_any_element(),
-        )
     }
 
     /// The popup whose rows a scrollbar drag is moving — the tokens are
@@ -5711,52 +5664,6 @@ impl Composer {
         if self.popup_bar.set_list_hovered(*hovered) {
             cx.notify();
         }
-    }
-
-    fn on_popup_bar_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_bar.set_bar_hovered(*hovered) {
-            cx.notify();
-        }
-    }
-
-    fn on_popup_bar_mouse_down(
-        &mut self,
-        event: &gpui::MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scroll) = self.active_popup_scroll() else {
-            return;
-        };
-        if !self.popup_bar.begin_press(&scroll, event.position.y) {
-            return;
-        }
-        cx.stop_propagation();
-        cx.notify();
-    }
-
-    fn on_popup_bar_drag_move(
-        &mut self,
-        event: &gpui::DragMoveEvent<crate::popover::MenuScrollbarDrag>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scroll) = self.active_popup_scroll() else {
-            return;
-        };
-        if self.popup_bar.drag_to(&scroll, event.event.position.y) {
-            cx.notify();
-        }
-    }
-
-    fn on_popup_bar_mouse_up(
-        &mut self,
-        _event: &gpui::MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.popup_bar.end_press();
-        cx.notify();
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -7155,6 +7062,19 @@ impl Composer {
     }
 }
 
+/// The completion popups' floating rails run through
+/// [`crate::popover::rail`]: the shared `popup_bar` state plus whichever
+/// popup's rows are mounted — see [`Composer::active_popup_scroll`].
+impl crate::popover::ScrollRailHost for Composer {
+    fn rail_bar(&mut self) -> &mut crate::popover::MenuScrollbarState {
+        &mut self.popup_bar
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.active_popup_scroll()
+    }
+}
+
 /// Focus lands on the prompt input (window-level focus fallbacks — e.g. after
 /// the focused terminal panel is hidden — route here).
 impl Focusable for Composer {
@@ -7289,18 +7209,20 @@ impl Render for Composer {
         let route_snap = self
             .route_snap_until
             .is_some_and(|until| Instant::now() < until);
-        self.flip_morph = if self.dock_frame.is_some() {
-            None
-        } else {
-            flip_morph_step(
-                self.flip_morph,
-                committed_flip && !new_chat,
-                self.last_rendered_height,
-                now_ms,
-                motion::reduced_motion(cx),
-                route_snap,
-            )
-        };
+        let dock_height_changed = std::mem::take(&mut self.dock_height_changed);
+        self.flip_morph =
+            if dock_height_changed || self.dock_frame.is_some_and(|frame| frame.active) {
+                None
+            } else {
+                flip_morph_step(
+                    self.flip_morph,
+                    committed_flip && !new_chat,
+                    self.last_rendered_height,
+                    now_ms,
+                    motion::reduced_motion(cx),
+                    route_snap,
+                )
+            };
         let expanded = self.expanded_mode;
 
         // Chat-scoped failures render only under their own chat; a global
@@ -7351,60 +7273,27 @@ impl Render for Composer {
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
             .when_some(failure, |el, message| {
-                // zeron composer.tsx `Notice` (matches the transcript
-                // ErrorChip palette): `flex items-start gap-2 rounded-xl
-                // border px-3 py-2 text-[12px] leading-snug` with a 14px
-                // DangerTriangle — a subtle tinted wash, not a bare red
-                // stroke. Amber for the offline-ish case (engine not
-                // connected), red for send/run failures. Click dismisses.
+                // Amber with "Warning" for the offline-ish case (engine not
+                // connected), red with "Error" for send/run failures. Click
+                // dismisses.
                 let offline = message.as_ref() == "Engine not connected";
-                let (border_c, wash, text_c) = if offline {
-                    let amber = theme.warning; // amber-400
-                    let amber_200 = theme.warning_muted;
-                    (
-                        amber.opacity(0.16),
-                        amber.opacity(0.05),
-                        amber_200.opacity(0.9),
-                    )
-                } else {
-                    let danger = theme.danger; // red-400
-                    let red_300 = theme.danger_muted;
-                    (
-                        danger.opacity(0.16),
-                        danger.opacity(0.05),
-                        red_300.opacity(0.9),
-                    )
-                };
                 el.child(
-                    div()
-                        .id("composer-failure")
-                        .mx(px(4.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(border_c)
-                        .bg(wash)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(16.0))
-                        .text_color(text_c)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.failure = None;
-                            this.failure_key = None;
-                            cx.notify();
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                                .size(px(14.0))
-                                .mt(px(2.0))
-                                .text_color(text_c),
-                        )
-                        .child(div().min_w_0().child(message)),
+                    notice_chip(
+                        &theme,
+                        offline,
+                        if offline { "Warning" } else { "Error" },
+                        message,
+                        NoticeChipIcon::Plain,
+                    )
+                    .id("composer-failure")
+                    .mx(px(4.0))
+                    .mt(px(6.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.failure = None;
+                        this.failure_key = None;
+                        cx.notify();
+                    })),
                 )
             })
             .when_some(queue_notice, |el, (notice, offline)| {
@@ -7479,15 +7368,21 @@ impl Render for Composer {
             }))
         });
 
-        // The shared main composer keeps one two-row body on both routes.
-        // Docking reduces its empty textarea by 16px without changing the
-        // input's origin or moving the controls through a second layout.
-        let expanded = expanded || new_chat || self.dock_frame.is_some();
+        // Route coordination must not force an established thread into the
+        // two-row layout. Short drafts keep the original skinny composer.
+        let session_expanded = expanded;
+        let expanded = expanded || new_chat;
         let dock_amount = self.dock_frame.map_or(0.0, |frame| frame.amount);
         let dock_height = |amount: f32| {
-            (content_height + TEXTAREA_PAD_V).clamp(TEXTAREA_MIN - 16.0 * amount, TEXTAREA_MAX)
-                + ACTIONS_ROW_HEIGHT
-                + PILL_BORDER_V
+            let hero = composer_total_height(content_height);
+            let session = if session_expanded {
+                (content_height + TEXTAREA_PAD_V).clamp(TEXTAREA_MIN - 16.0, TEXTAREA_MAX)
+                    + ACTIONS_ROW_HEIGHT
+                    + PILL_BORDER_V
+            } else {
+                COMPACT_TOTAL_HEIGHT
+            };
+            motion::lerp(hero, session, amount)
         };
 
         // Committed-height morph: the layout below is already the NEW mode's;
@@ -7536,20 +7431,21 @@ impl Render for Composer {
             || route_chrome_opacities(new_thread_chrome),
             |frame| (frame.selectors(), frame.footer()),
         );
-        self.height_morph = if self.dock_frame.is_some_and(|frame| frame.active) {
-            None
-        } else if coordinated_route_morph.is_some() {
-            coordinated_route_morph
-        } else {
-            flip_morph_step(
-                self.height_morph,
-                (target_height - self.last_target_height).abs() > 0.5,
-                self.last_rendered_height,
-                now_ms,
-                motion::reduced_motion(cx),
-                route_snap,
-            )
-        };
+        self.height_morph =
+            if dock_height_changed || self.dock_frame.is_some_and(|frame| frame.active) {
+                None
+            } else if coordinated_route_morph.is_some() {
+                coordinated_route_morph
+            } else {
+                flip_morph_step(
+                    self.height_morph,
+                    (target_height - self.last_target_height).abs() > 0.5,
+                    self.last_rendered_height,
+                    now_ms,
+                    motion::reduced_motion(cx),
+                    route_snap,
+                )
+            };
         self.last_target_height = target_height;
         let pill_height = self
             .height_morph
@@ -7577,19 +7473,33 @@ impl Render for Composer {
                 + comment_strip_h
                 - pill_height
         });
-        let text_pt = if self.dock_frame.is_some() {
-            16.0
-        } else {
-            morph_text_pad(morph_t)
-        };
+        // Route morphs use the dock's reversible clock; typing flips keep
+        // their existing local clock once the composer reaches its dock.
+        let layout_morph_t =
+            if self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded {
+                if expanded {
+                    1.0 - dock_amount
+                } else {
+                    dock_amount
+                }
+            } else {
+                morph_t
+            };
+        let text_pt = morph_text_pad(layout_morph_t);
         let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        let route_to_single_line =
+            self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
             - strip_h
             - appshot_strip_height(appshot_count)
             - comment_strip_h
             - PILL_BORDER_V
             - ACTIONS_ROW_HEIGHT)
-            .max(0.0);
+            .max(if route_to_single_line {
+                INPUT_LINE_HEIGHT + text_pt + 4.0
+            } else {
+                0.0
+            });
         self.input.update(cx, |input, cx| {
             let height = if expanded {
                 (textarea_height - text_pt - 4.0).max(0.0)
@@ -7597,7 +7507,13 @@ impl Render for Composer {
                 INPUT_LINE_HEIGHT
             };
             let settled_height = if expanded {
-                base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT - TEXTAREA_PAD_V
+                (base_height - PILL_BORDER_V - ACTIONS_ROW_HEIGHT - TEXTAREA_PAD_V).max(
+                    if route_to_single_line {
+                        INPUT_LINE_HEIGHT
+                    } else {
+                        0.0
+                    },
+                )
             } else {
                 INPUT_LINE_HEIGHT
             };
@@ -7655,14 +7571,18 @@ impl Render for Composer {
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
-        // The pill chrome (zeron composer.tsx): `rounded-[26px] border
-        // border-white/[0.08] bg-white/[0.03] shadow-xl` — a floating pill with
-        // a hairline over a faint wash, never a solid grey box. Picker chips,
-        // attach, and the send circle all live INSIDE the pill.
-        let pill_bg = theme.input_glass_bg();
-        // No drop shadow on glass: it paints BEHIND the translucent fill and
-        // shows through as an inner glow (theme.rs's card_selected_shadows
-        // lesson; user report).
+        // A translucent cool silver/slate edge sits more naturally on frost
+        // than the general-purpose white/black separator color.
+        let pill_border = if theme.is_frost() {
+            match theme.appearance {
+                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+            }
+        } else {
+            theme.border
+        };
+        // Compensate for the transcript canvas beneath the frosted surface.
+        // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
             .on_mouse_down(
                 MouseButton::Left,
@@ -7675,16 +7595,18 @@ impl Render for Composer {
                 }),
             )
             .rounded(px(surface_radius))
-            .bg(pill_bg)
             .border_1()
-            .border_color(theme.border)
-            .when(!theme.is_frost(), |el| el.shadow_lg());
+            .border_color(pill_border)
+            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
+            .when(!theme.is_frost(), |el| {
+                el.bg(theme.input_glass_bg()).shadow_lg()
+            });
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // (round-9 follow-up: the send/attach/chips must not ride the height,
         // and none of them fade — the full cluster stays visible throughout).
-        let cluster_dy = morph_cluster_dy(morph_t);
+        let cluster_dy = morph_cluster_dy(layout_morph_t);
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
             // (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
@@ -7728,13 +7650,9 @@ impl Render for Composer {
                         // Send has a larger structural separation.
                         .gap(px(ACTION_PRIMARY_GAP))
                         .pl(px(12.0))
-                        .pr(px(if self.dock_frame.is_some() {
-                            12.0 - 2.0 * dock_amount
-                        } else {
-                            morph_cluster_inset(true, morph_t)
-                        }))
+                        .pr(px(morph_cluster_inset(true, layout_morph_t)))
                         .pt(px(4.0))
-                        .pb(px(10.0 - 2.0 * dock_amount))
+                        .pb(px(10.0))
                         .child(
                             div()
                                 .flex_1()
@@ -7758,9 +7676,13 @@ impl Render for Composer {
             // its expanded resting place via a decaying relative offset, and
             // the whole inline cluster (chips + attach/send) holds its spot at
             // full alpha (2.5px centering delta gliding in).
-            let text_glide = match self.flip_morph {
-                Some(m) if morphing => collapse_text_glide(m.from, morph_t),
-                _ => 0.0,
+            let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
+                collapse_text_glide(dock_height(0.0), dock_amount)
+            } else {
+                match self.flip_morph {
+                    Some(m) if morphing => collapse_text_glide(m.from, morph_t),
+                    _ => 0.0,
+                }
             };
             pill.h(px(pill_height))
                 .overflow_hidden()
@@ -7796,7 +7718,7 @@ impl Render for Composer {
                                 // the right inset alone glides 12→8.
                                 .gap(px(ACTION_PRIMARY_GAP))
                                 .pl(px(4.0))
-                                .pr(px(morph_cluster_inset(false, morph_t)))
+                                .pr(px(morph_cluster_inset(false, layout_morph_t)))
                                 .relative()
                                 .top(px(-cluster_dy))
                                 .child(
@@ -8006,42 +7928,51 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dock_morph_keeps_editor_origin_and_reserves_final_height(cx: &mut gpui::TestAppContext) {
+    fn dock_morph_restores_skinny_height_with_a_continuous_editor_origin(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (_dir, handle) = composer_focus_window(cx);
         let input = handle
             .read_with(cx, |composer, _| composer.input.clone())
             .unwrap();
-        let mut first_origin = None;
-        for amount in [0.0, 0.2, 0.6, 0.98, 1.0, 0.7, 0.0] {
-            handle
-                .update(cx, |composer, _, cx| {
-                    let mut frame = crate::composer_dock::DockFrame::settled(true);
-                    frame.amount = amount;
-                    frame.active = amount < 1.0;
-                    composer.set_dock_frame(frame, cx);
+        for docked in [true, false] {
+            let amounts = if docked {
+                [0.0, 0.2, 0.6, 0.98, 1.0]
+            } else {
+                [1.0, 0.98, 0.6, 0.2, 0.0]
+            };
+            for amount in amounts {
+                handle
+                    .update(cx, |composer, _, cx| {
+                        composer.state.update(cx, |state, _| {
+                            state.selected_chat = docked.then(|| "chat".into());
+                        });
+                        composer.on_state_changed(cx);
+                        composer
+                            .input
+                            .update(cx, |input, cx| input.set_text("Hi", cx));
+                        composer.expanded_mode = false;
+                        let mut frame = crate::composer_dock::DockFrame::settled(docked);
+                        frame.amount = amount;
+                        frame.active = amount != if docked { 1.0 } else { 0.0 };
+                        composer.set_dock_frame(frame, cx);
+                    })
+                    .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.draw(cx).clear();
                 })
                 .unwrap();
-            cx.update_window(handle.into(), |_, window, cx| {
-                window.draw(cx).clear();
-            })
-            .unwrap();
-            handle
-                .read_with(cx, |composer, cx| {
+                handle.read_with(cx, |composer, cx| {
                     assert_eq!(composer.input, input);
+                    let surface = composer.surface_bounds.get().unwrap();
                     let origin = input.read(cx).last_bounds.unwrap().origin;
-                    let first = *first_origin.get_or_insert(origin);
-                    assert!(
-                        (f32::from(origin.y - first.y)).abs() < 0.1,
-                        "editor jumped at {amount}"
-                    );
-                    assert!(
-                        (composer.last_rendered_height + composer.dock_clearance_correction
-                            - 108.0)
-                            .abs()
-                            < 0.1
-                    );
-                })
-                .unwrap();
+                    assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
+                        "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
+                    let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
+                    assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
+                    assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
+                }).unwrap();
+            }
         }
     }
 
