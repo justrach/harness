@@ -34,6 +34,7 @@ use zeron_rpc::{RpcError, methods};
 use crate::appshots::{self, CapturedAppshot};
 use crate::attachments::{self, StagedAttachment};
 use crate::motion;
+use crate::notice::{NoticeChipIcon, notice_chip};
 use crate::pickers::Pickers;
 use crate::settings::{ComposerSendBehavior, platform_combo};
 use crate::state::{AppState, Indicator};
@@ -3894,11 +3895,6 @@ fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
     })
 }
 
-/// Restart a popup's row stack at the top (fresh open / query / result set).
-fn reset_scroll_offset(scroll: &gpui::ScrollHandle) {
-    scroll.set_offset(gpui::Point::new(px(0.0), px(0.0)));
-}
-
 /// The `/` must open the input: slash commands are whole-prompt prefixes
 /// (`/compact`, `/goal ship it`), so only the first token triggers, and a
 /// query containing another `/` (a typed path) never does.
@@ -5052,7 +5048,7 @@ impl Composer {
             self.mention.results.clear();
             self.mention.active = None;
             // Fresh open: the row stack restarts at the top.
-            reset_scroll_offset(&self.mention_scroll);
+            crate::popover::reset_menu_scroll(&self.mention_scroll, &mut self.popup_bar);
         }
         self.mention.error = None;
         self.mention.loading = token.is_some();
@@ -5129,7 +5125,10 @@ impl Composer {
                             composer.mention.active = (!results.is_empty()).then_some(0);
                             composer.mention.results = results;
                             // New result set: the row stack restarts at the top.
-                            reset_scroll_offset(&composer.mention_scroll);
+                            crate::popover::reset_menu_scroll(
+                                &composer.mention_scroll,
+                                &mut composer.popup_bar,
+                            );
                         }
                         Err(err) => tracing::warn!(%err, "file mention response decode failed"),
                     },
@@ -5191,7 +5190,7 @@ impl Composer {
     }
 
     fn render_file_mention_popup(
-        &self,
+        &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
@@ -5208,9 +5207,6 @@ impl Composer {
                     window.focus(&this.input.focus_handle(cx), cx);
                 }),
             )
-            // GPUI dispatches this captured stream while the thumb is
-            // dragged, including when the pointer has left the popup.
-            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_mention(cx)));
         if self.mention.loading && self.mention.results.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -5319,12 +5315,7 @@ impl Composer {
                             .track_scroll(&self.mention_scroll)
                             .children(rows),
                     )
-                    .children(self.popup_scrollbar(
-                        "mention-scrollbar",
-                        &self.mention_scroll,
-                        theme,
-                        cx,
-                    )),
+                    .children(crate::popover::rail(self, "mention-scrollbar", theme, cx)),
             );
         }
         Some(crate::popover::full_width_menu_above(
@@ -5445,7 +5436,7 @@ impl Composer {
         self.slash.filtered = crate::popover::filter_indices(&query, &names);
         self.slash.active = (!self.slash.filtered.is_empty()).then_some(0);
         // A fresh query/reopen restarts the row stack at the top.
-        reset_scroll_offset(&self.slash_scroll);
+        crate::popover::reset_menu_scroll(&self.slash_scroll, &mut self.popup_bar);
         self.sync_mention_controls(cx);
         cx.notify();
     }
@@ -5512,7 +5503,7 @@ impl Composer {
     }
 
     fn render_slash_popup(
-        &self,
+        &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
@@ -5536,9 +5527,6 @@ impl Composer {
                     window.focus(&this.input.focus_handle(cx), cx);
                 }),
             )
-            // GPUI dispatches this captured stream while the thumb is
-            // dragged, including when the pointer has left the popup.
-            .on_drag_move(cx.listener(Self::on_popup_bar_drag_move))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_slash(cx)));
         if self.slash.loading && commands.is_empty() {
             card = card.child(crate::popover::skeleton_rows(
@@ -5644,12 +5632,7 @@ impl Composer {
                             .track_scroll(&self.slash_scroll)
                             .children(rows),
                     )
-                    .children(self.popup_scrollbar(
-                        "slash-scrollbar",
-                        &self.slash_scroll,
-                        theme,
-                        cx,
-                    )),
+                    .children(crate::popover::rail(self, "slash-scrollbar", theme, cx)),
             );
         }
         // Full pill width above the composer, matching the file-mention popup.
@@ -5658,42 +5641,6 @@ impl Composer {
             card.into_any_element(),
             None,
         ))
-    }
-
-    /// The floating scrollbar rail for a composer popup's scroll host (the
-    /// model-list treatment). Callers pass the id and that popup's scroll
-    /// handle; the hover/drag interaction state is shared.
-    fn popup_scrollbar(
-        &self,
-        id: &'static str,
-        scroll: &gpui::ScrollHandle,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let metrics = self.popup_bar.metrics(scroll)?;
-        Some(
-            self.popup_bar
-                .render_rail(theme, metrics)?
-                .id(id)
-                .on_hover(cx.listener(Self::on_popup_bar_hover))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_down),
-                )
-                .on_drag(crate::popover::MenuScrollbarDrag, |_, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.new(|_| crate::popover::MenuScrollbarDragGhost)
-                })
-                .on_mouse_up_out(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_up),
-                )
-                .on_mouse_up(
-                    gpui::MouseButton::Left,
-                    cx.listener(Self::on_popup_bar_mouse_up),
-                )
-                .into_any_element(),
-        )
     }
 
     /// The popup whose rows a scrollbar drag is moving — the tokens are
@@ -5717,52 +5664,6 @@ impl Composer {
         if self.popup_bar.set_list_hovered(*hovered) {
             cx.notify();
         }
-    }
-
-    fn on_popup_bar_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.popup_bar.set_bar_hovered(*hovered) {
-            cx.notify();
-        }
-    }
-
-    fn on_popup_bar_mouse_down(
-        &mut self,
-        event: &gpui::MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scroll) = self.active_popup_scroll() else {
-            return;
-        };
-        if !self.popup_bar.begin_press(&scroll, event.position.y) {
-            return;
-        }
-        cx.stop_propagation();
-        cx.notify();
-    }
-
-    fn on_popup_bar_drag_move(
-        &mut self,
-        event: &gpui::DragMoveEvent<crate::popover::MenuScrollbarDrag>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(scroll) = self.active_popup_scroll() else {
-            return;
-        };
-        if self.popup_bar.drag_to(&scroll, event.event.position.y) {
-            cx.notify();
-        }
-    }
-
-    fn on_popup_bar_mouse_up(
-        &mut self,
-        _event: &gpui::MouseUpEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.popup_bar.end_press();
-        cx.notify();
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
@@ -7161,6 +7062,19 @@ impl Composer {
     }
 }
 
+/// The completion popups' floating rails run through
+/// [`crate::popover::rail`]: the shared `popup_bar` state plus whichever
+/// popup's rows are mounted — see [`Composer::active_popup_scroll`].
+impl crate::popover::ScrollRailHost for Composer {
+    fn rail_bar(&mut self) -> &mut crate::popover::MenuScrollbarState {
+        &mut self.popup_bar
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.active_popup_scroll()
+    }
+}
+
 /// Focus lands on the prompt input (window-level focus fallbacks — e.g. after
 /// the focused terminal panel is hidden — route here).
 impl Focusable for Composer {
@@ -7359,60 +7273,27 @@ impl Render for Composer {
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG))
             .when_some(failure, |el, message| {
-                // zeron composer.tsx `Notice` (matches the transcript
-                // ErrorChip palette): `flex items-start gap-2 rounded-xl
-                // border px-3 py-2 text-[12px] leading-snug` with a 14px
-                // DangerTriangle — a subtle tinted wash, not a bare red
-                // stroke. Amber for the offline-ish case (engine not
-                // connected), red for send/run failures. Click dismisses.
+                // Amber with "Warning" for the offline-ish case (engine not
+                // connected), red with "Error" for send/run failures. Click
+                // dismisses.
                 let offline = message.as_ref() == "Engine not connected";
-                let (border_c, wash, text_c) = if offline {
-                    let amber = theme.warning; // amber-400
-                    let amber_200 = theme.warning_muted;
-                    (
-                        amber.opacity(0.16),
-                        amber.opacity(0.05),
-                        amber_200.opacity(0.9),
-                    )
-                } else {
-                    let danger = theme.danger; // red-400
-                    let red_300 = theme.danger_muted;
-                    (
-                        danger.opacity(0.16),
-                        danger.opacity(0.05),
-                        red_300.opacity(0.9),
-                    )
-                };
                 el.child(
-                    div()
-                        .id("composer-failure")
-                        .mx(px(4.0))
-                        .mt(px(6.0))
-                        .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(border_c)
-                        .bg(wash)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(16.0))
-                        .text_color(text_c)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.failure = None;
-                            this.failure_key = None;
-                            cx.notify();
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                                .size(px(14.0))
-                                .mt(px(2.0))
-                                .text_color(text_c),
-                        )
-                        .child(div().min_w_0().child(message)),
+                    notice_chip(
+                        &theme,
+                        offline,
+                        if offline { "Warning" } else { "Error" },
+                        message,
+                        NoticeChipIcon::Plain,
+                    )
+                    .id("composer-failure")
+                    .mx(px(4.0))
+                    .mt(px(6.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.failure = None;
+                        this.failure_key = None;
+                        cx.notify();
+                    })),
                 )
             })
             .when_some(queue_notice, |el, (notice, offline)| {

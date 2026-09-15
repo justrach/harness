@@ -269,6 +269,11 @@ impl EngineCore {
         // Queued-attachment support: the doc host resolves `pending://` refs
         // against this store and pushes staged bytes to remote hosts.
         doc_host.set_uploads(uploads.clone());
+        let agent_accounts_config = AgentAccountsConfig::detect(data_dir);
+        sessions.set_generated_images(
+            uploads.clone(),
+            agent_accounts_config.codex_home.join("generated_images"),
+        );
         let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
             local_import::LocalImporter::new(
                 data_dir,
@@ -281,7 +286,7 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
-        let agent_accounts = AgentAccounts::new(AgentAccountsConfig::detect(data_dir));
+        let agent_accounts = AgentAccounts::new(agent_accounts_config);
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
             registry.clone(),

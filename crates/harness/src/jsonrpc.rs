@@ -180,7 +180,7 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
         if line.is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
             tracing::debug!(target: "zeron_harness::rpc", "non-JSON stdout line (skipped)");
             continue;
         };
@@ -195,7 +195,10 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
                 };
                 let outcome = match msg.get("error") {
                     Some(err) => Err(response_error(err)),
-                    None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                    None => Ok(msg
+                        .get_mut("result")
+                        .map(Value::take)
+                        .unwrap_or(Value::Null)),
                 };
                 let _ = sender.send(outcome);
             }
@@ -204,7 +207,10 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
                 let incoming = Incoming::Request {
                     id: id.clone(),
                     method: method.to_owned(),
-                    params: msg.get("params").cloned().unwrap_or(Value::Null),
+                    params: msg
+                        .get_mut("params")
+                        .map(Value::take)
+                        .unwrap_or(Value::Null),
                 };
                 if tx.send(incoming).await.is_err() {
                     return;
@@ -214,7 +220,10 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
             (Some(method), None) => {
                 let incoming = Incoming::Notification {
                     method: method.to_owned(),
-                    params: msg.get("params").cloned().unwrap_or(Value::Null),
+                    params: msg
+                        .get_mut("params")
+                        .map(Value::take)
+                        .unwrap_or(Value::Null),
                 };
                 if tx.send(incoming).await.is_err() {
                     return;

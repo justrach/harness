@@ -450,6 +450,23 @@ impl EngineHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(client),
+                url: "memory://test".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: "local".into(),
+                workspace_scope: WorkspaceScope::Local,
+                capabilities: Vec::new(),
+            },
+            deferred_state: None,
+        }
+    }
+
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }

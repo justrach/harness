@@ -36,7 +36,7 @@ use crate::motion::{self, AnimationExt as _, MotionSpec, RESIZE, SPLASH_OUT, TAB
 use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::accounts::AccountsPage;
-use crate::settings::appearance::AppearancePage;
+use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
@@ -173,6 +173,11 @@ impl SidebarDisclosureMotion {
 /// relying on paint order when chrome crosses an animated pane boundary.
 const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 10.0;
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
+/// Corner radius of the floating Linux CSD window (macOS gets its native
+/// curve from the platform; maximized/tiled Linux windows go square).
+/// Chrome layers that paint full-bleed at a window edge round their own
+/// backgrounds with it — see [`Shell::window_corner_radius`].
+pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
 const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
 
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
@@ -1377,6 +1382,7 @@ pub struct Shell {
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
+    appearance_settings_sub: Option<Subscription>,
     /// Session-row context menu, including the Copy submenu.
     chat_menu: popover::Popup<ChatMenuState>,
     rename_dialog: Option<RenameChatDialog>,
@@ -1392,6 +1398,8 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
+    /// Hover/drag + scroll-linger state of the dropdown's floating rail.
+    spaces_menu_bar: popover::MenuScrollbarState,
     /// Persisted organization/sort/metadata controls beside the project filter.
     sidebar_view_menu: popover::Popup<spaces::SidebarViewMenu>,
     /// Natural-tab-order focus target for the icon-only view-options button.
@@ -1740,6 +1748,7 @@ impl Shell {
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
+            appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
             rename_dialog: None,
             delete_confirm: None,
@@ -1748,6 +1757,7 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             spaces_menu: popover::Popup::default(),
+            spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
             sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
             chat_status_hover: None,
@@ -2554,8 +2564,11 @@ impl Shell {
         cx.notify();
     }
 
-    fn set_files_editor_font_size(&mut self, editor_font_size: f32, cx: &mut Context<Self>) {
-        self.settings.files_editor_font_size = editor_font_size;
+    /// Push a new code size into every open file surface. Called by the
+    /// Appearance settings page, which owns the control. The typography
+    /// global is the canonical store and persists on its own; this only
+    /// propagates the change to already-open surfaces.
+    pub(crate) fn set_code_font_size(&mut self, code_font_size: f32, cx: &mut Context<Self>) {
         let surfaces = self
             .files
             .values()
@@ -2564,10 +2577,9 @@ impl Shell {
             .collect::<Vec<_>>();
         for surface in surfaces {
             surface.update(cx, |surface, cx| {
-                surface.set_editor_font_size(editor_font_size, cx)
+                surface.set_editor_font_size(code_font_size, cx)
             });
         }
-        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -2730,7 +2742,7 @@ impl Shell {
         if !self.files.contains_key(&key) {
             let autosave_enabled = self.settings.files_autosave_enabled;
             let delay = self.settings.files_autosave_delay_ms;
-            let editor_font_size = self.settings.files_editor_font_size;
+            let editor_font_size = crate::typography::code_font_size(cx);
             let word_wrap = self.settings.files_word_wrap;
             let show_all_files = self.settings.files_show_all;
             let files = cx.new(|cx| {
@@ -2806,7 +2818,7 @@ impl Shell {
                 path.clone(),
                 self.settings.files_autosave_enabled,
                 self.settings.files_autosave_delay_ms,
-                self.settings.files_editor_font_size,
+                crate::typography::code_font_size(cx),
                 self.settings.files_word_wrap,
                 self.settings.files_show_all,
                 cx,
@@ -3477,18 +3489,25 @@ impl Shell {
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
         self.sync_independent_settings(cx);
-        self.settings.ui_font_family = crate::typography::requested(cx);
-        self.settings.ui_font_size = crate::typography::font_size(cx);
         settings::replace(self.settings.clone(), SavePolicy::Debounced, cx);
     }
 
     /// Controls outside the Shell mutate these choices directly. A geometry
     /// save must never publish the Shell's older values over those selections.
+    /// The typography globals own the font choices but persist every change
+    /// immediately, so the central store is an equally canonical read and
+    /// keeps this block on a single source.
     fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
+        self.settings.ui_font_family = current.ui_font_family;
+        self.settings.ui_font_size = current.ui_font_size;
+        self.settings.terminal_font_family = current.terminal_font_family;
+        self.settings.terminal_font_size = current.terminal_font_size;
+        self.settings.code_font_family = current.code_font_family;
+        self.settings.code_font_size = current.code_font_size;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -3669,7 +3688,16 @@ impl Shell {
             }
             SettingsSection::Appearance => {
                 if self.appearance_page.is_none() {
-                    self.appearance_page = Some(cx.new(AppearancePage::new));
+                    let page = cx.new(AppearancePage::new);
+                    self.appearance_settings_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                            AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
+                                this.set_code_font_size(size, cx);
+                            }
+                        },
+                    ));
+                    self.appearance_page = Some(page);
                 }
                 match &self.appearance_page {
                     Some(page) => page.clone().into_any_element(),
@@ -3682,7 +3710,6 @@ impl Shell {
                         FilesSettingsPage::new(
                             self.settings.files_autosave_enabled,
                             self.settings.files_autosave_delay_ms,
-                            self.settings.files_editor_font_size,
                             self.settings.files_word_wrap,
                             self.settings.files_show_all,
                             cx,
@@ -3715,9 +3742,6 @@ impl Shell {
                                 }
                                 this.schedule_save(cx);
                                 cx.notify();
-                            }
-                            FilesSettingsEvent::EditorFontSizeChanged(editor_font_size) => {
-                                this.set_files_editor_font_size(editor_font_size, cx);
                             }
                             FilesSettingsEvent::WordWrapChanged(word_wrap) => {
                                 this.set_files_word_wrap(word_wrap, window, cx);
@@ -5132,6 +5156,151 @@ impl Shell {
         out
     }
 
+    /// Linux CSD chrome state: which edges the compositor has taken (tiled or
+    /// maximized). A free edge can carry a resize strip; a fully floating
+    /// window (nothing tiled) also gets rounded corners. Server decorations
+    /// (e.g. KDE SSD) hand the frame back to the compositor — no CSD chrome.
+    #[cfg(target_os = "linux")]
+    fn linux_csd_edges(window: &Window) -> (bool, bool, bool, bool) {
+        match window.window_decorations() {
+            gpui::Decorations::Client { tiling } => {
+                (!tiling.top, !tiling.bottom, !tiling.left, !tiling.right)
+            }
+            gpui::Decorations::Server => (false, false, false, false),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn linux_csd_edges(_window: &Window) -> (bool, bool, bool, bool) {
+        (false, false, false, false)
+    }
+
+    /// True when the Linux window floats (CSD, nothing tiled or maximized) —
+    /// the state that gets macOS-style rounded corners.
+    fn linux_window_floating(window: &Window) -> bool {
+        let (top, bottom, left, right) = Self::linux_csd_edges(window);
+        top && bottom && left && right && cfg!(target_os = "linux")
+    }
+
+    /// The corner radius chrome layers must PAINT for this frame. gpui's
+    /// content masks are rectangles — `.rounded()` never clips children, so
+    /// every full-bleed layer that can occupy a window corner rounds its own
+    /// background with this radius (the layer beneath shows through the
+    /// curve, down to the transparent window corners). Zero everywhere the
+    /// window must be square: macOS rounds via the window server, and a
+    /// tiled/maximized Linux window sits flush with the screen.
+    pub(crate) fn window_corner_radius(window: &Window) -> f32 {
+        if Self::linux_window_floating(window) {
+            LINUX_WINDOW_CORNER_RADIUS
+        } else {
+            0.0
+        }
+    }
+
+    /// Invisible edge strips that turn pointer presses into compositor
+    /// resizes — the CSD contract on X11 and Wayland, where the platform
+    /// draws no frame for us. Each strip mounts only along a free edge (a
+    /// maximized or snapped window exposes just its untiled edges, like
+    /// GTK). The strips paint last so they sit above all content chrome.
+    fn render_linux_resize_borders(window: &Window) -> Vec<AnyElement> {
+        let (top, bottom, left, right) = Self::linux_csd_edges(window);
+        const EDGE: f32 = 6.0;
+        const CORNER: f32 = 14.0;
+        let mut out = Vec::new();
+        macro_rules! strip {
+            ($position:expr, $cursor:ident, $edge:expr) => {
+                out.push(
+                    $position
+                        .$cursor()
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            cx.stop_propagation();
+                            window.start_window_resize($edge);
+                        })
+                        .into_any_element(),
+                );
+            };
+        }
+        // Cardinal edges: full-length strips inset by the corner squares.
+        if top {
+            strip!(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(CORNER))
+                    .right(px(CORNER))
+                    .h(px(EDGE)),
+                cursor_ns_resize,
+                gpui::ResizeEdge::Top
+            );
+        }
+        if bottom {
+            strip!(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(CORNER))
+                    .right(px(CORNER))
+                    .h(px(EDGE)),
+                cursor_ns_resize,
+                gpui::ResizeEdge::Bottom
+            );
+        }
+        if left {
+            strip!(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(CORNER))
+                    .bottom(px(CORNER))
+                    .w(px(EDGE)),
+                cursor_ew_resize,
+                gpui::ResizeEdge::Left
+            );
+        }
+        if right {
+            strip!(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(CORNER))
+                    .bottom(px(CORNER))
+                    .w(px(EDGE)),
+                cursor_ew_resize,
+                gpui::ResizeEdge::Right
+            );
+        }
+        // Corners: squares over both adjacent edges, diagonal cursors.
+        if top && left {
+            strip!(
+                div().absolute().top_0().left_0().size(px(CORNER)),
+                cursor_nwse_resize,
+                gpui::ResizeEdge::TopLeft
+            );
+        }
+        if top && right {
+            strip!(
+                div().absolute().top_0().right_0().size(px(CORNER)),
+                cursor_nesw_resize,
+                gpui::ResizeEdge::TopRight
+            );
+        }
+        if bottom && left {
+            strip!(
+                div().absolute().bottom_0().left_0().size(px(CORNER)),
+                cursor_nesw_resize,
+                gpui::ResizeEdge::BottomLeft
+            );
+        }
+        if bottom && right {
+            strip!(
+                div().absolute().bottom_0().right_0().size(px(CORNER)),
+                cursor_nwse_resize,
+                gpui::ResizeEdge::BottomRight
+            );
+        }
+        out
+    }
+
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Zeron
         // palette here made imported families look split in half and froze
@@ -5817,6 +5986,52 @@ impl Shell {
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
 
+        // The (filtered) Sessions list scrolls inside an EdgeFade scope —
+        // a true per-glyph gradient at active overflow edges. Glass-safe
+        // (no painted overlay can fade content over see-through blur) and
+        // equivalent on opaque themes: alpha→0 reveals the surface tone
+        // underneath, same as the gradient overlays it replaced. Overflow
+        // is read at PAINT time via the scroll handle — render-time gating
+        // rode the previous frame's offset, so the last frame of a content
+        // shrink (row archived while scrolled) left a phantom fade stuck
+        // over an unscrollable list (user report).
+        let sidebar_lists = crate::edge_fade::edge_faded(
+            SIDEBAR_GLASS_FADE_BAND,
+            true,
+            true,
+            div().relative().flex_1().min_h_0().child(
+                div()
+                    .id("sidebar-lists")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll)
+                    .px(px(Theme::SPACE_SM))
+                    .flex()
+                    .flex_col()
+                    // No "Sessions" header (user request) — the list
+                    // is the whole column; a little air stands in.
+                    .pt(px(4.0))
+                    .child(if !list_items.is_empty() {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(list_items)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px(px(Theme::SPACE_SM))
+                            .pb(px(Theme::SPACE_SM))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from("No sessions yet"))
+                            .into_any_element()
+                    })
+                    .children(archived_section),
+            ),
+        )
+        .fade_overflow_y(&self.sidebar_scroll);
+
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
@@ -5825,53 +6040,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
-            // The (filtered) Sessions list scrolls inside an EdgeFade scope —
-            // a true per-glyph gradient at active overflow edges. Glass-safe
-            // (no painted overlay can fade content over see-through blur) and
-            // equivalent on opaque themes: alpha→0 reveals the surface tone
-            // underneath, same as the gradient overlays it replaced. Overflow
-            // is read at PAINT time via the scroll handle — render-time gating
-            // rode the previous frame's offset, so the last frame of a content
-            // shrink (row archived while scrolled) left a phantom fade stuck
-            // over an unscrollable list (user report).
-            .child(
-                crate::edge_fade::edge_faded(
-                    SIDEBAR_GLASS_FADE_BAND,
-                    true,
-                    true,
-                    div().relative().flex_1().min_h_0().child(
-                        div()
-                            .id("sidebar-lists")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.sidebar_scroll)
-                            .px(px(Theme::SPACE_SM))
-                            .flex()
-                            .flex_col()
-                            // No "Sessions" header (user request) — the list
-                            // is the whole column; a little air stands in.
-                            .pt(px(4.0))
-                            .child(if !list_items.is_empty() {
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .children(list_items)
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .px(px(Theme::SPACE_SM))
-                                    .pb(px(Theme::SPACE_SM))
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from("No sessions yet"))
-                                    .into_any_element()
-                            })
-                            .children(archived_section),
-                    ),
-                )
-                .fade_overflow_y(&self.sidebar_scroll),
-            )
+            .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
@@ -7435,7 +7604,7 @@ impl Shell {
                             frame_time,
                         ))
                     })
-                    .child(self.render_terminal_container(cx))
+                    .child(self.render_terminal_container(window, cx))
             })
             .child(
                 div()
@@ -7570,7 +7739,7 @@ impl Shell {
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
     /// over the panel, the whole container height-animated 200 ms on toggle.
-    fn render_terminal_container(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_terminal_container(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let target = self.terminal_target(cx);
         let tween = self.terminal_tween;
         if target <= 0.0 && tween.is_none() {
@@ -7585,6 +7754,16 @@ impl Shell {
         let Some(panel) = self.terminal.clone() else {
             return gpui::Empty.into_any_element();
         };
+        // The dock spans the main column's bottom: when the sidebar is fully
+        // closed the column IS the window's left edge (and likewise the right
+        // edge when the right pane is closed) — the panel's fill then carries
+        // the CSD window's bottom corners.
+        let window_corner = Self::window_corner_radius(window) > 0.0;
+        {
+            let bl = window_corner && self.sidebar_now() < 0.5;
+            let br = window_corner && !self.right_pane_open(cx);
+            panel.update(cx, |panel, cx| panel.set_window_corners(bl, br, cx));
+        }
         let border = Theme::of(cx).border;
         let handle_key = "pane-resize-terminal-resize";
         let handle_hover = motion::hover_blend(
@@ -7760,7 +7939,7 @@ impl Shell {
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
-    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
         let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
@@ -7882,6 +8061,14 @@ impl Shell {
             // border there doubled up (user report).
             .when(!self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
+            })
+            // The panel's right edge IS the window's right edge: it carries
+            // the CSD window's rounded corners directly (gpui cannot clip
+            // children rounded — each full-bleed layer rounds itself; see
+            // [`Self::window_corner_radius`]).
+            .when(Self::window_corner_radius(window) > 0.0, |el| {
+                let corner = Self::window_corner_radius(window);
+                el.rounded_tr(px(corner)).rounded_br(px(corner))
             })
             .bg(panel_bg)
             .overflow_hidden()
@@ -9454,6 +9641,14 @@ impl Render for Shell {
             .flex_row()
             .size_full()
             .bg(frost)
+            // Linux CSD: a floating window rounds its corners against the
+            // desktop (the window composites with alpha — see
+            // `Theme::window_background_appearance`); tiled/maximized keeps
+            // square edges flush with the screen. Everything, including the
+            // splash and caption chrome, clips to the curve.
+            .when(Self::linux_window_floating(window), |el| {
+                el.rounded(px(LINUX_WINDOW_CORNER_RADIUS)).overflow_hidden()
+            })
             .text_color(text)
             .font_family(font)
             .text_size(crate::typography::ui_rems(14.0))
@@ -9668,7 +9863,7 @@ impl Render for Shell {
                     .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
                 let right: AnyElement = if on_chat {
-                    self.render_right_pane(cx)
+                    self.render_right_pane(window, cx)
                 } else {
                     Empty.into_any_element()
                 };
@@ -9739,12 +9934,29 @@ impl Render for Shell {
                 let sidebar_now = self.sidebar_now();
                 // Hairline on its right edge — full height like the tone,
                 // so the sidebar column reads as its own surface.
+                // The tone carries the window's left corners when the CSD
+                // window floats — with one caveat: a corner radius is
+                // clamped to the element's own size, and the COLLAPSED
+                // sidebar is a ~1px border sliver (the grab affordance).
+                // macOS trims that hairline with the window server's native
+                // corner clip; we reproduce the same trim by insetting the
+                // sliver vertically to where the curve begins, so its tips
+                // never float over the transparent corner cutouts.
+                let window_corner = Self::window_corner_radius(window);
                 let sidebar_tone = div()
                     .absolute()
                     .top_0()
                     .bottom_0()
                     .left_0()
                     .w(px(sidebar_now))
+                    .when(window_corner > 0.0, |el| {
+                        if sidebar_now >= 2.0 * window_corner {
+                            el.rounded_tl(px(window_corner))
+                                .rounded_bl(px(window_corner))
+                        } else {
+                            el.top(px(window_corner)).bottom(px(window_corner))
+                        }
+                    })
                     .bg(crate::theme::wash(0.05))
                     .border_r_1()
                     .border_color(border_color);
@@ -9844,7 +10056,10 @@ impl Render for Shell {
         };
         let root = root
             .children(self.render_windows_caption_controls(window, cx))
-            .children(self.render_linux_caption_controls(window, cx));
+            .children(self.render_linux_caption_controls(window, cx))
+            // Last so the invisible CSD resize strips sit above every other
+            // element at the window edges.
+            .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
         root
     }
@@ -10979,7 +11194,7 @@ mod exit_regressions {
             )
         });
         window
-            .update(cx, |shell, _, cx| {
+            .update(cx, |shell, window, cx| {
                 let duration = RESIZE.total().mul_f32(motion::speed_scale());
                 let started = std::time::Instant::now() - duration.mul_f32(2.);
                 let tween = Some(WidthTween {
@@ -11030,7 +11245,7 @@ mod exit_regressions {
                     !files.read(cx).test_images_visible(),
                     "closing suspends image resources immediately"
                 );
-                let _ = shell.render_right_pane(cx);
+                let _ = shell.render_right_pane(window, cx);
                 assert!(
                     !files.read(cx).test_images_visible(),
                     "closing animation must not reactivate images"
@@ -11084,6 +11299,18 @@ mod exit_regressions {
             .enumerate()
         {
             let open_links_in_zeron = index % 2 == 0;
+            let terminal_family = if open_links_in_zeron {
+                crate::typography::UiFontFamily::System
+            } else {
+                crate::typography::UiFontFamily::Geist
+            };
+            let code_family = if open_links_in_zeron {
+                crate::typography::UiFontFamily::Geist
+            } else {
+                crate::typography::UiFontFamily::System
+            };
+            let terminal_size = 15.0 + index as f32;
+            let code_size = 11.0 + index as f32;
             window
                 .update(cx, |shell, _, cx| {
                     // Selection changes in Appearance, independently of the shell's
@@ -11093,22 +11320,32 @@ mod exit_regressions {
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
                         settings.open_web_links_in_zeron = open_links_in_zeron;
+                        settings.terminal_font_family = terminal_family.clone();
+                        settings.terminal_font_size = terminal_size;
+                        settings.code_font_family = code_family.clone();
+                        settings.code_font_size = code_size;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
                         shell.settings.right_pane_width = 540.0 + step as f32;
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
-                        assert_eq!(settings::current(cx).new_thread_background_effect, effect);
-                        assert_eq!(
-                            settings::current(cx).open_web_links_in_zeron,
-                            open_links_in_zeron
-                        );
+                        let current = settings::current(cx);
+                        assert_eq!(current.new_thread_background_effect, effect);
+                        assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
+                        assert_eq!(current.terminal_font_family, terminal_family);
+                        assert_eq!(current.terminal_font_size, terminal_size);
+                        assert_eq!(current.code_font_family, code_family);
+                        assert_eq!(current.code_font_size, code_size);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
+                    assert_eq!(loaded.terminal_font_family, terminal_family);
+                    assert_eq!(loaded.terminal_font_size, terminal_size);
+                    assert_eq!(loaded.code_font_family, code_family);
+                    assert_eq!(loaded.code_font_size, code_size);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
