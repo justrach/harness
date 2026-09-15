@@ -59,6 +59,8 @@ jobs:
         run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
       - name: Build application
         run: cargo build --release --locked -p zeron
+      - name: Verify portable packaging
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
