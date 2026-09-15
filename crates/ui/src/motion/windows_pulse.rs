@@ -81,3 +81,19 @@ impl Clock {
         receive.await.unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_high_resolution_ticks_are_delivered() {
+        // Exercise the real timer with a thread-safe executor, independently
+        // of GPUI's deterministic scheduler and its thread-affine wakeups.
+        let mut clock = Clock::new(Duration::from_millis(2))
+            .expect("Windows high-resolution timer must be available");
+        for _ in 0..3 {
+            assert!(futures::executor::block_on(clock.tick()));
+        }
+    }
+}

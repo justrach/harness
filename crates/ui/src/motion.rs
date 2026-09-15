@@ -148,7 +148,19 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
         clock.running = true;
         cx.spawn(async move |cx| {
             #[cfg(windows)]
-            let mut precise_clock = windows_pulse::Clock::new(PULSE_TICK);
+            let mut precise_clock = if cx
+                .background_executor()
+                .scheduler_executor()
+                .scheduler()
+                .as_test()
+                .is_none()
+            {
+                windows_pulse::Clock::new(PULSE_TICK)
+            } else {
+                // A deterministic scheduler must own its timers and wakeups;
+                // an OS thread cannot schedule its thread-local tasks safely.
+                None
+            };
             loop {
                 #[cfg(windows)]
                 let precise_tick = if let Some(clock) = precise_clock.as_mut() {
