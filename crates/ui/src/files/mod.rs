@@ -190,6 +190,8 @@ pub struct FilesSurface {
     tree_list: ListState,
     tree_list_rows: Vec<model::VisibleTreeRow>,
     tree_list_generation: u64,
+    /// Floating rail state for the file tree (the menu-scrollbar treatment).
+    tree_bar: crate::popover::MenuScrollbarState,
     tree_focus: FocusHandle,
     search: Entity<ComposerInput>,
     search_state: FileSearchState,
@@ -461,6 +463,16 @@ impl FilesSurface {
             }
             this.sync_active_markdown_comments(cx);
         });
+        // The list state exposes no scroll handle, so the floating rail
+        // bridges scroll activity through the scroll handler (the
+        // transcript's pattern) and reads its geometry from the state's own
+        // scrollbar accessors.
+        let tree_list = ListState::new(0, ListAlignment::Top, px(560.0));
+        let weak = cx.entity().downgrade();
+        tree_list.set_scroll_handler(move |_, _, cx| {
+            weak.update(cx, |this: &mut Self, cx| this.on_tree_scrolled(cx))
+                .ok();
+        });
         let mut surface = Self {
             state,
             chat_id,
@@ -473,9 +485,10 @@ impl FilesSurface {
             selected_editor_path: None,
             pending_request_context: None,
             tree: FileTreeModel::with_include_ignored(show_all_files),
-            tree_list: ListState::new(0, ListAlignment::Top, px(560.0)),
+            tree_list,
             tree_list_rows: Vec::new(),
             tree_list_generation: 0,
+            tree_bar: crate::popover::MenuScrollbarState::default(),
             tree_focus: cx.focus_handle(),
             search,
             search_state: FileSearchState::default(),

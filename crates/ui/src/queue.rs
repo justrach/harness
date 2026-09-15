@@ -730,6 +730,7 @@ impl Composer {
                             cx.background_executor(),
                             target.as_deref(),
                             &task_key.1,
+                            None,
                         )
                         .await
                     }
@@ -792,6 +793,7 @@ impl Composer {
                 cx.background_executor(),
                 target.as_deref(),
                 &path,
+                None,
             )
             .await;
             this.update(cx, |this, cx| {
@@ -1306,6 +1308,7 @@ impl Composer {
                 for path in paths.unwrap_or_default() {
                     let loaded = crate::attachments::read_attachment_image(
                         &engine, cx.background_executor(), Some(&host_device_id), &path,
+                        None,
                     ).await;
                     match loaded {
                         Some(loaded) => loaded_attachments.push(crate::attachments::StagedAttachment {

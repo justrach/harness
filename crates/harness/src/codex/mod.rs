@@ -4,7 +4,8 @@
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
 //! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
-//! revalidate the method/notification surface when bumping past it.
+//! imageGeneration additionally follows the 0.154.0 schema (savedPath only).
+//! Revalidate the method/notification surface when bumping past it.
 //!
 //! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`) then
 //!   the `initialized` notification; unknown notification methods tolerated.
@@ -71,7 +72,7 @@ use normalize::{
 /// PATH in ways a GUI/service launch never sees — see [`crate::shell_env`]),
 /// then known install locations as a last resort. Resolved per call — cheap
 /// after the snapshot is cached.
-fn resolve_codex_executable() -> Option<PathBuf> {
+pub fn resolve_codex_executable() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
         && !p.is_empty()
     {
@@ -1076,8 +1077,8 @@ async fn run_session(session: Session) {
                         } else {
                             Phase::Completed
                         };
-                        let item = params.get("item").cloned().unwrap_or(Value::Null);
-                        if matches!(item_type(&item), "agentMessage" | "agent_message") {
+                        let item = params.get("item").unwrap_or(&Value::Null);
+                        if matches!(item_type(item), "agentMessage" | "agent_message") {
                             if phase == Phase::Completed {
                                 // Fallback for non-streamed messages only.
                                 let id = item.get("id").and_then(Value::as_str).unwrap_or("");
@@ -1121,7 +1122,7 @@ async fn run_session(session: Session) {
                                 }
                             }
                         } else {
-                            for ev in children.parent_item(phase, &item) {
+                            for ev in children.parent_item(phase, item) {
                                 if !send(&event_tx, ev).await {
                                     break 'main;
                                 }

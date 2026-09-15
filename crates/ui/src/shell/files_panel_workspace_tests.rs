@@ -138,6 +138,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
             crate::typography::init(
                 settings.ui_font_family.clone(),
                 settings.ui_font_size,
+                settings.terminal_font_family.clone(),
+                settings.terminal_font_size,
+                settings.code_font_family.clone(),
+                settings.code_font_size,
                 fonts,
                 cx,
             );

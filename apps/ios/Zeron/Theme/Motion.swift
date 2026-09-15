@@ -21,6 +21,7 @@ enum Motion {
     /// WorkingIndicator flavour words (transcript.rs:795), rotated every 7s,
     /// seeded per chat.
     static let flavourWords = [
+        "Zeroning",
         "Thinking", "Pondering", "Scheming", "Brewing", "Weaving", "Tinkering",
         "Musing", "Composing", "Sifting", "Untangling", "Distilling", "Sketching",
         "Plotting", "Riffing", "Combobulating", "Percolating", "Marinating",
