@@ -8,9 +8,29 @@ Push-Location $root
 try {
     cargo build --release --locked -p zeron
     if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
-    $versionText = & ./target/release/zeron.exe --version
-    if ($LASTEXITCODE -ne 0 -or $versionText -notmatch '^zeron (\d+\.\d+\.\d+)$') { throw 'Cannot read executable version' }
-    $version = $Matches[1]
+    # Explicit pipes also work for the GUI-subsystem executable in CI. A
+    # PowerShell collection match does not populate the scalar $Matches map.
+    $probe = [Diagnostics.ProcessStartInfo]::new()
+    $probe.FileName = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
+    $probe.Arguments = '--version'
+    $probe.UseShellExecute = $false
+    $probe.CreateNoWindow = $true
+    $probe.RedirectStandardOutput = $true
+    $probe.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($probe)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(10000)) {
+            $process.Kill()
+            throw 'Executable version probe timed out'
+        }
+        $versionMatch = [regex]::Match($stdout.Result.Trim(), '\Azeron (\d+\.\d+\.\d+)\z')
+        if ($process.ExitCode -ne 0 -or -not $versionMatch.Success) {
+            throw "Cannot read executable version: $($stderr.Result)"
+        }
+        $version = $versionMatch.Groups[1].Value
+    } finally { $process.Dispose() }
     $out = Join-Path $root 'target/package'
     $stage = Join-Path $out "zeron-$version-windows-x86_64"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
