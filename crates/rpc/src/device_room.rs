@@ -574,7 +574,7 @@ impl DeviceLink {
         Ok(Self::from_socket(ws))
     }
 
-    fn from_socket<S>(ws: tokio_tungstenite::WebSocketStream<S>) -> Self
+    fn from_socket<S>(ws: zeron_sync::socket::Connection<S>) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -1073,7 +1073,11 @@ mod tests {
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
         let (client, _peer) = tokio::io::duplex(64);
-        let socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let (client, progress) = zeron_sync::socket::ProgressIo::new(client);
+        let socket = zeron_sync::socket::Connection {
+            socket: WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            progress,
+        };
         let link = DeviceLink::from_socket(socket);
         let client = link.client();
         let request = client.call(
@@ -1092,7 +1096,11 @@ mod tests {
         use tokio::io::AsyncReadExt;
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
         let (client, mut peer) = tokio::io::duplex(8);
-        let socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+        let (client, progress) = zeron_sync::socket::ProgressIo::new(client);
+        let socket = zeron_sync::socket::Connection {
+            socket: WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            progress,
+        };
         let link = DeviceLink::from_socket(socket);
         tokio::task::yield_now().await; // initial echo fills the uplink
         drop(link);

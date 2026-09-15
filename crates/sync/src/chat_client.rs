@@ -13,7 +13,7 @@
 //! transport pings prove nothing about the DO; room health is judged only by
 //! protocol frames with probe deadlines.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -1016,7 +1016,8 @@ impl Actor {
         // so a message written on a dead network flushes ~2 RTTs after the
         // socket lands instead of waiting out a whole checkpoint download +
         // backfill ("typing works even when load doesn't").
-        if !self.push_pending(&mut pipe).await {
+        let mut in_flight = HashSet::new();
+        if !self.push_pending(&mut pipe, &mut in_flight).await {
             return SessionEnd::Reconnect;
         }
         let mut buffered: Vec<wire::WireFrame> = Vec::new();
@@ -1169,7 +1170,7 @@ impl Actor {
                     }
                 }
                 _ = self.nudge_rx.recv() => {
-                    if !self.push_pending(&mut pipe).await {
+                    if !self.push_pending(&mut pipe, &mut in_flight).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -1451,8 +1452,23 @@ impl Actor {
         pipe.tx.send(req).await.is_ok()
     }
 
-    async fn push_pending(&self, pipe: &mut BinPipe) -> bool {
-        let batches: Vec<PendingPush> = lock(&self.shared).pending.iter().cloned().collect();
+    async fn push_pending(&self, pipe: &mut BinPipe, in_flight: &mut HashSet<String>) -> bool {
+        let batches: Vec<PendingPush> = {
+            let shared = lock(&self.shared);
+            // New edits must not retransmit every slow-to-ack batch. Keep
+            // this set local to the session so a reconnect still replays
+            // the durable outbox with exactly the same batch IDs.
+            in_flight.retain(|id| shared.pending.iter().any(|p| &p.batch_id == id));
+            if shared.quota_blocked {
+                return true;
+            } // push_head owns quota retries
+            shared
+                .pending
+                .iter()
+                .filter(|p| !in_flight.contains(&p.batch_id))
+                .cloned()
+                .collect()
+        };
         for push in batches {
             if !ensure_durable(&self.shared, self.sink.as_ref(), &push) {
                 return false;
@@ -1467,6 +1483,7 @@ impl Actor {
             if pipe.tx.send(frame).await.is_err() {
                 return false;
             }
+            in_flight.insert(push.batch_id);
         }
         true
     }

@@ -22,15 +22,15 @@ use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::net::TcpStream;
+use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, UrlError};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// Delay before starting the next address attempt while one is still pending
 /// (RFC 8305 §5's "Connection Attempt Delay"; 250ms is its recommended value).
 const STAGGER: Duration = Duration::from_millis(250);
 
-pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type WsStream = crate::socket::Connection<MaybeTlsStream<crate::socket::ProgressIo<TcpStream>>>;
 
 /// Dial `url` (ws/wss) with happy-eyeballs TCP racing, then run TLS + the
 /// WebSocket handshake on the winning stream. A success also broadcasts
@@ -70,10 +70,14 @@ async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
         .map_err(|err| io::Error::new(err.kind(), format!("{host}:{port}: {err}")))?;
     // Best-effort: a socket that works without NODELAY beats no socket.
     let _ = stream.set_nodelay(true);
+    let (stream, progress) = crate::socket::ProgressIo::new(stream);
     let (ws, _response) =
         tokio_tungstenite::client_async_tls_with_config(request, stream, None, None).await?;
     crate::wake::notify_online();
-    Ok(ws)
+    Ok(crate::socket::Connection {
+        socket: ws,
+        progress,
+    })
 }
 
 /// Race TCP connects over an already-ordered address list: one new attempt per
@@ -170,7 +174,8 @@ mod tests {
         let err = result
             .expect("dial remained stuck after 21 seconds")
             .unwrap()
-            .unwrap_err();
+            .err()
+            .expect("dial unexpectedly succeeded");
         assert!(matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut));
     }
 

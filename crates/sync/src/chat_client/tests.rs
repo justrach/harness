@@ -1683,3 +1683,51 @@ async fn blocked_websockets_deliver_reopened_outbox_over_http_despite_lost_ack()
     );
     client.shutdown().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn edits_do_not_retransmit_batches_waiting_for_slow_acknowledgments() {
+    let (pipe, mut end) = pipe_pair();
+    let (fetch, _) = fetcher(b"");
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, empty_state_json(), &[], vec![], false).await;
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        Arc::new(RecordingSink::default()),
+        fetch,
+        "sender",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    let mut observed = Vec::new();
+    // Each earlier ACK is still in transit when the next edit is queued.
+    // A sender that replays the whole outbox produces b0,b0,b1,... here.
+    for i in 0..20 {
+        client.enqueue_batch(format!("b{i}"), vec![i]);
+        let push = expect_kind(&mut end, frame_type::PUSH).await;
+        assert_eq!(push.header["batchId"], format!("b{i}"));
+        assert_eq!(push.payload, vec![i]);
+        observed.push(push);
+    }
+    assert_eq!(client.stats().pending_pushes, 20);
+    assert!(end.rx.try_recv().is_err(), "only 20 frames for 20 edits");
+    for (i, push) in observed.iter().enumerate() {
+        send(
+            &end,
+            frame_type::ACK,
+            serde_json::json!({"batchId":push.header["batchId"],"seq":i+1,"dup":false}),
+            &[],
+        )
+        .await;
+    }
+    let mut events = client.events();
+    while client.stats().pending_pushes != 0 {
+        events.recv().await.unwrap();
+    }
+    assert_eq!(client.stats().cursor, 20);
+    client.shutdown().await;
+}
