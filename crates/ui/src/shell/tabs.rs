@@ -335,7 +335,7 @@ impl Shell {
                             .child(
                                 header_icon_button(
                                     "toggle-files-panel",
-                                    icons::FOLDER_WITH_FILES,
+                                    icons::FILE_TREE,
                                     &theme,
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_files_panel(window, cx)

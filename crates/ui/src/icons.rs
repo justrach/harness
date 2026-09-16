@@ -71,6 +71,8 @@ icon_assets![
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
+    // Original folder-and-branches glyph for the independent Files panel.
+    (FILE_TREE, "file-tree"),
     (FOLDER, "folder"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
