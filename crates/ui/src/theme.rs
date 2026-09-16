@@ -904,12 +904,12 @@ impl Theme {
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
     /// the desktop behind it, so it needs no compositor vibrancy — macOS
-    /// rasterizes it in Metal and Linux in wgpu. The pinned Direct3D renderer
-    /// does not implement in-app blur yet. Windows window chrome
-    /// can still use native Acrylic independently of these scene-level blurs.
+    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D.
+    /// Windows window chrome uses native Acrylic independently of these
+    /// scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux"))
+            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -1993,7 +1993,7 @@ mod tests {
                 frosted.window_background_appearance(),
                 gpui::WindowBackgroundAppearance::Blurred
             );
-            assert!(!frosted.is_frost());
+            assert!(frosted.is_frost());
         }
 
         let opaque_zeron = Theme::for_selection(
@@ -2582,8 +2582,8 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances are glass-forward on macOS. Light frost runs heavier
-    /// than dark's (a light tint controls the blur less), and floating cards
+    /// Both appearances are glass-forward on macOS and Windows. Light frost
+    /// runs heavier than dark's (a light tint controls the blur less), and floating cards
     /// step their tint coverage up in light so menu text stays on a
     /// known-enough background — assert both relationships so the frost and
     /// the overlay can't drift apart.
@@ -2597,19 +2597,14 @@ mod tests {
                 light.glass().a > dark.glass().a - f32::EPSILON,
                 "a light tint dominates the blur less, so it must not run looser than dark"
             );
-            if cfg!(target_os = "macos") {
-                assert!(
-                    light.glass_overlay().a > dark.glass_overlay().a,
-                    "light floating cards need more coverage over blur for legible rows"
-                );
-            } else {
-                // Windows has native Acrylic window glass, but the DirectX
-                // renderer does not yet rasterize in-app BackdropBlur regions.
-                assert_eq!(dark.glass_overlay().a, 1.0);
-                assert_eq!(light.glass_overlay().a, 1.0);
-                assert!(!dark.is_frost());
-                assert!(!light.is_frost());
-            }
+            assert!(dark.is_frost());
+            assert!(light.is_frost());
+            assert!(dark.glass_overlay().a < 1.0);
+            assert!(light.glass_overlay().a < 1.0);
+            assert!(
+                light.glass_overlay().a > dark.glass_overlay().a,
+                "light floating cards need more coverage over blur for legible rows"
+            );
         } else {
             assert_eq!(Theme::light().glass().a, 1.0);
             assert_eq!(Theme::dark().glass().a, 1.0);
