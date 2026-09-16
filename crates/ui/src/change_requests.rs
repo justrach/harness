@@ -79,11 +79,7 @@ impl Render for ChangeRequestTooltip {
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border_strong)
-            .bg(if theme.is_frost() {
-                theme.glass_overlay()
-            } else {
-                theme.surface_raised
-            })
+            .bg(crate::popover::surface_bg(theme))
             .shadow_md()
             .child(
                 div()

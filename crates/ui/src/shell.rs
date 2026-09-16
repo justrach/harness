@@ -787,17 +787,18 @@ struct SurfaceTabTooltip {
 impl Render for SurfaceTabTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
+        let card = div()
             .max_w(px(380.0))
             .px(px(9.0))
             .py(px(6.0))
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_overlay)
+            .bg(crate::popover::surface_bg(theme))
             .text_size(px(10.5))
             .text_color(theme.text_muted)
-            .child(self.text.clone())
+            .child(self.text.clone());
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
     }
 }
 /// Drag marker for the terminal-panel height handle.
