@@ -2,6 +2,7 @@
 use super::*;
 
 const HISTORY_RESULT_LIMIT: usize = 30;
+const RESULTS_SCROLL_GUTTER: f32 = 8.0;
 
 pub(super) struct CommandPalette {
     search: Entity<ComposerInput>,
@@ -182,6 +183,24 @@ impl Shell {
                 );
             }
             let content = if let Some((label, glyph)) = entry.action() {
+                let shortcut = match entry {
+                    Entry::NewChat | Entry::NewProject => {
+                        let id = if *entry == Entry::NewChat {
+                            ShortcutId::NewSession
+                        } else {
+                            ShortcutId::NewProject
+                        };
+                        let combo = self.settings.keymap.get(id);
+                        let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
+                        Some(crate::settings::badge_combo(if valid {
+                            combo
+                        } else {
+                            id.default_combo()
+                        }))
+                    }
+                    Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
+                    _ => None,
+                };
                 let entry = entry.clone();
                 popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
@@ -195,6 +214,16 @@ impl Shell {
                         Some(&query),
                         &theme,
                     ))
+                    .child(div().flex_1())
+                    .when_some(shortcut, |row, shortcut| {
+                        row.child(
+                            popover::key_cap(&theme)
+                                .flex_none()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(shortcut)),
+                        )
+                    })
                     .into_any_element()
             } else if let Entry::Chat(id) = entry {
                 let state = self.state.read(cx);
@@ -252,10 +281,9 @@ impl Shell {
         let body = div()
             .id("command-results")
             .min_h_0()
-            .max_h(px(height))
+            .max_h(px(height - RESULTS_SCROLL_GUTTER * 2.0))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .py(px(8.0))
             .flex()
             .flex_col()
             .gap(px(SIDEBAR_LIST_GAP))
@@ -353,7 +381,9 @@ impl Shell {
                         "",
                     )),
             )
-            .child(body)
+            // Keep these gutters outside the scroll viewport: content padding
+            // scrolls away, and keyboard reveal otherwise pins rows to an edge.
+            .child(div().min_h_0().py(px(RESULTS_SCROLL_GUTTER)).child(body))
             .child(
                 div()
                     .flex_none()

@@ -367,6 +367,11 @@ pub fn apply_keymap(
             ArchiveSession,
             None,
         ),
+        KeyBinding::new(
+            &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
+            AddSpacePalette,
+            None,
+        ),
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
