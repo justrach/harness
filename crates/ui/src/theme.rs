@@ -909,7 +909,11 @@ impl Theme {
     /// scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+            && cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -917,6 +921,21 @@ impl Theme {
     /// theme, so forcing frost does not reintroduce Zeron's neutral hover.
     pub fn glass_hover(&self) -> Hsla {
         self.element_hover
+    }
+
+    /// Popup labels sit over arbitrary imagery, so use dedicated foreground
+    /// values rather than the subdued solid-panel text ladder.
+    pub fn for_popup(&self) -> Self {
+        let mut popup = self.clone();
+        if self.is_frost() {
+            let (secondary, hint) = match self.appearance {
+                Appearance::Dark => (0.88, 0.80),
+                Appearance::Light => (0.20, 0.28),
+            };
+            popup.text_muted = hsla(self.text.h, self.text.s, secondary, 1.0);
+            popup.text_faint = hsla(self.text.h, self.text.s, hint, 1.0);
+        }
+        popup
     }
 
     /// The theme-owned tint floating cards paint over their backdrop blur (see
@@ -2720,6 +2739,30 @@ mod tests {
         assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
         // Out-of-range t clamps.
         assert_eq!(mix(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn popup_foregrounds_keep_glass_and_solid_theme_surfaces_unchanged() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            theme.surface_treatment = SurfaceTreatment::Frosted;
+            let popup = theme.for_popup();
+            assert_eq!(popup.composer_sidebar_tint(), theme.composer_sidebar_tint());
+            assert_eq!(popup.surface_overlay, theme.surface_overlay);
+            assert_eq!(popup.text, theme.text);
+            match theme.appearance {
+                Appearance::Dark => {
+                    assert!(popup.text_muted.l > theme.text_muted.l);
+                    assert!(popup.text_faint.l > theme.text_faint.l);
+                }
+                Appearance::Light => {
+                    assert!(popup.text_muted.l < theme.text_muted.l);
+                    assert!(popup.text_faint.l < theme.text_faint.l);
+                }
+            }
+            theme.surface_treatment = SurfaceTreatment::Opaque;
+            assert_eq!(theme.for_popup().text_muted, theme.text_muted);
+            assert_eq!(theme.for_popup().text_faint, theme.text_faint);
+        }
     }
 
     #[test]

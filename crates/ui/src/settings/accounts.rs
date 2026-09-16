@@ -938,7 +938,7 @@ impl AccountsPage {
         viewport: gpui::Size<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let red_text = theme.danger_muted.opacity(0.9); // red-300
         let login = self.login.as_ref()?;
         let title = login.title();
@@ -951,7 +951,7 @@ impl AccountsPage {
                     .id(id)
                     .mt(px(6.0))
                     .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted.opacity(0.6))
+                    .text_color(theme.text_muted)
                     .truncate()
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme.text))
@@ -1084,7 +1084,7 @@ impl AccountsPage {
                                 .child(
                                     div()
                                         .text_size(crate::typography::ui_rems(12.5))
-                                        .text_color(theme.text_muted.opacity(0.7))
+                                        .text_color(theme.text_muted)
                                         .child(message.clone().unwrap_or_else(|| {
                                             SharedString::from("Waiting for the browser…")
                                         })),

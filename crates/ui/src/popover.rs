@@ -301,9 +301,13 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 /// Corner radius must match the frost wrapper's mask.
 pub const CARD_RADIUS: f32 = 12.0;
 
-/// The `p-1` inset of [`popover_card`] that [`menu_scroll_host`] /
+pub const MENU_GAP: f32 = 2.0;
+/// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
+/// Concentric corners: the row radius follows the card's inset curve.
+pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - CARD_INSET;
+pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     if theme.is_frost() {
@@ -321,12 +325,13 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .when(!theme.is_frost(), |el| el.shadow_lg())
         .bg(surface_bg(theme))
         .p(px(CARD_INSET))
+        .gap(px(MENU_GAP))
         .overflow_hidden()
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text)
 }
 
-/// [`popover_card`] without the `p-1` inset — for popovers that manage their
+/// [`popover_card`] without the shared inset — for popovers that manage their
 /// own internal panes (the harness/model picker's rail + list split).
 pub fn popover_card_flush(theme: &Theme) -> gpui::Div {
     popover_card(theme).p(px(0.0))
@@ -504,6 +509,32 @@ pub fn anchored_menu_below_end(
             )
             .priority(1)
             .into_any_element(),
+        )
+        .into_any_element()
+}
+
+/// A nested menu beside its trigger. Callers choose the side that has room;
+/// vertical placement still stays within the window's eight-pixel gutter.
+pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {
+    let content = frosted_menu(None, content);
+    div()
+        .absolute()
+        .top_0()
+        .size_0()
+        .when(left, |el| el.left(px(-(CARD_INSET + 6.0))))
+        .when(!left, |el| el.right(px(-(CARD_INSET + 6.0))))
+        .child(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(if left {
+                        Anchor::TopRight
+                    } else {
+                        Anchor::TopLeft
+                    })
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(menu_motion(id.into(), None, div().occlude().child(content))),
+            )
+            .priority(2),
         )
         .into_any_element()
 }
@@ -742,7 +773,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .gap(px(10.0))
         .px(px(8.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(MENU_ITEM_RADIUS))
         .text_size(crate::typography::ui_rems(13.0))
         .cursor_pointer();
     if active {
@@ -793,13 +824,14 @@ pub fn menu_row_nav(
 /// tracking-[0.1em] text-muted-foreground/60`. gpui has no letter-spacing at
 /// the pinned rev; the tracking is approximated with hair spaces.
 pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .px(px(8.0))
         .pb(px(4.0))
         .pt(px(6.0))
         .text_size(crate::typography::ui_rems(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(theme.text_muted.opacity(0.6))
+        .text_color(theme.text_muted)
         .child(SharedString::from(tracked_upper(label)))
 }
 
@@ -821,9 +853,13 @@ pub fn tracked_upper(label: &str) -> String {
 /// Hairline divider between menu sections (zeron `MenuSeparator`:
 /// `mx-1 my-1 h-px bg-white/[0.07]`).
 pub fn menu_separator() -> gpui::Div {
-    // Full-bleed: negative margins cancel the card's p-1 inset so the hairline
+    // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
-    div().h(px(1.0)).mx(px(-4.0)).my(px(4.0)).bg(hairline(0.07))
+    div()
+        .h(px(1.0))
+        .mx(px(-CARD_INSET))
+        .my(px(MENU_GAP))
+        .bg(hairline(0.07))
 }
 
 /// The recessed band tone for a palette/picker header or footer strip — a
@@ -892,15 +928,17 @@ pub fn key_cap(_theme: &Theme) -> gpui::Div {
 
 /// The tiny verb after a key-cap.
 fn key_hint_label(theme: &Theme, label: &'static str) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .text_size(crate::typography::ui_rems(10.5))
-        .text_color(theme.text_muted.opacity(0.45))
+        .text_color(theme.text_muted)
         .child(SharedString::from(label))
 }
 
 /// A footer legend: one icon key-cap + tiny verb (the add-space palette's
 /// footer voice, shared by the pickers).
 pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .flex()
         .flex_row()
@@ -910,7 +948,7 @@ pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> 
             key_cap(theme).child(
                 crate::icons::icon(icon_path)
                     .size(px(12.5))
-                    .text_color(theme.text_muted.opacity(0.7)),
+                    .text_color(theme.text_muted),
             ),
         )
         .child(key_hint_label(theme, label))
@@ -919,6 +957,7 @@ pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> 
 /// A footer legend whose cap holds a WORD ("tab", "esc") instead of a glyph
 /// — for keys with no icon in the set.
 pub fn key_hint_text(theme: &Theme, cap: &'static str, label: &'static str) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .flex()
         .flex_row()
@@ -928,7 +967,7 @@ pub fn key_hint_text(theme: &Theme, cap: &'static str, label: &'static str) -> g
             key_cap(theme)
                 .text_size(px(11.0))
                 .font_family(theme.font_mono.clone())
-                .text_color(theme.text_muted.opacity(0.7))
+                .text_color(theme.text_muted)
                 .child(SharedString::from(cap)),
         )
         .child(key_hint_label(theme, label))
@@ -942,6 +981,7 @@ pub fn key_hint_pair(
     second: &'static str,
     label: &'static str,
 ) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .flex()
         .flex_row()
@@ -952,13 +992,13 @@ pub fn key_hint_pair(
                 .child(
                     crate::icons::icon(first)
                         .size(px(12.5))
-                        .text_color(theme.text_muted.opacity(0.7)),
+                        .text_color(theme.text_muted),
                 )
                 .child(div().w(px(1.0)).h(px(11.0)).bg(hairline(0.10)))
                 .child(
                     crate::icons::icon(second)
                         .size(px(12.5))
-                        .text_color(theme.text_muted.opacity(0.7)),
+                        .text_color(theme.text_muted),
                 ),
         )
         .child(key_hint_label(theme, label))
@@ -966,6 +1006,7 @@ pub fn key_hint_pair(
 
 /// A muted kbd hint chip inside menu rows (`⌘↵`-style accelerators).
 pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
+    let theme = &theme.for_popup();
     div()
         .flex_none()
         .px(px(5.0))
@@ -974,7 +1015,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .bg(ink(0.05))
         .text_size(crate::typography::ui_rems(10.0))
         .font_family(theme.font_mono.clone())
-        .text_color(theme.text_muted.opacity(0.6))
+        .text_color(theme.text_muted)
         .child(SharedString::from(label.to_string()))
 }
 

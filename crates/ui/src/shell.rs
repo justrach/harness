@@ -5683,7 +5683,11 @@ impl Shell {
         };
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
-        let subline = theme.text_muted.opacity(0.5);
+        let subline = if search_query.is_some() {
+            theme.text_muted
+        } else {
+            theme.text_muted.opacity(0.5)
+        };
         let select_id = id.clone();
         let menu_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
@@ -5699,7 +5703,11 @@ impl Shell {
         // below its near-opaque selected fill, and blending toward it visibly
         // dimmed the active row under the pointer (user report).
         let hover_bg = if selected { selected_wash } else { hover };
-        let rest_text = if selected { text } else { text.opacity(0.8) };
+        let rest_text = if selected || search_query.is_some() {
+            text
+        } else {
+            text.opacity(0.8)
+        };
         div()
             .id(SharedString::from(row_id.clone()))
             .h(px(chat_row_height(
@@ -5709,7 +5717,11 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .rounded(px(8.0))
+            .rounded(px(if search_query.is_some() {
+                popover::PALETTE_ITEM_RADIUS
+            } else {
+                8.0
+            }))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
@@ -6248,6 +6260,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
@@ -6358,7 +6371,7 @@ impl Shell {
                         .pt(px(6.0))
                         .pb(px(4.0))
                         .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted.opacity(0.7))
+                        .text_color(theme.text_muted)
                         .truncate()
                         .child(menu_identity),
                 )
@@ -6443,7 +6456,7 @@ impl Shell {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let needs_org = matches!(
             self.state.read(cx).auth.as_ref(),
             Some(AuthState::NeedsOrganization { .. })
@@ -6948,7 +6961,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
@@ -7002,7 +7015,7 @@ impl Shell {
                             .child(
                                 icon(icons::ALT_ARROW_RIGHT)
                                     .size(px(14.0))
-                                    .text_color(theme.text_muted.opacity(0.7)),
+                                    .text_color(theme.text_muted),
                             ),
                     )
                     .child(popover::menu_separator())
