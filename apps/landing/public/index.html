@@ -450,6 +450,11 @@
     .spoke-node span:last-child { font-size: 11px; }
     .spoke-hub { width: 56px; height: 56px; padding: 6px; border-radius: 13px; }
   }
+  @media (max-width: 360px) {
+    .p-harness .p-diagram { padding-inline: 12px; }
+    .p-harness .spoke-node { gap: 5px; padding: 5px 7px; }
+    .p-harness .spoke-node span:last-child { font-size: 10px; }
+  }
   @media (prefers-reduced-motion: reduce) {
     .spoke-line, .spoke-accent { animation: none; }
   }
@@ -812,6 +817,8 @@
           <span class="agent-icon" title="Grok" style="--icon: url('/assets/icons/grok-mark.svg')"></span>
           <span class="agent-icon" title="Hermes" style="--icon: url('/assets/icons/hermes-mark.svg')"></span>
           <span class="agent-icon" title="Pi" style="--icon: url('/assets/icons/pi-mark.svg')"></span>
+          <span class="agent-icon" title="Devin" style="--icon: url('/assets/icons/devin-mark.svg')"></span>
+          <span class="agent-icon" title="OpenCode" style="--icon: url('/assets/icons/opencode-mark.svg')"></span>
         </div>
       </div>
       <pre class="hero-ascii" aria-hidden="true">++=========+=====+++++++++++******+++++++++++++++++++++*****#############%%######***#######*#%#######****#####
@@ -882,47 +889,61 @@
           <div class="spoke-wrap" aria-hidden="true">
             <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
               <g>
-                <line x1="50" y1="12" x2="50" y2="39" class="spoke-line" style="animation-delay: 0s"></line>
-                <line x1="50" y1="12" x2="50" y2="39" class="spoke-accent" style="animation-delay: 0s"></line>
+                <line x1="50.00" y1="12.00" x2="50.00" y2="39.00" class="spoke-line" style="animation-delay: 0s"></line>
+                <line x1="50.00" y1="12.00" x2="50.00" y2="39.00" class="spoke-accent" style="animation-delay: 0s"></line>
               </g>
               <g>
-                <line x1="82.91" y1="31" x2="59.53" y2="44.5" class="spoke-line" style="animation-delay: .25s"></line>
-                <line x1="82.91" y1="31" x2="59.53" y2="44.5" class="spoke-accent" style="animation-delay: .25s"></line>
+                <line x1="76.87" y1="23.13" x2="57.78" y2="42.22" class="spoke-line" style="animation-delay: 0.25s"></line>
+                <line x1="76.87" y1="23.13" x2="57.78" y2="42.22" class="spoke-accent" style="animation-delay: 0.25s"></line>
               </g>
               <g>
-                <line x1="82.91" y1="69" x2="59.53" y2="55.5" class="spoke-line" style="animation-delay: .5s"></line>
-                <line x1="82.91" y1="69" x2="59.53" y2="55.5" class="spoke-accent" style="animation-delay: .5s"></line>
+                <line x1="88.00" y1="50.00" x2="61.00" y2="50.00" class="spoke-line" style="animation-delay: 0.5s"></line>
+                <line x1="88.00" y1="50.00" x2="61.00" y2="50.00" class="spoke-accent" style="animation-delay: 0.5s"></line>
               </g>
               <g>
-                <line x1="50" y1="88" x2="50" y2="61" class="spoke-line" style="animation-delay: .75s"></line>
-                <line x1="50" y1="88" x2="50" y2="61" class="spoke-accent" style="animation-delay: .75s"></line>
+                <line x1="76.87" y1="76.87" x2="57.78" y2="57.78" class="spoke-line" style="animation-delay: 0.75s"></line>
+                <line x1="76.87" y1="76.87" x2="57.78" y2="57.78" class="spoke-accent" style="animation-delay: 0.75s"></line>
               </g>
               <g>
-                <line x1="17.09" y1="69" x2="40.47" y2="55.5" class="spoke-line" style="animation-delay: 1s"></line>
-                <line x1="17.09" y1="69" x2="40.47" y2="55.5" class="spoke-accent" style="animation-delay: 1s"></line>
+                <line x1="50.00" y1="88.00" x2="50.00" y2="61.00" class="spoke-line" style="animation-delay: 1s"></line>
+                <line x1="50.00" y1="88.00" x2="50.00" y2="61.00" class="spoke-accent" style="animation-delay: 1s"></line>
               </g>
               <g>
-                <line x1="17.09" y1="31" x2="40.47" y2="44.5" class="spoke-line" style="animation-delay: 1.25s"></line>
-                <line x1="17.09" y1="31" x2="40.47" y2="44.5" class="spoke-accent" style="animation-delay: 1.25s"></line>
+                <line x1="23.13" y1="76.87" x2="42.22" y2="57.78" class="spoke-line" style="animation-delay: 1.25s"></line>
+                <line x1="23.13" y1="76.87" x2="42.22" y2="57.78" class="spoke-accent" style="animation-delay: 1.25s"></line>
+              </g>
+              <g>
+                <line x1="12.00" y1="50.00" x2="39.00" y2="50.00" class="spoke-line" style="animation-delay: 1.5s"></line>
+                <line x1="12.00" y1="50.00" x2="39.00" y2="50.00" class="spoke-accent" style="animation-delay: 1.5s"></line>
+              </g>
+              <g>
+                <line x1="23.13" y1="23.13" x2="42.22" y2="42.22" class="spoke-line" style="animation-delay: 1.75s"></line>
+                <line x1="23.13" y1="23.13" x2="42.22" y2="42.22" class="spoke-accent" style="animation-delay: 1.75s"></line>
               </g>
             </svg>
             <div class="spoke-hub"><img src="/assets/zeron-app-icon.png" width="128" height="128" alt="" /></div>
-            <div class="spoke-node" style="left: 50%; top: 12%">
+            <div class="spoke-node" style="left: 50.00%; top: 12.00%">
               <span class="agent-icon" style="--icon: url('/assets/icons/claude-mark.svg')"></span><span>Claude Code</span>
             </div>
-            <div class="spoke-node" style="left: 82.91%; top: 31%">
+            <div class="spoke-node" style="left: 76.87%; top: 23.13%">
               <span class="agent-icon" style="--icon: url('/assets/icons/openai-mark.svg')"></span><span>Codex</span>
             </div>
-            <div class="spoke-node" style="left: 82.91%; top: 69%">
+            <div class="spoke-node" style="left: 88.00%; top: 50.00%">
               <span class="agent-icon" style="--icon: url('/assets/icons/cursor-mark.svg')"></span><span>Cursor</span>
             </div>
-            <div class="spoke-node" style="left: 50%; top: 88%">
+            <div class="spoke-node" style="left: 76.87%; top: 76.87%">
+              <span class="agent-icon" style="--icon: url('/assets/icons/devin-mark.svg')"></span><span>Devin</span>
+            </div>
+            <div class="spoke-node" style="left: 50.00%; top: 88.00%">
               <span class="agent-icon" style="--icon: url('/assets/icons/pi-mark.svg')"></span><span>Pi</span>
             </div>
-            <div class="spoke-node" style="left: 17.09%; top: 69%">
+            <div class="spoke-node" style="left: 23.13%; top: 76.87%">
               <span class="agent-icon" style="--icon: url('/assets/icons/hermes-mark.svg')"></span><span>Hermes</span>
             </div>
-            <div class="spoke-node" style="left: 17.09%; top: 31%">
+            <div class="spoke-node" style="left: 12.00%; top: 50.00%">
+              <span class="agent-icon" style="--icon: url('/assets/icons/opencode-mark.svg')"></span><span>OpenCode</span>
+            </div>
+            <div class="spoke-node" style="left: 23.13%; top: 23.13%">
               <span class="agent-icon" style="--icon: url('/assets/icons/grok-mark.svg')"></span><span>Grok</span>
             </div>
           </div>
@@ -930,7 +951,7 @@
         <div class="p-copy">
           <h2>Runs what you already use</h2>
           <p>Zeron is not a new harness. It drives Claude Code, Codex, Cursor,
-             Grok, Hermes and Pi — the same sessions and tools you use each day,
+             Devin, OpenCode, Grok, Hermes and Pi — the same sessions and tools you use each day,
              in one fast native window on every device.</p>
           <div class="cta-row">
             <a class="btn ghost" href="https://github.com/zeronsh/comet">Star on GitHub ↗</a>
