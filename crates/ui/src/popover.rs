@@ -718,14 +718,12 @@ pub fn modal(
     viewport: gpui::Size<Pixels>,
     card: AnyElement,
 ) -> AnyElement {
-    modal_with(id, viewport, card, 16.0, 0.6)
+    modal_with(id, viewport, card, 16.0, 0.35)
 }
 
-/// [`modal`] for glass-tinted cards (the add-space palette): a LIGHTER scrim,
-/// so the frosted card reads like the popovers — the standard 0.6 dim buried
-/// the backdrop hue under the blur and the palette came out a flat grey slab
-/// next to the hue-inheriting menus (user report). `corner_radius` must match
-/// the card's rounding.
+/// [`modal`] with custom rounding for glass palettes. Both use a light
+/// scrim so the blurred backdrop retains its hue instead of becoming gray.
+/// `corner_radius` must match the card's rounding.
 pub fn modal_glass(
     id: impl Into<ElementId>,
     viewport: gpui::Size<Pixels>,
@@ -1057,8 +1055,8 @@ pub fn menu_section() -> gpui::Div {
 // Dialog primitives (zeron dialog.tsx / sidebar dialogs.tsx)
 // ---------------------------------------------------------------------------
 
-/// The centered dialog card (`dialog-pop`): `w-[360px] rounded-2xl border
-/// border-white/[0.1] bg-popover/95 p-5 shadow-2xl` — popover tone ≈ #101010.
+/// Centered dialog with the shared popover surface. A filled drop shadow
+/// would show through the translucent card, so only opaque cards use it.
 pub fn dialog_card(theme: &Theme) -> gpui::Div {
     div()
         .w(px(360.0))
@@ -1067,7 +1065,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .bg(surface_bg(theme))
         .border_1()
         .border_color(hairline(0.10))
-        .shadow_lg()
+        .when(!theme.is_frost(), |el| el.shadow_lg())
         .flex()
         .flex_col()
         .text_color(theme.text)

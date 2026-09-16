@@ -3943,6 +3943,8 @@ impl Pickers {
             let id = group.id.clone();
             let outside_id = id.clone();
             let move_id = id.clone();
+            let exit_id = id.clone();
+            let exit_entity = cx.entity().downgrade();
             let entity = cx.entity().downgrade();
             let mut row = popover::menu_row(
                 &theme,
@@ -3990,7 +3992,45 @@ impl Pickers {
                             }
                         });
                     },
-                    |_, _, _, _| {},
+                    move |trigger, _, window, _| {
+                        if !open {
+                            return;
+                        }
+                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                            if phase != gpui::DispatchPhase::Bubble {
+                                return;
+                            }
+                            let _ = exit_entity.update(cx, |this, cx| {
+                                if this.setting_menu.as_ref() != Some(&exit_id) {
+                                    return;
+                                }
+                                let pointer = event.position;
+                                if trigger.contains(&pointer) {
+                                    this.setting_intent_origin = Some(pointer);
+                                    return;
+                                }
+                                let Some(bounds) = this.setting_bounds else {
+                                    return;
+                                };
+                                if bounds.contains(&pointer) {
+                                    return;
+                                }
+                                if this.setting_intent_origin.is_some_and(|origin| {
+                                    submenu_corridor(origin, pointer, bounds, this.setting_on_left)
+                                }) {
+                                    return;
+                                }
+                                this.cancel_setting_hover();
+                                this.setting_menu = None;
+                                this.setting_bounds = None;
+                                this.setting_intent_origin = None;
+                                // Do not leave a keyboard-style selection on the
+                                // trigger after pointer navigation dismisses it.
+                                this.active = 0;
+                                cx.notify();
+                            });
+                        });
+                    },
                 )
                 .absolute()
                 .inset_0(),
@@ -5270,17 +5310,29 @@ mod tests {
             } else {
                 (parent.right() + submenu.left()) / 2.0
             };
-            // Move out of the row diagonally, pause over the gap, overshoot
-            // below the submenu, and come back to its first choice.
+            // Leaving the safe corridor closes the child and clears its
+            // trigger selection, while preserving the parent picker.
+            for outside in [
+                gpui::point(gap_x, submenu.bottom() + px(20.0)),
+                gpui::point(parent.center().x, parent.top() + px(60.0)),
+                gpui::point(px(8.0), px(8.0)),
+            ] {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    hover(window, cx, outside);
+                    assert!(pickers.read(cx).setting_menu.is_none());
+                    assert_eq!(pickers.read(cx).active, 0);
+                    assert!(pickers.read(cx).is_open());
+                    hover(window, cx, trigger);
+                    assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
+                })
+                .unwrap();
+            }
+            // Moving through the gap into the child remains safe.
             let target = gpui::point(
                 submenu.left() + px(30.0),
                 submenu.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
             );
-            for position in [
-                gpui::point(gap_x, trigger.y + px(16.0)),
-                gpui::point(gap_x, submenu.bottom() + px(20.0)),
-                target,
-            ] {
+            for position in [gpui::point(gap_x, trigger.y + px(16.0)), target] {
                 cx.update_window(handle.into(), |_, window, cx| {
                     window.dispatch_event(
                         gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {

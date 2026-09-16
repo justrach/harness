@@ -7712,13 +7712,8 @@ impl Shell {
     /// the subagent pane so both read as one control. `anim_key`/`hover_key`
     /// must be distinct per instance (they key global animation state).
     ///
-    /// Glass-forward like the composer pill it floats near: a backdrop blur
-    /// under the floating-card tint ([`Theme::glass_overlay`]), hover
-    /// brightening via the standard glass wash painted OVER the tint —
-    /// mixing the tint TOWARD the wash would thin the pill on hover, the
-    /// exact see-through regression the old opaque pill's comment warned
-    /// about. Opaque appearances keep the raised-surface treatment
-    /// (`frosted` passes through there anyway).
+    /// Use the shared popover tint and blur, with a separate hover wash so
+    /// the floating control retains the same glass surface in either theme.
     fn jump_pill(
         &self,
         anim_key: &'static str,
@@ -7726,10 +7721,10 @@ impl Shell {
         transcript: Entity<Transcript>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = Theme::of(cx);
-        let glass = theme.is_glass();
+        let theme = Theme::of(cx).for_popup();
+        let glass = theme.is_frost();
         let base = if glass {
-            theme.glass_overlay()
+            popover::surface_bg(&theme)
         } else {
             motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
         };
@@ -7744,7 +7739,7 @@ impl Shell {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .shadow_md()
+            .when(!glass, |el| el.shadow_md())
             .cursor_pointer()
             .bg(base)
             .on_hover(motion::hover_listener(hover_key))
@@ -7781,7 +7776,12 @@ impl Shell {
         // glyphs — so the pill always composes over the transcript content
         // scrolling under it, and never loses its washes to the kind-sorted
         // draw order (frost.rs module docs).
-        crate::frost::frosted(15.0, 16.0, motion::dialog_in(anim_key, pill)).into_any_element()
+        crate::frost::frosted(
+            15.0,
+            crate::frost::MENU_BLUR,
+            motion::dialog_in(anim_key, pill),
+        )
+        .into_any_element()
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
