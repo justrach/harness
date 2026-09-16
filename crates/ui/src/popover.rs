@@ -296,37 +296,34 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 // ---------------------------------------------------------------------------
 
 /// The floating-menu surface (zeron `.glass-surface` + `menuSurface`):
-/// `rounded-xl border border-white/[0.1] p-1` over the frosted glass tint —
-/// the real recipe now that the fork paints backdrop blur: the
-/// [`Theme::glass_overlay`] tint (`oklch(0.33 0 0 / 34%)` on dark) over the
-/// [`crate::frost::MENU_BLUR`] blur from the mount helpers below, plus the
-/// same hairline + baked-in shadow. Opaque platforms keep the near-opaque
-/// tone the reference composites to on the dark panels (~#161616).
-/// Corner radius of every floating card. The frost wrapper masks its backdrop
-/// blur to the same value, so the two must agree.
+/// Shared floating surface used by palettes, popovers, dropdowns and menus.
+/// Mount helpers supply the same 16px backdrop blur as the composer.
+/// Corner radius must match the frost wrapper's mask.
 pub const CARD_RADIUS: f32 = 12.0;
 
 /// The `p-1` inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
 
+pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
+    if theme.is_frost() {
+        theme.composer_sidebar_tint()
+    } else {
+        theme.input_glass_bg()
+    }
+}
+
 pub fn popover_card(theme: &Theme) -> gpui::Div {
-    let card = div()
+    div()
         .border_1()
-        .border_color(hairline(0.10))
+        .border_color(theme.border)
         .rounded(px(CARD_RADIUS))
-        .shadow_lg()
+        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .bg(surface_bg(theme))
         .p(px(CARD_INSET))
         .overflow_hidden()
         .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text);
-    if theme.is_frost() {
-        // Translucent tint — the backdrop blur beneath it comes from the
-        // [`crate::frost::frosted`] wrapper at the mount helpers below.
-        card.bg(theme.glass_overlay())
-    } else {
-        card.bg(theme.surface_overlay)
-    }
+        .text_color(theme.text)
 }
 
 /// [`popover_card`] without the `p-1` inset — for popovers that manage their
@@ -850,16 +847,31 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
         .rounded(px(corner_radius))
         .border_1()
         .border_color(hairline(0.10))
-        .bg(if theme.is_frost() {
-            theme.glass_overlay()
-        } else {
-            theme.surface_overlay
-        })
+        .bg(surface_bg(theme))
         .shadow_lg()
         .overflow_hidden()
         .flex()
         .flex_col()
         .text_color(theme.text)
+}
+
+/// A compact search glyph in a stable header slot. The slight optical offset
+/// balances the magnifier's upper-left lens against its lower-right handle.
+pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
+    div()
+        .size(px(20.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(crate::icons::MAGNIFER)
+                .size(px(16.0))
+                .relative()
+                .left(px(0.5))
+                .top(px(0.5))
+                .text_color(theme.text_muted),
+        )
 }
 
 /// One footer key-cap (22px, rounded-5, `white/[0.05]`) holding arbitrary
@@ -1007,7 +1019,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .w(px(360.0))
         .p(px(20.0))
         .rounded(px(16.0))
-        .bg(theme.surface_dialog)
+        .bg(surface_bg(theme))
         .border_1()
         .border_color(hairline(0.10))
         .shadow_lg()
@@ -2188,5 +2200,127 @@ mod tests {
         // The re-observed top offset is a fresh baseline, not motion.
         bar.note_scroll(&scroll);
         assert!(!bar.visible());
+    }
+}
+
+/// Compact mention-style match washes preserve the row's font and spacing.
+pub(crate) fn search_highlight(
+    text: SharedString,
+    query: Option<&str>,
+    theme: &Theme,
+) -> AnyElement {
+    let Some(query) = query.filter(|query| !query.trim().is_empty()) else {
+        return text.into_any_element();
+    };
+    let ranges = search_match_ranges(&text, query);
+    if ranges.is_empty() {
+        return text.into_any_element();
+    }
+    let badges = ranges;
+    let styled = gpui::StyledText::new(text).with_highlights(badges.iter().cloned().map(|range| {
+        (
+            range,
+            gpui::HighlightStyle {
+                color: Some(theme.code_text),
+                ..Default::default()
+            },
+        )
+    }));
+    let layout = styled.layout().clone();
+    let wash = theme.code_wash;
+    // As in the composer, paint rounded backgrounds beneath shaped glyphs.
+    // A TextRun background would be square and can disappear when clipped.
+    let underlay = gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            for range in &badges {
+                for mut bounds in crate::markdown::render::range_rects(&layout, range, 1.0, 1.5) {
+                    // Glyphs sit below the line box's optical center. Shift the
+                    // wash down half a logical pixel to balance visible top/bottom padding.
+                    bounds.origin.y += px(0.5);
+                    window.paint_quad(gpui::quad(
+                        bounds,
+                        px(3.0),
+                        wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
+        .into_any_element()
+}
+
+fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let folded = text.to_lowercase();
+    let mut original = Vec::with_capacity(folded.len());
+    for (start, ch) in text.char_indices() {
+        let range = start..start + ch.len_utf8();
+        for lower in ch.to_lowercase() {
+            original.extend(std::iter::repeat_n(range.clone(), lower.len_utf8()));
+        }
+    }
+    let mut ranges = Vec::new();
+    for word in query.to_lowercase().split_whitespace() {
+        for (start, _) in folded.match_indices(word) {
+            ranges.push(original[start].start..original[start + word.len() - 1].end);
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod search_highlight_tests {
+    use super::search_match_ranges;
+
+    #[test]
+    fn inline_matches_keep_adjacent_word_boundaries() {
+        let text = "fieldnotes/fix-authentication-redirects";
+        let ranges = search_match_ranges(text, "authentication");
+        assert_eq!(&text[..ranges[0].start], "fieldnotes/fix-");
+        assert_eq!(&text[ranges[0].clone()], "authentication");
+        assert_eq!(&text[ranges[0].end..], "-redirects");
+    }
+
+    #[test]
+    fn highlights_repeated_case_insensitive_and_overlapping_words() {
+        assert_eq!(
+            search_match_ranges("New chat, new project", "NEW"),
+            vec![0..3, 10..13]
+        );
+        assert_eq!(
+            search_match_ranges("authentication", "auth authentication"),
+            vec![0..14]
+        );
+        assert!(search_match_ranges("New chat", "  ").is_empty());
+        assert!(search_match_ranges("New chat", "settings").is_empty());
+    }
+
+    #[test]
+    fn preserves_original_unicode_boundaries_after_lowercase_expansion() {
+        assert_eq!(
+            search_match_ranges("İstanbul café", "i CAFÉ"),
+            vec![0..2, 10..15]
+        );
+        assert_eq!(search_match_ranges("🚀 CAFÉ", "café"), vec![5..10]);
     }
 }

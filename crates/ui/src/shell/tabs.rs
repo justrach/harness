@@ -116,6 +116,7 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
@@ -127,6 +128,7 @@ impl Shell {
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
         let target = {
