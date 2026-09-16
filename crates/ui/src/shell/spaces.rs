@@ -971,17 +971,23 @@ impl Shell {
         let rows = self.spaces_menu_rows(cx);
         let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
         let filter = self.settings.space_filter.clone();
-        // (row, label, offline, selected) per scrollable row — same plain
-        // label-row treatment as the chat composer's project menu; an
-        // offline project wears only the tiny disconnect glyph. Consumes
-        // `rows` so the list children never re-clone per frame.
-        let details: Vec<(SpacesMenuRow, SharedString, bool, bool)> = {
+        // Keep the host tag so projects with the same name on different
+        // devices remain distinguishable. Consume `rows` to avoid cloning
+        // the list children per frame.
+        let details: Vec<(
+            SpacesMenuRow,
+            SharedString,
+            Option<SharedString>,
+            bool,
+            bool,
+        )> = {
             let state = self.state.read(cx);
             rows.into_iter()
                 .map(|row| match row {
                     SpacesMenuRow::All => (
                         SpacesMenuRow::All,
                         SharedString::from("All projects"),
+                        None,
                         false,
                         filter.is_none(),
                     ),
@@ -989,10 +995,11 @@ impl Shell {
                         let selected = filter.as_deref() == Some(id.as_str());
                         match state.space_row(&id) {
                             Some(space) => {
-                                let (_, offline) = state.space_device_tag(space, Utc::now());
+                                let (tag, offline) = state.space_device_tag(space, Utc::now());
                                 (
                                     SpacesMenuRow::Space(id),
                                     space.display_name().to_string().into(),
+                                    Some(tag.into()),
                                     offline,
                                     selected,
                                 )
@@ -1000,6 +1007,7 @@ impl Shell {
                             None => (
                                 SpacesMenuRow::Space(id),
                                 SharedString::from("?"),
+                                None,
                                 false,
                                 selected,
                             ),
@@ -1025,7 +1033,7 @@ impl Shell {
                     // Same scroll budget as the composer project menu.
                     .max_h(px(224.0))
                     .children(details.into_iter().enumerate().map(
-                        |(ix, (row, label, offline, selected))| {
+                        |(ix, (row, label, tag, offline, selected))| {
                             let menu_space = match &row {
                                 SpacesMenuRow::Space(id) => Some(id.clone()),
                                 _ => None,
@@ -1051,6 +1059,18 @@ impl Shell {
                                 )
                             })
                             .child(div().flex_1().min_w_0().truncate().child(label))
+                            .when_some(tag, |el, tag| {
+                                el.child(
+                                    div()
+                                        .max_w(gpui::relative(0.5))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .font_weight(gpui::FontWeight::NORMAL)
+                                        .text_color(theme.text_muted)
+                                        .child(tag),
+                                )
+                            })
                             // Disconnected glyph, not the word (user request).
                             .when(offline, |el| {
                                 el.child(
