@@ -3352,7 +3352,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.5.2"
-source = "git+https://github.com/zeronsh/gpui-component?rev=94c1bbaf6311b9f36f5e7438aaf5aeadd38740da#94c1bbaf6311b9f36f5e7438aaf5aeadd38740da"
+source = "git+https://github.com/zeronsh/gpui-component?rev=03cd9947a6aa07921cb284ad66c87fd6735e55b0#03cd9947a6aa07921cb284ad66c87fd6735e55b0"
 dependencies = [
  "aho-corasick",
  "anyhow",

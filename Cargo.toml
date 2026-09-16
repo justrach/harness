@@ -74,7 +74,7 @@ gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb2
     "runtime_shaders",
 ] }
 gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "94c1bbaf6311b9f36f5e7438aaf5aeadd38740da" }
+gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "03cd9947a6aa07921cb284ad66c87fd6735e55b0" }
 
 # diffs
 similar = "2"
