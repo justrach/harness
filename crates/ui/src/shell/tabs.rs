@@ -252,6 +252,15 @@ impl Shell {
             self.viewport_width - row_left - right_pad - gap_budget,
             right_pad,
         );
+        // Use the actual space left after native window controls, including
+        // while the panel animates, so search cannot cover the fixed toggle.
+        let files_controls = if self.files_panel_open(cx) && widths.files_controls >= 100.0 {
+            self.files.get(&self.panel_key(cx)).cloned().map(|files| {
+                files.update(cx, |files, cx| files.render_explorer_controls(&theme, cx))
+            })
+        } else {
+            None
+        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -321,16 +330,10 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_end()
-                            .when(files_width >= 120.0, |slot| {
-                                // The full-height Files panel already paints this seam.
-                                // Preserve the label inset without drawing a second border.
-                                slot.pl(px(11.0)).child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.text_muted)
-                                        .child("Files"),
-                                )
+                            .when_some(files_controls, |slot, controls| {
+                                slot.pl(px(crate::surface_chrome::EDGE_INSET))
+                                    .gap(px(crate::surface_chrome::CONTROL_GAP))
+                                    .child(controls)
                             })
                             .child(
                                 header_icon_button(

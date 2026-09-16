@@ -299,7 +299,6 @@ impl FilesSurface {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(self.render_header(theme, cx))
             .when_some(watch_error, |element, error| {
                 element.child(
                     div()
@@ -966,18 +965,53 @@ impl FilesSurface {
         self.tree_list_rows = self.tree.visible_rows().to_vec();
     }
 
-    fn render_header(&mut self, theme: &crate::theme::Theme, cx: &mut Context<Self>) -> gpui::Div {
+    /// Mounted by the shell in the titlebar, above the explorer's tree.
+    pub(crate) fn render_explorer_controls(
+        &mut self,
+        theme: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let include_ignored = self.tree.include_ignored();
-        toolbar(theme)
+        div()
+            .id("files-titlebar-controls")
+            .flex_1()
+            .min_w_0()
+            .h(px(28.0))
+            .flex()
+            .items_center()
+            .gap(px(crate::surface_chrome::CONTROL_GAP))
+            // Search selection and double-clicks must never drag or zoom the window.
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
             .child(
                 crate::surface_chrome::input()
+                    .id("files-titlebar-search")
+                    .debug_selector(|| "files-titlebar-search".into())
+                    .overflow_hidden()
+                    .cursor_text()
+                    .hover(|style| style.bg(crate::theme::ink(0.055)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            use gpui::Focusable;
+                            window.focus(&this.search.focus_handle(cx), cx);
+                            cx.stop_propagation();
+                        }),
+                    )
                     .child(
                         crate::icons::icon(crate::icons::MAGNIFER)
                             .size(px(12.0))
                             .flex_none()
                             .text_color(theme.text_faint),
                     )
-                    .child(div().min_w_0().flex_1().child(self.search.clone())),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(self.search.clone()),
+                    ),
             )
             .child(
                 toolbar_button(
@@ -988,10 +1022,14 @@ impl FilesSurface {
                         "Show all files (even hidden)"
                     },
                 )
+                .debug_selector(|| "files-toggle-ignored".into())
                 .when(include_ignored, |element| {
                     element.bg(crate::theme::wash(0.1))
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_ignored(cx)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_ignored(cx);
+                }))
                 .child(
                     crate::icons::icon(if include_ignored {
                         crate::icons::EYE
@@ -1014,6 +1052,86 @@ mod explorer_tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn titlebar_search_accepts_input_without_dragging_the_window(cx: &mut TestAppContext) {
+        use gpui::{Focusable, Modifiers, MouseButton};
+
+        struct TitlebarHost {
+            files: Entity<FilesSurface>,
+            titlebar_presses: usize,
+            titlebar_clicks: usize,
+        }
+        impl Render for TitlebarHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = crate::theme::Theme::of(cx).clone();
+                let controls = self
+                    .files
+                    .update(cx, |files, cx| files.render_explorer_controls(&theme, cx));
+                div()
+                    .id("files-test-titlebar")
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .w(px(180.0))
+                    .h(px(crate::theme::Theme::TITLEBAR_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.titlebar_presses += 1),
+                    )
+                    .on_click(cx.listener(|this, _, _, _| this.titlebar_clicks += 1))
+                    .child(controls)
+            }
+        }
+
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| TitlebarHost {
+            files: cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                FilesSurface::new_explorer(state, "chat".into(), false, cx)
+            }),
+            titlebar_presses: 0,
+            titlebar_clicks: 0,
+        });
+        let files = host.read_with(cx, |host, _| host.files.clone());
+        let show_all = Rc::new(RefCell::new(None));
+        let emitted = show_all.clone();
+        let _events = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                if let FilesEvent::ShowAllFilesChanged(value) = event {
+                    *emitted.borrow_mut() = Some(*value);
+                }
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let bounds = cx.debug_bounds("files-titlebar-search").unwrap();
+        // Click the field padding, not just the input's text hitbox.
+        let padding = gpui::point(bounds.left() + px(2.0), bounds.center().y);
+        cx.simulate_click(padding, Modifiers::default());
+        cx.simulate_input("main.rs");
+        host.read_with(cx, |host, cx| {
+            assert_eq!(host.files.read(cx).search.read(cx).text(), "main.rs");
+        });
+
+        let start = bounds.center();
+        let end = start + gpui::point(px(12.0), px(0.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
+        });
+        let ignored = cx.debug_bounds("files-toggle-ignored").unwrap().center();
+        cx.simulate_click(ignored, Modifiers::default());
+        assert_eq!(*show_all.borrow(), Some(true));
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.titlebar_presses, 0);
+            assert_eq!(host.titlebar_clicks, 0);
+        });
+    }
 
     #[gpui::test]
     fn explorer_open_delegates_without_becoming_an_editor(cx: &mut TestAppContext) {
