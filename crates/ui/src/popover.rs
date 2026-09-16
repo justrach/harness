@@ -516,7 +516,11 @@ pub fn anchored_menu_below_end(
 /// A nested menu beside its trigger. Callers choose the side that has room;
 /// vertical placement still stays within the window's eight-pixel gutter.
 pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {
-    let content = frosted_menu(None, content);
+    // A nested menu shares the parent's interaction surface. Its outside
+    // clicks must reach sibling controls and its trigger; the top-level menu
+    // still consumes dismissal clicks before they reach the app underneath.
+    let content =
+        crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, content).into_any_element();
     div()
         .absolute()
         .top_0()

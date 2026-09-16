@@ -3837,6 +3837,7 @@ impl Pickers {
                 .map(|c| c.label.clone())
                 .unwrap_or_default();
             let id = group.id.clone();
+            let outside_id = id.clone();
             let entity = cx.entity().downgrade();
             let mut row = popover::menu_row(
                 &theme,
@@ -3851,6 +3852,7 @@ impl Pickers {
                 this.active = base_index + ix;
                 if this.setting_menu.as_ref() == Some(&id) {
                     this.setting_menu = None;
+                    this.setting_bounds = None;
                 } else {
                     this.open_setting(id.clone(), cx);
                 }
@@ -3858,6 +3860,22 @@ impl Pickers {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            .on_mouse_down_out(
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    // The trigger handles its own toggle. Elsewhere in the parent,
+                    // close this child during capture and let that control receive
+                    // the same click. Clicks inside the floating child stay local.
+                    if this.setting_menu.as_ref() == Some(&outside_id)
+                        && !this
+                            .setting_bounds
+                            .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        this.setting_menu = None;
+                        this.setting_bounds = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 gpui::canvas(
                     move |bounds, window, cx| {
@@ -4870,6 +4888,17 @@ mod tests {
                 pickers.update(cx, |pickers, cx| {
                     let mut model = bare_model("test", "Test model");
                     model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+                    model.options.push(ModelOption {
+                        id: "contextWindow".into(),
+                        label: "Context window".into(),
+                        choices: ["200k", "1m"]
+                            .map(|id| ModelOptionChoice {
+                                id: id.into(),
+                                label: id.into(),
+                            })
+                            .into(),
+                        default_choice: "200k".into(),
+                    });
                     pickers.config.harness = Some(HarnessId::ClaudeCode);
                     pickers.harnesses =
                         Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
@@ -4893,7 +4922,7 @@ mod tests {
             let parent = measured.get();
             let trigger = gpui::point(
                 parent.center().x,
-                parent.bottom() - px(popover::CARD_INSET + 15.0),
+                parent.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
             );
             let click = |window: &mut Window, cx: &mut App, position| {
                 window.dispatch_event(
@@ -4940,6 +4969,22 @@ mod tests {
             } else {
                 assert!(submenu.left() > parent.right());
             }
+            // A second click must toggle the trigger, without dismissing the picker.
+            cx.update_window(handle.into(), |_, window, cx| {
+                click(window, cx, trigger);
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            pickers.read_with(cx, |pickers, _| {
+                assert!(pickers.setting_menu.is_none(), "trigger toggles closed");
+                assert!(pickers.is_open());
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                click(window, cx, trigger);
+                window.draw(cx).clear();
+                window.draw(cx).clear();
+            })
+            .unwrap();
             let gap_x = if on_left {
                 (submenu.right() + parent.left()) / 2.0
             } else {
@@ -4981,6 +5026,44 @@ mod tests {
                 assert!(pickers.setting_menu.is_none());
                 assert!(pickers.is_open());
             });
+            // Switching directly between sibling triggers takes one click.
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                click(window, cx, trigger);
+                window.draw(cx).clear();
+                window.draw(cx).clear();
+                click(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
+                window.draw(cx).clear();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            pickers.read_with(cx, |pickers, _| {
+                assert_eq!(
+                    pickers.setting_menu,
+                    Some(ModelSetting::Option("contextWindow".into()))
+                );
+                assert!(pickers.is_open());
+            });
+            // Clicking the parent's search closes only the child and focuses
+            // the input on that same click, rather than swallowing the press.
+            cx.update_window(handle.into(), |_, window, cx| {
+                click(
+                    window,
+                    cx,
+                    gpui::point(parent.center().x, parent.top() + px(60.0)),
+                );
+                pickers.read_with(cx, |pickers, cx| {
+                    assert!(pickers.setting_menu.is_none());
+                    assert!(pickers.is_open());
+                    assert!(pickers.search.read(cx).focus_handle(cx).is_focused(window));
+                });
+                window.draw(cx).clear();
+                click(window, cx, trigger);
+                window.draw(cx).clear();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            pickers.read_with(cx, |pickers, _| assert!(pickers.setting_menu.is_some()));
             cx.update_window(handle.into(), |_, window, cx| {
                 click(window, cx, gpui::point(px(8.0), px(8.0)))
             })
