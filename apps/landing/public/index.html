@@ -604,87 +604,68 @@
   }
 
   /* ── downloads ───────────────────────────────────────── */
-  /* same rhythm as the tweets section: heading + sub, then one row of
-     cells in the tweet-card idiom (hairline head, dim body). z-index keeps
-     the cells above the closing section's ascii hand, which reaches up
-     into this section's bottom rows */
+  /* centered lede, then hairline rows: a lead column (audience + sub) and
+     a list of builds with a button each. z-index keeps the rows above
+     the closing section's ascii hand, which reaches up into this section */
   .downloads { padding: 130px 0 0; position: relative; z-index: 1; }
   .downloads .wrap { scroll-margin-top: 40px; }
-  .downloads h2 {
+  .dl-lede { text-align: center; }
+  .dl-lede h2 {
     font-size: clamp(24px, 3vw, 32px);
     font-weight: 600;
     letter-spacing: -0.025em;
     text-wrap: balance;
   }
-  .downloads .sub {
-    margin-top: 14px;
+  .dl-lede .sub {
+    margin: 14px auto 0;
     max-width: 460px;
     font-size: 14.5px;
     line-height: 1.65;
     color: var(--dim);
   }
-  .download-grid {
-    margin-top: 44px;
+  .dl-rows { margin-top: 56px; border-bottom: 1px solid var(--line-soft); }
+  .dl-row {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 14px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+    gap: 32px;
+    padding: 44px 0;
+    border-top: 1px solid var(--line-soft);
   }
-  .download-card {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--line-soft);
-    border-radius: 10px;
-    overflow: hidden;
-    -webkit-backdrop-filter: blur(10px);
-    backdrop-filter: blur(10px);
-    transition: background .2s, border-color .2s;
-  }
-  .download-card:hover,
-  .download-card:focus-within { background: rgba(139, 92, 246, 0.05); border-color: var(--line); }
-  .download-head {
-    display: flex;
-    align-items: baseline;
-    gap: 11px;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--line-soft);
-  }
-  .download-head h3 {
-    font-size: 13px;
+  .dl-lead h3 {
+    font-size: 19px;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.02em;
   }
-  /* artifact details in the same mono caption voice as the gallery */
-  .download-meta {
-    margin-left: auto;
+  .dl-lead p { margin-top: 8px; font-size: 14.5px; line-height: 1.6; color: var(--faint); }
+  .dl-list { list-style: none; }
+  .dl-list li {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 0;
+  }
+  .dl-list li + li { border-top: 1px solid var(--line-soft); }
+  .dl-name { font-size: 14px; font-weight: 500; }
+  /* build details in the same mono caption voice as the gallery */
+  .dl-meta {
     font-family: var(--mono);
     font-size: 11px;
     letter-spacing: 0.02em;
     color: var(--faint);
     white-space: nowrap;
   }
-  .download-body {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    padding: 14px 18px 18px;
+  .dl-list .btn { margin-left: auto; padding: 8px 14px; font-size: 13px; }
+  .dl-list .btn.ghost[aria-disabled="true"] {
+    opacity: .4;
+    cursor: default;
+    pointer-events: none;
   }
-  .download-body p {
-    font-size: 13.5px;
-    line-height: 1.58;
-    color: var(--dim);
+  .dl-soon {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--faint);
   }
-  /* the action row sits on the cell floor so the buttons line up across
-     cells even when the hint copy wraps differently */
-  .download-actions {
-    margin-top: auto;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-  }
-  .download-alt { font-size: 12.5px; color: var(--dim); transition: color .15s; }
-  .download-alt:hover { color: var(--ink); }
   .download-foot {
     margin-top: 24px;
     display: flex;
@@ -697,7 +678,7 @@
   .download-foot a { color: var(--dim); transition: color .15s; }
   .download-foot a:hover { color: var(--ink); }
   @media (max-width: 900px) {
-    .download-grid { grid-template-columns: 1fr; }
+    .dl-row { grid-template-columns: 1fr; gap: 22px; padding: 34px 0; }
   }
 
   /* ── closing ─────────────────────────────────────────── */
@@ -778,7 +759,8 @@
     .tweet-row.is-reverse .tweet-track { animation-duration: 62s; }
     .tweet { width: 300px; }
     .downloads { padding: 84px 0 0; }
-    .download-grid { margin-top: 28px; }
+    .dl-rows { margin-top: 36px; }
+    .dl-list li { flex-wrap: wrap; row-gap: 6px; }
     .closing { margin: 80px 0 56px; }
     .closing p { font-size: 14px; }
     .closing .cta-row { margin-top: 28px; }
@@ -1421,37 +1403,32 @@ love the ui</p>
 
   <section class="downloads" aria-labelledby="downloads-title">
     <div class="wrap" id="downloads">
-      <h2 id="downloads-title">At home on your desktop.</h2>
-      <p class="sub">Zeron runs natively on macOS, Windows and Linux. Pick your platform.</p>
-      <div class="download-grid">
-        <article class="download-card">
-          <div class="download-head"><h3>macOS</h3><span class="download-meta">apple silicon · dmg</span></div>
-          <div class="download-body">
-            <p>Open the disk image and drag Zeron into Applications.</p>
-            <div class="download-actions">
-              <a class="btn ghost" data-platform-download="macos" href="https://zeron.sh/releases/zeron-0.2.66-macos-arm64.dmg">Download for macOS</a>
-            </div>
+      <div class="dl-lede">
+        <h2 id="downloads-title">Download Zeron.</h2>
+        <p class="sub">Available for macOS, Windows and Linux. iOS is on the way.</p>
+      </div>
+      <div class="dl-rows">
+        <div class="dl-row">
+          <div class="dl-lead">
+            <h3>Zeron for desktop.</h3>
+            <p>macOS, Windows and Linux.</p>
           </div>
-        </article>
-        <article class="download-card">
-          <div class="download-head"><h3>Windows</h3><span class="download-meta">x64 · portable zip</span></div>
-          <div class="download-body">
-            <p>Extract the ZIP anywhere, then open zeron.exe.</p>
-            <div class="download-actions">
-              <a class="btn ghost" data-platform-download="windows" href="https://zeron.sh/releases/zeron-0.2.66-windows-x86_64.zip">Download for Windows</a>
-            </div>
+          <ul class="dl-list">
+            <li><span class="dl-name">macOS</span><span class="dl-meta">apple silicon · dmg</span><a class="btn ghost" data-platform-download="macos" href="https://zeron.sh/releases/zeron-0.2.66-macos-arm64.dmg">Download</a></li>
+            <li><span class="dl-name">Windows</span><span class="dl-meta">x64 · portable zip</span><a class="btn ghost" data-platform-download="windows" href="https://zeron.sh/releases/zeron-0.2.66-windows-x86_64.zip">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">x64 · tar.gz</span><a class="btn ghost" data-platform-download="linux" href="https://zeron.sh/releases/zeron-0.2.66-linux-x86_64.tar.gz">Download</a></li>
+            <li><span class="dl-name">Linux</span><span class="dl-meta">arm64 · tar.gz</span><a class="btn ghost" data-platform-download="linux-arm" href="https://zeron.sh/releases/zeron-0.2.66-linux-aarch64.tar.gz">Download</a></li>
+          </ul>
+        </div>
+        <div class="dl-row">
+          <div class="dl-lead">
+            <h3>Zeron for mobile.</h3>
+            <p>iPhone and iPad.</p>
           </div>
-        </article>
-        <article class="download-card">
-          <div class="download-head"><h3>Linux</h3><span class="download-meta">x64 · arm64 · tar.gz</span></div>
-          <div class="download-body">
-            <p>Extract the archive and run the included install.sh.</p>
-            <div class="download-actions">
-              <a class="btn ghost" data-platform-download="linux" href="https://zeron.sh/releases/zeron-0.2.66-linux-x86_64.tar.gz">Download for Linux</a>
-              <a class="download-alt" data-platform-download="linux-arm" href="https://zeron.sh/releases/zeron-0.2.66-linux-aarch64.tar.gz">ARM64 build ↗</a>
-            </div>
-          </div>
-        </article>
+          <ul class="dl-list">
+            <li><span class="dl-name">iOS</span><span class="dl-soon">coming soon</span><span class="btn ghost" role="link" aria-disabled="true">App Store ↗</span></li>
+          </ul>
+        </div>
       </div>
       <div class="download-foot">
         <a href="https://github.com/zeronsh/zeron/releases/latest">Release notes and checksums ↗</a>
