@@ -36,10 +36,10 @@ receive a thicker material on one surface without disabling frost everywhere.
 
 macOS and Windows can frost the main window (native vibrancy and Acrylic,
 respectively). Linux keeps the main window opaque because compositor blur is
-not guaranteed. Supported floating surfaces can frost on macOS and Linux;
-Windows keeps those surfaces opaque until the DirectX renderer implements
-`BackdropBlur`. The preference remains portable even where a particular
-surface cannot honor blur.
+not guaranteed. Supported floating surfaces can frost on macOS, Linux, and
+Windows using their in-app renderers. Windows uses the bounded Direct3D
+`BackdropBlur` implementation; native window Acrylic remains independent.
+The preference remains portable even where a particular surface cannot honor blur.
 
 The built-in registry contains 30 variants across 19 families:
 

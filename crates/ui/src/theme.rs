@@ -2582,8 +2582,8 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances are glass-forward on macOS and Windows. Light frost runs heavier
-    /// than dark's (a light tint controls the blur less), and floating cards
+    /// Both appearances are glass-forward on macOS and Windows. Light frost
+    /// runs heavier than dark's (a light tint controls the blur less), and floating cards
     /// step their tint coverage up in light so menu text stays on a
     /// known-enough background — assert both relationships so the frost and
     /// the overlay can't drift apart.
