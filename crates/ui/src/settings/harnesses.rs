@@ -527,6 +527,7 @@ impl HarnessesPage {
                 );
 
         if open {
+            let theme = &theme.for_popup();
             let menu = popover::popover_card(theme)
                 .w(px(220.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -563,7 +564,7 @@ impl HarnessesPage {
                                 div()
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(10.5))
-                                    .text_color(theme.text_muted.opacity(0.35))
+                                    .text_color(theme.text_muted)
                                     .child(SharedString::from("You")),
                             )
                         })

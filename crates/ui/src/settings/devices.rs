@@ -155,7 +155,7 @@ impl DevicesPage {
         viewport: gpui::Size<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let dialog = self.rename.as_ref()?;
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)

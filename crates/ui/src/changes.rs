@@ -3936,6 +3936,7 @@ impl Changes {
     }
 
     fn render_scope_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let current = self.scope;
         popover::popover_card(theme)
             .w(px(180.0))
@@ -4083,6 +4084,7 @@ impl Changes {
     }
 
     fn render_ref_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let (search, active, focus, list_scroll) = {
             let Some(menu) = self.ref_menu.get() else {
                 return div().into_any_element();
@@ -5718,7 +5720,9 @@ rename to new_name.rs
     /// Uses the native font backend, not TestAppContext's simulated metrics.
     #[test]
     fn native_diff_font_geometry() {
-        let platform = gpui_platform::current_platform(true);
+        // Windows headless mode uses NoopTextSystem. This regression needs
+        // actual DirectWrite metrics, as it does CoreText/fontconfig elsewhere.
+        let platform = gpui_platform::current_platform(!cfg!(windows));
         let text_system =
             gpui::WindowTextSystem::new(Arc::new(gpui::TextSystem::new(platform.text_system())));
         text_system

@@ -734,6 +734,7 @@ pub enum ShortcutId {
     ToggleChanges,
     ToggleTerminal,
     NewSession,
+    NewProject,
     NextSession,
     PrevSession,
     ArchiveSession,
@@ -741,7 +742,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 10 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 11 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -749,6 +750,7 @@ impl ShortcutId {
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
+        ShortcutId::NewProject,
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
@@ -777,6 +779,7 @@ impl ShortcutId {
             ShortcutId::ToggleChanges => "Toggle right sidebar",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
+            ShortcutId::NewProject => "New project",
             ShortcutId::NextSession => "Next session",
             ShortcutId::PrevSession => "Previous session",
             ShortcutId::ArchiveSession => "Archive session",
@@ -801,6 +804,7 @@ impl ShortcutId {
             ShortcutId::ToggleChanges => "mod-r",
             ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::NewSession => "mod-n",
+            ShortcutId::NewProject => "mod-shift-n",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
             // recorder spells ctrl (see `combo_from_keystroke`). Off macOS
             // ctrl IS the primary and stores as "mod"; on macOS it is its own
@@ -845,6 +849,7 @@ pub struct KeymapConfig {
     pub toggle_changes: String,
     pub toggle_terminal: String,
     pub new_session: String,
+    pub new_project: String,
     pub next_session: String,
     pub prev_session: String,
     pub archive_session: String,
@@ -906,6 +911,7 @@ impl Default for KeymapConfig {
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
+            new_project: ShortcutId::NewProject.default_combo().into(),
             next_session: ShortcutId::NextSession.default_combo().into(),
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
@@ -924,6 +930,7 @@ impl KeymapConfig {
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::NewSession => &self.new_session,
+            ShortcutId::NewProject => &self.new_project,
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
@@ -944,6 +951,7 @@ impl KeymapConfig {
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::NewSession => self.new_session = combo,
+            ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::NextSession => self.next_session = combo,
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
@@ -1683,7 +1691,14 @@ mod tests {
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             appshots_enabled: false,
             appshot_sound_enabled: true,
-            appshot_destination: crate::appshots::AppshotDestination::NewSession,
+            // The destination is only persisted where Appshots exist (macOS and
+            // Linux); elsewhere the field is `serde(skip)` and reloads as the
+            // default, so the round trip must expect exactly that.
+            appshot_destination: if cfg!(any(target_os = "macos", target_os = "linux")) {
+                crate::appshots::AppshotDestination::NewSession
+            } else {
+                crate::appshots::AppshotDestination::Automatic
+            },
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -2267,6 +2282,19 @@ mod tests {
         assert_eq!(loaded.keymap.save_file, "");
         assert_eq!(loaded.keymap.new_session, "mod-s");
         assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
+    }
+
+    #[test]
+    fn new_project_shortcut_migrates_and_persists() {
+        let mut keymap: KeymapConfig = serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
+        assert_eq!(keymap.get(ShortcutId::NewProject), "mod-shift-n");
+        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
+        keymap.set(ShortcutId::NewProject, "mod-alt-p".into());
+        let mut restored: KeymapConfig =
+            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
+        assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
+        restored.reset(ShortcutId::NewProject);
+        assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
     }
 
     #[test]
