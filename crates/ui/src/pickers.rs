@@ -31,6 +31,31 @@ use zeron_rpc::methods;
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
+/// A triangle from the last point in the active trigger to the near edge
+/// of its submenu. Mirroring the edge handles menus placed on either side.
+fn submenu_corridor(
+    origin: gpui::Point<gpui::Pixels>,
+    pointer: gpui::Point<gpui::Pixels>,
+    submenu: gpui::Bounds<gpui::Pixels>,
+    on_left: bool,
+) -> bool {
+    let edge = if on_left {
+        submenu.right()
+    } else {
+        submenu.left()
+    };
+    let direction = if on_left { -1.0 } else { 1.0 };
+    let distance = f32::from(edge - origin.x) * direction;
+    let advance = f32::from(pointer.x - origin.x) * direction;
+    if distance <= 0.0 || advance <= 0.0 || advance > distance + 8.0 {
+        return false;
+    }
+    let fraction = (advance / distance).min(1.0);
+    let top = origin.y + (submenu.top() - px(8.0) - origin.y) * fraction;
+    let bottom = origin.y + (submenu.bottom() + px(8.0) - origin.y) * fraction;
+    pointer.y >= top && pointer.y <= bottom
+}
+
 const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
 /// Both sides of the composer handoff share one leading-aligned workspace
@@ -509,6 +534,11 @@ pub struct Pickers {
     setting_menu: Option<ModelSetting>,
     setting_active: usize,
     setting_on_left: bool,
+    setting_intent_origin: Option<gpui::Point<gpui::Pixels>>,
+    setting_hover_pending: Option<ModelSetting>,
+    setting_hover_pointer: Option<gpui::Point<gpui::Pixels>>,
+    setting_hover_task: Option<Task<()>>,
+    model_space_below: Option<f32>,
     setting_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scroll: gpui::ScrollHandle,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
@@ -690,6 +720,11 @@ impl Pickers {
             setting_menu: None,
             setting_active: 0,
             setting_on_left: false,
+            setting_intent_origin: None,
+            setting_hover_pending: None,
+            setting_hover_pointer: None,
+            setting_hover_task: None,
+            model_space_below: None,
             setting_bounds: None,
             setting_scroll: gpui::ScrollHandle::new(),
             harnesses: Loadable::Idle,
@@ -919,6 +954,7 @@ impl Pickers {
 
     /// Outside clicks and navigation keep focus at the clicked destination.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.cancel_setting_hover();
         self.setting_menu = None;
         self.setting_bounds = None;
         self.menu_bar = popover::MenuScrollbarState::default();
@@ -2222,6 +2258,7 @@ impl Pickers {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &Window, cx: &mut Context<Self>) {
+        self.cancel_setting_hover();
         // The frame stays mounted (and possibly focused) through the exit
         // animation — keys must not drive a dying popover.
         if !self.open.is_open() {
@@ -3217,7 +3254,18 @@ impl Pickers {
         // Compact tabbed layout (user request, modeled on the referenced
         // picker): the model LIST gets a fixed band of roughly seven compact
         // rows; the pinned traits tray below sizes to its sections.
-        const LIST_HEIGHT: f32 = 216.0;
+        let list_height = if self.state.read(cx).selected_chat.is_none() {
+            // Keep the settings tray visible while the model list scrolls
+            // within the room below the new-chat composer.
+            let tray_height = if self.setting_groups(cx).is_empty() {
+                0.0
+            } else {
+                self.setting_groups(cx).len() as f32 * 32.0 + 7.0
+            };
+            (self.model_space_below.unwrap_or(640.0) - 82.0 - tray_height).clamp(30.0, 216.0)
+        } else {
+            216.0
+        };
 
         let theme = Theme::of(cx).for_popup();
 
@@ -3226,7 +3274,7 @@ impl Pickers {
         match &self.harnesses {
             Loadable::Loading | Loadable::Idle => {
                 return div()
-                    .h(px(LIST_HEIGHT))
+                    .h(px(list_height))
                     .p(px(8.0))
                     .child(popover::skeleton_menu_rows(
                         "harness-skeleton",
@@ -3240,7 +3288,7 @@ impl Pickers {
             Loadable::Error(message) => {
                 let message = message.clone();
                 return div()
-                    .h(px(LIST_HEIGHT))
+                    .h(px(list_height))
                     .p(px(8.0))
                     .child(self.retry_row(
                         "harness-retry",
@@ -3481,7 +3529,7 @@ impl Pickers {
             .id("model-list-scroll-host")
             .relative()
             .flex_none()
-            .h(px(LIST_HEIGHT))
+            .h(px(list_height))
             .py(px(popover::CARD_INSET))
             // A whisper of wash keeps the scrolling band readable between
             // the pinned chrome above and the traits tray below.
@@ -3783,7 +3831,63 @@ impl Pickers {
         groups
     }
 
+    fn cancel_setting_hover(&mut self) {
+        self.setting_hover_task = None;
+        self.setting_hover_pending = None;
+        self.setting_hover_pointer = None;
+    }
+
+    fn hover_setting(
+        &mut self,
+        id: ModelSetting,
+        index: usize,
+        pointer: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_setting_hover();
+        if self.setting_menu.as_ref() == Some(&id) {
+            self.setting_intent_origin = Some(pointer);
+            return;
+        }
+        let toward_child = self.setting_menu.is_some()
+            && self
+                .setting_intent_origin
+                .zip(self.setting_bounds)
+                .is_some_and(|(origin, bounds)| {
+                    submenu_corridor(origin, pointer, bounds, self.setting_on_left)
+                });
+        if toward_child {
+            // A brief pause distinguishes crossing a sibling en route to the
+            // submenu from deliberately resting on that sibling. Leaving it
+            // or clicking cancels this task, so dismissed menus cannot reopen.
+            let source = self.setting_menu.clone();
+            self.setting_hover_pending = Some(id.clone());
+            self.setting_hover_pointer = Some(pointer);
+            self.setting_hover_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.is_open()
+                        && this.setting_menu == source
+                        && this.setting_hover_pending.as_ref() == Some(&id)
+                    {
+                        this.active = index;
+                        this.open_setting(id, cx);
+                        this.setting_intent_origin = Some(pointer);
+                    }
+                });
+            }));
+        } else {
+            self.active = index;
+            self.open_setting(id, cx);
+            self.setting_intent_origin = Some(pointer);
+        }
+    }
+
     fn open_setting(&mut self, id: ModelSetting, cx: &mut Context<Self>) {
+        self.cancel_setting_hover();
+        self.setting_intent_origin = None;
         self.setting_active = self
             .setting_groups(cx)
             .iter()
@@ -3838,6 +3942,7 @@ impl Pickers {
                 .unwrap_or_default();
             let id = group.id.clone();
             let outside_id = id.clone();
+            let move_id = id.clone();
             let entity = cx.entity().downgrade();
             let mut row = popover::menu_row(
                 &theme,
@@ -3850,19 +3955,16 @@ impl Pickers {
             .py(px(0.0))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.active = base_index + ix;
-                if this.setting_menu.as_ref() == Some(&id) {
-                    this.setting_menu = None;
-                    this.setting_bounds = None;
-                } else {
-                    this.open_setting(id.clone(), cx);
-                }
+                this.cancel_setting_hover();
+                this.setting_menu = None;
+                this.setting_bounds = None;
                 window.focus(&this.focus, cx);
                 cx.stop_propagation();
                 cx.notify();
             }))
             .on_mouse_down_out(
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    // The trigger handles its own toggle. Elsewhere in the parent,
+                    // The trigger dismisses its own child. Elsewhere in the parent,
                     // close this child during capture and let that control receive
                     // the same click. Clicks inside the floating child stay local.
                     if this.setting_menu.as_ref() == Some(&outside_id)
@@ -3870,6 +3972,7 @@ impl Pickers {
                             .setting_bounds
                             .is_some_and(|bounds| bounds.contains(&event.position))
                     {
+                        this.cancel_setting_hover();
                         this.setting_menu = None;
                         this.setting_bounds = None;
                         cx.notify();
@@ -3975,7 +4078,63 @@ impl Pickers {
                     self.setting_on_left,
                 ));
             }
-            rows.push(row);
+            // Keep hover ownership on a stable wrapper: menu_row already
+            // owns its hover animation, and changing the open row's styling
+            // must not reopen a child just dismissed by clicking its trigger.
+            rows.push(
+                div()
+                    .id(("model-setting-hover", ix))
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        if *hovered {
+                            this.hover_setting(
+                                id.clone(),
+                                base_index + ix,
+                                window.mouse_position(),
+                                cx,
+                            );
+                        } else if this.setting_hover_pending.as_ref() == Some(&id) {
+                            this.cancel_setting_hover();
+                        }
+                    }))
+                    .on_mouse_move(
+                        cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                            if this.setting_menu.as_ref() == Some(&move_id) {
+                                this.setting_intent_origin = Some(event.position);
+                            } else if this.setting_hover_pending.as_ref() == Some(&move_id) {
+                                let in_corridor = this
+                                    .setting_intent_origin
+                                    .zip(this.setting_bounds)
+                                    .is_some_and(|(origin, bounds)| {
+                                        submenu_corridor(
+                                            origin,
+                                            event.position,
+                                            bounds,
+                                            this.setting_on_left,
+                                        )
+                                    });
+                                let forward = this.setting_hover_pointer.map_or(0.0, |previous| {
+                                    f32::from(event.position.x - previous.x)
+                                        * if this.setting_on_left { -1.0 } else { 1.0 }
+                                });
+                                if !in_corridor || forward <= -2.0 {
+                                    this.active = base_index + ix;
+                                    this.open_setting(move_id.clone(), cx);
+                                    this.setting_intent_origin = Some(event.position);
+                                } else if forward >= 2.0 {
+                                    // Slow but continuing progress renews grace;
+                                    // only a pause should activate the sibling.
+                                    this.hover_setting(
+                                        move_id.clone(),
+                                        base_index + ix,
+                                        event.position,
+                                        cx,
+                                    );
+                                }
+                            }
+                        }),
+                    )
+                    .child(row),
+            );
         }
         div()
             .flex()
@@ -4488,17 +4647,7 @@ impl Render for Pickers {
             None => None,
         };
 
-        // Left cluster: empty — the device/project pickers live in the
-        // composer FOOTER row alongside checkout + ref.
-        // Right cluster: agent+model and traits — the composer appends
-        // attach + send after this element (zeron composer-actions.tsx
-        // arrangement).
-        let left = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .min_w_0()
-            .gap(px(4.0));
+        // The composer places this model chip beside the attachment button.
         // ONE chip for the whole run identity (user request): brand icon +
         // model name, then the joined traits summary ("Medium", "High · 1M ·
         // Fast", "Agent · Balance") as the chip's muted second tone — the
@@ -4522,7 +4671,53 @@ impl Render for Pickers {
             &theme,
             cx,
         );
-        let right = div()
+        let new_chat = self.state.read(cx).selected_chat.is_none();
+        let entity = cx.entity().downgrade();
+        let model_chip = model_chip.relative().child(
+            gpui::canvas(
+                move |bounds, window, cx| {
+                    let available = (f32::from(window.viewport_size().height - bounds.bottom())
+                        - 14.0)
+                        .max(0.0);
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.model_space_below != Some(available) {
+                            this.model_space_below = Some(available);
+                            if new_chat && this.open_kind() == Some(PickerKind::HarnessModel) {
+                                cx.notify();
+                                window.request_animation_frame();
+                            }
+                        }
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
+        let model_chip = if new_chat {
+            if overlay
+                .as_ref()
+                .is_some_and(|(kind, _)| *kind == PickerKind::HarnessModel)
+                && let Some((_, content)) = overlay.take()
+            {
+                model_chip.child(popover::anchored_menu_below_end(
+                    "model-popover",
+                    content,
+                    closing,
+                ))
+            } else {
+                model_chip
+            }
+        } else {
+            attach_overlay_end(
+                model_chip,
+                &mut overlay,
+                PickerKind::HarnessModel,
+                "model-popover",
+                closing,
+            )
+        };
+        div()
             .flex()
             .flex_row()
             .items_center()
@@ -4533,25 +4728,7 @@ impl Render for Pickers {
             // instead of truncating (user report).
             .min_w_0()
             .gap(px(4.0))
-            // End-anchored: the menu's right edge sits flush with the chip's
-            // right edge (user request), same as the footer's ref popover.
-            .child(attach_overlay_end(
-                model_chip,
-                &mut overlay,
-                PickerKind::HarnessModel,
-                "model-popover",
-                closing,
-            ));
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(Theme::SPACE_SM))
-            .child(left)
-            .child(right)
+            .child(model_chip)
     }
 }
 
@@ -4951,8 +5128,19 @@ mod tests {
                     cx,
                 );
             };
+            let hover = |window: &mut Window, cx: &mut App, position| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.draw(cx).clear();
+                window.draw(cx).clear();
+            };
             cx.update_window(handle.into(), |_, window, cx| {
-                click(window, cx, trigger);
+                hover(window, cx, trigger);
                 window.draw(cx).clear();
                 window.draw(cx).clear();
             })
@@ -4969,22 +5157,114 @@ mod tests {
             } else {
                 assert!(submenu.left() > parent.right());
             }
-            // A second click must toggle the trigger, without dismissing the picker.
+            // Clicking the hovered trigger dismisses its child and keeps it closed.
             cx.update_window(handle.into(), |_, window, cx| {
                 click(window, cx, trigger);
                 window.draw(cx).clear();
             })
             .unwrap();
             pickers.read_with(cx, |pickers, _| {
-                assert!(pickers.setting_menu.is_none(), "trigger toggles closed");
+                assert!(
+                    pickers.setting_menu.is_none(),
+                    "trigger click dismisses the hovered submenu"
+                );
                 assert!(pickers.is_open());
             });
             cx.update_window(handle.into(), |_, window, cx| {
-                click(window, cx, trigger);
-                window.draw(cx).clear();
+                // Moving inside the same hovered row must not reopen it.
+                hover(window, cx, trigger + gpui::point(px(2.0), px(0.0)));
+                assert!(pickers.read(cx).setting_menu.is_none());
+                hover(window, cx, gpui::point(px(8.0), px(8.0)));
+                hover(window, cx, trigger);
+            })
+            .unwrap();
+            // Cross the neighboring trigger diagonally toward the open child.
+            // It must not steal the menu while the pointer is inside the cone.
+            let diagonal = gpui::point(
+                if on_left {
+                    parent.left() + px(8.0)
+                } else {
+                    parent.right() - px(8.0)
+                },
+                trigger.y + px(32.0),
+            );
+            cx.update_window(handle.into(), |_, window, cx| {
+                hover(window, cx, diagonal);
+                assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
+                assert!(pickers.read(cx).setting_hover_pending.is_some());
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                hover(
+                    window,
+                    cx,
+                    diagonal + gpui::point(px(if on_left { -3.0 } else { 3.0 }), px(0.0)),
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                assert_eq!(
+                    pickers.read(cx).setting_menu,
+                    Some(ModelSetting::Reasoning),
+                    "forward progress renews grace"
+                );
+                hover(window, cx, submenu.center());
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(400));
+            cx.run_until_parked();
+            pickers.read_with(cx, |pickers, _| {
+                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
+                assert!(pickers.setting_hover_pending.is_none());
+            });
+            // Resting on the sibling expresses intent to switch after grace.
+            cx.update_window(handle.into(), |_, window, cx| {
+                hover(window, cx, trigger);
+                hover(window, cx, diagonal);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(350));
+            cx.run_until_parked();
+            pickers.read_with(cx, |pickers, _| {
+                assert_eq!(
+                    pickers.setting_menu,
+                    Some(ModelSetting::Option("contextWindow".into()))
+                );
+            });
+            // Moving away from the cone switches immediately. A click during
+            // the grace period dismisses instead, with no delayed reopening.
+            cx.update_window(handle.into(), |_, window, cx| {
+                hover(window, cx, trigger);
+                hover(window, cx, diagonal);
+                hover(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
+                assert_eq!(
+                    pickers.read(cx).setting_menu,
+                    Some(ModelSetting::Option("contextWindow".into()))
+                );
+                hover(window, cx, trigger);
+                hover(window, cx, diagonal);
+                click(window, cx, diagonal);
                 window.draw(cx).clear();
             })
             .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(400));
+            cx.run_until_parked();
+            pickers.read_with(cx, |pickers, _| {
+                assert!(pickers.setting_menu.is_none());
+                assert!(pickers.setting_hover_pending.is_none());
+                assert!(pickers.is_open());
+            });
+            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, trigger))
+                .unwrap();
             let gap_x = if on_left {
                 (submenu.right() + parent.left()) / 2.0
             } else {
@@ -5026,13 +5306,11 @@ mod tests {
                 assert!(pickers.setting_menu.is_none());
                 assert!(pickers.is_open());
             });
-            // Switching directly between sibling triggers takes one click.
+            // Hover switches directly between sibling triggers without clicking.
             cx.update_window(handle.into(), |_, window, cx| {
                 window.draw(cx).clear();
-                click(window, cx, trigger);
-                window.draw(cx).clear();
-                window.draw(cx).clear();
-                click(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
+                hover(window, cx, trigger);
+                hover(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
                 window.draw(cx).clear();
                 window.draw(cx).clear();
             })
@@ -5058,7 +5336,7 @@ mod tests {
                     assert!(pickers.search.read(cx).focus_handle(cx).is_focused(window));
                 });
                 window.draw(cx).clear();
-                click(window, cx, trigger);
+                hover(window, cx, trigger);
                 window.draw(cx).clear();
                 window.draw(cx).clear();
             })

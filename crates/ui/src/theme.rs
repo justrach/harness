@@ -923,17 +923,13 @@ impl Theme {
         self.element_hover
     }
 
-    /// Popup labels sit over arbitrary imagery, so use dedicated foreground
-    /// values rather than the subdued solid-panel text ladder.
+    /// Muted popup text is the theme foreground composited onto the glass.
+    /// Fixed opaque grays turn muddy over colorful or bright backgrounds.
     pub fn for_popup(&self) -> Self {
         let mut popup = self.clone();
         if self.is_frost() {
-            let (secondary, hint) = match self.appearance {
-                Appearance::Dark => (0.88, 0.80),
-                Appearance::Light => (0.20, 0.28),
-            };
-            popup.text_muted = hsla(self.text.h, self.text.s, secondary, 1.0);
-            popup.text_faint = hsla(self.text.h, self.text.s, hint, 1.0);
+            popup.text_muted = self.text.opacity(0.64);
+            popup.text_faint = self.text.opacity(0.48);
         }
         popup
     }
@@ -2749,15 +2745,22 @@ mod tests {
             assert_eq!(popup.composer_sidebar_tint(), theme.composer_sidebar_tint());
             assert_eq!(popup.surface_overlay, theme.surface_overlay);
             assert_eq!(popup.text, theme.text);
-            match theme.appearance {
-                Appearance::Dark => {
-                    assert!(popup.text_muted.l > theme.text_muted.l);
-                    assert!(popup.text_faint.l > theme.text_faint.l);
-                }
-                Appearance::Light => {
-                    assert!(popup.text_muted.l < theme.text_muted.l);
-                    assert!(popup.text_faint.l < theme.text_faint.l);
-                }
+            for background in [
+                theme.bg,
+                hsla(0.60, 0.55, 0.35, 1.0),
+                hsla(0.57, 0.35, 0.82, 1.0),
+            ] {
+                let primary = painted_contrast(popup.text, background);
+                let secondary = painted_contrast(popup.text_muted, background);
+                let hint = painted_contrast(popup.text_faint, background);
+                assert!(
+                    primary > secondary && secondary > hint,
+                    "glass text hierarchy collapsed on {background:?}"
+                );
+                assert!(
+                    flatten(popup.text_muted, background) != popup.text_muted,
+                    "muted text must blend with the background"
+                );
             }
             theme.surface_treatment = SurfaceTreatment::Opaque;
             assert_eq!(theme.for_popup().text_muted, theme.text_muted);
