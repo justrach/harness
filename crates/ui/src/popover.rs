@@ -2190,3 +2190,125 @@ mod tests {
         assert!(!bar.visible());
     }
 }
+
+/// Compact mention-style match washes preserve the row's font and spacing.
+pub(crate) fn search_highlight(
+    text: SharedString,
+    query: Option<&str>,
+    theme: &Theme,
+) -> AnyElement {
+    let Some(query) = query.filter(|query| !query.trim().is_empty()) else {
+        return text.into_any_element();
+    };
+    let ranges = search_match_ranges(&text, query);
+    if ranges.is_empty() {
+        return text.into_any_element();
+    }
+    let badges = ranges;
+    let styled = gpui::StyledText::new(text).with_highlights(badges.iter().cloned().map(|range| {
+        (
+            range,
+            gpui::HighlightStyle {
+                color: Some(theme.code_text),
+                ..Default::default()
+            },
+        )
+    }));
+    let layout = styled.layout().clone();
+    let wash = theme.code_wash;
+    // As in the composer, paint rounded backgrounds beneath shaped glyphs.
+    // A TextRun background would be square and can disappear when clipped.
+    let underlay = gpui::canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            for range in &badges {
+                for mut bounds in crate::markdown::render::range_rects(&layout, range, 1.0, 1.5) {
+                    // Glyphs sit below the line box's optical center. Shift the
+                    // wash down half a logical pixel to balance visible top/bottom padding.
+                    bounds.origin.y += px(0.5);
+                    window.paint_quad(gpui::quad(
+                        bounds,
+                        px(3.0),
+                        wash,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .relative()
+        .child(underlay)
+        .child(styled)
+        .into_any_element()
+}
+
+fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let folded = text.to_lowercase();
+    let mut original = Vec::with_capacity(folded.len());
+    for (start, ch) in text.char_indices() {
+        let range = start..start + ch.len_utf8();
+        for lower in ch.to_lowercase() {
+            original.extend(std::iter::repeat_n(range.clone(), lower.len_utf8()));
+        }
+    }
+    let mut ranges = Vec::new();
+    for word in query.to_lowercase().split_whitespace() {
+        for (start, _) in folded.match_indices(word) {
+            ranges.push(original[start].start..original[start + word.len() - 1].end);
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod search_highlight_tests {
+    use super::search_match_ranges;
+
+    #[test]
+    fn inline_matches_keep_adjacent_word_boundaries() {
+        let text = "fieldnotes/fix-authentication-redirects";
+        let ranges = search_match_ranges(text, "authentication");
+        assert_eq!(&text[..ranges[0].start], "fieldnotes/fix-");
+        assert_eq!(&text[ranges[0].clone()], "authentication");
+        assert_eq!(&text[ranges[0].end..], "-redirects");
+    }
+
+    #[test]
+    fn highlights_repeated_case_insensitive_and_overlapping_words() {
+        assert_eq!(
+            search_match_ranges("New chat, new project", "NEW"),
+            vec![0..3, 10..13]
+        );
+        assert_eq!(
+            search_match_ranges("authentication", "auth authentication"),
+            vec![0..14]
+        );
+        assert!(search_match_ranges("New chat", "  ").is_empty());
+        assert!(search_match_ranges("New chat", "settings").is_empty());
+    }
+
+    #[test]
+    fn preserves_original_unicode_boundaries_after_lowercase_expansion() {
+        assert_eq!(
+            search_match_ranges("İstanbul café", "i CAFÉ"),
+            vec![0..2, 10..15]
+        );
+        assert_eq!(search_match_ranges("🚀 CAFÉ", "café"), vec![5..10]);
+    }
+}

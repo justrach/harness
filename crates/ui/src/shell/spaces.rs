@@ -1,5 +1,5 @@
 //! Spaces sidebar: the space-filter dropdown (searchable, with "All projects"),
-//! the filtered Sessions list, and the add-space palette (⌘K-style: device
+//! the filtered Sessions list, and the add-space palette (device
 //! tabs + filtered folder browser).
 //!
 //! A space = a synced (device, folder) pair. Spaces stopped being a
@@ -22,7 +22,7 @@ struct ActiveChatRow {
     group: Option<(String, String)>,
 }
 
-fn compare_sidebar_chats(
+pub(super) fn compare_sidebar_chats(
     sort: SidebarSort,
     left: &zeron_proto::Chat,
     right: &zeron_proto::Chat,
@@ -1324,6 +1324,7 @@ impl Shell {
                     is_selected,
                     false,
                     jump_label,
+                    None,
                     theme,
                     cx,
                 );
@@ -1648,9 +1649,10 @@ impl Shell {
         Some(section.into_any_element())
     }
 
-    // ---- add-space flow (the ⌘K palette) ----
+    // ---- add-space flow ----
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
         let devices: Vec<Device> = self.state.read(cx).devices.clone();
         let local = self.state.read(cx).local_device_id.clone();
         // Land on this device's tab (else the first registered device).
@@ -2288,7 +2290,7 @@ impl Shell {
             _ => None,
         };
 
-        // A quiet mono key-cap chip ("⌘K" / "esc") for the search bar ends.
+        // A quiet mono key-cap chip ("esc") for the search bar ends.
         let key_chip = |theme: &Theme| {
             div()
                 .h(px(22.0))
@@ -2305,7 +2307,7 @@ impl Shell {
                 .text_color(theme.text_muted.opacity(0.7))
         };
 
-        // ── search bar (the ⌘K bar): summon chip · input · "⌘ Enter" add ·
+        // ── search bar: input · "⌘ Enter" add ·
         //    esc. The primary chip leads with the ⌘ glyph, then says "Enter"
         //    in words (user request — the bare return arrow read as noise).
         let submit_chip = popover::btn_primary(&theme, "")
@@ -2351,15 +2353,6 @@ impl Shell {
             .bg(band)
             .border_b_1()
             .border_color(hairline)
-            .child(
-                key_chip(&theme)
-                    .child(
-                        icon(icons::COMMAND)
-                            .size(px(11.0))
-                            .text_color(theme.text_muted.opacity(0.7)),
-                    )
-                    .child(SharedString::from("K")),
-            )
             .child(
                 div()
                     .flex_1()
