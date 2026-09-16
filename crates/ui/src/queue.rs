@@ -58,16 +58,17 @@ struct QueueActionTooltip {
 impl Render for QueueActionTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        div()
+        let card = div()
             .px(px(8.0))
             .py(px(5.0))
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_overlay)
+            .bg(crate::popover::surface_bg(theme))
             .text_size(px(10.5))
             .text_color(theme.text_muted)
-            .child(self.label.clone())
+            .child(self.label.clone());
+        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
     }
 }
 
@@ -224,7 +225,7 @@ fn queue_panel_surface(theme: &Theme) -> gpui::Div {
     div()
         .occlude()
         .rounded_t(px(PANEL_RADIUS))
-        .bg(theme.input_glass_bg())
+        .bg(crate::popover::surface_bg(theme))
         .border_1()
         .border_color(theme.border)
         .when(!theme.is_frost(), |el| el.shadow_lg())
@@ -373,7 +374,7 @@ impl Composer {
                 cx.listener(|this, _, _, cx| this.cancel_queue_drag(cx)),
             )
             .child(rows);
-        Some(crate::frost::frosted(PANEL_RADIUS, 16.0, panel).into_any_element())
+        Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element())
     }
 
     /// One queued message: a quiet queue marker, the text, edit controls, and
