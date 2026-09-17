@@ -247,6 +247,13 @@ impl Shell {
     }
 
     pub(super) fn render_files_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.panel_key(cx);
+        let visible = matches!(self.route, Route::Chat) && self.files_panel_open(cx);
+        for (key, files) in &self.files {
+            if !visible || *key != active {
+                files.update(cx, |files, _| files.release_git_status());
+            }
+        }
         if !matches!(self.route, Route::Chat)
             || self.active_chat.is_empty()
             || (!self.files_panel_open(cx) && !self.tween_active(self.files_tween))
@@ -256,7 +263,12 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let content = self.files.get(&self.panel_key(cx)).cloned();
         if let Some(files) = &content {
-            files.update(cx, |files, cx| files.ensure_loaded(cx));
+            files.update(cx, |files, cx| {
+                files.ensure_loaded(cx);
+                if visible {
+                    files.ensure_git_status(cx);
+                }
+            });
         }
         self.sync_explorer_selection(cx);
         let target = self.files_target(cx);

@@ -608,6 +608,7 @@ impl FilesSurface {
         let selected = self.search_state.active == index;
         let expanded = row.has_children && self.search_state.tree.is_expanded(&row.path);
         let is_directory = row.kind == WorkspaceEntryKind::Directory;
+        let decoration = self.git_decoration(&row.path, is_directory, cx);
         let padding = 8.0 + row.depth as f32 * super::tree::TREE_INDENT;
         let drag_payload = WorkspacePathDrag::new(row.path.clone(), is_directory);
         let content = div()
@@ -676,7 +677,9 @@ impl FilesSurface {
                     .truncate()
                     .font_family(theme.font_sans.clone())
                     .text_size(px(11.5))
-                    .text_color(if is_directory {
+                    .text_color(if let Some(value) = decoration {
+                        value.color(&theme)
+                    } else if is_directory {
                         theme.text_muted
                     } else {
                         theme.text

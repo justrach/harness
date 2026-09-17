@@ -21,6 +21,7 @@ pub mod client;
 pub mod document;
 pub mod editor;
 pub mod editor_adapter;
+mod git_status;
 mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
@@ -203,6 +204,8 @@ pub struct FilesSurface {
     search_restore_tree_focus: bool,
     search_state: FileSearchState,
     search_list: ListState,
+    git_status: Option<Entity<git_status::GitStatusSource>>,
+    git_status_subscription: Option<Subscription>,
     watch_task: Option<Task<()>>,
     watch_sequence: Option<u64>,
     watch_error: Option<SharedString>,
@@ -312,6 +315,17 @@ impl FilesSurface {
             .min_w_0()
             .flex()
             .flex_col()
+            .when_some(self.git_status_notice(cx), |element, notice| {
+                element.child(
+                    div()
+                        .flex_none()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .child(notice),
+                )
+            })
             .when_some(watch_error, |element, error| {
                 element.child(
                     div()
@@ -510,6 +524,8 @@ impl FilesSurface {
             search_restore_tree_focus: false,
             search_state: FileSearchState::default(),
             search_list: ListState::new(0, ListAlignment::Top, px(420.0)),
+            git_status: None,
+            git_status_subscription: None,
             watch_task: None,
             watch_sequence: None,
             watch_error: None,
@@ -931,6 +947,7 @@ impl FilesSurface {
     }
 
     fn apply_target(&mut self, next: Option<FilesRequestContext>, cx: &mut Context<Self>) {
+        self.release_git_status();
         self.suspend_images(cx);
         self.cancel_review_comment_flush(cx);
         self.loads.clear();

@@ -81,6 +81,32 @@ fn files_panel_workspace_navigation_and_external_updates() {
     )
     .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture"],
+    ] {
+        let result = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    std::fs::write(
+        project.join("README.md"),
+        "# Workspace\n\nChanged documentation.\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("src/new.rs"), "// new file\n").unwrap();
     let core = runtime
         .block_on(async {
             zeron_engine::EngineCore::assemble(
@@ -212,6 +238,40 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 })
                 .await;
                 frame(window, cx, output.as_deref(), "01-chat-files").await;
+                wait_for(
+                    window,
+                    cx,
+                    "Git decorations without a Diffs panel",
+                    |shell, cx| {
+                        let files = shell.files["first"].read(cx);
+                        let theme = Theme::of(cx);
+                        files.test_git_color("README.md", false, cx) == Some(theme.warning)
+                            && files.test_git_color("src/new.rs", false, cx) == Some(theme.success)
+                            && files.test_git_color("src", true, cx) == Some(theme.success)
+                            && files
+                                .test_git_color("src/nested/main.rs", false, cx)
+                                .is_none()
+                    },
+                )
+                .await;
+                window
+                    .update(cx, |shell, _, cx| {
+                        let other = cx.new(|cx| {
+                            FilesSurface::new_explorer(
+                                shell.state.clone(),
+                                "second".into(),
+                                false,
+                                cx,
+                            )
+                        });
+                        other.update(cx, |files, cx| files.ensure_git_status(cx));
+                        assert_eq!(
+                            shell.files["first"].read(cx).test_git_source(),
+                            other.read(cx).test_git_source(),
+                            "chats on the same checkout share one status source"
+                        );
+                    })
+                    .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
                         shell.settings.files_panel_width = FILES_PANEL_MAX;
@@ -281,6 +341,14 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     "02c-two-file-tabs-explorer-hidden",
                 )
                 .await;
+                window
+                    .update(cx, |shell, _, cx| {
+                        assert!(
+                            shell.files["first"].read(cx).test_git_source().is_none(),
+                            "closing the explorer releases its status subscription"
+                        );
+                    })
+                    .unwrap();
                 window
                     .update(cx, |shell, window, cx| {
                         shell.toggle_files_panel(window, cx);

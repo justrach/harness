@@ -224,9 +224,12 @@ impl FilesSurface {
                 let selected = self.tree.selected() == Some(path.as_str());
                 let focused = self.tree_focus.is_focused(window);
                 let is_directory = node.entry.kind == WorkspaceEntryKind::Directory;
+                let decoration = self.git_decoration(&row.path, is_directory, cx);
                 let drag_payload = WorkspacePathDrag::new(path.clone(), is_directory);
                 let expanded = is_directory && self.tree.is_expanded(&path);
-                let text_color = if selected {
+                let text_color = if let Some(decoration) = decoration {
+                    decoration.color(&theme)
+                } else if selected {
                     theme.text
                 } else {
                     theme.text_muted
@@ -256,7 +259,9 @@ impl FilesSurface {
                     .items_center()
                     .gap(px(4.0))
                     .cursor_pointer()
-                    .when(node.entry.ignored, |element| element.opacity(0.52))
+                    .when(node.entry.ignored && decoration.is_none(), |element| {
+                        element.opacity(0.52)
+                    })
                     .when(selected, |element| {
                         element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
                     })

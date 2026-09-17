@@ -225,6 +225,9 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     /// Probe the IPC port and connect (daemon listening) or embed (nothing there).
     /// Must run on the tokio runtime (`Tokio::spawn`): both transports spawn
     /// tokio tasks.
