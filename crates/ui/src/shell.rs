@@ -2793,7 +2793,7 @@ impl Shell {
                             cx.open_url(&url);
                         }
                     }
-                    FilesEvent::TitleChanged => cx.notify(),
+                    FilesEvent::TitleChanged | FilesEvent::SearchControlsChanged => cx.notify(),
                     FilesEvent::FileRenamed { old_path, new_path } => {
                         this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
                     }

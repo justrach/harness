@@ -254,11 +254,19 @@ impl Shell {
             self.viewport_width - row_left - right_pad - gap_budget,
             right_pad,
         );
-        // Use the actual space left after native window controls, including
-        // while the panel animates, so search cannot cover the fixed toggle.
-        let files_controls = if self.files_panel_open(cx) && widths.files_controls >= 100.0 {
+        // Choose the search layout using the space left after native captions.
+        // Compact search temporarily owns the toggle's slot as well.
+        let search_owns_titlebar = self.files_panel_open(cx)
+            && self.files.get(&self.panel_key(cx)).is_some_and(|files| {
+                files
+                    .read(cx)
+                    .search_owns_titlebar(widths.files_controls, cx)
+            });
+        let files_controls = if self.files_panel_open(cx) && widths.files_controls >= 72.0 {
             self.files.get(&self.panel_key(cx)).cloned().map(|files| {
-                files.update(cx, |files, cx| files.render_explorer_controls(&theme, cx))
+                files.update(cx, |files, cx| {
+                    files.render_explorer_controls(&theme, widths.files_controls, cx)
+                })
             })
         } else {
             None
@@ -337,25 +345,27 @@ impl Shell {
                                     .gap(px(crate::surface_chrome::CONTROL_GAP))
                                     .child(controls)
                             })
-                            .child(
-                                header_icon_button(
-                                    "toggle-files-panel",
-                                    icons::FILE_TREE,
-                                    &theme,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.toggle_files_panel(window, cx)
+                            .when(!search_owns_titlebar, |slot| {
+                                slot.child(
+                                    header_icon_button(
+                                        "toggle-files-panel",
+                                        icons::FILE_TREE,
+                                        &theme,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.toggle_files_panel(window, cx)
+                                        }),
+                                    )
+                                    .role(gpui::Role::Button)
+                                    .aria_label(if self.files_panel_open(cx) {
+                                        "Hide files panel"
+                                    } else {
+                                        "Show files panel"
+                                    })
+                                    .when(self.files_panel_open(cx), |button| {
+                                        button.bg(crate::theme::wash(0.09))
                                     }),
                                 )
-                                .role(gpui::Role::Button)
-                                .aria_label(if self.files_panel_open(cx) {
-                                    "Hide files panel"
-                                } else {
-                                    "Show files panel"
-                                })
-                                .when(self.files_panel_open(cx), |button| {
-                                    button.bg(crate::theme::wash(0.09))
-                                }),
-                            ),
+                            }),
                     )
                     .into_any_element(),
             )
