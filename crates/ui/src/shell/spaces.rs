@@ -146,6 +146,11 @@ fn promote_local_device_group<T>(
     }
 }
 
+/// Shared quiet rule for sidebar groups and palette sections.
+pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
+    div().h(px(1.0)).bg(theme.border.opacity(0.6))
+}
+
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
@@ -163,7 +168,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label),
         )
-        .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
+        .child(sidebar_separator(theme).flex_1())
         .child(chevron)
 }
 

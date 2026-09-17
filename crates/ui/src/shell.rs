@@ -9647,6 +9647,7 @@ impl Render for Shell {
                 window,
                 |this: &mut Shell, window, cx| {
                     if !window.is_window_active() {
+                        this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
                         this.composer.update(cx, |composer, cx| {
                             composer.set_queue_shortcut_revealed(false, cx)

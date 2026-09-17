@@ -2738,6 +2738,7 @@ impl Render for AppearancePage {
             .map(|mode| {
                 widgets::option_card(
                     &theme,
+                    mode.icon(),
                     mode.label(),
                     mode == current_mode,
                     preview(mode, &current_themes, current_accent, current_surface),
@@ -2755,15 +2756,15 @@ impl Render for AppearancePage {
             .into_iter()
             .enumerate()
         {
-            let label = if appearance_kind.is_light() {
-                "Light theme"
+            let (label, mode) = if appearance_kind.is_light() {
+                ("Light theme", AppearanceMode::Light)
             } else {
-                "Dark theme"
+                ("Dark theme", AppearanceMode::Dark)
             };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             theme_rows.push(
                 widgets::card_row(&theme, index == 0)
-                    .child(widgets::row_tile(&theme, icons::TUNING))
+                    .child(widgets::row_tile(&theme, mode.icon()))
                     .child(
                         div()
                             .flex_1()

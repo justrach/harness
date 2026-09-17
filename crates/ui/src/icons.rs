@@ -50,6 +50,8 @@ macro_rules! icon_assets {
 icon_assets![
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
+    (SUN, "sun"),
+    (MOON, "moon"),
     // Browser globe, drawn in the same linear weight as the toolbar family.
     (GLOBE, "globe"),
     (LAPTOP, "laptop"),
@@ -137,6 +139,8 @@ icon_assets![
     (SETTINGS_MINIMALISTIC, "settings-minimalistic"),
     (LOGOUT_2, "logout-2"),
     (MAGNIFER, "magnifer"),
+    // Compact magnifier with a distinct handle, matching the linear icon family.
+    (PALETTE_SEARCH, "palette-search"),
     (COMMAND, "command"),
     (DOCUMENT, "document"),
     (DOCUMENT_ADD, "document-add"),
