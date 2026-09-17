@@ -577,6 +577,9 @@ pub struct Pickers {
     /// keyboard nav drives the data-side-opened popover (headless rigs have
     /// no synthetic pointer, but synthetic keys do arrive).
     boot_focus_pending: bool,
+    /// Reclaim focus while mounting: shell recovery can replace an immediate
+    /// focus request while the menu is still absent from the dispatch tree.
+    focus_on_mount: bool,
     load_task: Option<Task<()>>,
     /// Own slot: the refs load runs concurrently with the eager
     /// harness/model loads — sharing `load_task` would abort one mid-flight.
@@ -741,6 +744,7 @@ impl Pickers {
             search_reset_muted: false,
             focus: cx.focus_handle(),
             boot_focus_pending: boot_open.is_some(),
+            focus_on_mount: false,
             load_task: None,
             refs_task: None,
             switching: None,
@@ -954,6 +958,7 @@ impl Pickers {
 
     /// Outside clicks and navigation keep focus at the clicked destination.
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        self.focus_on_mount = false;
         self.cancel_setting_hover();
         self.setting_menu = None;
         self.setting_bounds = None;
@@ -1008,6 +1013,7 @@ impl Pickers {
             return;
         }
         self.open.open(kind);
+        self.focus_on_mount = true;
         // The plain-div menus (branch / project / device) share one scroll
         // handle; a fresh open starts at the top. The model list resets its
         // own virtualized handle below. Sync the rail baselines so the jump
@@ -4576,13 +4582,24 @@ impl Render for Pickers {
             }
         }
 
+        let focus_on_mount = std::mem::take(&mut self.focus_on_mount) && self.is_open();
+        if focus_on_mount {
+            // The frame exists even when loading/error/empty content omits
+            // the input. Claim it during mount, after any pre-frame shell
+            // recovery has handled the old dispatch tree.
+            window.focus(&self.focus, cx);
+        }
         if self.is_open() {
             let search = self.search.focus_handle(cx);
             let frame = self.focus.clone();
             window.defer(cx, move |window, cx| {
-                // Loading, empty, and error states can omit the search box.
-                // Keep Escape/arrow keys on the mounted menu in those states.
-                if search.is_focused(window) && !frame.contains(&search, window) {
+                let has_search = frame.contains(&search, window);
+                if focus_on_mount && frame.is_focused(window) && has_search {
+                    // Transfer to the filter only once it is actually mounted.
+                    window.focus(&search, cx);
+                } else if search.is_focused(window) && !has_search {
+                    // Loading, empty, and error states can omit the search box.
+                    // Keep Escape/arrow keys on the mounted menu in those states.
                     window.focus(&frame, cx);
                 }
             });
@@ -4777,6 +4794,152 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    struct ModelShortcutHost {
+        focus_sub: Option<gpui::Subscription>,
+        root: FocusHandle,
+        editor: FocusHandle,
+        neutral: FocusHandle,
+        pickers: Entity<Pickers>,
+    }
+
+    impl Render for ModelShortcutHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if self.focus_sub.is_none() {
+                self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Self, window, cx| {
+                    let root = this.root.clone();
+                    let editor = this.editor.clone();
+                    let neutral = this.neutral.clone();
+                    window.on_next_frame(move |window, cx| {
+                        crate::shell::restore_mounted_focus(&root, &editor, &neutral, window, cx);
+                    });
+                    cx.notify();
+                }));
+            }
+            let root = self.root.clone();
+            let editor = self.editor.clone();
+            let neutral = self.neutral.clone();
+            window.defer(cx, move |window, cx| {
+                crate::shell::restore_mounted_focus(&root, &editor, &neutral, window, cx);
+            });
+            div()
+                .size_full()
+                .track_focus(&self.root)
+                .on_action(
+                    cx.listener(|this, _: &crate::shell::OpenModelPicker, window, cx| {
+                        this.pickers
+                            .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                        cx.notify();
+                    }),
+                )
+                .child(div().track_focus(&self.editor))
+                .child(div().track_focus(&self.neutral))
+                .child(self.pickers.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn model_shortcut_focuses_mounted_picker_and_routes_navigation(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+            cx.bind_keys([gpui::KeyBinding::new(
+                "cmd-/",
+                crate::shell::OpenModelPicker,
+                None,
+            )]);
+        });
+        let handle = cx.add_window(|_, cx| ModelShortcutHost {
+            focus_sub: None,
+            root: cx.focus_handle(),
+            editor: cx.focus_handle(),
+            neutral: cx.focus_handle(),
+            pickers: cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut pickers = Pickers::new(state, cx);
+                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.model = Some("first".into());
+                pickers.harnesses =
+                    Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                pickers.models.insert(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(vec![
+                        bare_model("first", "First"),
+                        bare_model("second", "Second"),
+                    ]),
+                );
+                pickers
+            }),
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |host, window, cx| window.focus(&host.editor, cx))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "cmd-/");
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |host, window, cx| {
+                host.pickers.read_with(cx, |pickers, cx| {
+                    assert!(pickers.is_open());
+                    assert!(
+                        pickers.focus.contains_focused(window, cx),
+                        "shortcut must transfer focus into the mounted picker"
+                    );
+                });
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "down");
+        handle
+            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 1))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "up");
+        handle
+            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 0))
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "escape");
+        handle
+            .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
+            .unwrap();
+
+        // Catalog loading/error/empty cards omit the input but still need
+        // immediate keyboard focus on their mounted frame for Escape.
+        for catalog in [
+            Loadable::Loading,
+            Loadable::Error("offline".into()),
+            Loadable::Ready(vec![]),
+        ] {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            handle
+                .update(cx, |host, window, cx| {
+                    host.pickers.update(cx, |pickers, cx| {
+                        pickers.config.harness = None;
+                        pickers.defaults.harness = None;
+                        pickers.harnesses = catalog;
+                        cx.notify();
+                    });
+                    window.focus(&host.editor, cx);
+                })
+                .unwrap();
+            cx.simulate_keystrokes(handle.into(), "cmd-/");
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            handle
+                .update(cx, |host, window, cx| {
+                    assert!(host.pickers.read(cx).focus.contains_focused(window, cx));
+                })
+                .unwrap();
+            cx.simulate_keystrokes(handle.into(), "escape");
+            handle
+                .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
+                .unwrap();
+        }
+    }
 
     #[gpui::test]
     fn workspace_footer_pair_keeps_its_leading_edge_and_gap(cx: &mut gpui::TestAppContext) {

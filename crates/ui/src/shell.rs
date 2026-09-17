@@ -100,7 +100,7 @@ pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
 
 /// Check the completed dispatch tree, not just the lifetime of the focused
 /// handle: a hidden editor can stay alive after its element has unmounted.
-fn restore_mounted_focus(
+pub(crate) fn restore_mounted_focus(
     root: &FocusHandle,
     preferred: &FocusHandle,
     unfocused: &FocusHandle,
