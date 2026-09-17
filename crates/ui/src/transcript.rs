@@ -7996,6 +7996,90 @@ mod tests {
     }
 
     #[gpui::test]
+    fn tool_group_revisit_skips_batched_history_but_animates_live_arrivals(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let apply_frame = |frame, cx: &mut gpui::App| {
+                state.update(cx, |state, cx| {
+                    state.receive_transcript_frame(frame, cx).unwrap();
+                });
+                transcript.update(cx, |this, cx| this.sync(cx));
+            };
+            let cached = vec![assistant(
+                "tools",
+                MessageStatus::Streaming,
+                vec![tool_part("call", "pwd")],
+            )];
+            apply_frame(TranscriptFrame::reset(&cached), cx);
+            state.update(cx, |state, cx| state.select_chat(Some("chat-b".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+
+            // The agent does this work while A is away. On return, a stale
+            // local snapshot can arrive before remote catch-up deltas. Keep
+            // the same streaming message/group throughout: its status alone
+            // cannot distinguish historical tools from new live arrivals.
+            let mut first_batch = cached.clone();
+            first_batch[0].parts.extend([
+                tool_part("away-1", "ls"),
+                tool_part("away-2", "git status --short"),
+            ]);
+            let mut second_batch = first_batch.clone();
+            second_batch[0].parts.extend([
+                tool_part("away-3", "git diff --stat"),
+                tool_part("away-4", "git log -1"),
+            ]);
+
+            state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            apply_frame(TranscriptFrame::reset(&cached), cx);
+            let row_id: SharedString = "tools#g0".into();
+            {
+                let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
+                assert_eq!(reveal.starts.len(), 1);
+                assert!(reveal.header_started_at.is_none());
+                assert!(reveal.starts.iter().all(Option::is_none));
+            }
+
+            // Drive the production delta reducer, rather than marking the
+            // replay pending again between batches (the wire has no such
+            // signal today). Inspect epochs without sleeping or advancing
+            // frames, so slow test machines cannot hide a replayed entrance.
+            let mut historical_entrances = Vec::new();
+            for (previous, next) in [(&cached, &first_batch), (&first_batch, &second_batch)] {
+                let frame = diff_transcript(previous, next);
+                assert!(matches!(&frame, TranscriptFrame::Delta { .. }));
+                apply_frame(frame, cx);
+                let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
+                assert_eq!(reveal.starts.len(), next[0].parts.len());
+                assert!(reveal.header_started_at.is_none());
+                historical_entrances.push(reveal.starts.iter().flatten().count());
+            }
+
+            // Once caught up, a genuinely new tool in that same group still
+            // needs its entrance. Check this before reporting accumulated
+            // history failures, so both halves of the contract are exercised.
+            let mut live = second_batch.clone();
+            live[0].parts.push(tool_part("live-call", "git diff"));
+            apply_frame(diff_transcript(&second_batch, &live), cx);
+            let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
+            assert_eq!(reveal.starts.len(), 6);
+            assert!(
+                reveal.starts[5].is_some(),
+                "a new live tool must retain its entrance after catch-up"
+            );
+            assert!(reveal.header_started_at.is_none());
+            assert_eq!(
+                historical_entrances,
+                vec![0, 0],
+                "tools accumulated while away must not acquire entrance animations in either catch-up batch"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn tool_group_navigation_keeps_user_pins_and_new_arrivals(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             transcript.update(cx, |this, _| {
