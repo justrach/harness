@@ -74,6 +74,14 @@ pub(super) fn retain_known_pins(
     pinned_ids.len() != before
 }
 
+/// Convert viewport coordinates to the first pinned row, below its disclosure.
+fn pinned_session_pointer_y(pointer_y: f32, viewport_top: f32, scroll_top: f32) -> f32 {
+    pointer_y - viewport_top + scroll_top
+        - super::SIDEBAR_LIST_PAD_TOP
+        - SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+        - SIDEBAR_DISCLOSURE_BODY_INSET
+}
+
 pub(super) fn pinned_session_drop_index(rel_y: f32, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
@@ -143,6 +151,108 @@ mod pinned_session_tests {
         );
     }
 
+    #[gpui::test]
+    fn pinned_disclosure_click_collapses_and_restores_rows(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct PinnedHost(Entity<Shell>);
+        impl Render for PinnedHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |shell, cx| {
+                    let items = (0..2)
+                        .map(|_| div().h(px(61.0)).into_any_element())
+                        .collect();
+                    div()
+                        .w(px(280.0))
+                        .flex()
+                        .flex_col()
+                        .child(shell.render_pinned_section(
+                            items,
+                            128.0,
+                            true,
+                            &Theme::default(),
+                            cx,
+                        ))
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            PinnedHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Development);
+                    state.sidebar_preferences.pinned_session_ids = vec!["pin".into()];
+                    state.chats = ["pin", "regular"]
+                        .into_iter()
+                        .map(|id| {
+                            serde_json::from_value(serde_json::json!({
+                                "id": id, "deviceId": "local", "archived": false,
+                                "createdAt": Utc::now(),
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                });
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        for open in [true, false, true] {
+            if !open || !shell.read_with(cx, |shell, _| shell.pinned_open) {
+                let toggle = cx.debug_bounds("pinned-toggle").unwrap().center();
+                cx.simulate_mouse_down(toggle, MouseButton::Left, gpui::Modifiers::default());
+                cx.simulate_mouse_up(toggle, MouseButton::Left, gpui::Modifiers::default());
+            }
+            shell.update(cx, |shell, cx| {
+                assert_eq!(shell.pinned_open, open);
+                let expected = if open {
+                    vec!["pin", "regular"]
+                } else {
+                    vec!["regular"]
+                };
+                assert_eq!(shell.sidebar_visible_order(cx), expected);
+                assert_eq!(shell.active_sidebar_pins(cx), ["pin"]);
+                // Finish the tween to assert settled layout without wall-clock sleeps.
+                shell.sidebar_disclosure_motion.clear();
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            let bounds = cx.debug_bounds("sidebar-pinned-section").unwrap();
+            assert_eq!(
+                f32::from(bounds.size.height),
+                if open { 171.0 } else { 28.0 }
+            );
+            let divider = cx.debug_bounds(SIDEBAR_PINNED_DIVIDER_KEY).unwrap();
+            assert_eq!(
+                f32::from(divider.size.height),
+                if open { 15.0 } else { 0.0 }
+            );
+        }
+    }
+
     #[test]
     fn missing_duplicate_and_archived_pins_do_not_disturb_regular_rows() {
         let recency = ids(&["b", "a", "c"]);
@@ -207,6 +317,29 @@ mod pinned_session_tests {
         );
         assert_eq!(pinned_session_drop_index(500.0, 3), None);
         assert_eq!(pinned_session_drop_index(0.0, 0), None);
+    }
+
+    #[test]
+    fn pinned_drag_accounts_for_disclosure_header_and_scroll() {
+        // The first row starts 36px below the scroll viewport: 4px list
+        // padding, 28px header, and 4px body inset.
+        let viewport_top = 100.0;
+        let row_top = 136.0;
+        assert_eq!(
+            super::pinned_session_pointer_y(row_top, viewport_top, 0.0),
+            0.0
+        );
+        assert_eq!(
+            pinned_session_drop_index(super::pinned_session_pointer_y(125.0, viewport_top, 0.0), 3),
+            None,
+        );
+        assert_eq!(
+            pinned_session_drop_index(
+                super::pinned_session_pointer_y(row_top, viewport_top, 63.0),
+                3
+            ),
+            Some(1),
+        );
     }
 
     #[test]
@@ -386,8 +519,8 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
 const SIDEBAR_SECTION_GAP: f32 = 12.0;
-const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
-const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
+pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
+pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
 pub(super) const SIDEBAR_DISCLOSURE_TWEEN_GRACE: std::time::Duration =
@@ -712,7 +845,9 @@ impl Shell {
         over: usize,
         cx: &mut Context<Self>,
     ) {
-        if self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&payload.profile_key) {
+        if !self.pinned_open
+            || self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&payload.profile_key)
+        {
             self.cancel_pinned_session_drag(cx);
             return;
         }
@@ -778,7 +913,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
-        let rel_y = pointer_y - viewport_top + scroll_top - super::SIDEBAR_LIST_PAD_TOP;
+        let rel_y = pinned_session_pointer_y(pointer_y, viewport_top, scroll_top);
         let inside_pinned_section =
             pinned_session_drop_index(rel_y, payload.visible_ids.len()).is_some();
         let Some(over) = pinned_session_clamped_index(rel_y, payload.visible_ids.len()) else {
@@ -868,7 +1003,7 @@ impl Shell {
             return false;
         };
 
-        let rel_y = pointer_y - viewport_top + next_scroll - super::SIDEBAR_LIST_PAD_TOP;
+        let rel_y = pinned_session_pointer_y(pointer_y, viewport_top, next_scroll);
         let Some(over) = pinned_session_drop_index(rel_y, drag.visible_ids.len()) else {
             if let Some(drag) = self.pinned_session_drag.as_mut() {
                 drag.autoscroll_active = false;
@@ -894,7 +1029,8 @@ impl Shell {
         let Some(drag) = self.pinned_session_drag.as_ref() else {
             return true;
         };
-        if drag.filter != self.settings.space_filter
+        if !self.pinned_open
+            || drag.filter != self.settings.space_filter
             || self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&drag.profile_key)
         {
             return false;
@@ -1737,7 +1873,12 @@ impl Shell {
         } else {
             chats.into_iter().map(|chat| chat.id).collect()
         };
-        project_pinned_first(&ordered, pinned_order)
+        let mut visible = project_pinned_first(&ordered, pinned_order);
+        if !self.pinned_open {
+            let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
+            visible.retain(|id| !pins.contains(id.as_str()));
+        }
+        visible
     }
 
     /// Pinned sessions form a manually ordered section above the configured
@@ -1905,22 +2046,25 @@ impl Shell {
                 let height = super::chat_row_height(branch.is_some(), change_request.is_some());
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
-                let jump_label: Option<SharedString> = if jump_hints {
+                let jump_slot = slot.checked_sub(if self.pinned_open { 0 } else { pinned_count });
+                let jump_label: Option<SharedString> = if jump_hints && let Some(slot) = jump_slot {
                     let combo = keymap.get(ShortcutId::JumpSession(slot));
                     (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
                 } else {
                     None
                 };
-                let drag = (slot < pinned_count && pinned_session_is_draggable(pinned_count))
-                    .then(|| {
-                        profile_key.as_ref().map(|profile_key| PinnedSessionDrag {
-                            chat_id: chat.id.clone(),
-                            visible_ids: visible_pinned_ids.clone(),
-                            filter: filter.clone(),
-                            profile_key: profile_key.clone(),
-                        })
+                let drag = (self.pinned_open
+                    && slot < pinned_count
+                    && pinned_session_is_draggable(pinned_count))
+                .then(|| {
+                    profile_key.as_ref().map(|profile_key| PinnedSessionDrag {
+                        chat_id: chat.id.clone(),
+                        visible_ids: visible_pinned_ids.clone(),
+                        filter: filter.clone(),
+                        profile_key: profile_key.clone(),
                     })
-                    .flatten();
+                })
+                .flatten();
                 slot += 1;
                 let element = self.render_chat_row(
                     chat.id.clone(),
@@ -2015,6 +2159,101 @@ impl Shell {
         SidebarSessionRows {
             rows: rendered,
             pinned_count,
+        }
+    }
+
+    pub(super) fn render_pinned_section(
+        &mut self,
+        items: Vec<AnyElement>,
+        body_height: f32,
+        has_divider: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.pinned_open;
+        let label = if open {
+            "Pinned".into()
+        } else {
+            format!("Pinned ({})", items.len()).into()
+        };
+        let chevron = self.sidebar_disclosure_chevron("pinned", open, theme);
+        let header = sidebar_disclosure_header(theme, label, chevron)
+            .id("pinned-toggle")
+            .debug_selector(|| "pinned-toggle".into())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = this.pinned_open;
+                this.cancel_pinned_session_drag(cx);
+                this.begin_sidebar_disclosure_motion(
+                    "pinned",
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                this.pinned_open = !was_open;
+                // The disclosure owns this movement; avoid a second FLIP
+                // animation on the regular sessions below it.
+                this.sidebar_prev_order.clear();
+                this.sidebar_resort.clear();
+                this.sidebar_new_keys.clear();
+                cx.notify();
+            }));
+        let content = div()
+            .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
+            .child(Self::render_pinned_session_group(items, cx))
+            .into_any_element();
+        let body = self.render_sidebar_disclosure_body("pinned", open, body_height, content);
+        div()
+            .id("sidebar-pinned-section")
+            .debug_selector(|| "sidebar-pinned-section".into())
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(body)
+            .when(has_divider, |el| {
+                el.child(self.render_pinned_divider(body_height, theme))
+            })
+            .into_any_element()
+    }
+
+    fn render_pinned_divider(&self, body_height: f32, theme: &Theme) -> AnyElement {
+        // Keep the separator's spacing inside the animated frame so neither
+        // the line nor an empty gap survives when Pinned is collapsed.
+        let height = SIDEBAR_PINNED_DIVIDER_HEIGHT + SIDEBAR_LIST_GAP;
+        let frame = div()
+            .id(SIDEBAR_PINNED_DIVIDER_KEY)
+            .debug_selector(|| SIDEBAR_PINNED_DIVIDER_KEY.into())
+            .flex_none()
+            .overflow_hidden()
+            .child(
+                div()
+                    .mt(px(SIDEBAR_LIST_GAP))
+                    .h(px(SIDEBAR_PINNED_DIVIDER_HEIGHT))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .child(div().h(px(1.0)).w_full().bg(theme.border.opacity(0.6))),
+            );
+        if let Some(tween) = self
+            .sidebar_disclosure_motion
+            .get("pinned")
+            .copied()
+            .filter(|motion| motion.animating())
+        {
+            frame
+                .with_animation(
+                    SharedString::from(format!("sidebar-pinned-divider-{}", tween.epoch)),
+                    motion::COLLAPSE.animation(),
+                    move |el, t| {
+                        let reveal = (motion::lerp(tween.from, tween.to, t) / body_height.max(1.0))
+                            .clamp(0.0, 1.0);
+                        el.h(px(height * reveal)).opacity(reveal)
+                    },
+                )
+                .into_any_element()
+        } else {
+            frame
+                .h(px(if self.pinned_open { height } else { 0.0 }))
+                .opacity(if self.pinned_open { 1.0 } else { 0.0 })
+                .into_any_element()
         }
     }
 

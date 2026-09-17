@@ -1383,6 +1383,8 @@ pub struct Shell {
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
+    /// Session-transient disclosure state, matching the Archived shelf.
+    pub(super) pinned_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1394,7 +1396,7 @@ pub struct Shell {
     pub(super) archived_hover: Option<String>,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
-    /// In-flight disclosure tweens, shared by device groups and Archived.
+    /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
     /// The jump-hint overlay: true while the held modifiers exactly match a
@@ -1789,6 +1791,7 @@ impl Shell {
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
+            pinned_open: true,
             archived_shown: 0,
             archived_hover: None,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
@@ -6250,8 +6253,15 @@ impl Shell {
         // promotions glide; cleared rows just go).
         let session_rows = self.render_active_rows(theme, cx);
         let pinned_count = session_rows.pinned_count;
-        let has_pinned_divider = pinned_count > 0 && pinned_count < session_rows.rows.len();
         let keyed = session_rows.rows;
+        let has_pinned_divider = pinned_count > 0 && pinned_count < keyed.len();
+        let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
+            + keyed
+                .iter()
+                .take(pinned_count)
+                .map(|(_, height, _)| height)
+                .sum::<f32>()
+            + SIDEBAR_LIST_GAP * pinned_count.saturating_sub(1) as f32;
 
         // Resort glide (§1.6 View Transitions parity): when the ORDER of a live
         // list changes (new activity resort, grouping flip), surviving rows
@@ -6260,14 +6270,27 @@ impl Shell {
         // over 260ms cubic-bezier(0.22,1,0.36,1). New rows fade in; removals
         // just go (matching the original). First fill and chat switches (which
         // don't reorder) never animate.
-        let mut order: Vec<(String, f32)> =
-            Vec::with_capacity(keyed.len() + usize::from(has_pinned_divider));
+        let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
+        if pinned_count > 0 {
+            order.push((
+                "sidebar-pinned-header".to_string(),
+                spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                    + if self.pinned_open {
+                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                    } else {
+                        0.0
+                    },
+            ));
+        }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if has_pinned_divider && ix == pinned_count {
+            if has_pinned_divider && self.pinned_open && ix == pinned_count {
                 order.push((
                     SIDEBAR_PINNED_DIVIDER_KEY.to_string(),
                     SIDEBAR_PINNED_DIVIDER_HEIGHT,
                 ));
+            }
+            if ix < pinned_count && !self.pinned_open {
+                continue;
             }
             order.push((key.clone(), *height));
         }
@@ -6402,8 +6425,15 @@ impl Shell {
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let regular_items = pinned_items.split_off(pinned_count);
-            let pinned_group = (!pinned_items.is_empty())
-                .then(|| Self::render_pinned_session_group(pinned_items, cx));
+            let pinned_group = (!pinned_items.is_empty()).then(|| {
+                self.render_pinned_section(
+                    pinned_items,
+                    pinned_body_height,
+                    has_pinned_divider,
+                    theme,
+                    cx,
+                )
+            });
             div()
                 .id("sidebar-active-sessions")
                 .flex()
@@ -6411,17 +6441,6 @@ impl Shell {
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
-                .when(has_pinned_divider, |el| {
-                    el.child(
-                        div()
-                            .id(SIDEBAR_PINNED_DIVIDER_KEY)
-                            .h(px(SIDEBAR_PINNED_DIVIDER_HEIGHT))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .child(div().h(px(1.0)).w_full().bg(theme.border.opacity(0.6))),
-                    )
-                })
                 .when(!regular_items.is_empty(), |el| {
                     el.child(
                         div()
@@ -6463,10 +6482,7 @@ impl Shell {
                     .overflow_y_scroll()
                     .track_scroll(&self.sidebar_scroll)
                     .on_drag_move::<PinnedSessionDrag>(cx.listener(
-                        move |this,
-                              event: &gpui::DragMoveEvent<PinnedSessionDrag>,
-                              _,
-                              cx| {
+                        move |this, event: &gpui::DragMoveEvent<PinnedSessionDrag>, _, cx| {
                             let payload = event.drag(cx).clone();
                             this.track_pinned_session_drag_pointer(
                                 payload,
@@ -6477,7 +6493,7 @@ impl Shell {
                             );
                         },
                     ))
-                    // The divider is a hard boundary, not an unpin target.
+                    // The section boundary is not an unpin target.
                     // Releasing over regular sessions commits the nearest
                     // valid pinned slot.
                     .on_drop::<PinnedSessionDrag>(cx.listener(
