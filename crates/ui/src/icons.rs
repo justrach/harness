@@ -198,6 +198,7 @@ icon_assets![
     (HERMES_MARK, "hermes-mark"),
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
+    (ANTIGRAVITY_MARK, "antigravity-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
