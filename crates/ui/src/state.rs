@@ -1642,6 +1642,11 @@ impl AppState {
         self.engine.as_ref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+        self.engine = Some(handle);
+    }
+
     /// Drop every account-scoped view and subscription after its runtime has
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.

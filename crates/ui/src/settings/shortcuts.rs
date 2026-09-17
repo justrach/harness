@@ -484,7 +484,8 @@ fn group(id: ShortcutId) -> &'static str {
             "Panels"
         }
         ShortcutId::NewProject => "Projects",
-        ShortcutId::NewSession
+        ShortcutId::OpenModelPicker
+        | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession => "Sessions",
@@ -506,6 +507,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NewProject => "Open the new project dialog.",
+        ShortcutId::OpenModelPicker => "Open the model picker for the current session.",
         ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
         ShortcutId::PrevSession => {
             "Select the previous session in the sidebar, wrapping at the start."
