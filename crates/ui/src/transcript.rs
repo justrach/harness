@@ -2642,6 +2642,10 @@ pub struct Transcript {
     /// Entrance state follows stable groups through completion so fast calls
     /// finish revealing. Replay rows have no entrance timestamps.
     tool_group_reveals: HashMap<SharedString, ToolGroupReveal>,
+    last_replay_baseline: Option<Arc<zeron_doc::TranscriptBaseline>>,
+    /// Parsed historical prefixes, used to seed text before a coalesced live
+    /// suffix is painted. The wire watermark contains lengths, not text.
+    historical_markdown: HashMap<SharedString, Row>,
     /// Detail folds (output/diff) per chip, keyed `"{row_id}#d{ix}"` — full
     /// [`FoldState`]s so detail bodies tween open/closed exactly like the
     /// group fold. Render-local like `folds` — never part of the row
@@ -2919,6 +2923,8 @@ impl Transcript {
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
             tool_group_reveals: HashMap::new(),
+            last_replay_baseline: None,
+            historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
             user_heights: HashMap::new(),
@@ -4033,6 +4039,8 @@ impl Transcript {
             self.tree_cache.clear();
             self.folds.clear();
             self.tool_group_reveals.clear();
+            self.last_replay_baseline = None;
+            self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -4112,6 +4120,63 @@ impl Transcript {
             )
         };
 
+        let baseline = self
+            .chat_id
+            .as_deref()
+            .and_then(|id| self.state.read(cx).transcript_baseline(id))
+            .cloned();
+        let baseline_changed = baseline.as_ref().is_some_and(|baseline| {
+            self.last_replay_baseline
+                .as_ref()
+                .is_none_or(|previous| !Arc::ptr_eq(previous, baseline))
+        });
+        let mut historical_tool_counts = HashMap::new();
+        if baseline_changed {
+            let baseline = baseline.as_ref().unwrap();
+            let state = self.state.read(cx);
+            let entries = match &self.doc_override {
+                Some(id) => state.sub_transcript(id),
+                None => &state.transcript,
+            };
+            self.historical_markdown.clear();
+            let mut fully_historical = HashSet::new();
+            let mut historical_rows = Vec::new();
+            for entry in entries {
+                if baseline.covers(entry) {
+                    fully_historical.insert(entry.id.as_str());
+                    continue;
+                }
+                let Some(historical) = baseline.historical_entry(entry) else {
+                    continue;
+                };
+                historical_rows.extend(rows_for_entry(&historical, false, &mut |_, text| {
+                    Arc::new(parse_full(text))
+                }));
+            }
+            // A normal opening snapshot is entirely historical. Share its
+            // parsed trees instead of parsing the whole transcript twice;
+            // only an entry mixing historical and live parts needs a prefix.
+            historical_rows.extend(
+                new_rows
+                    .iter()
+                    .filter(|row| fully_historical.contains(row.entry_id.as_ref()))
+                    .cloned(),
+            );
+            for row in historical_rows {
+                match &row.kind {
+                    RowKind::ToolGroup { tools, .. } => {
+                        historical_tool_counts.insert(row.id.clone(), tools.len());
+                    }
+                    RowKind::LiveMarkdown { .. } => {
+                        self.veils.remove(&row.id);
+                        self.historical_markdown.insert(row.id.clone(), row);
+                    }
+                    _ => {}
+                }
+            }
+            self.last_replay_baseline = Some(baseline.clone());
+        }
+
         // Give only rows that ARRIVE after the replay baseline an entrance.
         // The first populated frame after a chat attach may already contain a
         // live tool group; treating it as history prevents a whole existing
@@ -4145,20 +4210,38 @@ impl Transcript {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
-            let old_count = if replay_baseline {
+            let historical_count = historical_tool_counts.get(&row.id).copied().unwrap_or(0);
+            let old_count = if replay_baseline && baseline.is_none() {
                 tools.len()
             } else {
-                previous_tool_counts.get(&row.id).copied().unwrap_or(0)
+                previous_tool_counts
+                    .get(&row.id)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(historical_count)
             }
             .min(tools.len());
-            let is_new_group = !replay_baseline && !previous_tool_counts.contains_key(&row.id);
+            let is_new_group = !(replay_baseline && baseline.is_none())
+                && historical_count == 0
+                && !previous_tool_counts.contains_key(&row.id);
             let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
+            if baseline_changed && historical_count > 0 {
+                reveal.rendered_open = None;
+                if let Some(fold) = self.folds.get_mut(&row.id) {
+                    fold.toggled_at = None;
+                    fold.disclosure_at = None;
+                }
+            }
             reveal.shimmer_started_at.get_or_insert(now);
             if is_new_group {
                 reveal.header_started_at.get_or_insert(now);
             }
             reveal.starts.truncate(tools.len());
             reveal.starts.resize(tools.len(), None);
+            if baseline_changed && historical_count > 0 {
+                reveal.header_started_at = None;
+                reveal.starts[..historical_count.min(tools.len())].fill(None);
+            }
             let first_row_delay = is_new_group.then_some(TOOL_FIRST_ROW_DELAY_MS).unwrap_or(0);
             for (arrival_ix, tool_ix) in (old_count..tools.len()).enumerate() {
                 reveal.starts[tool_ix] = Some(
@@ -4200,11 +4283,13 @@ impl Transcript {
         // first NON-EMPTY transcript after attach — the replay frame — never
         // the attach-time sync, whose transcript is still empty (selection
         // clears it; the doc watch refills it async).
-        if self.veil_attach_pending && !entries_empty {
+        if self.veil_attach_pending
+            && (!entries_empty || replay.authoritative_empty() || baseline_changed)
+        {
             self.veil_attach_pending = false;
             self.veil_baseline = new_rows
                 .iter()
-                .filter(|r| matches!(r.kind, RowKind::LiveMarkdown { .. }))
+                .filter(|r| baseline.is_none() && matches!(r.kind, RowKind::LiveMarkdown { .. }))
                 .map(|r| r.id.clone())
                 .collect();
         }
@@ -4221,6 +4306,11 @@ impl Transcript {
             new_rows
                 .iter()
                 .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
+        });
+        self.historical_markdown.retain(|id, _| {
+            new_rows
+                .iter()
+                .any(|row| &row.id == id && matches!(row.kind, RowKind::LiveMarkdown { .. }))
         });
 
         // Capture this before the row splice changes the list's measured end.
@@ -4305,7 +4395,7 @@ impl Transcript {
             self.own_turn_kick = true;
         }
         if self.pinned {
-            if live_following {
+            if live_following || baseline_changed {
                 self.list.scroll_to_end();
                 self.spring.reset();
                 self.spring_last_tick = None;
@@ -5660,11 +5750,13 @@ impl Transcript {
                 // Baseline rows (text already streamed when the transcript
                 // attached) start seeded: the existing reply must not fade in
                 // on a session switch — only fresh appends animate.
+                let seed_history = !self.veils.contains_key(&row.id)
+                    && self.historical_markdown.contains_key(&row.id);
                 let veil = (!motion::reduced_motion(cx)).then(|| {
                     self.veils
                         .entry(row.id.clone())
                         .or_insert_with(|| {
-                            if self.veil_baseline.contains(&row.id) {
+                            if seed_history || self.veil_baseline.contains(&row.id) {
                                 Rc::new(RefCell::new(RowVeil::seeded()))
                             } else {
                                 Rc::default()
@@ -5684,6 +5776,24 @@ impl Transcript {
                     workspace_root: workspace_root.clone(),
                     code,
                 };
+                if seed_history && let Some(veil) = &veil {
+                    let historical = &self.historical_markdown[&row.id];
+                    if let RowKind::LiveMarkdown { tree, block_ix } = &historical.kind
+                        && let Some(top) = tree.blocks.get(*block_ix)
+                    {
+                        // Use the renderer's own nested element keys and text
+                        // flattening, but never cache/paint the historical tree.
+                        let seed_opts = RenderOptions {
+                            cache: None,
+                            link: None,
+                            ..opts.clone()
+                        };
+                        let _ = render::render_block(
+                            &top.block, *block_ix, *block_ix, &seed_opts, &theme, window, None,
+                        );
+                        veil.borrow_mut().finish_seeding();
+                    }
+                }
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
                 let timer = frame_stats_enabled().then(Instant::now);
                 let el = render::render_block(
@@ -8002,9 +8112,18 @@ mod tests {
         use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
 
         with_tool_group_navigation(cx, |state, transcript, cx| {
-            let apply_frame = |frame, cx: &mut gpui::App| {
+            let apply_frame = |frame, replay_baseline, cx: &mut gpui::App| {
                 state.update(cx, |state, cx| {
-                    state.receive_transcript_frame(frame, cx).unwrap();
+                    state
+                        .receive_transcript_update(
+                            zeron_doc::TranscriptUpdate {
+                                frame,
+                                replay_baseline,
+                                context_usage: None,
+                            },
+                            cx,
+                        )
+                        .unwrap();
                 });
                 transcript.update(cx, |this, cx| this.sync(cx));
             };
@@ -8013,7 +8132,11 @@ mod tests {
                 MessageStatus::Streaming,
                 vec![tool_part("call", "pwd")],
             )];
-            apply_frame(TranscriptFrame::reset(&cached), cx);
+            apply_frame(
+                TranscriptFrame::reset(&cached),
+                Some(zeron_doc::TranscriptBaseline::capture(&cached)),
+                cx,
+            );
             state.update(cx, |state, cx| state.select_chat(Some("chat-b".into()), cx));
             transcript.update(cx, |this, cx| this.sync(cx));
 
@@ -8034,7 +8157,11 @@ mod tests {
 
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
             transcript.update(cx, |this, cx| this.sync(cx));
-            apply_frame(TranscriptFrame::reset(&cached), cx);
+            apply_frame(
+                TranscriptFrame::reset(&cached),
+                Some(zeron_doc::TranscriptBaseline::capture(&cached)),
+                cx,
+            );
             let row_id: SharedString = "tools#g0".into();
             {
                 let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
@@ -8043,15 +8170,19 @@ mod tests {
                 assert!(reveal.starts.iter().all(Option::is_none));
             }
 
-            // Drive the production delta reducer, rather than marking the
-            // replay pending again between batches (the wire has no such
-            // signal today). Inspect epochs without sleeping or advancing
+            // Drive the production update reducer with the historical cutoff
+            // supplied by the engine on each backfill batch. Inspect epochs
+            // without sleeping or advancing
             // frames, so slow test machines cannot hide a replayed entrance.
             let mut historical_entrances = Vec::new();
             for (previous, next) in [(&cached, &first_batch), (&first_batch, &second_batch)] {
                 let frame = diff_transcript(previous, next);
                 assert!(matches!(&frame, TranscriptFrame::Delta { .. }));
-                apply_frame(frame, cx);
+                apply_frame(
+                    frame,
+                    Some(zeron_doc::TranscriptBaseline::capture(next)),
+                    cx,
+                );
                 let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
                 assert_eq!(reveal.starts.len(), next[0].parts.len());
                 assert!(reveal.header_started_at.is_none());
@@ -8063,7 +8194,7 @@ mod tests {
             // history failures, so both halves of the contract are exercised.
             let mut live = second_batch.clone();
             live[0].parts.push(tool_part("live-call", "git diff"));
-            apply_frame(diff_transcript(&second_batch, &live), cx);
+            apply_frame(diff_transcript(&second_batch, &live), None, cx);
             let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
             assert_eq!(reveal.starts.len(), 6);
             assert!(
@@ -8076,6 +8207,141 @@ mod tests {
                 vec![0, 0],
                 "tools accumulated while away must not acquire entrance animations in either catch-up batch"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn tool_group_replay_cutoff_survives_coalesced_live_updates(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let history = vec![assistant(
+                "tools",
+                MessageStatus::Streaming,
+                vec![tool_part("call", "pwd"), tool_part("away", "ls")],
+            )];
+            let mut live = history.clone();
+            live[0].parts.push(tool_part("live", "git diff"));
+            live.push(assistant(
+                "new-live-group",
+                MessageStatus::Streaming,
+                vec![tool_part("new", "git status")],
+            ));
+            state.update(cx, |state, cx| {
+                let frame = zeron_doc::diff_transcript(&state.transcript, &history);
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame,
+                            context_usage: None,
+                            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&history)),
+                        },
+                        cx,
+                    )
+                    .unwrap();
+                // Both updates land before the transcript observes/render them.
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::diff_transcript(&history, &live),
+                            context_usage: None,
+                            replay_baseline: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                let reveal = &this.tool_group_reveals[&SharedString::from("tools#g0")];
+                assert!(reveal.header_started_at.is_none());
+                assert!(reveal.starts[..2].iter().all(Option::is_none));
+                assert!(
+                    reveal.starts[2].is_some(),
+                    "live tail was swallowed by the replay"
+                );
+                let new_group = &this.tool_group_reveals[&SharedString::from("new-live-group#g0")];
+                assert!(new_group.header_started_at.is_some());
+                assert!(new_group.starts[0].is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn tool_group_first_live_arrival_after_empty_replay_animates(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, cx| {
+                state.select_chat(Some("new-chat".into()), cx);
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::TranscriptFrame::reset(&[]),
+                            context_usage: None,
+                            replay_baseline: Some(Default::default()),
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let live = vec![assistant(
+                "first",
+                MessageStatus::Streaming,
+                vec![tool_part("first-call", "pwd")],
+            )];
+            state.update(cx, |state, cx| {
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::diff_transcript(&[], &live),
+                            context_usage: None,
+                            replay_baseline: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                let reveal = &this.tool_group_reveals[&SharedString::from("first#g0")];
+                assert!(reveal.header_started_at.is_some());
+                assert!(reveal.starts[0].is_some());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn tool_group_live_reset_does_not_become_history(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let mut live = state.read(cx).transcript.clone();
+            for ix in 0..5 {
+                live.push(assistant(
+                    &format!("live-{ix}"),
+                    MessageStatus::Streaming,
+                    vec![tool_part("call", "pwd")],
+                ));
+            }
+            state.update(cx, |state, cx| {
+                let frame = zeron_doc::diff_transcript(&state.transcript, &live);
+                assert!(matches!(&frame, zeron_doc::TranscriptFrame::Reset { .. }));
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame,
+                            context_usage: None,
+                            replay_baseline: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| {
+                this.sync(cx);
+                for ix in 0..5 {
+                    let reveal =
+                        &this.tool_group_reveals[&SharedString::from(format!("live-{ix}#g0"))];
+                    assert!(reveal.header_started_at.is_some());
+                    assert!(reveal.starts[0].is_some());
+                }
+            });
         });
     }
 
@@ -9639,6 +9905,121 @@ mod tests {
                 let _ = window.draw(cx);
             })
             .unwrap();
+        }
+
+        #[test]
+        fn replay_text_prefix_is_visible_while_coalesced_live_suffix_fades() {
+            with_window(|transcript, window, cx| {
+                let history = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![text_part("body", "café histórico")],
+                )];
+                let live = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![text_part("body", "café histórico y nuevo\n\nOtro párrafo")],
+                )];
+                transcript.update(cx, |this, cx| {
+                    this.state.update(cx, |state, cx| {
+                        state.select_chat(Some("chat".into()), cx);
+                        state
+                            .receive_transcript_update(
+                                zeron_doc::TranscriptUpdate {
+                                    frame: zeron_doc::TranscriptFrame::reset(&history),
+                                    context_usage: None,
+                                    replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                        &history,
+                                    )),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                        state
+                            .receive_transcript_update(
+                                zeron_doc::TranscriptUpdate {
+                                    frame: zeron_doc::diff_transcript(&history, &live),
+                                    context_usage: None,
+                                    replay_baseline: None,
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                    });
+                    this.sync(cx);
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        let _ = this.render_row(0, window, cx);
+                        let _ = this.render_row(1, window, cx);
+                        let first = &this.veils[&SharedString::from("reply#body.0")];
+                        let spans =
+                            first
+                                .borrow_mut()
+                                .advance(0, "café histórico y nuevo", Instant::now());
+                        assert_eq!(spans.len(), 1);
+                        assert_eq!(
+                            spans[0].0,
+                            "café histórico".len().."café histórico y nuevo".len()
+                        );
+                        let second = &this.veils[&SharedString::from("reply#body.1")];
+                        let spans = second
+                            .borrow_mut()
+                            .advance(1, "Otro párrafo", Instant::now());
+                        assert_eq!(spans.len(), 1);
+                        assert_eq!(spans[0].0, 0.."Otro párrafo".len());
+                    });
+                })
+                .unwrap();
+            });
+        }
+
+        #[test]
+        fn replay_growth_snaps_only_when_following_the_tail() {
+            with_window(|transcript, window, cx| {
+                let entries: Vec<_> = (0..30).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
+                transcript.update(cx, |this, cx| feed(this, entries.clone(), cx));
+                draw(window, cx);
+                let mut updated = entries;
+                for pinned in [false, true] {
+                    transcript.update(cx, |this, cx| {
+                        this.pinned = pinned;
+                        this.list.scroll_to(ListOffset {
+                            item_ix: 5,
+                            offset_in_item: px(12.0),
+                        });
+                        this.spring_kick = true;
+                        updated.push(prompt(&format!("history-{}", updated.len())));
+                        this.state.update(cx, |state, cx| {
+                            let frame = zeron_doc::diff_transcript(&state.transcript, &updated);
+                            state
+                                .receive_transcript_update(
+                                    zeron_doc::TranscriptUpdate {
+                                        frame,
+                                        context_usage: None,
+                                        replay_baseline: Some(
+                                            zeron_doc::TranscriptBaseline::capture(&updated),
+                                        ),
+                                    },
+                                    cx,
+                                )
+                                .unwrap();
+                        });
+                        this.sync(cx);
+                        if !pinned {
+                            let offset = this.list.logical_scroll_top();
+                            assert_eq!(offset.item_ix, 5);
+                            assert_eq!(offset.offset_in_item, px(12.0));
+                        } else {
+                            assert!(!this.spring_kick, "history must not start a scroll chase");
+                        }
+                    });
+                    draw(window, cx);
+                    if pinned {
+                        assert!(transcript.read(cx).distance_from_bottom() <= 0.5);
+                    }
+                }
+            });
         }
 
         // These exercise frame-by-frame geometry, including the first paint

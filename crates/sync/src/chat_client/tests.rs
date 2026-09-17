@@ -47,6 +47,7 @@ impl BinConnector for ChanConnector {
 #[derive(Default)]
 struct RecordingSink {
     rows: Mutex<Vec<(Vec<u8>, u64)>>,
+    replay_rows: Mutex<Vec<u64>>,
     checkpoints: Mutex<Vec<(Vec<u8>, u64)>>,
     cursor_advances: Mutex<Vec<u64>>,
     frontier_contained: std::sync::atomic::AtomicBool,
@@ -57,6 +58,10 @@ struct RecordingSink {
 }
 
 impl ChatDocSink for RecordingSink {
+    fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        lock(&self.replay_rows).push(cursor);
+        self.apply_row(bytes, cursor)
+    }
     fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
         if self
             .pending_until_checkpoint
@@ -261,7 +266,7 @@ async fn fresh_join_backfills_rows_and_advances_cursor() {
     )
     .await
     .expect("join succeeds");
-    server.await.unwrap();
+    let end = server.await.unwrap();
 
     assert_eq!(
         *lock(&sink.rows),
@@ -272,6 +277,23 @@ async fn fresh_join_backfills_rows_and_advances_cursor() {
     let stats = client.stats();
     assert!(stats.connected);
     assert_eq!(stats.cursor, 2);
+    assert_eq!(*lock(&sink.replay_rows), vec![1, 2]);
+    let mut events = client.events();
+    send(
+        &end,
+        frame_type::ROW,
+        serde_json::json!({"seq": 3, "device": "dev-b", "batchId": "live"}),
+        b"live",
+    )
+    .await;
+    while client.stats().cursor != 3 {
+        events.recv().await.unwrap();
+    }
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![1, 2],
+        "steady-state arrivals must remain live"
+    );
     client.shutdown().await;
 }
 
@@ -805,6 +827,15 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
             &[],
         )
         .await;
+        // A live row can buffer after ROWS_DONE while the checkpoint is
+        // still downloading. Crossing that boundary must retain its origin.
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq": 8, "device": "dev-b", "batchId": "live8"}),
+            b"live8",
+        )
+        .await;
         // Only now does the "download" complete.
         let _ = gate_tx.send(());
         end
@@ -822,12 +853,21 @@ async fn checkpoint_fetch_overlaps_row_backfill() {
     .expect("join succeeds with rows served before the checkpoint bytes");
 
     let _end = server.await.unwrap();
+    let mut events = client.events();
+    while client.stats().cursor != 8 {
+        events.recv().await.unwrap();
+    }
     assert_eq!(
         *lock(&sink.ops),
-        vec!["ckpt@5", "row@6", "row@7"],
+        vec!["ckpt@5", "row@6", "row@7", "row@8"],
         "checkpoint imports before any row that buffered during the download"
     );
-    assert_eq!(client.stats().cursor, 7);
+    assert_eq!(client.stats().cursor, 8);
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![6, 7],
+        "buffered backfill keeps its origin after checkpoint download"
+    );
     client.shutdown().await;
 }
 
@@ -1451,6 +1491,98 @@ struct FixedHttpRows {
     body: Vec<u8>,
     requests: Mutex<Vec<u64>>,
 }
+
+#[tokio::test(start_paused = true)]
+async fn http_polling_returns_to_live_after_replay_and_rearms_on_revisit_or_failure() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+    struct HttpRows {
+        head: AtomicU64,
+        fail_next: AtomicBool,
+    }
+    impl ChatTransport for HttpRows {
+        fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            let head = self.head.load(Relaxed);
+            let fail = self.fail_next.swap(false, Relaxed);
+            Box::pin(async move {
+                if fail {
+                    return Err(SyncError::Closed);
+                }
+                let mut frames = vec![encode(
+                    frame_type::STATE,
+                    &serde_json::json!({
+                        "headSeq": head, "seqFloor": 0, "checkpointSeq": 0,
+                        "checkpointSize": 0, "rowCount": head, "rowBytes": head,
+                    }),
+                    &[],
+                )];
+                for seq in after + 1..=head {
+                    frames.push(encode(
+                        frame_type::ROW,
+                        &serde_json::json!({
+                            "seq": seq, "device": "dev-b", "batchId": format!("b{seq}"),
+                        }),
+                        &[seq as u8],
+                    ));
+                }
+                frames.push(encode(
+                    frame_type::ROWS_DONE,
+                    &serde_json::json!({"headSeq": head}),
+                    &[],
+                ));
+                let mut body = Vec::new();
+                for frame in frames {
+                    body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+                    body.extend_from_slice(&frame);
+                }
+                Ok(body)
+            })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(async { panic!("read-only test") })
+        }
+    }
+    let transport = Arc::new(HttpRows {
+        head: AtomicU64::new(1),
+        fail_next: AtomicBool::new(false),
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        connector(vec![]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(transport.clone()),
+    )
+    .await
+    .unwrap();
+    for head in 1..=5 {
+        if head == 3 {
+            client.probe();
+        } // reopening the transcript
+        if head == 5 {
+            transport.fail_next.store(true, Relaxed);
+        }
+        transport.head.store(head, Relaxed);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while client.stats().cursor != head {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "HTTP delivery stalled at {head}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    assert_eq!(
+        *lock(&sink.replay_rows),
+        vec![1, 3, 5],
+        "ordinary foreground HTTP polls must retain live entrances"
+    );
+    client.shutdown().await;
+}
+
 impl ChatTransport for FixedHttpRows {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         lock(&self.requests).push(after);
@@ -1520,6 +1652,11 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
         assert_eq!(calls.load(Relaxed), u64::from(pending_dependencies));
         assert_eq!(lock(&transport.requests)[0], 1);
         assert_eq!(lock(&sink.rows).last().unwrap().1, 6);
+        assert_eq!(
+            *lock(&sink.replay_rows).last().unwrap(),
+            6,
+            "HTTP recovery must carry the same replay provenance"
+        );
         if pending_dependencies {
             assert_eq!(
                 lock(&transport.requests)[1],

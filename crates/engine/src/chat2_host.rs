@@ -37,6 +37,7 @@ pub struct EngineChatSink {
     doc: std::sync::Weak<SessionDoc>,
     store: Arc<DocsStore>,
     chat_id: String,
+    handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
 }
 
 impl EngineChatSink {
@@ -45,7 +46,43 @@ impl EngineChatSink {
             doc: Arc::downgrade(doc),
             store,
             chat_id: chat_id.into(),
+            handle: std::sync::Weak::new(),
         }
+    }
+
+    pub(crate) fn with_handle(
+        mut self,
+        handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
+    ) -> Self {
+        self.handle = handle;
+        self
+    }
+
+    fn import_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        let Some(doc) = self.doc.upgrade() else {
+            return RowImportOutcome::Applied;
+        };
+        match doc.doc().import(bytes) {
+            Ok(status) => {
+                if status.pending.is_some() {
+                    // Room sequence contiguity does not prove causal history
+                    // is present. Snapshot export omits parked operations;
+                    // advancing its cursor would lose them after restart.
+                    tracing::warn!(chat = %self.chat_id, cursor,
+                        "chat2 sink: row parked on missing deps; requesting repair");
+                    return RowImportOutcome::PendingDependencies;
+                }
+            }
+            Err(err) => {
+                // Malformed remote bytes cost the row, never the doc (the same
+                // skip-not-fail rule as transcript reads). The cursor still
+                // advances: replaying a poison row forever is the wedge class.
+                tracing::warn!(chat = %self.chat_id, error = %err,
+                    "chat2 sink: row import failed; skipping row");
+            }
+        }
+        self.persist_with_cursor(cursor);
+        RowImportOutcome::Applied
     }
 
     /// Export the CURRENT doc and persist it with `cursor` in one tx.
@@ -112,43 +149,36 @@ impl ChatDocSink for EngineChatSink {
     }
 
     fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
-        let Some(doc) = self.doc.upgrade() else {
-            return RowImportOutcome::Applied;
-        };
-        match doc.doc().import(bytes) {
-            Ok(status) => {
-                if status.pending.is_some() {
-                    // Room sequence contiguity does not prove causal history
-                    // is present. Snapshot export omits parked operations;
-                    // advancing its cursor would lose them after restart.
-                    tracing::warn!(chat = %self.chat_id, cursor,
-                        "chat2 sink: row parked on missing deps; requesting repair");
-                    return RowImportOutcome::PendingDependencies;
-                }
-            }
-            Err(err) => {
-                // Malformed remote bytes cost the row, never the doc (the same
-                // skip-not-fail rule as transcript reads). The cursor still
-                // advances: replaying a poison row forever is the wedge class.
-                tracing::warn!(chat = %self.chat_id, error = %err,
-                    "chat2 sink: row import failed; skipping row");
-            }
+        match self.handle.upgrade() {
+            Some(handle) => handle.import_transcript(false, || self.import_row(bytes, cursor)),
+            None => self.import_row(bytes, cursor),
         }
-        self.persist_with_cursor(cursor);
-        RowImportOutcome::Applied
+    }
+
+    fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        match self.handle.upgrade() {
+            Some(handle) => handle.import_transcript(true, || self.import_row(bytes, cursor)),
+            None => self.apply_row(bytes, cursor),
+        }
     }
 
     fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
-        let doc = self.doc.upgrade().ok_or("doc evicted")?;
-        let status = doc
-            .doc()
-            .import(bytes)
-            .map_err(|e| format!("checkpoint import: {e}"))?;
-        if status.pending.is_some() {
-            return Err("checkpoint is missing causal dependencies".into());
+        let import = || {
+            let doc = self.doc.upgrade().ok_or("doc evicted")?;
+            let status = doc
+                .doc()
+                .import(bytes)
+                .map_err(|e| format!("checkpoint import: {e}"))?;
+            if status.pending.is_some() {
+                return Err("checkpoint is missing causal dependencies".into());
+            }
+            self.persist_with_cursor(cursor);
+            Ok(())
+        };
+        match self.handle.upgrade() {
+            Some(handle) => handle.import_transcript(true, import),
+            None => import(),
         }
-        self.persist_with_cursor(cursor);
-        Ok(())
     }
 
     fn contains_frontier(&self, frontier: &[u8]) -> bool {

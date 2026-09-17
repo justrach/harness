@@ -1022,17 +1022,12 @@ where
 /// full `reset` first, then only changed entries per commit — the whole-Vec
 /// serialization here was the per-tick cost that scaled with transcript size.
 fn doc_messages_stream(
-    rx: watch::Receiver<std::sync::Arc<Vec<zeron_doc::SessionMessageEntry>>>,
+    rx: watch::Receiver<crate::doc_host::TranscriptSnapshot>,
     doc: std::sync::Arc<zeron_doc::SessionDoc>,
 ) -> BoxStream<'static, serde_json::Value> {
     use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
     futures::stream::unfold(
-        (
-            rx,
-            None::<std::sync::Arc<Vec<zeron_doc::SessionMessageEntry>>>,
-            doc,
-            None,
-        ),
+        (rx, None::<crate::doc_host::TranscriptSnapshot>, doc, None),
         |(mut rx, mut prev, doc, mut previous_usage)| async move {
             loop {
                 if prev.is_some() {
@@ -1041,21 +1036,34 @@ fn doc_messages_stream(
                 // Watchers retain the immutable published snapshot. Each
                 // connection used to deep-copy the entire transcript here.
                 let current = rx.borrow_and_update().clone();
-                let frame = match prev.as_deref() {
-                    None => TranscriptFrame::reset(&current),
-                    Some(prev) => diff_transcript(prev, &current),
+                let frame = match prev.as_ref() {
+                    None => TranscriptFrame::reset(&current.entries),
+                    Some(prev) => diff_transcript(&prev.entries, &current.entries),
+                };
+                let replay_baseline = match prev.as_ref() {
+                    None => Some(zeron_doc::TranscriptBaseline::capture(&current.entries)),
+                    Some(prev)
+                        if !std::sync::Arc::ptr_eq(
+                            &prev.replay_baseline,
+                            &current.replay_baseline,
+                        ) =>
+                    {
+                        Some((*current.replay_baseline).clone())
+                    }
+                    _ => None,
                 };
                 prev = Some(current);
                 // No-op commits (a second watcher attaching, command-only
                 // changes) produce empty deltas — skip the frame entirely.
                 let usage = doc.context_usage();
-                if frame.is_empty_delta() && usage == previous_usage {
+                if frame.is_empty_delta() && usage == previous_usage && replay_baseline.is_none() {
                     continue;
                 }
                 previous_usage = usage;
                 let value = serde_json::to_value(zeron_doc::TranscriptUpdate {
                     frame,
                     context_usage: usage,
+                    replay_baseline,
                 })
                 .ok()?;
                 return Some((value, (rx, prev, doc, previous_usage)));
@@ -2389,6 +2397,129 @@ mod context_usage_tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn replay_cutoff_travels_with_coalesced_backfill_and_live_content() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+        use zeron_sync::chat_client::ChatDocSink;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("replay-chat").unwrap();
+        let sink = crate::chat2_host::EngineChatSink::new(&handle.doc_arc(), store, "replay-chat")
+            .with_handle(Arc::downgrade(&handle));
+        let mut stream = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let first: zeron_doc::TranscriptUpdate =
+            serde_json::from_value(stream.next().await.unwrap()).unwrap();
+        assert!(first.replay_baseline.unwrap().entries.is_empty());
+
+        let source = zeron_doc::SessionDoc::init("replay-chat").unwrap();
+        let append = |id: &str| {
+            source
+                .push_message(&zeron_doc::SessionMessageEntry {
+                    id: id.into(),
+                    role: zeron_doc::MessageRole::Assistant,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: id.into(),
+                    }],
+                    created_at: 0,
+                    device_id: "writer".into(),
+                    status: Some(zeron_doc::MessageStatus::Streaming),
+                    continuation_of: None,
+                })
+                .unwrap()
+        };
+        append("cached");
+        sink.apply_checkpoint(&source.export_snapshot().unwrap(), 0)
+            .unwrap();
+        let checkpoint: zeron_doc::TranscriptUpdate = serde_json::from_value(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            checkpoint
+                .replay_baseline
+                .unwrap()
+                .entries
+                .contains_key("cached")
+        );
+
+        let version = source.doc().oplog_vv();
+        append("away");
+        sink.apply_replay_row(
+            &source
+                .doc()
+                .export(loro::ExportMode::updates(&version))
+                .unwrap(),
+            1,
+        );
+        let version = source.doc().oplog_vv();
+        append("live");
+        sink.apply_row(
+            &source
+                .doc()
+                .export(loro::ExportMode::updates(&version))
+                .unwrap(),
+            2,
+        );
+        // Neither the doc worker nor the RPC consumer ran between these
+        // imports. They must not flatten their different presentation origins.
+        let update: zeron_doc::TranscriptUpdate = serde_json::from_value(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let cutoff = update.replay_baseline.unwrap();
+        assert!(cutoff.entries.contains_key("away"));
+        assert!(!cutoff.entries.contains_key("live"));
+        let mut entries = vec![];
+        zeron_doc::apply_transcript_frame(&mut entries, checkpoint.frame).unwrap();
+        zeron_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let version = source.doc().oplog_vv();
+        append("next-live");
+        sink.apply_row(
+            &source
+                .doc()
+                .export(loro::ExportMode::updates(&version))
+                .unwrap(),
+            3,
+        );
+        let update: zeron_doc::TranscriptUpdate = serde_json::from_value(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            update.replay_baseline.is_none(),
+            "live updates must not resend the history watermark"
+        );
+        let mut reopened = doc_messages_stream(handle.watch_messages(), handle.doc_arc());
+        let opening: zeron_doc::TranscriptUpdate =
+            serde_json::from_value(reopened.next().await.unwrap()).unwrap();
+        assert_eq!(
+            opening.replay_baseline.unwrap().entries.len(),
+            4,
+            "reopening includes all existing content as history"
+        );
+        host.shutdown_workers().await;
+    }
+
+    #[tokio::test]
     async fn context_only_commits_reach_remote_watch_and_reconnect() {
         let host = zeron_doc::SessionDoc::init("context-chat").unwrap();
         host.update_context_usage(Some(42000), Some(200000))
@@ -2399,7 +2530,7 @@ mod context_usage_tests {
             .doc()
             .import(&host.export_snapshot().unwrap())
             .unwrap();
-        let (tx, rx) = watch::channel(Arc::new(Vec::new()));
+        let (tx, rx) = watch::channel(crate::doc_host::TranscriptSnapshot::default());
         let mut stream = doc_messages_stream(rx, remote.clone());
         let first = stream.next().await.unwrap();
         assert_eq!(first["contextUsage"]["tokens"], 42000);
@@ -2415,7 +2546,7 @@ mod context_usage_tests {
                     .unwrap(),
             )
             .unwrap();
-        tx.send_replace(Arc::new(Vec::new()));
+        tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         let update = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -2428,7 +2559,7 @@ mod context_usage_tests {
             update["contextUsage"]
         );
         remote.clear_context_usage().unwrap();
-        tx.send_replace(Arc::new(Vec::new()));
+        tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
     }
 }

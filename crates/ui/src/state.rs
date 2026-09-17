@@ -662,6 +662,7 @@ pub struct AppState {
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
+    transcript_baselines: HashMap<String, Arc<zeron_doc::TranscriptBaseline>>,
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
@@ -752,6 +753,7 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
+            transcript_baselines: HashMap::new(),
             transcript_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -887,6 +889,7 @@ impl AppState {
             && !self.chats.iter().any(|c| &c.id == selected)
         {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
+            self.transcript_baselines.remove(selected);
             self.selected_chat = None;
             self.transcript.clear();
             self.context_usage = None;
@@ -1184,6 +1187,30 @@ impl AppState {
         result
     }
 
+    pub(crate) fn transcript_baseline(
+        &self,
+        doc_id: &str,
+    ) -> Option<&Arc<zeron_doc::TranscriptBaseline>> {
+        self.transcript_baselines.get(doc_id)
+    }
+
+    pub fn receive_transcript_update(
+        &mut self,
+        update: zeron_doc::TranscriptUpdate,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
+        self.receive_transcript_frame(update.frame, cx)?;
+        if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, update.replay_baseline) {
+            self.transcript_baselines
+                .insert(doc_id.clone(), Arc::new(baseline));
+        }
+        if self.context_usage != update.context_usage {
+            self.context_usage = update.context_usage;
+            cx.notify();
+        }
+        Ok(())
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -1214,6 +1241,7 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
+        self.transcript_baselines.remove(doc_id);
     }
 
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
@@ -1221,6 +1249,10 @@ impl AppState {
     pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(&doc_id);
+        self.transcript_baselines.insert(
+            doc_id.clone(),
+            Arc::new(zeron_doc::TranscriptBaseline::capture(&entries)),
+        );
         self.sub_transcripts.insert(doc_id, entries);
     }
 
@@ -1637,6 +1669,7 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.transcript_baselines.clear();
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
@@ -1862,6 +1895,9 @@ impl AppState {
                 self.mark_chat_seen(&id, cx);
             }
             return;
+        }
+        if let Some(previous) = &self.selected_chat {
+            self.transcript_baselines.remove(previous);
         }
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
@@ -2294,19 +2330,11 @@ fn spawn_transcript_watch(
                         continue 'resubscribe;
                     }
                 };
-                let zeron_doc::TranscriptUpdate {
-                    frame,
-                    context_usage: usage,
-                } = update;
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        if state.context_usage != usage {
-                            state.context_usage = usage;
-                            cx.notify();
-                        }
-                        if let Err(err) = state.receive_transcript_frame(frame, cx) {
+                        if let Err(err) = state.receive_transcript_update(update, cx) {
                             tracing::warn!(%chat_id, error = %err, "resubscribing transcript");
                             desync = true;
                         }
@@ -2418,7 +2446,7 @@ fn spawn_subagent_watch(
                 }
             };
             while let Some(value) = rx.recv().await {
-                let frame: TranscriptFrame = match serde_json::from_value(value) {
+                let update: zeron_doc::TranscriptUpdate = match serde_json::from_value(value) {
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
@@ -2430,11 +2458,17 @@ fn spawn_subagent_watch(
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
                     if let Some(rows) = state.sub_transcripts.get_mut(&doc_id) {
+                        let frame = update.frame;
                         let text_only = is_text_append(&frame);
                         state.transcript_revision = state.transcript_revision.wrapping_add(1);
                         if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
                             tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
                             desync = true;
+                        }
+                        if !desync && let Some(baseline) = update.replay_baseline {
+                            state
+                                .transcript_baselines
+                                .insert(doc_id.clone(), Arc::new(baseline));
                         }
                         if text_only && !desync {
                             cx.emit(TranscriptTextChanged {
