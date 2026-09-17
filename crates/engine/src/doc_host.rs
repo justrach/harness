@@ -493,7 +493,8 @@ pub struct ChatDocHandle {
     messages_tx: watch::Sender<TranscriptSnapshot>,
     /// Serialize historical imports with publication so an async doc-change
     /// task cannot publish recovered content before its presentation cutoff.
-    replay_baseline: Mutex<Arc<zeron_doc::TranscriptBaseline>>,
+    transcript_import: Mutex<()>,
+    transcript_history: Arc<Mutex<crate::transcript_history::TranscriptHistory>>,
     /// Pending-message queue watch (WatchQueue). Cheap to rebuild — a handful
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
@@ -582,7 +583,15 @@ impl ChatDocHandle {
         // Subscribe BEFORE the dirty check: a commit racing this attach then
         // sees a live receiver and publishes, instead of re-marking dirty
         // after our refresh and leaving the new watcher a cleared mirror.
-        let rx = self.messages_tx.subscribe();
+        let rx = {
+            let _import = lock(&self.transcript_import);
+            if self.messages_tx.receiver_count() == 0 {
+                // A new viewing session must not inherit the former viewer's
+                // live-part protection, even if no commit happened while away.
+                *lock(&self.transcript_history) = Default::default();
+            }
+            self.messages_tx.subscribe()
+        };
         if self.mirror_dirty.load(Ordering::Acquire) {
             self.publish_messages();
         }
@@ -677,10 +686,12 @@ impl ChatDocHandle {
     }
 
     fn publish_messages(&self) {
-        let replay_baseline = lock(&self.replay_baseline);
+        let _import = lock(&self.transcript_import);
         self.mirror_dirty.store(false, Ordering::Release);
         match self.doc.read_entries() {
             Ok(entries) => {
+                let replay_baseline =
+                    lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
                 let joined = join_continuation_entries(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
@@ -695,22 +706,9 @@ impl ChatDocHandle {
         }
     }
 
-    pub(crate) fn import_transcript<T>(&self, replay: bool, import: impl FnOnce() -> T) -> T {
-        let mut baseline = lock(&self.replay_baseline);
-        let before = replay.then(|| self.doc.doc().state_frontiers());
-        let result = import();
-        if before.is_some_and(|before| before != self.doc.doc().state_frontiers())
-            && self.messages_tx.receiver_count() > 0
-        {
-            if let Ok(entries) = self.doc.read_entries() {
-                let next =
-                    zeron_doc::TranscriptBaseline::capture(&join_continuation_entries(entries));
-                if **baseline != next {
-                    *baseline = Arc::new(next);
-                }
-            }
-        }
-        result
+    pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
+        let _guard = lock(&self.transcript_import);
+        import()
     }
 
     /// Per-commit publish path: unwatched docs just mark the mirror dirty —
@@ -721,7 +719,7 @@ impl ChatDocHandle {
             self.mirror_dirty.store(true, Ordering::Release);
             // Shrink the stale mirror: watch_messages rebuilds on attach.
             self.messages_tx.send_replace(TranscriptSnapshot::default());
-            *lock(&self.replay_baseline) = Arc::default();
+            *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages();
         }
@@ -1251,13 +1249,28 @@ impl DocHost {
         let doc = Arc::new(doc);
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
-        let sub = doc.doc().subscribe_root(Arc::new(move |_diff| {
+        let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
+        let transcript_history = Arc::new(Mutex::new(
+            crate::transcript_history::TranscriptHistory::default(),
+        ));
+        let history = transcript_history.clone();
+        let watched = messages_tx.clone();
+        let weak_doc = Arc::downgrade(&doc);
+        let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
+            // This callback runs before the change worker can publish. The
+            // import origin belongs to the event, so concurrent local commits
+            // cannot inherit a remote replay's presentation classification.
+            if watched.receiver_count() > 0 {
+                if let Some(doc) = weak_doc.upgrade() {
+                    lock(&history).observe(doc.doc(), &diff);
+                }
+            } else {
+                *lock(&history) = Default::default();
+            }
             changed_tx.send_modify(|v| *v = v.wrapping_add(1));
         }));
-        // The mirror starts dirty and empty: many opens (command queueing,
-        // drains, nudges) never watch the transcript, and the first
-        // watch_messages attach materializes it on demand.
-        let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
+        // The mirror starts dirty and empty; watch_messages materializes it
+        // once on attach instead of maintaining an unwatched transcript.
         let initial_queue = doc.read_queue().unwrap_or_default();
         // A queue already present when a handle is materialized came from a
         // persisted snapshot (or a synced checkpoint), not from a prompt the
@@ -1272,7 +1285,8 @@ impl DocHost {
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
-            replay_baseline: Mutex::default(),
+            transcript_import: Mutex::default(),
+            transcript_history,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),

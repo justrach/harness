@@ -330,6 +330,8 @@ impl StickSpring {
 /// One tool invocation inside a group row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolItem {
+    /// Stable document part identity, independent of arrival order.
+    pub part_id: String,
     pub call: ToolCall,
     pub is_error: bool,
     pub resolved: bool,
@@ -675,7 +677,7 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
 /// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
 /// outputs, with the counted tail. `live` = the part is still streaming
 /// (chip defaults open).
-fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
+fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
     let mut lines = thought_lines(tree);
     let truncated_by = lines.len().saturating_sub(OUTPUT_DETAIL_MAX_LINES);
     if truncated_by > 0 {
@@ -695,6 +697,7 @@ fn thought_item(tree: &BlockTree, live: bool) -> ToolItem {
         }
     }
     ToolItem {
+        part_id: part_id.into(),
         call: ToolCall::Unknown {
             name: "Thought process".into(),
             input: None,
@@ -1084,6 +1087,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
+        acc.extend_from_slice(t.part_id.as_bytes());
+        acc.push(0);
         let (label, detail) = tool_chip_content(&t.call);
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
@@ -1329,6 +1334,7 @@ pub fn rows_for_entry(
                 ..
             } => {
                 let item = ToolItem {
+                    part_id: part.id().to_owned(),
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
@@ -1373,7 +1379,7 @@ pub fn rows_for_entry(
                 // streaming, hanging inline markers mended for display, the
                 // settled cache once complete.
                 let tree = parse(&format!("{}#{}", entry.id, part_id), text);
-                let item = thought_item(&tree, live);
+                let item = thought_item(part_id, &tree, live);
                 // Thoughts join ordinary tool groups; agent (spawn-link)
                 // groups stay pure, exactly like the tool genus rule.
                 if pending_group.first().is_some_and(is_agent_tool) {
@@ -4130,7 +4136,7 @@ impl Transcript {
                 .as_ref()
                 .is_none_or(|previous| !Arc::ptr_eq(previous, baseline))
         });
-        let mut historical_tool_counts = HashMap::new();
+        let mut historical_tools: HashMap<SharedString, HashSet<String>> = HashMap::new();
         if baseline_changed {
             let baseline = baseline.as_ref().unwrap();
             let state = self.state.read(cx);
@@ -4138,7 +4144,7 @@ impl Transcript {
                 Some(id) => state.sub_transcript(id),
                 None => &state.transcript,
             };
-            self.historical_markdown.clear();
+            let previous_markdown = std::mem::take(&mut self.historical_markdown);
             let mut fully_historical = HashSet::new();
             let mut historical_rows = Vec::new();
             for entry in entries {
@@ -4165,10 +4171,18 @@ impl Transcript {
             for row in historical_rows {
                 match &row.kind {
                     RowKind::ToolGroup { tools, .. } => {
-                        historical_tool_counts.insert(row.id.clone(), tools.len());
+                        historical_tools
+                            .entry(row.entry_id.clone())
+                            .or_default()
+                            .extend(tools.iter().map(|tool| tool.part_id.clone()));
                     }
                     RowKind::LiveMarkdown { .. } => {
-                        self.veils.remove(&row.id);
+                        if previous_markdown
+                            .get(&row.id)
+                            .is_none_or(|old| old.version != row.version)
+                        {
+                            self.veils.remove(&row.id);
+                        }
                         self.historical_markdown.insert(row.id.clone(), row);
                     }
                     _ => {}
@@ -4191,11 +4205,26 @@ impl Transcript {
                 fold.disclosure_at = None;
             }
         }
-        let previous_tool_counts: HashMap<SharedString, usize> = self
+        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self
             .rows
             .iter()
             .filter_map(|row| match &row.kind {
-                RowKind::ToolGroup { tools, .. } => Some((row.id.clone(), tools.len())),
+                RowKind::ToolGroup { tools, .. } => {
+                    let reveal = self.tool_group_reveals.get(&row.id);
+                    Some((
+                        row.id.clone(),
+                        tools
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, tool)| {
+                                (
+                                    tool.part_id.clone(),
+                                    reveal.and_then(|r| r.starts.get(ix).copied().flatten()),
+                                )
+                            })
+                            .collect(),
+                    ))
+                }
                 _ => None,
             })
             .collect();
@@ -4210,20 +4239,14 @@ impl Transcript {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
-            let historical_count = historical_tool_counts.get(&row.id).copied().unwrap_or(0);
-            let old_count = if replay_baseline && baseline.is_none() {
-                tools.len()
-            } else {
-                previous_tool_counts
-                    .get(&row.id)
-                    .copied()
-                    .unwrap_or(0)
-                    .max(historical_count)
-            }
-            .min(tools.len());
-            let is_new_group = !(replay_baseline && baseline.is_none())
-                && historical_count == 0
-                && !previous_tool_counts.contains_key(&row.id);
+            let historical = historical_tools.get(&row.entry_id);
+            let is_historical = |tool: &ToolItem| {
+                (replay_baseline && baseline.is_none())
+                    || historical.is_some_and(|ids| ids.contains(&tool.part_id))
+            };
+            let historical_count = tools.iter().filter(|tool| is_historical(tool)).count();
+            let previous = previous_tools.get(&row.id);
+            let is_new_group = historical_count == 0 && previous.is_none();
             let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
             if baseline_changed && historical_count > 0 {
                 reveal.rendered_open = None;
@@ -4236,20 +4259,26 @@ impl Transcript {
             if is_new_group {
                 reveal.header_started_at.get_or_insert(now);
             }
-            reveal.starts.truncate(tools.len());
-            reveal.starts.resize(tools.len(), None);
-            if baseline_changed && historical_count > 0 {
+            if baseline_changed && historical_count == tools.len() {
                 reveal.header_started_at = None;
-                reveal.starts[..historical_count.min(tools.len())].fill(None);
             }
             let first_row_delay = is_new_group.then_some(TOOL_FIRST_ROW_DELAY_MS).unwrap_or(0);
-            for (arrival_ix, tool_ix) in (old_count..tools.len()).enumerate() {
-                reveal.starts[tool_ix] = Some(
-                    now + Duration::from_millis(
-                        first_row_delay + arrival_ix as u64 * TOOL_ROW_STAGGER_MS,
-                    ),
-                );
-            }
+            let mut arrival_ix = 0;
+            reveal.starts = tools
+                .iter()
+                .map(|tool| {
+                    if is_historical(tool) {
+                        return None;
+                    }
+                    if let Some(start) = previous.and_then(|tools| tools.get(&tool.part_id)) {
+                        return *start;
+                    }
+                    let start = now
+                        + Duration::from_millis(first_row_delay + arrival_ix * TOOL_ROW_STAGGER_MS);
+                    arrival_ix += 1;
+                    Some(start)
+                })
+                .collect();
         }
         self.tool_group_reveals
             .retain(|row_id, _| live_tool_groups.contains(row_id));
@@ -8266,6 +8295,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn tool_group_interleaved_history_preserves_live_animation_epochs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let apply = |entries: &[SessionMessageEntry], baseline, cx: &mut gpui::App| {
+                state.update(cx, |state, cx| {
+                    let frame = zeron_doc::diff_transcript(&state.transcript, entries);
+                    state
+                        .receive_transcript_update(
+                            zeron_doc::TranscriptUpdate {
+                                frame,
+                                replay_baseline: baseline,
+                                context_usage: None,
+                            },
+                            cx,
+                        )
+                        .unwrap();
+                });
+                transcript.update(cx, |this, cx| this.sync(cx));
+            };
+            // Two live tools are already animating when older work arrives
+            // before and between them in the same group.
+            let mut entries = vec![assistant(
+                "mixed",
+                MessageStatus::Streaming,
+                vec![tool_part("live-a", "pwd"), tool_part("live-b", "pwd")],
+            )];
+            apply(&entries, None, cx);
+            let row: SharedString = "mixed#g0".into();
+            let starts = transcript.read(cx).tool_group_reveals[&row].starts.clone();
+            assert!(starts.iter().all(Option::is_some));
+            let header = transcript.read(cx).tool_group_reveals[&row].header_started_at;
+            entries[0].parts.insert(0, tool_part("old-a", "pwd"));
+            entries[0].parts.insert(2, tool_part("old-b", "pwd"));
+            let mut historical = entries.clone();
+            historical[0].parts.retain(|p| p.id().starts_with("old"));
+            apply(
+                &entries,
+                Some(zeron_doc::TranscriptBaseline::capture(&historical)),
+                cx,
+            );
+            let reveal = &transcript.read(cx).tool_group_reveals[&row];
+            assert_eq!(reveal.starts, vec![None, starts[0], None, starts[1]]);
+            assert_eq!(reveal.header_started_at, header);
+            // A further mixed frame must animate only its new live activity.
+            entries[0].parts.push(tool_part("old-c", "pwd"));
+            historical[0].parts.push(tool_part("old-c", "pwd"));
+            entries[0].parts.push(tool_part("live-c", "pwd"));
+            apply(
+                &entries,
+                Some(zeron_doc::TranscriptBaseline::capture(&historical)),
+                cx,
+            );
+            let reveal = &transcript.read(cx).tool_group_reveals[&row];
+            assert_eq!(reveal.starts[..5], [None, starts[0], None, starts[1], None]);
+            assert!(reveal.starts[5].is_some());
+        });
+    }
+
+    #[gpui::test]
     fn tool_group_first_live_arrival_after_empty_replay_animates(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             state.update(cx, |state, cx| {
@@ -9971,6 +10060,39 @@ mod tests {
                     });
                 })
                 .unwrap();
+                let veil = transcript.read(cx).veils[&SharedString::from("reply#body.0")].clone();
+                // A second history batch in another entry must not restart
+                // the fade of this already visible live suffix.
+                let recovered = assistant(
+                    "other",
+                    MessageStatus::Complete,
+                    vec![text_part("body", "otra respuesta histórica")],
+                );
+                let mut next = live.clone();
+                next.push(recovered.clone());
+                let mut next_history = history.clone();
+                next_history.push(recovered);
+                transcript.update(cx, |this, cx| {
+                    this.state.update(cx, |state, cx| {
+                        state
+                            .receive_transcript_update(
+                                zeron_doc::TranscriptUpdate {
+                                    frame: zeron_doc::diff_transcript(&live, &next),
+                                    context_usage: None,
+                                    replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                        &next_history,
+                                    )),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                    });
+                    this.sync(cx);
+                    assert!(Rc::ptr_eq(
+                        &veil,
+                        &this.veils[&SharedString::from("reply#body.0")]
+                    ));
+                });
             });
         }
 
@@ -11541,6 +11663,7 @@ mod tests {
     #[test]
     fn tool_group_summaries() {
         let exec = |c: &str| ToolItem {
+            part_id: "fixture".into(),
             call: ToolCall::Exec { command: c.into() },
             is_error: false,
             resolved: true,
@@ -11555,6 +11678,7 @@ mod tests {
             is_thought: false,
         };
         let edit = |p: &str| ToolItem {
+            part_id: "fixture".into(),
             call: ToolCall::EditFile {
                 path: p.into(),
                 old_string: None,
@@ -11593,6 +11717,7 @@ mod tests {
         // Reads / searches / misc.
         let tools = vec![
             ToolItem {
+                part_id: "fixture".into(),
                 call: ToolCall::ReadFile { path: "x".into() },
                 is_error: false,
                 resolved: true,
@@ -11607,6 +11732,7 @@ mod tests {
                 is_thought: false,
             },
             ToolItem {
+                part_id: "fixture".into(),
                 call: ToolCall::Glob {
                     pattern: "*.rs".into(),
                 },
@@ -11623,6 +11749,7 @@ mod tests {
                 is_thought: false,
             },
             ToolItem {
+                part_id: "fixture".into(),
                 call: ToolCall::WebSearch { query: "q".into() },
                 is_error: false,
                 resolved: true,

@@ -58,11 +58,16 @@ impl EngineChatSink {
         self
     }
 
-    fn import_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+    fn import_row(&self, bytes: &[u8], cursor: u64, replay: bool) -> RowImportOutcome {
         let Some(doc) = self.doc.upgrade() else {
             return RowImportOutcome::Applied;
         };
-        match doc.doc().import(bytes) {
+        let origin = if replay {
+            crate::transcript_history::REPLAY_ORIGIN
+        } else {
+            ""
+        };
+        match doc.doc().import_with(bytes, origin) {
             Ok(status) => {
                 if status.pending.is_some() {
                     // Room sequence contiguity does not prove causal history
@@ -150,14 +155,14 @@ impl ChatDocSink for EngineChatSink {
 
     fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
         match self.handle.upgrade() {
-            Some(handle) => handle.import_transcript(false, || self.import_row(bytes, cursor)),
-            None => self.import_row(bytes, cursor),
+            Some(handle) => handle.import_transcript(|| self.import_row(bytes, cursor, false)),
+            None => self.import_row(bytes, cursor, false),
         }
     }
 
     fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
         match self.handle.upgrade() {
-            Some(handle) => handle.import_transcript(true, || self.import_row(bytes, cursor)),
+            Some(handle) => handle.import_transcript(|| self.import_row(bytes, cursor, true)),
             None => self.apply_row(bytes, cursor),
         }
     }
@@ -167,7 +172,7 @@ impl ChatDocSink for EngineChatSink {
             let doc = self.doc.upgrade().ok_or("doc evicted")?;
             let status = doc
                 .doc()
-                .import(bytes)
+                .import_with(bytes, crate::transcript_history::REPLAY_ORIGIN)
                 .map_err(|e| format!("checkpoint import: {e}"))?;
             if status.pending.is_some() {
                 return Err("checkpoint is missing causal dependencies".into());
@@ -176,7 +181,7 @@ impl ChatDocSink for EngineChatSink {
             Ok(())
         };
         match self.handle.upgrade() {
-            Some(handle) => handle.import_transcript(true, import),
+            Some(handle) => handle.import_transcript(import),
             None => import(),
         }
     }
