@@ -73,6 +73,7 @@ actions!(
         ToggleChanges,
         AddSpacePalette,
         ToggleCommandPalette,
+        OpenModelPicker,
         NewSession,
         OpenSettings,
         NextSession,
@@ -375,6 +376,11 @@ pub fn apply_keymap(
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        KeyBinding::new(
+            &valid_or_default(&keymap.open_model_picker, "mod-/"),
+            OpenModelPicker,
+            None,
+        ),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
@@ -706,6 +712,27 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
 const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
+
+/// Keep the fade short so only the last few glyphs recede. Tracking clipped
+/// content lets the shared paint-time overflow gate leave fitting labels intact.
+fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) -> impl IntoElement {
+    let overflow = gpui::ScrollHandle::new();
+    crate::edge_fade::edge_faded(
+        20.0,
+        false,
+        false,
+        div()
+            .id(id)
+            .when(fill, |el| el.flex_1())
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .child(div().flex_none().whitespace_nowrap().child(label)),
+    )
+    .fade_right(true)
+    .fade_label_overflow(&overflow)
+}
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -3645,6 +3672,7 @@ impl Shell {
     /// keeps this block on a single source.
     fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
+        self.settings.window_geometry = current.window_geometry;
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
@@ -6030,16 +6058,15 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(Theme::SPACE_SM))
-                    .child(
+                    .child(sidebar_faded_label(
+                        format!("chat-device-{id}").into(),
+                        true,
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
                             .line_height(px(14.0))
                             .text_color(subline)
                             .child(popover::search_highlight(space_name, search_query, theme)),
-                    )
+                    ))
                     .child(div().text_color(subline).child(corner)),
             )
             // Line 2: harness identity belongs directly with the title,
@@ -6062,15 +6089,14 @@ impl Shell {
                             )
                         },
                     )
-                    .child(
+                    .child(sidebar_faded_label(
+                        format!("chat-title-{id}").into(),
+                        true,
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
-                    ),
+                    )),
             )
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
@@ -6089,15 +6115,15 @@ impl Shell {
                                     .flex_none()
                                     .text_color(subline),
                             )
-                            .child(
+                            .child(sidebar_faded_label(
+                                format!("chat-branch-{id}").into(),
+                                false,
                                 div()
-                                    .min_w_0()
-                                    .truncate()
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .line_height(px(14.0))
                                     .text_color(subline)
                                     .child(popover::search_highlight(branch, search_query, theme)),
-                            )
+                            ))
                         })
                         // Stable invisible spring keeps the optional PR badge
                         // pinned right without changing no-PR paint.
@@ -10052,6 +10078,7 @@ impl Render for Shell {
                 window,
                 |this: &mut Shell, window, cx| {
                     if !window.is_window_active() {
+                        this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
                         this.composer.update(cx, |composer, cx| {
                             composer.set_queue_shortcut_revealed(false, cx)
@@ -10187,6 +10214,12 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    let pickers = this.composer.read(cx).pickers().clone();
+                    pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
@@ -11774,6 +11807,13 @@ mod exit_regressions {
             };
             let terminal_size = 15.0 + index as f32;
             let code_size = 11.0 + index as f32;
+            let geometry = Some(settings::WindowGeometry {
+                display_uuid: Some(uuid::Uuid::from_u128(7)),
+                x: 80.0 + index as f32,
+                y: 60.0,
+                width: 1100.0,
+                height: 750.0,
+            });
             window
                 .update(cx, |shell, _, cx| {
                     // Selection changes in Appearance, independently of the shell's
@@ -11782,6 +11822,7 @@ mod exit_regressions {
                     shell.schedule_save(cx);
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
                         settings.terminal_font_size = terminal_size;
@@ -11794,6 +11835,7 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
+                        assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.new_thread_background_effect, effect);
                         assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
                         assert_eq!(current.terminal_font_family, terminal_family);
@@ -11803,6 +11845,7 @@ mod exit_regressions {
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
+                    assert_eq!(loaded.window_geometry, geometry);
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
                     assert_eq!(loaded.terminal_font_family, terminal_family);

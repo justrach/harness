@@ -893,21 +893,17 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
         .text_color(theme.text)
 }
 
-/// A compact search glyph in a stable header slot. The slight optical offset
-/// balances the magnifier's upper-left lens against its lower-right handle.
+/// A compact search glyph with the same 16px slot as palette action icons.
 pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
     div()
-        .size(px(20.0))
+        .size(px(16.0))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
         .child(
-            crate::icons::icon(crate::icons::MAGNIFER)
+            crate::icons::icon(crate::icons::PALETTE_SEARCH)
                 .size(px(16.0))
-                .relative()
-                .left(px(0.5))
-                .top(px(0.5))
                 .text_color(theme.text_muted),
         )
 }
