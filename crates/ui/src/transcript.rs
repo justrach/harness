@@ -10085,6 +10085,84 @@ mod tests {
         }
 
         #[test]
+        fn replay_keeps_unpainted_opening_text_seeded_and_new_text_live() {
+            with_window(|transcript, window, cx| {
+                let history = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![text_part("body", "historial fuera de pantalla")],
+                )];
+                transcript.update(cx, |this, cx| {
+                    this.state.update(cx, |state, cx| {
+                        state.select_chat(Some("chat".into()), cx);
+                        state
+                            .receive_transcript_update(
+                                zeron_doc::TranscriptUpdate {
+                                    frame: zeron_doc::TranscriptFrame::reset(&history),
+                                    context_usage: None,
+                                    replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                        &history,
+                                    )),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                    });
+                    this.sync(cx);
+                    assert!(this.veils.is_empty(), "opening text has not been painted");
+                });
+                let recovered = assistant(
+                    "recovered",
+                    MessageStatus::Complete,
+                    vec![text_part("old", "otro bloque histórico")],
+                );
+                let mut next = history.clone();
+                next[0].parts.push(text_part("fresh", "texto en vivo"));
+                next.push(recovered.clone());
+                let mut cutoff = history.clone();
+                cutoff.push(recovered);
+                transcript.update(cx, |this, cx| {
+                    this.state.update(cx, |state, cx| {
+                        state
+                            .receive_transcript_update(
+                                zeron_doc::TranscriptUpdate {
+                                    frame: zeron_doc::diff_transcript(&history, &next),
+                                    context_usage: None,
+                                    // The RPC must retain its opening cutoff when
+                                    // publishing subsequent changed-part history.
+                                    replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                        &cutoff,
+                                    )),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                    });
+                    this.sync(cx);
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        let _ = this.render_row(0, window, cx);
+                        let _ = this.render_row(1, window, cx);
+                        let old = &this.veils[&SharedString::from("reply#body.0")];
+                        assert!(
+                            old.borrow_mut()
+                                .advance(0, "historial fuera de pantalla", Instant::now())
+                                .is_empty()
+                        );
+                        let fresh = &this.veils[&SharedString::from("reply#fresh.0")];
+                        let spans = fresh
+                            .borrow_mut()
+                            .advance(0, "texto en vivo", Instant::now());
+                        assert_eq!(spans.len(), 1);
+                        assert_eq!(spans[0].0, 0.."texto en vivo".len());
+                    });
+                })
+                .unwrap();
+            });
+        }
+
+        #[test]
         fn replay_text_prefix_is_visible_while_coalesced_live_suffix_fades() {
             with_window(|transcript, window, cx| {
                 let history = vec![assistant(
