@@ -36,7 +36,7 @@ mod subagent_devin;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -854,12 +854,9 @@ pub struct AcpHarness {
     model_discovery_timeout: Duration,
     /// Discovery result cache: the advertised commands survive across calls.
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
-    /// Model discovery cache: only a successful, non-empty probe is cached,
-    /// so a mis-authed agent retries on the next picker open.
-    models_cache: tokio::sync::OnceCell<Vec<Model>>,
-    /// Coalesce concurrent picker/title probes. Starting several OpenCode
-    /// processes at once makes cold plugin loading slower and wastes memory.
-    models_probe: tokio::sync::Mutex<()>,
+    /// Share successful catalogs only with overlapping requests. Later picker
+    /// opens must see account changes and newly available models.
+    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
     devin_models: devin_models::Catalog,
 }
 
@@ -877,8 +874,7 @@ impl AcpHarness {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
-            models_cache: tokio::sync::OnceCell::new(),
-            models_probe: tokio::sync::Mutex::new(()),
+            models_cache: tokio::sync::Mutex::new(None),
             devin_models: devin_models::Catalog::default(),
         }
     }
@@ -1668,7 +1664,7 @@ impl Harness for AcpHarness {
     }
 
     /// Devin refreshes through its native catalog command on each request.
-    /// Other ACP agents use a cached session probe, with the spec's static
+    /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
@@ -1679,26 +1675,23 @@ impl Harness for AcpHarness {
                 .refresh(&exe, self.model_discovery_timeout)
                 .await;
         }
-        if self.spec.id == HarnessId::Antigravity {
-            return match self.discover_models().await {
-                Ok(models) if !models.is_empty() => Ok(models),
-                _ => Ok((self.spec.models)()),
-            };
-        }
-        if let Some(models) = self.models_cache.get() {
-            return Ok(models.clone());
-        }
-        let _probe = self.models_probe.lock().await;
-        if let Some(models) = self.models_cache.get() {
+        let requested_at = Instant::now();
+        let mut latest = self.models_cache.lock().await;
+        if let Some((completed_at, models)) = &*latest
+            && *completed_at >= requested_at
+        {
             return Ok(models.clone());
         }
         match self.discover_models().await {
             Ok(models) if !models.is_empty() => {
-                let _ = self.models_cache.set(models.clone());
-                Ok(self.models_cache.get().cloned().unwrap_or(models))
+                *latest = Some((Instant::now(), models.clone()));
+                Ok(models)
             }
             Ok(_) => Ok((self.spec.models)()),
-            Err(_) => Ok((self.spec.models)()),
+            Err(error) => {
+                tracing::warn!(harness = %self.spec.display_name, %error, "Model discovery failed; using fallback");
+                Ok((self.spec.models)())
+            }
         }
     }
 

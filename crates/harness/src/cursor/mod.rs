@@ -35,7 +35,7 @@
 //!   parked session (parity with the previous ACP behavior).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -90,9 +90,9 @@ pub struct CursorHarness {
     executable: Option<PathBuf>,
     interrupt_grace: Duration,
     kill_grace: Duration,
-    /// Discovery cache: only a successful, non-empty catalog is cached, so a
-    /// failed probe (offline, SDK churn) retries on the next picker open.
-    models_cache: tokio::sync::OnceCell<Vec<Model>>,
+    /// Only overlapping requests share a successful catalog. Later requests
+    /// re-read credentials and discover account changes and model rollouts.
+    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
 }
 
 impl Default for CursorHarness {
@@ -101,7 +101,7 @@ impl Default for CursorHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            models_cache: tokio::sync::OnceCell::new(),
+            models_cache: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -138,6 +138,12 @@ impl CursorHarness {
                 .output()
                 .await
                 .map_err(|e| HarnessError::Protocol(format!("cursor models probe: {e}")))?;
+            if !output.status.success() {
+                return Err(HarnessError::Protocol(format!(
+                    "cursor models probe exited with {}",
+                    output.status
+                )));
+            }
             let stdout = String::from_utf8_lossy(&output.stdout);
             let items = stdout
                 .lines()
@@ -218,20 +224,26 @@ impl Harness for CursorHarness {
         true
     }
 
-    /// Live catalog via the shim's models mode (`Cursor.models.list()` —
-    /// public, no auth; verified live on 1.0.28). Falls back to a minimal
-    /// static pair when the probe fails, UNCACHED so the next picker open
-    /// retries.
+    /// Live, credential-aware SDK catalog. A failed/empty probe uses the
+    /// minimal fallback for this request only; the next request retries.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        if let Some(models) = self.models_cache.get() {
+        let requested_at = Instant::now();
+        let mut latest = self.models_cache.lock().await;
+        if let Some((completed_at, models)) = &*latest
+            && *completed_at >= requested_at
+        {
             return Ok(models.clone());
         }
         match self.discover_models().await {
             Ok(models) if !models.is_empty() => {
-                let _ = self.models_cache.set(models.clone());
+                *latest = Some((Instant::now(), models.clone()));
                 Ok(models)
             }
-            Ok(_) | Err(_) => Ok(static_models()),
+            Ok(_) => Ok(static_models()),
+            Err(error) => {
+                tracing::warn!(%error, "Cursor model discovery failed; using fallback");
+                Ok(static_models())
+            }
         }
     }
 
