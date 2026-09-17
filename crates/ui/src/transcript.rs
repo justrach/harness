@@ -85,8 +85,6 @@ const MAX_PENDING_QUEUED_TURNS: usize = 256;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
-/// Transcript column max width (zeron 46rem).
-pub const MAX_CONTENT_WIDTH: f32 = 736.0;
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
 /// Rows stack without a gap so the rail continues alongside expanded output.
@@ -2700,6 +2698,7 @@ pub struct Transcript {
     /// Family and size changes can alter prose wrapping without changing row
     /// identity, so the virtual list must explicitly discard cached heights.
     typography_generation: u32,
+    content_width: f32,
     /// Last global code-fence layout generation applied to this transcript.
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
@@ -2945,6 +2944,7 @@ impl Transcript {
             workspace_link: None,
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
+            content_width: crate::settings::transcript_width(cx),
             code_fences_generation: crate::settings::code_fences_generation(cx),
             highlights: HighlightStore::default(),
             show_jump_button: false,
@@ -5721,7 +5721,7 @@ impl Transcript {
                         div().w_full().flex().justify_end().child(
                             div()
                                 .min_w_0()
-                                .max_w(px(MAX_CONTENT_WIDTH * 0.8))
+                                .max_w(px(self.content_width * 0.8))
                                 .bg(crate::theme::user_bubble_bg())
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))
@@ -5980,12 +5980,12 @@ impl Transcript {
             .justify_center()
             .pt(px(top_gap))
             .pb(px(bottom_pad))
-            // Wide gutters (zeron `px-4 @3xl:px-12`) around the 46rem column.
+            // Keep side gutters as the configurable column shrinks to fit.
             .px(px(48.0))
             .child(
                 div()
                     .w_full()
-                    .max_w(px(MAX_CONTENT_WIDTH))
+                    .max_w(px(self.content_width))
                     .min_w_0()
                     .child(inner)
                     .children(strip)
@@ -7800,6 +7800,20 @@ impl Render for Transcript {
             }
             // Fit changes every code row from analytic to measured height (or
             // back), including virtual rows outside the current viewport.
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+            if self.own_turn.is_some() {
+                self.own_turn_kick = true;
+            }
+        }
+        let content_width = crate::settings::transcript_width(cx);
+        if self.content_width != content_width {
+            self.content_width = content_width;
+            // The outer list viewport may not resize when only max-width
+            // changes. Invalidate virtual row heights explicitly, retaining
+            // their anchors and all live animation/provenance state.
             self.list.remeasure();
             if self.pinned {
                 self.wake_spring();
@@ -9994,6 +10008,80 @@ mod tests {
                 let _ = window.draw(cx);
             })
             .unwrap();
+        }
+
+        #[test]
+        fn conversation_width_reflows_streaming_text_without_restarting_animations() {
+            with_window(|transcript, window, cx| {
+                let dir = tempfile::tempdir().unwrap();
+                crate::settings::init(Default::default(), dir.path(), cx);
+                let text = "Streaming content should wrap at the configured conversation width. "
+                    .repeat(80);
+                let mut entries = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![text_part("body", &text)],
+                )];
+                transcript.update(cx, |this, cx| {
+                    feed(this, entries.clone(), cx);
+                    this.rail_enabled = false;
+                    this.pinned = false;
+                    this.list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.0),
+                    });
+                });
+                draw(window, cx);
+                let original_veil =
+                    transcript.read(cx).veils[&SharedString::from("reply#body.0")].clone();
+                crate::settings::set_transcript_width(560.0, cx);
+                draw(window, cx);
+                let narrow = transcript
+                    .read(cx)
+                    .list
+                    .bounds_for_item(0)
+                    .unwrap()
+                    .size
+                    .height;
+                crate::settings::set_transcript_width(1200.0, cx);
+                draw(window, cx);
+                let this = transcript.read(cx);
+                let wide = this.list.bounds_for_item(0).unwrap().size.height;
+                assert!(
+                    wide < narrow,
+                    "width change must remeasure wrapped rows: {wide:?} vs {narrow:?}"
+                );
+                assert!(Rc::ptr_eq(
+                    &original_veil,
+                    &this.veils[&SharedString::from("reply#body.0")]
+                ));
+                assert!(!this.pinned);
+                assert_eq!(this.list.logical_scroll_top().item_ix, 0);
+                assert!(this.list.logical_scroll_top().offset_in_item.abs() <= px(1.0));
+                let bounds = render::selection_test_bounds("reply#body.0:0");
+                assert!(
+                    bounds.size.width <= px(904.0),
+                    "content must fit a 1000px viewport with 48px gutters"
+                );
+                entries[0].parts.push(tool_part("live-tool", "pwd"));
+                transcript.update(cx, |this, cx| {
+                    feed(this, entries, cx);
+                    assert!(
+                        this.tool_group_reveals[&SharedString::from("reply#g0")].starts[0]
+                            .is_some()
+                    );
+                    this.pinned = true;
+                    this.list.scroll_to(ListOffset {
+                        item_ix: this.list.item_count(),
+                        offset_in_item: px(0.0),
+                    });
+                });
+                crate::settings::set_transcript_width(560.0, cx);
+                for _ in 0..80 {
+                    tick(&transcript, window, cx);
+                }
+                assert!(transcript.read(cx).distance_from_bottom() <= 1.0);
+            });
         }
 
         #[test]
