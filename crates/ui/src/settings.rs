@@ -202,6 +202,36 @@ impl Default for GitHistoryColumnWidths {
     }
 }
 
+pub const TRANSCRIPT_WIDTH_MIN: f32 = 560.0;
+pub const TRANSCRIPT_WIDTH_MAX: f32 = 1200.0;
+pub const TRANSCRIPT_WIDTH_DEFAULT: f32 = 736.0;
+pub const TRANSCRIPT_WIDTH_STEP: f32 = 16.0;
+
+pub fn normalize_transcript_width(width: f32) -> f32 {
+    let width = clamp_or(
+        width,
+        TRANSCRIPT_WIDTH_MIN,
+        TRANSCRIPT_WIDTH_MAX,
+        TRANSCRIPT_WIDTH_DEFAULT,
+    );
+    TRANSCRIPT_WIDTH_MIN
+        + ((width - TRANSCRIPT_WIDTH_MIN) / TRANSCRIPT_WIDTH_STEP).round() * TRANSCRIPT_WIDTH_STEP
+}
+
+pub fn transcript_width(cx: &App) -> f32 {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.transcript_width)
+        .unwrap_or(TRANSCRIPT_WIDTH_DEFAULT)
+}
+
+pub fn set_transcript_width(width: f32, cx: &mut App) {
+    if update(SavePolicy::Debounced, cx, |settings| {
+        settings.transcript_width = normalize_transcript_width(width);
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 /// Whether a settings mutation should wait for the normal coalescing window or
 /// reach disk before returning to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,6 +712,8 @@ pub struct UiSettings {
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
+    /// Maximum conversation width in logical pixels; composer width is independent.
+    pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_zeron: bool,
@@ -756,6 +788,7 @@ impl Default for UiSettings {
             diff_split: false,
             diff_wrap: false,
             code_fences_fit_content: false,
+            transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
@@ -1222,6 +1255,7 @@ impl UiSettings {
 
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
+        self.transcript_width = normalize_transcript_width(self.transcript_width);
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
         if self.sidebar_organization == SidebarOrganization::ByProject {
             self.sidebar_organization = SidebarOrganization::InOneList;
@@ -1941,6 +1975,7 @@ mod tests {
             diff_split: true,
             diff_wrap: true,
             code_fences_fit_content: true,
+            transcript_width: 960.0,
             open_web_links_in_zeron: false,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
@@ -2002,6 +2037,32 @@ mod tests {
             reloaded.ui_font_family,
             crate::typography::UiFontFamily::Installed("Arial".into())
         );
+    }
+
+    #[test]
+    fn transcript_width_loads_legacy_defaults_and_normalizes_persisted_values() {
+        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.transcript_width, 736.0);
+        for (value, expected) in [
+            (100.0, 560.0),
+            (2000.0, 1200.0),
+            (745.0, 752.0),
+            (f32::NAN, 736.0),
+        ] {
+            let settings = UiSettings {
+                transcript_width: value,
+                ..Default::default()
+            }
+            .clamped();
+            assert_eq!(settings.transcript_width, expected);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = UiSettings {
+            transcript_width: 1024.0,
+            ..Default::default()
+        };
+        settings.save(dir.path()).unwrap();
+        assert_eq!(UiSettings::load(dir.path()).transcript_width, 1024.0);
     }
 
     #[test]
