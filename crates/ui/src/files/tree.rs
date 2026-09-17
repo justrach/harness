@@ -16,7 +16,34 @@ use crate::{
 };
 
 pub const TREE_ROW_HEIGHT: f32 = 27.0;
-const TREE_INDENT: f32 = 14.0;
+pub(super) const TREE_INDENT: f32 = 14.0;
+
+/// Draw each ancestor's guide in the row itself so virtualized rows join
+/// seamlessly, including when the parent has scrolled out of view.
+pub(super) fn with_indent_guides(
+    row: AnyElement,
+    depth: usize,
+    height: f32,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .relative()
+        .h(px(height))
+        .w_full()
+        .flex_none()
+        .children((0..depth).map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                // Align with the center of the ancestor's 14px disclosure slot.
+                .left(px(8.0 + 7.0 + level as f32 * TREE_INDENT))
+                .w(px(1.0))
+                .bg(theme.border)
+        }))
+        .child(row)
+        .into_any_element()
+}
 
 /// Keep the viewport attached to a path rather than an index when rows move.
 pub(super) fn sync_list_rows(
@@ -188,7 +215,7 @@ impl FilesSurface {
         };
         let theme = Theme::of(cx).clone();
         let padding = 8.0 + row.depth as f32 * TREE_INDENT;
-        match row.kind {
+        let content = match row.kind {
             VisibleRowKind::Entry => {
                 let Some(node) = self.tree.node(&row.path).cloned() else {
                     return gpui::Empty.into_any_element();
@@ -347,7 +374,8 @@ impl FilesSurface {
                         .child("Load more…"),
                 )
                 .into_any_element(),
-        }
+        };
+        with_indent_guides(content, row.depth, TREE_ROW_HEIGHT, &theme)
     }
 
     pub(super) fn activate_tree_path(&mut self, path: String, cx: &mut Context<Self>) {

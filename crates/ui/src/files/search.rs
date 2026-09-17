@@ -22,7 +22,6 @@ use crate::{
 };
 
 pub const SEARCH_ROW_HEIGHT: f32 = 27.0;
-const SEARCH_TREE_INDENT: f32 = 14.0;
 const SEARCH_RESULT_LIMIT: usize = 200;
 
 #[derive(Debug, Clone)]
@@ -609,9 +608,9 @@ impl FilesSurface {
         let selected = self.search_state.active == index;
         let expanded = row.has_children && self.search_state.tree.is_expanded(&row.path);
         let is_directory = row.kind == WorkspaceEntryKind::Directory;
-        let padding = 8.0 + row.depth as f32 * SEARCH_TREE_INDENT;
+        let padding = 8.0 + row.depth as f32 * super::tree::TREE_INDENT;
         let drag_payload = WorkspacePathDrag::new(row.path.clone(), is_directory);
-        div()
+        let content = div()
             .id(("files-search-result", index))
             .role(gpui::Role::TreeItem)
             .aria_label(row.name.clone())
@@ -684,7 +683,8 @@ impl FilesSurface {
                     })
                     .child(row.name),
             )
-            .into_any_element()
+            .into_any_element();
+        super::tree::with_indent_guides(content, row.depth, SEARCH_ROW_HEIGHT, &theme)
     }
 }
 
