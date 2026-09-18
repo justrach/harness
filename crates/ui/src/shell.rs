@@ -5875,7 +5875,7 @@ impl Shell {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
-            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, cx));
+            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
