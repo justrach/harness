@@ -231,6 +231,162 @@ mod pinned_session_tests {
         state.sidebar_preferences.initialized = initialized;
     }
 
+    fn pin_test_chat(id: &str) -> zeron_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "local", "archived": false,
+            "createdAt": chrono::Utc::now(),
+        }))
+        .unwrap()
+    }
+
+    #[gpui::test]
+    fn sidebar_menu_and_drop_both_reject_unknown_remote_preferences(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, false, false);
+                    state.chats = vec![pin_test_chat("normal")];
+                });
+                shell.settings.space_filter = None;
+                shell.set_chat_pinned("normal".into(), true, cx);
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Pins are still syncing")
+                );
+                let payload = SidebarSessionDrag {
+                    chat_id: "normal".into(),
+                    visible_ids: std::sync::Arc::new(vec![]),
+                    filter: None,
+                    profile_key: shell.active_sidebar_pin_profile_key(cx).unwrap(),
+                };
+                shell.begin_sidebar_session_transfer(
+                    &payload,
+                    gpui::point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                shell.finish_sidebar_session_transfer(&payload, SidebarSessionDrop::Pinned(0), cx);
+                assert!(shell.active_sidebar_pins(cx).is_empty());
+                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Pins are still syncing")
+                );
+                assert!(
+                    shell.sidebar_session_return.is_some(),
+                    "rejected drop returns to its origin"
+                );
+                assert!(shell.mutate_task.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_full_capacity_drop_returns_without_mutating_local_or_remote_pins(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                let saved: Vec<String> = (0..zeron_proto::MAX_SIDEBAR_PINS)
+                    .map(|n| format!("hidden-{n}"))
+                    .collect();
+                for remote in [false, true] {
+                    shell.state.update(cx, |state, _| {
+                        if remote {
+                            remote_pin_state(state, true, true);
+                            state.sidebar_preferences.pinned_session_ids = saved.clone();
+                        } else {
+                            state.workspace_scope = Some(WorkspaceScope::Local);
+                        }
+                        state.chats = vec![pin_test_chat("normal")];
+                    });
+                    let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                    if !remote {
+                        shell
+                            .settings
+                            .sidebar_pinned_session_ids_by_profile
+                            .insert(key.clone(), saved.clone());
+                    }
+                    shell.settings.space_filter = None;
+                    let payload = SidebarSessionDrag {
+                        chat_id: "normal".into(),
+                        visible_ids: std::sync::Arc::new(vec![]),
+                        filter: None,
+                        profile_key: key,
+                    };
+                    shell.begin_sidebar_session_transfer(
+                        &payload,
+                        gpui::point(px(0.0), px(0.0)),
+                        window,
+                        cx,
+                    );
+                    shell.finish_sidebar_session_transfer(
+                        &payload,
+                        SidebarSessionDrop::Pinned(0),
+                        cx,
+                    );
+                    assert_eq!(shell.active_sidebar_pins(cx), saved);
+                    assert_eq!(
+                        shell.sidebar_notice.as_deref(),
+                        Some("You can pin up to 200 sessions")
+                    );
+                    assert!(shell.sidebar_session_return.is_some());
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_validation_preserves_offline_edits_and_rejects_stale_profiles(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .state
+                    .update(cx, |state, _| remote_pin_state(state, false, true));
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                assert!(shell.validate_sidebar_pin_change(&key, &ids(&["cached"]), cx));
+                assert!(!shell.validate_sidebar_pin_change(
+                    "another-profile",
+                    &ids(&["cached"]),
+                    cx
+                ));
+                assert!(!shell.validate_sidebar_pin_change(
+                    &key,
+                    &ids(&["duplicate", "duplicate"]),
+                    cx
+                ));
+                assert!(!shell.validate_sidebar_pin_change(&key, &ids(&[""]), cx));
+                let saved: Vec<_> = (0..zeron_proto::MAX_SIDEBAR_PINS)
+                    .map(|n| format!("pin-{n}"))
+                    .collect();
+                let reordered = super::sidebar_session_drop_pins(
+                    &saved,
+                    &saved,
+                    &saved[0],
+                    super::SidebarSessionDrop::Pinned(199),
+                );
+                assert!(shell.validate_sidebar_pin_change(&key, &reordered, cx));
+                let unpinned = super::sidebar_session_drop_pins(
+                    &saved,
+                    &saved,
+                    &saved[0],
+                    super::SidebarSessionDrop::Regular,
+                );
+                assert!(shell.validate_sidebar_pin_change(&key, &unpinned, cx));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn sidebar_preferences_arriving_before_chats_never_prune_live_pins(
         cx: &mut gpui::TestAppContext,
@@ -1827,7 +1983,9 @@ impl Shell {
         let saved = self.sidebar_pins_for_profile(&payload.profile_key, cx);
         let next =
             sidebar_session_drop_pins(&saved, &payload.visible_ids, &payload.chat_id, target);
-        if saved == next {
+        // Validate and accept before ending the preview. Rejected drops use
+        // the same animated return path as dropping outside a destination.
+        if !self.replace_sidebar_pins(payload.profile_key.clone(), next, cx) {
             self.cancel_sidebar_session_transfer(cx);
             return;
         }
@@ -1837,7 +1995,6 @@ impl Shell {
             self.pinned_open = true;
         }
         // Only pin preferences change. Regular rows keep their live activity sort.
-        self.replace_sidebar_pins(payload.profile_key.clone(), next, cx);
         // Drag previews already animated this move. Establish a fresh layout
         // baseline so the automatic resort glide does not replay it on release.
         self.sidebar_prev_order.clear();

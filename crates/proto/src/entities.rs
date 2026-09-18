@@ -12,6 +12,21 @@ use crate::{HarnessId, ReasoningLevel, SandboxLevel};
 /// pin membership and order, so a cross-device write converges atomically.
 pub const MAX_SIDEBAR_PINS: usize = 200;
 
+/// Shared by interaction paths and the registry; validate before optimistic UI.
+pub fn validate_sidebar_pins(ids: &[String]) -> Result<(), &'static str> {
+    if ids.len() > MAX_SIDEBAR_PINS {
+        return Err("You can pin up to 200 sessions");
+    }
+    let mut seen = std::collections::HashSet::new();
+    if ids
+        .iter()
+        .any(|id| id.is_empty() || !seen.insert(id.as_str()))
+    {
+        return Err("Sidebar pins must be non-empty and unique");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarPreferences {
@@ -29,6 +44,13 @@ pub struct SidebarPreferencesState {
     pub initialized: bool,
     #[serde(default)]
     pub pinned_session_ids: Vec<String>,
+}
+
+impl SidebarPreferencesState {
+    /// A cached initialized row remains editable offline. An unknown list does not.
+    pub fn can_edit(&self) -> bool {
+        self.synced || self.initialized
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

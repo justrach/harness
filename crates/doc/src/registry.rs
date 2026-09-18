@@ -1230,20 +1230,8 @@ impl RegistryDoc {
         &mut self,
         pinned_session_ids: &[String],
     ) -> Result<(), DocError> {
-        if pinned_session_ids.len() > MAX_SIDEBAR_PINS {
-            return Err(DocError::Schema(format!(
-                "sidebar pins exceed the {MAX_SIDEBAR_PINS}-item limit"
-            )));
-        }
-        let mut seen = std::collections::HashSet::new();
-        if pinned_session_ids
-            .iter()
-            .any(|id| id.is_empty() || !seen.insert(id.as_str()))
-        {
-            return Err(DocError::Schema(
-                "sidebar pins must be non-empty and unique".into(),
-            ));
-        }
+        zeron_proto::validate_sidebar_pins(pinned_session_ids)
+            .map_err(|message| DocError::Schema(message.into()))?;
         self.write(
             KIND_PREFERENCES,
             SIDEBAR_PREFERENCES_ID,

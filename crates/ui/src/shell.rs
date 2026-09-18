@@ -4275,12 +4275,44 @@ impl Shell {
         self.active_sidebar_pins(cx)
     }
 
+    fn validate_sidebar_pin_change(
+        &mut self,
+        profile_key: &str,
+        pins: &[String],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active_sidebar_pin_profile_key(cx).as_deref() != Some(profile_key) {
+            return false;
+        }
+        let state = self.state.read(cx);
+        let remote = matches!(
+            state.workspace_scope,
+            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
+        );
+        let result = if remote && !state.sidebar_preferences.can_edit() {
+            Err("Pins are still syncing")
+        } else {
+            zeron_proto::validate_sidebar_pins(pins)
+        };
+        if let Err(message) = result {
+            self.sidebar_notice = Some(message.into());
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
     fn replace_sidebar_pins(
         &mut self,
         profile_key: String,
         pinned_session_ids: Vec<String>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if !self.validate_sidebar_pin_change(&profile_key, &pinned_session_ids, cx)
+            || self.active_sidebar_pins(cx) == pinned_session_ids
+        {
+            return false;
+        }
         match self.state.read(cx).workspace_scope {
             Some(WorkspaceScope::Local) => {
                 if pinned_session_ids.is_empty() {
@@ -4308,8 +4340,9 @@ impl Shell {
                     cx,
                 );
             }
-            None => {}
+            None => return false,
         }
+        true
     }
 
     fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
@@ -4327,24 +4360,9 @@ impl Shell {
         {
             return;
         }
-        let remote = matches!(
-            self.state.read(cx).workspace_scope,
-            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
-        );
-        if remote
-            && !self.state.read(cx).sidebar_preferences.synced
-            && !self.state.read(cx).sidebar_preferences.initialized
-        {
-            self.sidebar_notice = Some("Pins are still syncing".into());
-            cx.notify();
-            return;
-        }
         let mut pinned_ids = self.active_sidebar_pins(cx);
         let changed = if pinned {
             if pinned_ids.iter().any(|id| id == &chat_id) {
-                false
-            } else if pinned_ids.len() >= zeron_proto::MAX_SIDEBAR_PINS {
-                self.sidebar_notice = Some("You can pin up to 200 sessions".into());
                 false
             } else {
                 pinned_ids.push(chat_id);

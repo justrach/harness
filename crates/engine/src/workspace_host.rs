@@ -651,7 +651,13 @@ impl WorkspaceHost {
         &self,
         pinned_session_ids: &[String],
     ) -> Result<(), EngineError> {
-        Ok(self.mutate(|doc| doc.set_sidebar_pinned_sessions(pinned_session_ids))?)
+        let synced = self.sync_status().is_some_and(|status| status.synced);
+        self.mutate(|doc| {
+            if self.edge_expected() && !synced && doc.sidebar_preferences().is_none() {
+                return Err(EngineError::Other("Pins are still syncing".into()));
+            }
+            Ok(doc.set_sidebar_pinned_sessions(pinned_session_ids)?)
+        })
     }
 
     /// Import legacy desktop pins without replacing an existing remote row.
