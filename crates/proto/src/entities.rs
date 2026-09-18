@@ -8,21 +8,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HarnessId, ReasoningLevel, SandboxLevel};
 
-/// A deliberately bounded sidebar preference: one ordered list is the full
-/// pin membership and order, so a cross-device write converges atomically.
+/// Admission limit for new pins. Concurrent offline additions may exceed it;
+/// existing pins remain visible, reorderable and removable without truncation.
 pub const MAX_SIDEBAR_PINS: usize = 200;
 
-/// Shared by interaction paths and the registry; validate before optimistic UI.
-pub fn validate_sidebar_pins(ids: &[String]) -> Result<(), &'static str> {
-    if ids.len() > MAX_SIDEBAR_PINS {
-        return Err("You can pin up to 200 sessions");
-    }
+/// Validate an optimistic projection without truncating concurrent overflow.
+pub fn validate_sidebar_pin_update(
+    current: &[String],
+    next: &[String],
+) -> Result<(), &'static str> {
     let mut seen = std::collections::HashSet::new();
-    if ids
-        .iter()
-        .any(|id| id.is_empty() || !seen.insert(id.as_str()))
-    {
+    if next.iter().any(|id| id.is_empty() || !seen.insert(id)) {
         return Err("Sidebar pins must be non-empty and unique");
+    }
+    if next.len() > MAX_SIDEBAR_PINS && next.iter().any(|id| !current.contains(id)) {
+        return Err("You can pin up to 200 sessions");
     }
     Ok(())
 }
@@ -34,9 +34,8 @@ pub struct SidebarPreferences {
     pub pinned_session_ids: Vec<String>,
 }
 
-/// Watch payload for sidebar preferences. `initialized` distinguishes a
-/// missing row (eligible for one-time local migration) from an explicit empty
-/// list, while `synced` prevents migration before authoritative state lands.
+/// Watch payload for pins. `initialized` records known cached state, including
+/// an empty list; `synced` records receipt of an authoritative registry state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarPreferencesState {

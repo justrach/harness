@@ -1563,9 +1563,7 @@ pub struct Shell {
     pinned_session_drag_generation: u64,
     sidebar_session_transfer: Option<SidebarSessionTransfer>,
     sidebar_session_return: Option<SidebarSessionReturn>,
-    /// One migration attempt per engine attachment; failed sources stay on disk
-    /// and can be retried on the next attachment without an observer retry loop.
-    sidebar_pin_migration: Option<(String, crate::state::EngineHandle)>,
+    /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
     sidebar_pin_write_generation: u64,
     sidebar_pin_write_notice: Option<SharedString>,
@@ -1927,7 +1925,6 @@ impl Shell {
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
             sidebar_session_return: None,
-            sidebar_pin_migration: None,
             sidebar_pin_write: None,
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -4185,51 +4182,7 @@ impl Shell {
             }
             return;
         }
-        // Never compare independent UI streams to infer remote deletions.
-        // Migration filters against the authoritative registry in the engine.
-        if !state.sidebar_preferences.synced {
-            return;
-        }
-        let Some(source) = self
-            .settings
-            .sidebar_pinned_session_ids_by_profile
-            .get(&profile_key)
-            .cloned()
-        else {
-            return;
-        };
-        let Some(engine) = state.engine().cloned() else {
-            return;
-        };
-        if self
-            .sidebar_pin_migration
-            .as_ref()
-            .is_some_and(|(key, previous)| key == &profile_key && previous.same_connection(&engine))
-        {
-            return;
-        }
-        self.sidebar_pin_migration = Some((profile_key.clone(), engine.clone()));
-        cx.spawn(async move |this, cx| {
-            let request = engine.client().call(
-                methods::MUTATE,
-                serde_json::json!({
-                    "op": "migrateSidebarPinnedSessions", "pinnedSessionIds": source,
-                }),
-            );
-            let deadline = cx.background_executor().timer(Duration::from_secs(20));
-            let result = match futures::future::select(Box::pin(request), Box::pin(deadline)).await
-            {
-                futures::future::Either::Left((result, _)) => result
-                    .map_err(|error| error.to_string())
-                    .and_then(sidebar_pins::preferences_reply),
-                futures::future::Either::Right(_) => Err("Migration confirmation timed out".into()),
-            };
-            this.update(cx, |shell, cx| {
-                shell.finish_sidebar_pin_migration(&profile_key, &engine, &source, result, cx);
-            })
-            .ok();
-        })
-        .detach();
+        // Remote pins come exclusively from per-pin registry records.
     }
 
     fn active_sidebar_pin_profile_key(&self, cx: &App) -> Option<String> {
@@ -4243,7 +4196,7 @@ impl Shell {
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
         if let Some(pins) = self.optimistic_sidebar_pins(cx) {
-            return pins.clone();
+            return pins;
         }
         let state = self.state.read(cx);
         match state.workspace_scope {
@@ -4282,7 +4235,8 @@ impl Shell {
         let result = if remote && !state.sidebar_preferences.can_edit() {
             Err("Pins are still syncing")
         } else {
-            zeron_proto::validate_sidebar_pins(pins)
+            let current = self.active_sidebar_pins(cx);
+            zeron_proto::validate_sidebar_pin_update(&current, pins)
         };
         if let Err(message) = result {
             self.sidebar_notice = Some(message.into());
@@ -4292,12 +4246,14 @@ impl Shell {
         true
     }
 
-    fn replace_sidebar_pins(
+    fn apply_sidebar_pin_change(
         &mut self,
         profile_key: String,
-        pinned_session_ids: Vec<String>,
+        change: zeron_proto::SidebarPinChange,
         cx: &mut Context<Self>,
     ) -> bool {
+        let mut pinned_session_ids = self.active_sidebar_pins(cx);
+        change.project(&mut pinned_session_ids);
         if !self.validate_sidebar_pin_change(&profile_key, &pinned_session_ids, cx)
             || self.active_sidebar_pins(cx) == pinned_session_ids
         {
@@ -4317,7 +4273,7 @@ impl Shell {
                 self.schedule_save(cx);
             }
             Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
-                return self.queue_sidebar_pin_write(profile_key, pinned_session_ids, cx);
+                return self.queue_sidebar_pin_write(profile_key, change, cx);
             }
             None => return false,
         }
@@ -4339,22 +4295,22 @@ impl Shell {
         {
             return;
         }
-        let mut pinned_ids = self.active_sidebar_pins(cx);
-        let changed = if pinned {
-            if pinned_ids.iter().any(|id| id == &chat_id) {
-                false
-            } else {
-                pinned_ids.push(chat_id);
-                true
+        let pins = self.active_sidebar_pins(cx);
+        if pins.contains(&chat_id) == pinned {
+            return;
+        }
+        let change = if pinned {
+            zeron_proto::SidebarPinChange::Pin {
+                session_id: chat_id,
+                after: pins.last().cloned(),
+                before: None,
             }
         } else {
-            let before = pinned_ids.len();
-            pinned_ids.retain(|id| id != &chat_id);
-            pinned_ids.len() != before
+            zeron_proto::SidebarPinChange::Unpin {
+                session_id: chat_id,
+            }
         };
-        if changed {
-            self.replace_sidebar_pins(profile_key, pinned_ids, cx);
-        }
+        self.apply_sidebar_pin_change(profile_key, change, cx);
         cx.notify();
     }
 

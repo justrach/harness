@@ -276,17 +276,15 @@ final class WorkspaceStore {
 
     /// Keep archived ids (unarchive restores their position), but once an
     /// authoritative registry state has landed, remove ids whose chat row was
-    /// actually deleted. The preferences row must already exist: absence is a
-    /// valid pre-migration state, not an empty list to manufacture on iOS.
+    /// actually deleted. Cache readiness even when this first snapshot is empty.
     private func pruneDeletedPinsIfNeeded() {
-        guard synced, sidebarPreferencesInitialized else { return }
+        guard synced else { return }
         let known = Set(chats.map(\.id))
-        let retained = pinnedSessionIds.filter(known.contains)
-        guard retained != pinnedSessionIds else { return }
-        doc.write(kind: "preferences", id: "sidebar-v1", op: .upsert, set: [
-            "pinnedSessionIds": .array(retained.map(JSONValue.string)),
-        ])
-        afterLocalWrite()
+        let initialized = doc.sidebarPinsInitialized
+        doc.initializeSidebarPins()
+        let removed = pinnedSessionIds.filter { !known.contains($0) }
+        for id in removed { doc.changeSidebarPin(id: id, pinned: false) }
+        if !initialized || !removed.isEmpty { afterLocalWrite() }
     }
 
     // MARK: Presence
@@ -398,16 +396,9 @@ final class WorkspaceStore {
         }
         sessions = rows
 
-        if let preferences = doc.overlayRow(kind: "preferences", id: "sidebar-v1") {
+        if doc.sidebarPinsInitialized {
             sidebarPreferencesInitialized = true
-            if case .array(let values)? = preferences.fields["pinnedSessionIds"] {
-                var seen = Set<String>()
-                pinnedSessionIds = values.compactMap(\.stringValue).filter {
-                    !$0.isEmpty && seen.insert($0).inserted
-                }
-            } else {
-                pinnedSessionIds = []
-            }
+            pinnedSessionIds = doc.orderedSidebarPins.map(\.id)
         } else {
             sidebarPreferencesInitialized = false
             pinnedSessionIds = []
@@ -766,21 +757,13 @@ final class WorkspaceStore {
 
     func setPinned(chatId: String, pinned: Bool) {
         guard chats.contains(where: { $0.id == chatId }) else { return }
-        // A persisted preferences row is safe to edit offline. With no row,
-        // wait for one authoritative state so a fresh install cannot replace
-        // an existing remote list before learning that it exists.
+        // Known cached pins are editable offline. A fresh install waits for
+        // an authoritative snapshot before making membership/capacity decisions.
         guard synced || sidebarPreferencesInitialized else { return }
-        var next = pinnedSessionIds
-        if pinned {
-            guard !next.contains(chatId), next.count < Self.maxSidebarPins else { return }
-            next.append(chatId)
-        } else {
-            next.removeAll { $0 == chatId }
-        }
-        guard next != pinnedSessionIds else { return }
-        doc.write(kind: "preferences", id: "sidebar-v1", op: .upsert, set: [
-            "pinnedSessionIds": .array(next.map(JSONValue.string)),
-        ])
+        guard pinnedSessionIds.contains(chatId) != pinned else { return }
+        guard !pinned || pinnedSessionIds.count < Self.maxSidebarPins else { return }
+        doc.initializeSidebarPins()
+        guard doc.changeSidebarPin(id: chatId, pinned: pinned, after: pinnedSessionIds.last) else { return }
         afterLocalWrite()
     }
 

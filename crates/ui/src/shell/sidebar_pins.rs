@@ -4,13 +4,13 @@
 use super::*;
 use crate::state::EngineHandle;
 use std::collections::VecDeque;
-use zeron_proto::SidebarPreferencesState;
+use zeron_proto::{SidebarPinChange, SidebarPreferencesState};
 
 pub(super) struct PendingSidebarPins {
     pub id: u64,
     pub profile_key: String,
     pub engine: EngineHandle,
-    pub queue: VecDeque<Vec<String>>,
+    pub queue: VecDeque<SidebarPinChange>,
     pub unconfirmed: bool,
 }
 
@@ -43,11 +43,21 @@ impl Shell {
                 .is_some_and(|engine| engine.same_connection(&pending.engine))
     }
 
-    pub(super) fn optimistic_sidebar_pins(&self, cx: &App) -> Option<&Vec<String>> {
-        self.sidebar_pin_write
+    pub(super) fn optimistic_sidebar_pins(&self, cx: &App) -> Option<Vec<String>> {
+        let pending = self
+            .sidebar_pin_write
             .as_ref()
-            .filter(|pending| !pending.unconfirmed && self.pin_write_is_current(pending, cx))
-            .and_then(|pending| pending.queue.back())
+            .filter(|pending| !pending.unconfirmed && self.pin_write_is_current(pending, cx))?;
+        let mut pins = self
+            .state
+            .read(cx)
+            .sidebar_preferences
+            .pinned_session_ids
+            .clone();
+        for change in &pending.queue {
+            change.project(&mut pins);
+        }
+        Some(pins)
     }
 
     pub(super) fn discard_stale_sidebar_pin_writes(&mut self, cx: &App) {
@@ -63,7 +73,7 @@ impl Shell {
     pub(super) fn queue_sidebar_pin_write(
         &mut self,
         profile_key: String,
-        pins: Vec<String>,
+        change: SidebarPinChange,
         cx: &mut Context<Self>,
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
@@ -80,7 +90,7 @@ impl Shell {
                 cx.notify();
                 return false;
             }
-            pending.queue.push_back(pins);
+            pending.queue.push_back(change);
             cx.notify();
             return true;
         }
@@ -90,18 +100,18 @@ impl Shell {
             id,
             profile_key,
             engine: engine.clone(),
-            queue: VecDeque::from([pins.clone()]),
+            queue: VecDeque::from([change.clone()]),
             unconfirmed: false,
         });
         // Detached from generic sidebar mutations: rename/archive must not
         // cancel a pin write, and rapid drops must reach the engine in order.
         cx.spawn(async move |this, cx| {
-            let mut next = pins;
+            let mut next = change;
             loop {
                 let request = engine.client().call(
                     methods::MUTATE,
                     serde_json::json!({
-                        "op": "setSidebarPinnedSessions", "pinnedSessionIds": next,
+                        "op": "changeSidebarPin", "change": next,
                     }),
                 );
                 let deadline = cx.background_executor().timer(Duration::from_secs(20));
@@ -112,7 +122,7 @@ impl Shell {
                             .and_then(preferences_reply),
                         futures::future::Either::Right((_, request)) => {
                             // The old request may still run. Do not send a later
-                            // full-list write whose execution order is uncertain.
+                            // intent whose execution order is uncertain.
                             this.update(cx, |shell, cx| shell.mark_pin_write_unconfirmed(id, cx))
                                 .ok();
                             // Keep observing the original request. No later user
@@ -143,7 +153,7 @@ impl Shell {
         id: u64,
         result: Result<SidebarPreferencesState, String>,
         cx: &mut Context<Self>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<SidebarPinChange> {
         self.discard_stale_sidebar_pin_writes(cx);
         if self
             .sidebar_pin_write
@@ -190,48 +200,5 @@ impl Shell {
             self.set_pin_write_notice("Couldn't confirm pins. Queued edits were cancelled; waiting for the engine before allowing more pin changes.".into());
             cx.notify();
         }
-    }
-
-    pub(super) fn finish_sidebar_pin_migration(
-        &mut self,
-        profile_key: &str,
-        engine: &EngineHandle,
-        source: &[String],
-        result: Result<SidebarPreferencesState, String>,
-        cx: &mut Context<Self>,
-    ) {
-        let current = self.active_sidebar_pin_profile_key(cx).as_deref() == Some(profile_key)
-            && self
-                .state
-                .read(cx)
-                .engine()
-                .is_some_and(|active| active.same_connection(engine));
-        if let Ok(preferences) = result {
-            if current {
-                self.state.update(cx, |state, cx| {
-                    if state.apply_sidebar_preferences(preferences) {
-                        cx.notify();
-                    }
-                });
-            }
-            // Delete only the acknowledged source, even if the user switched
-            // profiles or edited another source while this request was running.
-            if self
-                .settings
-                .sidebar_pinned_session_ids_by_profile
-                .get(profile_key)
-                .map(Vec::as_slice)
-                == Some(source)
-            {
-                self.settings
-                    .sidebar_pinned_session_ids_by_profile
-                    .remove(profile_key);
-                self.schedule_save(cx);
-            }
-        } else if current {
-            self.sidebar_notice =
-                Some("Couldn't migrate pins. Local pins were kept; restart to retry.".into());
-        }
-        cx.notify();
     }
 }

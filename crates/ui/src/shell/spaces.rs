@@ -33,8 +33,8 @@ pub(super) fn project_pinned_first(recency_ids: &[String], pinned_ids: &[String]
         .collect()
 }
 
-/// Reorder the visible pinned projection while preserving hidden or archived
-/// pins in their existing global slots.
+/// Move only the dragged pin. Every other pin, including hidden/archived pins,
+/// keeps its relative order; no other position needs to be written.
 pub(super) fn reorder_visible_pins(
     pinned_ids: &[String],
     visible_ids: &[String],
@@ -45,21 +45,18 @@ pub(super) fn reorder_visible_pins(
         return pinned_ids.to_vec();
     }
 
-    let mut reordered = visible_ids.to_vec();
-    let moved = reordered.remove(from);
-    reordered.insert(to, moved);
-    let visible: HashSet<&str> = visible_ids.iter().map(String::as_str).collect();
-    let mut replacements = reordered.into_iter();
-    pinned_ids
+    let moved = &visible_ids[from];
+    let anchor = &visible_ids[to];
+    let mut result: Vec<_> = pinned_ids
         .iter()
-        .map(|id| {
-            if visible.contains(id.as_str()) {
-                replacements.next().unwrap_or_else(|| id.clone())
-            } else {
-                id.clone()
-            }
-        })
-        .collect()
+        .filter(|id| *id != moved)
+        .cloned()
+        .collect();
+    let Some(index) = result.iter().position(|id| id == anchor) else {
+        return pinned_ids.to_vec();
+    };
+    result.insert(index + usize::from(from < to), moved.clone());
+    result
 }
 
 /// Remove only ids absent from the workspace. Archived sessions remain known
@@ -171,6 +168,13 @@ pub(super) fn pinned_drag_scroll_delta(
 
 #[cfg(test)]
 mod pinned_session_tests {
+    fn pin_change(id: &str) -> zeron_proto::SidebarPinChange {
+        zeron_proto::SidebarPinChange::Pin {
+            session_id: id.into(),
+            after: None,
+            before: None,
+        }
+    }
     use super::{
         pinned_drag_scroll_delta, pinned_drag_scroll_step, pinned_drag_snapshot_is_valid,
         pinned_session_clamped_index, pinned_session_drop_index, project_pinned_first,
@@ -300,15 +304,15 @@ mod pinned_session_tests {
                     state.set_test_engine(engine);
                 });
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx);
-                shell.replace_sidebar_pins(key, ids(&["second"]), cx);
+                shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx);
+                shell.apply_sidebar_pin_change(key, pin_change("second"), cx);
             })
             .unwrap();
         cx.run_until_parked();
         let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
         assert_eq!(
-            first["params"]["pinnedSessionIds"],
-            serde_json::json!(["first"])
+            first["params"]["change"],
+            serde_json::to_value(pin_change("first")).unwrap()
         );
         assert!(requests.try_recv().is_err());
         deliver_pin_rpc_reply(
@@ -320,13 +324,13 @@ mod pinned_session_tests {
         let second: serde_json::Value =
             serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
         assert_eq!(
-            second["params"]["pinnedSessionIds"],
-            serde_json::json!(["second"])
+            second["params"]["change"],
+            serde_json::to_value(pin_change("second")).unwrap()
         );
         assert!(requests.try_recv().is_err());
         window
             .update(cx, |shell, _, cx| {
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["second"]));
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["first", "second"]));
                 assert_eq!(
                     shell.state.read(cx).sidebar_preferences.pinned_session_ids,
                     ids(&["first"])
@@ -378,8 +382,8 @@ mod pinned_session_tests {
                     state.sidebar_preferences = pin_snapshot(1, &["confirmed"]);
                 });
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.replace_sidebar_pins(key.clone(), ids(&["slow"]), cx);
-                shell.replace_sidebar_pins(key, ids(&["queued"]), cx);
+                shell.apply_sidebar_pin_change(key.clone(), pin_change("slow"), cx);
+                shell.apply_sidebar_pin_change(key, pin_change("queued"), cx);
             })
             .unwrap();
         cx.run_until_parked();
@@ -393,7 +397,7 @@ mod pinned_session_tests {
                 assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(!shell.replace_sidebar_pins(key, ids(&["overtaking"]), cx));
+                assert!(!shell.apply_sidebar_pin_change(key, pin_change("overtaking"), cx));
             })
             .unwrap();
         assert!(
@@ -415,75 +419,16 @@ mod pinned_session_tests {
                     "late success must clear the waiting notice"
                 );
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(shell.replace_sidebar_pins(key, ids(&["after-confirmation"]), cx));
+                assert!(shell.apply_sidebar_pin_change(key, pin_change("after-confirmation"), cx));
             })
             .unwrap();
         cx.run_until_parked();
         let next: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
         assert_eq!(
-            next["params"]["pinnedSessionIds"],
-            serde_json::json!(["after-confirmation"])
+            next["params"]["change"],
+            serde_json::to_value(pin_change("after-confirmation")).unwrap()
         );
         assert!(requests.try_recv().is_err());
-    }
-
-    #[gpui::test]
-    fn sidebar_migration_removes_only_the_successfully_acknowledged_source(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let _guard = runtime.enter();
-        let (engine, _requests, _replies) = pin_test_engine();
-        let dir = tempfile::tempdir().unwrap();
-        let window = pin_test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    remote_pin_state(state, true, false);
-                    state.set_test_engine(engine.clone());
-                });
-                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                let source = ids(&["legacy"]);
-                shell
-                    .settings
-                    .sidebar_pinned_session_ids_by_profile
-                    .insert(key.clone(), source.clone());
-                shell.finish_sidebar_pin_migration(
-                    &key,
-                    &engine,
-                    &source,
-                    Err("disk failure".into()),
-                    cx,
-                );
-                assert_eq!(shell.settings.sidebar_pins(&key), source);
-                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
-                shell
-                    .settings
-                    .sidebar_pinned_session_ids_by_profile
-                    .insert(key.clone(), ids(&["new-source"]));
-                shell.finish_sidebar_pin_migration(
-                    &key,
-                    &engine,
-                    &source,
-                    Ok(pin_snapshot(1, &["legacy"])),
-                    cx,
-                );
-                assert_eq!(shell.settings.sidebar_pins(&key), ids(&["new-source"]));
-                shell.finish_sidebar_pin_migration(
-                    &key,
-                    &engine,
-                    &ids(&["new-source"]),
-                    Ok(pin_snapshot(2, &["legacy"])),
-                    cx,
-                );
-                assert!(
-                    !shell
-                        .settings
-                        .sidebar_pinned_session_ids_by_profile
-                        .contains_key(&key)
-                );
-            })
-            .unwrap();
     }
 
     #[gpui::test]
@@ -503,14 +448,14 @@ mod pinned_session_tests {
                     state.sidebar_preferences = pin_snapshot(2, &["confirmed"]);
                 });
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx);
-                shell.replace_sidebar_pins(key, ids(&["second"]), cx);
+                shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx);
+                shell.apply_sidebar_pin_change(key, pin_change("second"), cx);
                 let id = shell.sidebar_pin_write.as_ref().unwrap().id;
                 shell.mark_pin_write_unconfirmed(id, cx);
                 assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(!shell.replace_sidebar_pins(key, ids(&["third"]), cx));
+                assert!(!shell.apply_sidebar_pin_change(key, pin_change("third"), cx));
                 assert_eq!(
                     shell.finish_sidebar_pin_write(id, Err("late error".into()), cx),
                     None
@@ -545,9 +490,12 @@ mod pinned_session_tests {
                     state.set_test_engine(engine);
                 });
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                assert!(shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx));
-                assert!(shell.replace_sidebar_pins(key, ids(&["second"]), cx));
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["second"]));
+                assert!(shell.apply_sidebar_pin_change(key.clone(), pin_change("first"), cx));
+                assert!(shell.apply_sidebar_pin_change(key, pin_change("second"), cx));
+                assert_eq!(
+                    shell.active_sidebar_pins(cx),
+                    ids(&["original", "first", "second"])
+                );
                 assert_eq!(
                     shell.state.read(cx).sidebar_preferences.pinned_session_ids,
                     ids(&["original"])
@@ -563,8 +511,8 @@ mod pinned_session_tests {
         let request: serde_json::Value =
             serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
         assert_eq!(
-            request["params"]["pinnedSessionIds"],
-            serde_json::json!(["first"])
+            request["params"]["change"],
+            serde_json::to_value(pin_change("first")).unwrap()
         );
         assert!(
             requests.try_recv().is_err(),
@@ -577,11 +525,11 @@ mod pinned_session_tests {
                 });
                 assert_eq!(
                     shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
-                    Some(ids(&["second"]))
+                    Some(pin_change("second"))
                 );
                 assert_eq!(
                     shell.active_sidebar_pins(cx),
-                    ids(&["second"]),
+                    ids(&["remote", "second"]),
                     "an older failure must not roll back a newer drop"
                 );
                 assert_eq!(
@@ -620,17 +568,17 @@ mod pinned_session_tests {
                     state.set_test_engine(engine);
                 });
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                shell.replace_sidebar_pins(key.clone(), ids(&["saved"]), cx);
+                shell.apply_sidebar_pin_change(key.clone(), pin_change("saved"), cx);
                 let first = shell.sidebar_pin_write.as_ref().unwrap().id;
                 shell.finish_sidebar_pin_write(first, Ok(pin_snapshot(5, &["saved"])), cx);
                 shell.state.update(cx, |state, _| {
                     assert!(!state.apply_sidebar_preferences(pin_snapshot(4, &["stale"])));
                 });
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved"]));
-                shell.replace_sidebar_pins(key, ids(&["new-drop"]), cx);
+                shell.apply_sidebar_pin_change(key, pin_change("new-drop"), cx);
                 let second = shell.sidebar_pin_write.as_ref().unwrap().id;
                 shell.finish_sidebar_pin_write(first, Err("late failure".into()), cx);
-                assert_eq!(shell.active_sidebar_pins(cx), ids(&["new-drop"]));
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved", "new-drop"]));
                 shell.state.update(cx, |state, _| {
                     state.apply_sidebar_preferences(pin_snapshot(8, &["newer-remote"]));
                 });
@@ -663,7 +611,7 @@ mod pinned_session_tests {
                         state.set_test_engine(engine);
                     });
                     let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-                    shell.replace_sidebar_pins(key, ids(&["pending"]), cx);
+                    shell.apply_sidebar_pin_change(key, pin_change("pending"), cx);
                     let id = shell.sidebar_pin_write.as_ref().unwrap().id;
                     shell.state.update(cx, |state, _| {
                         if change_profile {
@@ -887,7 +835,7 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
-    fn sidebar_migration_keeps_source_without_an_engine_ack(cx: &mut gpui::TestAppContext) {
+    fn sidebar_remote_pins_ignore_old_local_preferences(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = pin_test_shell(cx, dir.path());
         window
@@ -1463,7 +1411,13 @@ mod pinned_session_tests {
         // Suppressing a completed drag must not disable later activity-driven glides.
         shell.update(cx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            shell.replace_sidebar_pins(key, vec![], cx);
+            for id in shell.active_sidebar_pins(cx) {
+                shell.apply_sidebar_pin_change(
+                    key.clone(),
+                    zeron_proto::SidebarPinChange::Unpin { session_id: id },
+                    cx,
+                );
+            }
             cx.notify();
         });
         let epoch = shell.update(cx, |shell, cx| {
@@ -1498,12 +1452,12 @@ mod pinned_session_tests {
     }
 
     #[test]
-    fn filtered_pin_reorder_preserves_hidden_slots() {
+    fn filtered_pin_reorder_preserves_every_other_pins_relative_order() {
         let saved = ids(&["a1", "b1", "a2", "archived", "b2"]);
         let visible = ids(&["a1", "a2"]);
         assert_eq!(
             reorder_visible_pins(&saved, &visible, 0, 1),
-            ids(&["a2", "b1", "a1", "archived", "b2"])
+            ids(&["b1", "a2", "a1", "archived", "b2"])
         );
     }
 
@@ -2464,7 +2418,28 @@ impl Shell {
             sidebar_session_drop_pins(&saved, &payload.visible_ids, &payload.chat_id, target);
         // Validate and accept before ending the preview. Rejected drops use
         // the same animated return path as dropping outside a destination.
-        if !self.replace_sidebar_pins(payload.profile_key.clone(), next, cx) {
+        let change = if let Some(index) = next.iter().position(|id| id == &payload.chat_id) {
+            let after = index.checked_sub(1).and_then(|i| next.get(i)).cloned();
+            let before = next.get(index + 1).cloned();
+            if saved.contains(&payload.chat_id) {
+                zeron_proto::SidebarPinChange::Move {
+                    session_id: payload.chat_id.clone(),
+                    after,
+                    before,
+                }
+            } else {
+                zeron_proto::SidebarPinChange::Pin {
+                    session_id: payload.chat_id.clone(),
+                    after,
+                    before,
+                }
+            }
+        } else {
+            zeron_proto::SidebarPinChange::Unpin {
+                session_id: payload.chat_id.clone(),
+            }
+        };
+        if !self.apply_sidebar_pin_change(payload.profile_key.clone(), change, cx) {
             self.cancel_sidebar_session_transfer(cx);
             return;
         }

@@ -32,8 +32,10 @@ pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
 
-/// One row owns the complete sidebar pin order for this user and organization.
-pub const SIDEBAR_PREFERENCES_ID: &str = "sidebar-v1";
+/// Readiness only; membership and order live on individual pins.
+pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
+pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+mod sidebar_pins;
 
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
@@ -1184,61 +1186,35 @@ impl RegistryDoc {
     // ── whole-doc read ──────────────────────────────────────────────────────
 
     pub fn sidebar_preferences(&self) -> Option<SidebarPreferences> {
-        self.overlay_row(KIND_PREFERENCES, SIDEBAR_PREFERENCES_ID)
-            .and_then(|row| row_to(&row))
+        self.sidebar_pins_initialized().then(|| SidebarPreferences {
+            pinned_session_ids: self
+                .ordered_sidebar_pins()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect(),
+        })
     }
 
-    /// Reconcile only against an authoritative, single registry snapshot.
-    /// A missing row is initialized only by migration; an explicit empty row
-    /// always wins over legacy local pins. Callers hold the registry lock.
-    pub fn reconcile_sidebar_pins(
-        &mut self,
-        authoritative: bool,
-        migration: Option<&[String]>,
-    ) -> Result<bool, DocError> {
+    /// Initialize readiness and clean deleted pins from one authoritative snapshot.
+    pub fn reconcile_sidebar_pins(&mut self, authoritative: bool) -> Result<bool, DocError> {
         if !authoritative {
             return Ok(false);
         }
-        let preferences = self.sidebar_preferences();
-        let Some(source) = preferences
-            .as_ref()
-            .map(|preferences| preferences.pinned_session_ids.as_slice())
-            .or(migration)
-        else {
-            return Ok(false);
-        };
+        let initialized = self.sidebar_pins_initialized();
+        self.initialize_sidebar_pins();
         let known: std::collections::HashSet<_> =
-            self.read_chats()?.into_iter().map(|chat| chat.id).collect();
-        let mut seen = std::collections::HashSet::new();
-        let retained: Vec<String> = source
-            .iter()
-            .filter(|id| known.contains(*id) && seen.insert(id.as_str()))
-            .take(MAX_SIDEBAR_PINS)
-            .cloned()
+            self.read_chats()?.into_iter().map(|c| c.id).collect();
+        let removed: Vec<_> = self
+            .ordered_sidebar_pins()
+            .into_iter()
+            .filter(|(id, _)| !known.contains(id))
             .collect();
-        if preferences.is_some() && retained == source {
-            return Ok(false);
+        for (id, _) in &removed {
+            self.change_sidebar_pin(&zeron_proto::SidebarPinChange::Unpin {
+                session_id: id.clone(),
+            })?;
         }
-        self.set_sidebar_pinned_sessions(&retained)?;
-        Ok(true)
-    }
-
-    /// Replace the complete ordered pin list. The row is always upserted,
-    /// including for an empty list, so "unpin all" cannot be mistaken for a
-    /// missing row and re-imported by another desktop.
-    pub fn set_sidebar_pinned_sessions(
-        &mut self,
-        pinned_session_ids: &[String],
-    ) -> Result<(), DocError> {
-        zeron_proto::validate_sidebar_pins(pinned_session_ids)
-            .map_err(|message| DocError::Schema(message.into()))?;
-        self.write(
-            KIND_PREFERENCES,
-            SIDEBAR_PREFERENCES_ID,
-            OpKind::Upsert,
-            fields([("pinnedSessionIds", json!(pinned_session_ids))]),
-        );
-        Ok(())
+        Ok(!initialized || !removed.is_empty())
     }
 
     pub fn read_all(&self) -> Result<WorkspaceState, DocError> {
