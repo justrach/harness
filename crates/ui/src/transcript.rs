@@ -33,14 +33,15 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity,
+    ListAlignment,
     ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
     PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
     TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::{SessionStatus, ToolCall};
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -110,8 +111,6 @@ const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
-/// Settled compact-mode subtitle under the work accordion.
-const WORKED_FOR_HEIGHT: f32 = 16.0;
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
@@ -2172,6 +2171,76 @@ fn worked_for_label(secs: i64) -> String {
     format!("Worked for {}", format_elapsed(secs))
 }
 
+fn compact_durations_path(cx: &App) -> Option<std::path::PathBuf> {
+    crate::settings::data_dir(cx).map(|dir| dir.join("compact-turn-durations.json"))
+}
+
+fn load_compact_durations(cx: &App) -> HashMap<String, i64> {
+    let Some(path) = compact_durations_path(cx) else {
+        return HashMap::new();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_compact_durations(map: &HashMap<String, i64>, cx: &App) {
+    let Some(path) = compact_durations_path(cx) else {
+        return;
+    };
+    if let Ok(raw) = serde_json::to_string(map) {
+        let _ = std::fs::write(path, raw);
+    }
+}
+
+/// Compact-mode header: the live tool summary crossfades into "Worked for".
+/// `t` is 0 = summary, 1 = duration.
+fn compact_work_title(
+    summary: SharedString,
+    worked: SharedString,
+    t: f32,
+    shimmer_phase: Option<f32>,
+    theme: &Theme,
+) -> AnyElement {
+    if t >= 1.0 {
+        return tool_group_title(worked, None, theme);
+    }
+    if t <= 0.0 {
+        return tool_group_title(summary, shimmer_phase, theme);
+    }
+    div()
+        .relative()
+        .min_w_0()
+        .w_full()
+        .h(px(TOOL_LABEL_LINE_HEIGHT))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top_0()
+                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .opacity(1.0 - t)
+                .child(tool_group_title(summary, None, theme)),
+        )
+        .child(
+            div()
+                .relative()
+                .top(px(4.0 * (1.0 - t)))
+                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .opacity(t)
+                .child(tool_group_title(worked, None, theme)),
+        )
+        .into_any_element()
+}
+
 // ---------------------------------------------------------------------------
 // Highlight store (background, time-sliced, paint-only)
 // ---------------------------------------------------------------------------
@@ -3230,7 +3299,7 @@ impl Transcript {
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
-            compact_last_elapsed: HashMap::new(),
+            compact_last_elapsed: load_compact_durations(cx),
             compact_worked_fade_at: HashMap::new(),
             highlights: HighlightStore::default(),
             show_jump_button: false,
@@ -4406,12 +4475,12 @@ impl Transcript {
                 {
                     new_rows.extend(rows.iter().cloned());
                 } else {
-                    new_rows.extend(self.rows_for(entry, false));
+                    new_rows.extend(self.rows_for(entry, false, cx));
                 }
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
-                    new_rows.extend(self.rows_for(echo, true));
+                    new_rows.extend(self.rows_for(echo, true, cx));
                 }
             }
             (
@@ -4781,8 +4850,103 @@ impl Transcript {
         cx.notify();
     }
 
+    fn remember_compact_elapsed(&mut self, cx: &App) -> bool {
+        if !self.compact_mode {
+            return false;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return false;
+        };
+        let state = self.state.read(cx);
+        let Some(entry_id) = state
+            .transcript
+            .iter()
+            .rev()
+            .find(|entry| entry.role == MessageRole::Assistant)
+            .map(|entry| entry.id.clone())
+        else {
+            return false;
+        };
+        let Some(session) = state.session_for(&chat_id) else {
+            return false;
+        };
+        let secs = match session.status {
+            SessionStatus::Working | SessionStatus::AwaitingInput => session
+                .started_at
+                .map(|start| chrono::Utc::now().signed_duration_since(start).num_seconds())
+                .unwrap_or(0),
+            SessionStatus::Idle | SessionStatus::Errored => {
+                if self.compact_last_elapsed.contains_key(&entry_id) {
+                    return false;
+                }
+                (session.updated_at.timestamp_millis()
+                    - state
+                        .transcript
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.id == entry_id)
+                        .map(|entry| entry.created_at)
+                        .unwrap_or(0))
+                    / 1000
+            }
+        };
+        if secs <= 0 || secs >= 6 * 3600 {
+            return false;
+        }
+        let changed = self.compact_last_elapsed.get(&entry_id) != Some(&secs);
+        if changed {
+            self.compact_last_elapsed.insert(entry_id, secs);
+            save_compact_durations(&self.compact_last_elapsed, cx);
+        }
+        changed
+    }
+
+    fn compact_worked_secs_for(&self, entry: &SessionMessageEntry, cx: &App) -> Option<i64> {
+        if !self.compact_mode || entry.role != MessageRole::Assistant {
+            return None;
+        }
+        if entry.status == Some(MessageStatus::Streaming) {
+            return None;
+        }
+        if let Some(ms) = entry.duration_ms.filter(|&ms| ms > 0) {
+            return Some((ms / 1000).max(1));
+        }
+        if let Some(secs) = self
+            .compact_last_elapsed
+            .get(&entry.id)
+            .copied()
+            .filter(|&secs| secs > 0)
+        {
+            return Some(secs);
+        }
+        let chat_id = self.chat_id.as_deref()?;
+        let state = self.state.read(cx);
+        let last = state
+            .transcript
+            .iter()
+            .rev()
+            .find(|e| e.role == MessageRole::Assistant)?;
+        if last.id != entry.id {
+            return None;
+        }
+        let session = state.session_for(chat_id)?;
+        if !matches!(
+            session.status,
+            SessionStatus::Idle | SessionStatus::Errored
+        ) {
+            return None;
+        }
+        let secs = (session.updated_at.timestamp_millis() - entry.created_at) / 1000;
+        (secs > 0 && secs < 6 * 3600).then_some(secs)
+    }
+
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
+    fn rows_for(
+        &mut self,
+        entry: &SessionMessageEntry,
+        pending: bool,
+        cx: &App,
+    ) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
@@ -4794,38 +4958,31 @@ impl Transcript {
         } else {
             entry_fingerprint(entry, pending) ^ ((self.compact_mode as u64) << 63)
         };
-        if !streaming
+        let mut rows = if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
             && cached.fingerprint == fingerprint
         {
-            return cached.rows.clone();
-        }
-
-        let live_parsers = &mut self.live_parsers;
-        let tree_cache = &mut self.tree_cache;
-        let mut parse = |key: &str, text: &str| -> Arc<BlockTree> {
-            // Render-cache invalidation rides on the row diff in `sync` (only
-            // rows whose content hash changed are spliced — the reparsed tail).
-            parse_for_row(streaming, key, text, live_parsers, tree_cache).0
+            cached.rows.clone()
+        } else {
+            let live_parsers = &mut self.live_parsers;
+            let tree_cache = &mut self.tree_cache;
+            let mut parse = |key: &str, text: &str| -> Arc<BlockTree> {
+                // Render-cache invalidation rides on the row diff in `sync` (only
+                // rows whose content hash changed are spliced — the reparsed tail).
+                parse_for_row(streaming, key, text, live_parsers, tree_cache).0
+            };
+            rows_for_entry(entry, pending, self.compact_mode, &mut parse)
         };
-        let mut rows = rows_for_entry(entry, pending, self.compact_mode, &mut parse);
-        if self.compact_mode && !streaming {
-            let secs = entry
-                .duration_ms
-                .filter(|&ms| ms > 0)
-                .map(|ms| (ms / 1000).max(1))
-                .or_else(|| self.compact_last_elapsed.get(&entry.id).copied());
-            if let Some(secs) = secs.filter(|&s| s > 0) {
-                for row in &mut rows {
-                    if let RowKind::ToolGroup {
-                        worked_secs,
-                        auto_open,
-                        ..
-                    } = &mut row.kind
-                        && !*auto_open
-                    {
-                        *worked_secs = Some(secs);
-                    }
+        if let Some(secs) = self.compact_worked_secs_for(entry, cx) {
+            for row in &mut rows {
+                if let RowKind::ToolGroup {
+                    worked_secs,
+                    auto_open,
+                    ..
+                } = &mut row.kind
+                    && !*auto_open
+                {
+                    *worked_secs = Some(secs);
                 }
             }
         }
@@ -6586,7 +6743,7 @@ impl Transcript {
         if self.compact_mode && active {
             self.compact_live_entries.insert(row_id.clone());
         }
-        let worked_secs = worked_secs.filter(|_| self.compact_mode && !active);
+        let worked_secs = worked_secs.filter(|_| self.compact_mode);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
                 .insert(row_id.clone(), Instant::now());
@@ -6595,6 +6752,19 @@ impl Transcript {
             .compact_worked_fade_at
             .get(row_id)
             .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
+        let worked_fade_t = match worked_secs {
+            Some(_) if animate_worked && !cx.reduce_motion() => self
+                .compact_worked_fade_at
+                .get(row_id)
+                .map(|at| {
+                    motion::FADE_IN.progress(
+                        at.elapsed().as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
+                    )
+                })
+                .unwrap_or(1.0),
+            Some(_) => 1.0,
+            None => 0.0,
+        };
 
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
@@ -6888,41 +7058,18 @@ impl Transcript {
                     .h(px(TOOL_LABEL_LINE_HEIGHT))
                     .flex()
                     .items_center()
-                    .truncate()
-                    .child(tool_group_title(summary.clone(), shimmer_phase, theme)),
+                    .overflow_hidden()
+                    .child(match worked_secs {
+                        Some(secs) => compact_work_title(
+                            summary.clone(),
+                            SharedString::from(worked_for_label(secs)),
+                            worked_fade_t,
+                            shimmer_phase,
+                            theme,
+                        ),
+                        None => tool_group_title(summary.clone(), shimmer_phase, theme),
+                    }),
             );
-        let worked_line = worked_secs.map(|secs| {
-            let label = div()
-                .pl(px(28.0))
-                .h(px(WORKED_FOR_HEIGHT))
-                .flex()
-                .items_center()
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(worked_for_label(secs)));
-            if animate_worked && !cx.reduce_motion() {
-                motion::fade_in(SharedString::from(format!("{row_id}-worked")), label)
-                    .into_any_element()
-            } else {
-                label.into_any_element()
-            }
-        });
-        let header_height = TOOL_GROUP_HEADER_HEIGHT
-            + if worked_line.is_some() {
-                WORKED_FOR_HEIGHT
-            } else {
-                0.0
-            };
-        let header = if let Some(worked_line) = worked_line {
-            div()
-                .flex()
-                .flex_col()
-                .child(header)
-                .child(worked_line)
-                .into_any_element()
-        } else {
-            header.into_any_element()
-        };
 
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
@@ -7162,7 +7309,11 @@ impl Transcript {
             // retain their explicit mono/diff typography below this boundary.
             .font_family(theme.font_sans_fixed.clone())
             .when(collapses, |el| {
-                el.child(reveal_tool_row(header, header_height, header_reveal))
+                el.child(reveal_tool_row(
+                    header.into_any_element(),
+                    TOOL_GROUP_HEADER_HEIGHT,
+                    header_reveal,
+                ))
             })
             .child(body)
             .when(motion_active || animate_worked, |group| {
@@ -8263,6 +8414,10 @@ impl Render for Transcript {
             // The row SPLIT differs by mode (one work fold vs per-segment
             // groups + narration rows) — the fingerprint above already keys
             // on it, so a fresh sync rebuilds everything.
+            self.last_source = None;
+            self.sync(cx);
+        }
+        if self.remember_compact_elapsed(cx) {
             self.last_source = None;
             self.sync(cx);
         }
@@ -10294,6 +10449,7 @@ mod tests {
         };
         assert_eq!(*worked_secs, Some(310));
         assert_eq!(worked_for_label(310), "Worked for 5m 10s");
+        assert_eq!(worked_for_label(95), "Worked for 1m 35s");
 
         let streaming = assistant("a1", MessageStatus::Streaming, vec![tool_part("t0", "ls")]);
         let mut streaming = streaming;
