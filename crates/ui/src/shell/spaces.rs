@@ -410,6 +410,10 @@ mod pinned_session_tests {
             .update(cx, |shell, _, cx| {
                 assert!(shell.sidebar_pin_write.is_none());
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["slow"]));
+                assert!(
+                    shell.sidebar_notice.is_none(),
+                    "late success must clear the waiting notice"
+                );
                 let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
                 assert!(shell.replace_sidebar_pins(key, ids(&["after-confirmation"]), cx));
             })
@@ -630,8 +634,13 @@ mod pinned_session_tests {
                 shell.state.update(cx, |state, _| {
                     state.apply_sidebar_preferences(pin_snapshot(8, &["newer-remote"]));
                 });
+                shell.sidebar_notice = Some("Unrelated archive error".into());
                 shell.finish_sidebar_pin_write(second, Ok(pin_snapshot(6, &["new-drop"])), cx);
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer-remote"]));
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Unrelated archive error")
+                );
             })
             .unwrap();
     }

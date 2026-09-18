@@ -22,6 +22,18 @@ pub(super) fn preferences_reply(
 }
 
 impl Shell {
+    fn set_pin_write_notice(&mut self, message: SharedString) {
+        self.sidebar_pin_write_notice = Some(message.clone());
+        self.sidebar_notice = Some(message);
+    }
+
+    fn clear_pin_write_notice(&mut self) {
+        if self.sidebar_notice == self.sidebar_pin_write_notice {
+            self.sidebar_notice = None;
+        }
+        self.sidebar_pin_write_notice = None;
+    }
+
     fn pin_write_is_current(&self, pending: &PendingSidebarPins, cx: &App) -> bool {
         self.active_sidebar_pin_profile_key(cx).as_ref() == Some(&pending.profile_key)
             && self
@@ -56,14 +68,15 @@ impl Shell {
     ) -> bool {
         self.discard_stale_sidebar_pin_writes(cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sidebar_notice = Some("Engine not connected. Pins were not changed.".into());
+            self.set_pin_write_notice("Engine not connected. Pins were not changed.".into());
             cx.notify();
             return false;
         };
         if let Some(pending) = &mut self.sidebar_pin_write {
             if pending.unconfirmed {
-                self.sidebar_notice =
-                    Some("Waiting for the engine to confirm the previous pin change.".into());
+                self.set_pin_write_notice(
+                    "Waiting for the engine to confirm the previous pin change.".into(),
+                );
                 cx.notify();
                 return false;
             }
@@ -141,6 +154,7 @@ impl Shell {
         }
         match result {
             Ok(value) => {
+                self.clear_pin_write_notice();
                 self.state.update(cx, |state, cx| {
                     if state.apply_sidebar_preferences(value) {
                         cx.notify();
@@ -148,7 +162,7 @@ impl Shell {
                 });
             }
             Err(error) => {
-                self.sidebar_notice = Some(format!("Couldn't save pins: {error}").into());
+                self.set_pin_write_notice(format!("Couldn't save pins: {error}").into());
             }
         }
         let pending = self.sidebar_pin_write.as_mut().unwrap();
@@ -173,7 +187,7 @@ impl Shell {
             let pending = self.sidebar_pin_write.as_mut().unwrap();
             pending.queue.clear();
             pending.unconfirmed = true;
-            self.sidebar_notice = Some("Couldn't confirm pins. Queued edits were cancelled; waiting for the engine before allowing more pin changes.".into());
+            self.set_pin_write_notice("Couldn't confirm pins. Queued edits were cancelled; waiting for the engine before allowing more pin changes.".into());
             cx.notify();
         }
     }
