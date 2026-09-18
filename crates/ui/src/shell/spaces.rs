@@ -498,8 +498,11 @@ mod pinned_session_tests {
         shell.update(cx, |shell, cx| {
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
             assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
+            assert!(
+                shell.sidebar_resort.is_empty(),
+                "successful pin must not replay the movement"
+            );
+            assert!(shell.sidebar_new_keys.is_empty());
             cx.notify();
         });
 
@@ -536,8 +539,11 @@ mod pinned_session_tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.active_sidebar_pins(cx).is_empty());
             assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
+            assert!(
+                shell.sidebar_resort.is_empty(),
+                "successful unpin must not replay the movement"
+            );
+            assert!(shell.sidebar_new_keys.is_empty());
             cx.notify();
         });
 
@@ -587,8 +593,8 @@ mod pinned_session_tests {
         shell.update(cx, |shell, cx| {
             assert!(shell.pinned_open);
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
+            assert!(shell.sidebar_resort.is_empty());
+            assert!(shell.sidebar_new_keys.is_empty());
             cx.notify();
         });
 
@@ -673,8 +679,8 @@ mod pinned_session_tests {
         shell.update(cx, |shell, cx| {
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
             assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
+            assert!(shell.sidebar_resort.is_empty());
+            assert!(shell.sidebar_new_keys.is_empty());
             cx.notify();
         });
 
@@ -696,12 +702,16 @@ mod pinned_session_tests {
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["older", "newer"]));
-            shell.sidebar_resort.clear();
-            shell.sidebar_new_keys.clear();
+            assert!(shell.sidebar_resort.is_empty());
+            assert!(shell.sidebar_new_keys.is_empty());
             cx.notify();
         });
 
         // Existing pin-to-pin reordering still works with the shared payload.
+        shell.update(cx, |shell, cx| {
+            shell.reduced_motion = false;
+            cx.notify();
+        });
         let from = cx.debug_bounds("chat-newer").unwrap().center();
         cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
@@ -715,6 +725,40 @@ mod pinned_session_tests {
         cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer", "older"]));
+            assert!(
+                shell.sidebar_resort.is_empty(),
+                "successful reorder must not replay the movement"
+            );
+            assert!(shell.sidebar_new_keys.is_empty());
+            assert!(shell.sidebar_session_transfer.is_none());
+            assert!(shell.sidebar_session_return.is_none());
+        });
+
+        // Suppressing a completed drag must not disable later activity-driven glides.
+        shell.update(cx, |shell, cx| {
+            let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+            shell.replace_sidebar_pins(key, vec![], cx);
+            cx.notify();
+        });
+        let epoch = shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older", "newer"]));
+            shell.resort_epoch
+        });
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "newer")
+                    .unwrap()
+                    .last_message_at = Some(Utc::now() + chrono::Duration::seconds(1));
+            });
+            cx.notify();
+        });
+        shell.update(cx, |shell, cx| {
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["newer", "older"]));
+            assert!(shell.resort_epoch > epoch);
+            assert!(!shell.sidebar_resort.is_empty());
         });
     }
 
@@ -1703,6 +1747,11 @@ impl Shell {
         }
         // Only pin preferences change. Regular rows keep their live activity sort.
         self.replace_sidebar_pins(payload.profile_key.clone(), next, cx);
+        // Drag previews already animated this move. Establish a fresh layout
+        // baseline so the automatic resort glide does not replay it on release.
+        self.sidebar_prev_order.clear();
+        self.sidebar_resort.clear();
+        self.sidebar_new_keys.clear();
         cx.notify();
     }
 
