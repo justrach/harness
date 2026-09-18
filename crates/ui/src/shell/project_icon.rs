@@ -54,8 +54,22 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
     None
 }
 
+// Curated badge tones: (dark appearance, light appearance). Keep the ordering
+// stable so projects retain their assigned color. These are explicit colors,
+// independent of the selected theme accent; only their appearance variant changes.
+const MONOGRAM_PALETTE: [(u32, u32); 8] = [
+    (0x94a3b8, 0x475569), // slate
+    (0x93c5fd, 0x2563eb), // blue
+    (0xc4b5fd, 0x7c3aed), // violet
+    (0xfda4af, 0xbe123c), // rose
+    (0xfcd34d, 0xa16207), // amber
+    (0x6ee7b7, 0x047857), // emerald
+    (0x5eead4, 0x0f766e), // teal
+    (0xfdba74, 0xc2410c), // orange
+];
+
 fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
-    // FNV-1a keeps each project’s muted badge hue stable across processes.
+    // FNV-1a selects a stable entry from the curated palette.
     let hash = seed.bytes().fold(2166136261u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(16777619)
     });
@@ -66,17 +80,12 @@ fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
         .unwrap_or('?')
         .to_uppercase()
         .to_string();
-    let hue = [0.04, 0.11, 0.36, 0.48, 0.58, 0.68, 0.79, 0.91][(hash % 8) as usize];
-    let tone = gpui::hsla(
-        hue,
-        0.48,
-        if theme.appearance.is_dark() {
-            0.70
-        } else {
-            0.38
-        },
-        1.0,
-    );
+    let (dark, light) = MONOGRAM_PALETTE[hash as usize % MONOGRAM_PALETTE.len()];
+    let tone = gpui::Hsla::from(gpui::rgb(if theme.appearance.is_dark() {
+        dark
+    } else {
+        light
+    }));
     let tile = div()
         .size_full()
         .flex()

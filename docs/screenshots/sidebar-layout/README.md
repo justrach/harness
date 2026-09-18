@@ -15,7 +15,8 @@ project/harness artwork and an Unarchive action in the same hover slot.
 
 Repository artwork follows [Conductor's documented filename priority](https://www.conductor.build/docs/faq#where-does-conductor-get-the-repo-icon).
 The first existing file wins; missing or invalid artwork uses the project initial on a muted, colored
-frosted background using the composer’s backdrop-blur helper. A stable hash of the project path chooses the hue, with appearance-aware lightness. Like PR badges, the background
+frosted background using the composer’s backdrop-blur helper. A stable hash of the project path chooses from eight fixed colors: slate, blue, violet, rose, amber, emerald, teal,
+and orange, each with an explicit light/dark variant independent of theme accent. Like PR badges, the background
 uses 8% of the tone and the monospaced letter uses 85%. Local reads and bounded image decoding run off the UI thread. Remote
 projects use the owning device's workspace file RPC, including ICO support.
 Artwork is shared across a project's rows, refreshed after five minutes, and
