@@ -3236,9 +3236,6 @@ impl Shell {
                     }
                 },
             ))
-            .drag_over::<SidebarSessionDrag>(|style, _, _, cx| {
-                style.bg(Theme::of(cx).border.opacity(0.4))
-            })
             .on_drop::<SidebarSessionDrag>(cx.listener(|this, payload, _, cx| {
                 this.finish_sidebar_session_transfer(payload, SidebarSessionDrop::Pinned(0), cx);
             }))

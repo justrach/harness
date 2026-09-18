@@ -6256,9 +6256,6 @@ impl Shell {
                 }
             })
             .id("sidebar-pinned-sessions")
-            .drag_over::<SidebarSessionDrag>(|style, _, _, cx| {
-                style.bg(Theme::of(cx).border.opacity(0.25))
-            })
             .flex()
             .flex_col()
             .gap(px(SIDEBAR_LIST_GAP))
@@ -6659,13 +6656,6 @@ impl Shell {
                                         }
                                     },
                                 ))
-                                .drag_over::<SidebarSessionDrag>(|style, payload, _, cx| {
-                                    if payload.visible_ids.contains(&payload.chat_id) {
-                                        style.bg(Theme::of(cx).border.opacity(0.25))
-                                    } else {
-                                        style
-                                    }
-                                })
                                 .on_drop::<SidebarSessionDrag>(cx.listener(
                                     |this, payload, _, cx| {
                                         this.finish_sidebar_session_transfer(
