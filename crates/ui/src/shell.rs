@@ -100,7 +100,7 @@ pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
 
 /// Check the completed dispatch tree, not just the lifetime of the focused
 /// handle: a hidden editor can stay alive after its element has unmounted.
-fn restore_mounted_focus(
+pub(crate) fn restore_mounted_focus(
     root: &FocusHandle,
     preferred: &FocusHandle,
     unfocused: &FocusHandle,
@@ -3312,13 +3312,31 @@ impl Shell {
                 Duration::from_secs(20),
             )
             .await;
-            let entries: Option<Vec<zeron_doc::SessionMessageEntry>> = reply.ok().and_then(|v| {
-                let text = v.get("text")?.as_str()?.to_owned();
-                serde_json::from_str(&text).ok()
-            });
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    let value = reply.ok()?;
+                    let entries: Vec<zeron_doc::SessionMessageEntry> =
+                        serde_json::from_str(value.get("text")?.as_str()?).ok()?;
+                    let update = zeron_doc::TranscriptUpdate {
+                        replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+                        frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
+                        context_usage: None,
+                    };
+                    let prepared = crate::transcript::TranscriptPreparation::default()
+                        .prepare(&update)
+                        .ok()?;
+                    let zeron_doc::TranscriptFrame::Reset { reset } = update.frame else {
+                        unreachable!()
+                    };
+                    Some((reset, prepared))
+                })
+                .await;
             state.update(cx, |s, cx| {
-                match entries {
-                    Some(entries) => s.set_subagent_snapshot(doc_id, entries),
+                match snapshot {
+                    Some((entries, prepared)) => {
+                        s.set_prepared_subagent_snapshot(doc_id, entries, prepared);
+                    }
                     None => s.watch_subagent_doc(doc_id, cx),
                 }
                 cx.notify();
@@ -3760,6 +3778,7 @@ impl Shell {
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
+        self.settings.transcript_width = current.transcript_width;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -12086,6 +12105,7 @@ mod exit_regressions {
             };
             let terminal_size = 15.0 + index as f32;
             let code_size = 11.0 + index as f32;
+            let transcript_width = 736.0 + 16.0 * index as f32;
             let geometry = Some(settings::WindowGeometry {
                 display_uuid: Some(uuid::Uuid::from_u128(7)),
                 x: 80.0 + index as f32,
@@ -12107,6 +12127,7 @@ mod exit_regressions {
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
                         settings.code_font_size = code_size;
+                        settings.transcript_width = transcript_width;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
@@ -12121,6 +12142,7 @@ mod exit_regressions {
                         assert_eq!(current.terminal_font_size, terminal_size);
                         assert_eq!(current.code_font_family, code_family);
                         assert_eq!(current.code_font_size, code_size);
+                        assert_eq!(current.transcript_width, transcript_width);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
@@ -12131,6 +12153,7 @@ mod exit_regressions {
                     assert_eq!(loaded.terminal_font_size, terminal_size);
                     assert_eq!(loaded.code_font_family, code_family);
                     assert_eq!(loaded.code_font_size, code_size);
+                    assert_eq!(loaded.transcript_width, transcript_width);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
