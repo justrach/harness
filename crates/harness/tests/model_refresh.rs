@@ -2,7 +2,7 @@
 //! probes without pinning a stale catalog for the lifetime of the engine.
 #![cfg(unix)]
 use std::{os::unix::fs::PermissionsExt, path::Path};
-use zeron_harness::{AcpHarness, CursorHarness, Harness};
+use zeron_harness::{AcpHarness, Harness};
 
 fn fixture(dir: &Path) -> std::path::PathBuf {
     let script = dir.join("agent.py");
@@ -55,26 +55,6 @@ async fn check_refresh(harness: &dyn Harness, dir: &Path) {
     assert!(!fallback.iter().any(|m| m.id.starts_with("second-")));
     std::fs::write(&state, r#"{"id":"recovered-"}"#).unwrap();
     assert_eq!(harness.models().await.unwrap()[255].id, "recovered-255");
-}
-
-#[tokio::test]
-async fn cursor_refreshes_large_catalogs_coalesces_and_recovers() {
-    let dir = tempfile::tempdir().unwrap();
-    let harness = CursorHarness::new().with_executable(fixture(dir.path()));
-    check_refresh(&harness, dir.path()).await;
-    std::fs::write(
-        dir.path().join("state"),
-        r#"{"id":"failed-exit-","exit":1}"#,
-    )
-    .unwrap();
-    assert!(
-        !harness
-            .models()
-            .await
-            .unwrap()
-            .iter()
-            .any(|m| m.id.starts_with("failed-exit-"))
-    );
 }
 
 #[tokio::test]

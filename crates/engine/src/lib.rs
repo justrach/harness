@@ -19,6 +19,7 @@ pub mod agent_accounts;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
+mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
 mod http_error;
@@ -696,6 +697,7 @@ impl Engine {
         Ok(EngineInfo {
             device_id: load_or_create_device_id(&config.data_dir)?,
             workspace_scope,
+            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
         })
     }

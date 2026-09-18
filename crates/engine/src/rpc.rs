@@ -515,6 +515,11 @@ enum MutateParams {
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
     SetChatArchived { chat_id: String, archived: bool },
+    /// Change one pin without replacing another device's edits.
+    #[serde(rename_all = "camelCase")]
+    ChangeSidebarPin {
+        change: zeron_proto::SidebarPinChange,
+    },
     /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -576,6 +581,7 @@ impl EngineRpc {
         let engine_info = EngineInfo {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
+            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
         };
         Self {
@@ -944,6 +950,9 @@ impl EngineRpc {
                 .set_chat_archived(&chat_id, archived)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::ChangeSidebarPin { change } => {
+                self.workspace.change_sidebar_pin(&change).map_err(failed)
+            }
             MutateParams::SetChatConfig { chat_id, config } => self
                 .workspace
                 .set_chat_config(&chat_id, &config)
@@ -1191,6 +1200,46 @@ fn doc_messages_stream(
     .boxed()
 }
 
+/// First paint reads only the local tail; full history is deferred until the
+/// next stream poll. No network dependency or persisted truncation.
+async fn opening_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+    let (handle, preview) = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        let entries = handle.doc().read_opening_tail(128)?;
+        let mut preview = serde_json::to_value(zeron_doc::TranscriptUpdate {
+            frame: zeron_doc::TranscriptFrame::reset(&entries),
+            context_usage: handle.doc().context_usage(),
+            replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+        })
+        .map_err(|e| crate::EngineError::Other(e.to_string()))?;
+        preview["historyPending"] = serde_json::Value::Bool(true);
+        Ok::<_, crate::EngineError>((handle, preview))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+    // Do not build the full mirror before yielding the preview.
+    // The next poll attaches normally and begins with a complete
+    // authoritative reset; subsequent frames use normal deltas.
+    let full = futures::stream::once(async move {
+        match tokio::task::spawn_blocking(move || (handle.watch_messages(), handle.doc_arc())).await
+        {
+            Ok((rx, doc)) => doc_messages_stream(rx, doc),
+            Err(error) => {
+                tracing::warn!(%error, "transcript opening failed");
+                futures::stream::empty().boxed()
+            }
+        }
+    })
+    .flatten();
+    Ok(futures::stream::once(async move { preview })
+        .chain(full)
+        .boxed())
+}
+
 /// Authentication-only RPC surface used while the headed app is waiting for a
 /// production WorkOS session. Keeping this independent from [`EngineRpc`] lets
 /// the UI show its sign-in and organization gates before identity-scoped Loro
@@ -1402,7 +1451,17 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
             }
             methods::WATCH_DOC_MESSAGES => {
+                // Opt-in: older viewports retain the full-reset contract.
+                let opening_tail = params
+                    .get("openingTail")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let p: ChatParams = parse_params(params)?;
+                if opening_tail {
+                    return Ok(RpcReply::Stream(
+                        opening_doc_messages_stream(self.doc_host.clone(), p.chat_id).await?,
+                    ));
+                }
                 let handle = self
                     .doc_host
                     .open(&p.chat_id)
@@ -1682,6 +1741,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
+            methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
+                self.workspace.watch_sidebar_preferences(),
+            ))),
             methods::WATCH_DEVICES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_devices(),
             ))),
@@ -1745,7 +1807,13 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
+                let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
                 self.mutate(p)?;
+                if sidebar_pins {
+                    return RpcReply::value(&serde_json::json!({
+                        "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),
+                    }));
+                }
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {
@@ -2601,6 +2669,88 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
+        use crate::doc_host::{DocHost, DocHostConfig};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "viewer".into(),
+                default_harness: zeron_proto::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        let handle = host.open("whale").unwrap();
+        handle
+            .doc()
+            .push_message(&zeron_doc::SessionMessageEntry {
+                id: "turn".into(),
+                role: zeron_doc::MessageRole::Assistant,
+                parts: (0..500)
+                    .map(|i| zeron_doc::MessagePart::Text {
+                        id: format!("part-{i}"),
+                        text: "local text".into(),
+                    })
+                    .collect(),
+                created_at: 0,
+                device_id: "host".into(),
+                status: None,
+                continuation_of: None,
+            })
+            .unwrap();
+        // Hold publication blocked: the opening must not await the full mirror.
+        let held = handle.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            held.import_transcript(|| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+        locked_rx.recv().unwrap();
+        let opening = tokio::time::timeout(
+            Duration::from_secs(2),
+            opening_doc_messages_stream(host.clone(), "whale".into()),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+        let mut stream = opening
+            .expect("first paint must not wait for publication")
+            .unwrap();
+        let preview = stream.next().await.unwrap();
+        assert_eq!(preview["historyPending"], true);
+        assert_eq!(preview["reset"][0]["parts"].as_array().unwrap().len(), 128);
+        assert_eq!(preview["reset"][0]["parts"][0]["id"], "part-372");
+        // Changes between preview and subscribe must appear in the full reset.
+        handle
+            .write_user_message("arrived", "new local message", 1)
+            .unwrap();
+        let full = stream.next().await.unwrap();
+        assert!(full.get("historyPending").is_none());
+        assert_eq!(full["reset"][0]["parts"].as_array().unwrap().len(), 500);
+        assert_eq!(full["reset"][1]["id"], "arrived");
+        handle
+            .write_user_message("live", "after attach", 2)
+            .unwrap();
+        let live = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut entries = Vec::new();
+        for value in [full, live] {
+            let update: zeron_doc::TranscriptUpdate = serde_json::from_value(value).unwrap();
+            zeron_doc::apply_transcript_frame(&mut entries, update.frame).unwrap();
+        }
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.last().unwrap().id, "live");
+        host.shutdown_workers().await;
+    }
+
     #[tokio::test]
     async fn antigravity_sign_out_failure_stays_enabled_and_can_be_retried() {
         let registry = HarnessRegistry::new();
@@ -2647,6 +2797,20 @@ mod tests {
         .expect("ui param shape");
         assert_eq!(p.account_id, "acct-1");
         assert_eq!(p.harness, HarnessId::ClaudeCode);
+    }
+
+    #[test]
+    fn sidebar_preferences_mutation_accepts_desktop_wire_shape() {
+        let p: MutateParams = parse_params(serde_json::json!({
+            "op": "changeSidebarPin",
+            "change": {"action":"move","sessionId":"chat-b","before":"chat-a","after":null},
+        }))
+        .expect("sidebar preferences params");
+        assert!(matches!(
+            p,
+            MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
+                if session_id == "chat-b" && before.as_deref() == Some("chat-a")
+        ));
     }
 
     #[test]

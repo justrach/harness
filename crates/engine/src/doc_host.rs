@@ -544,6 +544,7 @@ pub struct ChatDocHandle {
     /// chat2 relay client (docs/chat2-sync.md C3) — populated once the
     /// registry names roomGen 2 for this chat and the join resolves.
     chat2: Mutex<Option<zeron_sync::ChatClient>>,
+    pub(crate) persistence: Option<Arc<crate::chat_persistence::ChatPersistence>>,
     /// Local commits made before the relay connects (the dial can take up
     /// to a minute; offline, forever): buffered here by the subscription
     /// below and drained into the client on join (review B3 — a user
@@ -586,8 +587,8 @@ impl ChatDocHandle {
         // Subscribe BEFORE the dirty check: a commit racing this attach then
         // sees a live receiver and publishes, instead of re-marking dirty
         // after our refresh and leaving the new watcher a cleared mirror.
+        let _import = lock(&self.transcript_import);
         let rx = {
-            let _import = lock(&self.transcript_import);
             if self.messages_tx.receiver_count() == 0 {
                 // A new viewing session must not inherit the former viewer's
                 // live-part protection, even if no commit happened while away.
@@ -596,7 +597,7 @@ impl ChatDocHandle {
             self.messages_tx.subscribe()
         };
         if self.mirror_dirty.load(Ordering::Acquire) {
-            self.publish_messages();
+            self.publish_messages_locked();
         }
         rx
     }
@@ -690,6 +691,11 @@ impl ChatDocHandle {
 
     fn publish_messages(&self) {
         let _import = lock(&self.transcript_import);
+        self.publish_messages_locked();
+    }
+
+    // Caller holds transcript_import, shared with attach and mirror clearing.
+    fn publish_messages_locked(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
         match self.doc.read_entries() {
             Ok(entries) => {
@@ -718,20 +724,26 @@ impl ChatDocHandle {
     /// rebuilding a full transcript nobody reads was a per-tick cost on every
     /// open doc (and kept a second transcript copy hot).
     fn publish_messages_if_watched(&self) {
+        // Serialize the receiver check AND clear with attach. Otherwise an
+        // unwatched worker can clear the mirror after a new watcher rebuilt it.
+        let _import = lock(&self.transcript_import);
         if self.messages_tx.receiver_count() == 0 {
             self.mirror_dirty.store(true, Ordering::Release);
             // Shrink the stale mirror: watch_messages rebuilds on attach.
             self.messages_tx.send_replace(TranscriptSnapshot::default());
             *lock(&self.transcript_history) = Default::default();
         } else {
-            self.publish_messages();
+            self.publish_messages_locked();
         }
     }
 
     /// Rough resident cost for the LRU budget.
     fn resident_estimate(&self) -> usize {
-        (self.snapshot_bytes.load(Ordering::Relaxed) * RESIDENT_BYTES_PER_SNAPSHOT_BYTE)
-            .max(DOC_RESIDENT_FLOOR_BYTES)
+        let bytes = self
+            .snapshot_bytes
+            .load(Ordering::Relaxed)
+            .max(self.persistence.as_ref().map_or(0, |p| p.snapshot_bytes()));
+        (bytes * RESIDENT_BYTES_PER_SNAPSHOT_BYTE).max(DOC_RESIDENT_FLOOR_BYTES)
     }
 }
 
@@ -761,6 +773,8 @@ impl DocHost {
                 executing: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .read_timeout(std::time::Duration::from_secs(30))
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
@@ -853,9 +867,19 @@ impl DocHost {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
         self.inner.tasks.wait().await;
+        // Stop room actors before the final snapshot so shutdown does not
+        // leave a scheduled debounce behind an already-dropped document.
+        let clients: Vec<_> = lock(&self.inner.handles)
+            .values()
+            .filter_map(|handle| lock(&handle.chat2).take())
+            .collect();
+        futures::future::join_all(clients.into_iter().map(|client| client.shutdown())).await;
         // Snapshot open docs BEFORE releasing their handles: the handles map
         // holds the only strong doc refs, and an unflushed doc dies with it.
-        self.flush_all();
+        let host = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || host.flush_all()).await {
+            tracing::error!(%error, "shutdown snapshot flush failed");
+        }
         // Take the map under the lock, drop the handles outside it.
         let handles = std::mem::take(&mut *lock(&self.inner.handles));
         drop(handles);
@@ -1160,6 +1184,10 @@ impl DocHost {
         } else {
             registry_gen
         };
+        let deferred_adoption = room_gen >= 2
+            && stored_epoch < crate::chat2_host::CHAT2_DOC_EPOCH
+            && self.inner.config.edge.is_none()
+            && stored.is_some();
         let mut snapshot_len = 0usize;
         let mut chat2_cursor = 0u64;
         let mut requeue_commands: Vec<SessionCommandEntry> = Vec::new();
@@ -1262,6 +1290,15 @@ impl DocHost {
             }
         }
         let doc = Arc::new(doc);
+        let persistence = (room_gen >= 2 && !deferred_adoption).then(|| {
+            crate::chat_persistence::ChatPersistence::new(
+                &doc,
+                self.inner.store.clone(),
+                chat_id.to_string(),
+                chat2_cursor,
+            )
+        });
+        let changed_persistence = persistence.clone();
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
         let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
@@ -1281,6 +1318,9 @@ impl DocHost {
                 }
             } else {
                 *lock(&history) = Default::default();
+            }
+            if let Some(persistence) = &changed_persistence {
+                persistence.dirty(false);
             }
             changed_tx.send_modify(|v| *v = v.wrapping_add(1));
         }));
@@ -1312,6 +1352,7 @@ impl DocHost {
             retired: AtomicBool::new(false),
             checkpointing: Arc::new(AtomicBool::new(false)),
             chat2: Mutex::new(None),
+            persistence,
             chat2_pending_local: Mutex::new(Vec::new()),
             publication_failed: AtomicBool::new(false),
             chat2_local_sub: Mutex::new(None),
@@ -1956,11 +1997,18 @@ impl DocHost {
             return;
         };
         let chat_id = handle.chat_id.clone();
-        // Tail publish: cheap, every quiesce tick.
-        if let Ok(tail) =
-            zeron_doc::materialize_tail(&handle.doc, now_ms(), zeron_doc::TAIL_MESSAGE_COUNT)
-            && let Ok(body) = serde_json::to_vec(&tail)
-        {
+        // A whale's last 64 joined messages can still contain its entire
+        // history. Materialization/encoding must not occupy a network worker.
+        let doc = handle.doc.clone();
+        let body = tokio::task::spawn_blocking(move || {
+            let tail =
+                zeron_doc::materialize_tail(&doc, now_ms(), zeron_doc::TAIL_MESSAGE_COUNT).ok()?;
+            serde_json::to_vec(&tail).ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(body) = body {
             let http = self.inner.http.clone();
             let edge_tail = edge.clone();
             let chat = chat_id.clone();
@@ -2016,38 +2064,30 @@ impl DocHost {
             return;
         }
         let in_flight = handle.checkpointing.clone();
-        let rejected = self
-            .inner
-            .store
-            .rejected_chat_updates(&chat_id)
-            .unwrap_or_default();
         let publication_store = self.inner.store.clone();
-        let Ok(snapshot) = handle.doc.export_snapshot() else {
-            in_flight.store(false, Ordering::Release);
-            return;
-        };
-        let frontier = match loro::LoroDoc::decode_import_blob_meta(&snapshot, true) {
-            Ok(meta) => meta.partial_end_vv.encode(),
-            Err(err) => {
-                tracing::error!(%err, "chat2: checkpoint metadata decode failed");
-                in_flight.store(false, Ordering::Release);
-                return;
-            }
-        };
-        let snapshot_vv = loro::VersionVector::decode(&frontier).expect("encoded snapshot vector");
-        let covered_rejections: Vec<String> = rejected
-            .into_iter()
-            .filter_map(|(id, bytes)| {
-                loro::LoroDoc::decode_import_blob_meta(&bytes, true)
-                    .ok()
-                    .filter(|m| snapshot_vv.includes_vv(&m.partial_end_vv))
-                    .map(|_| id)
-            })
-            .collect();
+        let snapshot_doc = handle.doc.clone();
         let seq_covered = stats.cursor;
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
         self.spawn_worker(async move {
+            let store = publication_store.clone();
+            let chat = chat_id.clone();
+            let prepared = tokio::task::spawn_blocking(move || {
+                let rejected = store.rejected_chat_updates(&chat).unwrap_or_default();
+                let snapshot = snapshot_doc.export_snapshot().ok()?;
+                let frontier = loro::LoroDoc::decode_import_blob_meta(&snapshot, true).ok()?.partial_end_vv.encode();
+                let vv = loro::VersionVector::decode(&frontier).ok()?;
+                let covered_rejections: Vec<String> = rejected.into_iter().filter_map(|(id, bytes)| {
+                    loro::LoroDoc::decode_import_blob_meta(&bytes, true).ok()
+                        .filter(|m| vv.includes_vv(&m.partial_end_vv)).map(|_| id)
+                }).collect();
+                Some((snapshot, frontier, covered_rejections))
+            }).await;
+            let Ok(Some((snapshot, frontier, covered_rejections))) = prepared else {
+                in_flight.store(false, Ordering::Release);
+                return;
+            };
+
             let Ok(bearer) = edge.bearer().await else {
                 in_flight.store(false, Ordering::Release);
                 return;
@@ -2061,6 +2101,7 @@ impl DocHost {
             let size = snapshot.len() as u64;
             match http
                 .post(&url)
+                .timeout(std::time::Duration::from_secs(300))
                 .bearer_auth(&bearer)
                 .header(
                     "x-chat2-frontier",
@@ -4651,6 +4692,10 @@ impl DocHost {
                 return;
             }
         }
+        if let Some(persistence) = &handle.persistence {
+            persistence.flush_sync();
+            return;
+        }
         match handle.doc.export_snapshot() {
             Ok(bytes) => {
                 handle.snapshot_bytes.store(bytes.len(), Ordering::Relaxed);
@@ -4741,6 +4786,87 @@ mod transfer_progress_tests {
             },
         );
         (dir, host)
+    }
+
+    #[tokio::test]
+    async fn whale_snapshot_opens_and_reopens_without_network() {
+        let (_dir, host) = host();
+        let source = zeron_doc::SessionDoc::init("persisted-whale").unwrap();
+        for i in 0..2000 {
+            source
+                .push_message(&zeron_doc::SessionMessageEntry {
+                    id: format!("row-{i}"),
+                    role: zeron_doc::MessageRole::User,
+                    parts: vec![zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(2048),
+                    }],
+                    created_at: i,
+                    device_id: "remote".into(),
+                    status: None,
+                    continuation_of: None,
+                })
+                .unwrap();
+        }
+        host.inner
+            .store
+            .save_snapshot_with_cursor("persisted-whale", &source.export_snapshot().unwrap(), 0, 2)
+            .unwrap();
+        drop(source);
+        let start = std::time::Instant::now();
+        let handle = host.open("persisted-whale").unwrap();
+        let rx = handle.watch_messages();
+        assert_eq!(rx.borrow().entries.len(), 2000);
+        eprintln!("offline whale cold open: {:?}", start.elapsed());
+        drop(rx);
+        // An unwatched commit clears the mirror; attach still serves local data.
+        handle.publish_messages_if_watched();
+        let start = std::time::Instant::now();
+        assert_eq!(handle.watch_messages().borrow().entries.len(), 2000);
+        eprintln!("offline whale rebuilt mirror: {:?}", start.elapsed());
+    }
+
+    #[tokio::test]
+    async fn transcript_attach_and_unwatched_clear_share_a_critical_section() {
+        let (_dir, host) = host();
+        let handle = host.open("cached").unwrap();
+        handle
+            .write_user_message("row", "locally persisted transcript", 0)
+            .unwrap();
+        let rx = handle.watch_messages();
+        assert_eq!(rx.borrow().entries.len(), 1);
+        drop(rx);
+
+        // Freeze attach's critical section. An unwatched publisher must not
+        // pass its receiver check and clear the mirror while attach owns it.
+        let guard = super::lock(&handle.transcript_import);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker_handle = handle.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            worker_handle.publish_messages_if_watched();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let result = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+        // Simulate the subscription attaching before the worker can inspect it.
+        let rx = handle.messages_tx.subscribe();
+        drop(guard);
+        worker.join().unwrap();
+        assert!(
+            matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "unwatched clear escaped attach's critical section"
+        );
+        assert_eq!(rx.borrow().entries.len(), 1, "no empty reset after attach");
+        drop(rx);
+        handle.publish_messages_if_watched();
+        assert!(handle.messages_tx.borrow().entries.is_empty());
+        assert_eq!(
+            handle.watch_messages().borrow().entries.len(),
+            1,
+            "offline reopen rebuilds from local content"
+        );
     }
 
     #[test]
@@ -4956,8 +5082,11 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                     break; // doc handle (and its change sender) is gone
                 }
                 let Some(handle) = weak.upgrade() else { break };
-                handle.publish_messages_if_watched();
-                handle.publish_queue();
+                let publishing = handle.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    publishing.publish_messages_if_watched();
+                    publishing.publish_queue();
+                }).await;
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
                 if save_deadline.is_none() {
@@ -4970,7 +5099,9 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
                 let Some(handle) = weak.upgrade() else { break };
-                host.save_snapshot(&handle);
+                // chat2 has its own coalescing blocking-pool persister. The
+                // legacy worker must not duplicate every scheduled export.
+                if handle.persistence.is_none() { host.save_snapshot(&handle); }
                 // chat2 host duties ride the same quiesce tick (C3):
                 // threshold checkpoints + the tail sidecar publish.
                 host.chat2_maintenance(&handle).await;

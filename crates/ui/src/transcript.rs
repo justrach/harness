@@ -1008,6 +1008,7 @@ pub enum RowKind {
         block_ix: usize,
     },
     ToolGroup {
+        summary: SharedString,
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
     },
@@ -1227,6 +1228,9 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
     motion::MotionSpec::new(user_resize_duration_ms(height_delta), curve)
 }
 
+#[cfg(test)]
+thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -1237,6 +1241,9 @@ pub fn rows_for_entry(
     pending: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
+    #[cfg(test)]
+    FORBID_ROW_PREPARATION
+        .with(|forbidden| assert!(!forbidden.get(), "row preparation ran on the UI thread"));
     let mut rows: Vec<Row> = Vec::new();
     let streaming = entry.status == Some(MessageStatus::Streaming);
     let entry_id: SharedString = entry.id.clone().into();
@@ -1304,6 +1311,7 @@ pub fn rows_for_entry(
                 version: tool_fingerprint(&tools, auto_open),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
+                    summary: tool_group_summary(&tools).into(),
                     tools: Arc::new(tools),
                     auto_open,
                 },
@@ -1735,6 +1743,9 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// The rule lives in `zeron_proto::view` so the terminal viewport reports the
 /// same summary; this only adapts the row model's [`ToolItem`] to it.
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
+    #[cfg(test)]
+    FORBID_ROW_PREPARATION
+        .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
     let pairs: Vec<(ToolCall, bool)> = tools
         .iter()
         .filter(|t| !t.is_thought)
@@ -2001,13 +2012,17 @@ pub fn sending_bridge(
     }
 }
 
-/// "1m 32s"-style elapsed formatting.
+/// Compact elapsed formatting, using at most two units up to days.
 pub fn format_elapsed(secs: i64) -> String {
     let secs = secs.max(0);
     if secs < 60 {
         format!("{secs}s")
-    } else {
+    } else if secs < 3_600 {
         format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
     }
 }
 
@@ -2144,6 +2159,113 @@ impl HighlightStore {
 // ---------------------------------------------------------------------------
 // Transcript entity
 // ---------------------------------------------------------------------------
+
+/// Expensive presentation work belongs to the subscription's background job,
+/// never to a GPUI observer/render callback. Shared rows survive navigation.
+#[derive(Default)]
+pub(crate) struct TranscriptPreparation {
+    entries: Vec<SessionMessageEntry>,
+    cache: HashMap<String, Arc<Vec<Row>>>,
+    live_parsers: HashMap<String, IncrementalParser>,
+    tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
+    baseline: Option<zeron_doc::TranscriptBaseline>,
+}
+
+pub(crate) struct PreparedTranscript {
+    pub(crate) rows: HashMap<String, Arc<Vec<Row>>>,
+    pub(crate) historical: HashMap<String, Vec<Row>>,
+    fully_historical: HashSet<String>,
+    pub(crate) navigation_baseline: Arc<zeron_doc::TranscriptBaseline>,
+    pub(crate) bytes: usize,
+}
+
+impl TranscriptPreparation {
+    pub(crate) fn prepare(
+        &mut self,
+        update: &zeron_doc::TranscriptUpdate,
+    ) -> Result<Arc<PreparedTranscript>, zeron_doc::TranscriptDesync> {
+        match &update.frame {
+            zeron_doc::TranscriptFrame::Reset { .. } => {
+                self.cache.clear();
+                self.tree_cache.clear();
+                self.live_parsers.clear();
+            }
+            zeron_doc::TranscriptFrame::Delta {
+                upsert,
+                append,
+                remove,
+                ..
+            } => {
+                if !upsert.is_empty() {
+                    self.tree_cache.clear();
+                }
+                for id in upsert
+                    .iter()
+                    .map(|u| &u.entry.id)
+                    .chain(append.iter().map(|a| &a.entry))
+                    .chain(remove.iter())
+                {
+                    self.cache.remove(id);
+                }
+            }
+        }
+        zeron_doc::apply_transcript_frame(&mut self.entries, update.frame.clone())?;
+        if let Some(baseline) = &update.replay_baseline {
+            self.baseline = Some(baseline.clone());
+        }
+        let mut rows = HashMap::new();
+        let mut historical = HashMap::new();
+        let mut fully_historical = HashSet::new();
+        let mut bytes = 0;
+        for entry in &self.entries {
+            let built = if let Some(rows) = self.cache.get(&entry.id) {
+                rows.clone()
+            } else {
+                let streaming = entry.status == Some(MessageStatus::Streaming);
+                let built = Arc::new(rows_for_entry(entry, false, &mut |key, text| {
+                    parse_for_row(
+                        streaming,
+                        key,
+                        text,
+                        &mut self.live_parsers,
+                        &mut self.tree_cache,
+                    )
+                    .0
+                }));
+                self.cache.insert(entry.id.clone(), built.clone());
+                built
+            };
+            rows.insert(entry.id.clone(), built);
+            if self.baseline.as_ref().is_some_and(|b| b.covers(entry)) {
+                fully_historical.insert(entry.id.clone());
+            }
+            if let Some(baseline) = &self.baseline
+                && !fully_historical.contains(&entry.id)
+                && let Some(prefix) = baseline.historical_entry(entry)
+            {
+                historical.insert(
+                    entry.id.clone(),
+                    rows_for_entry(&prefix, false, &mut |_, text| Arc::new(parse_full(text))),
+                );
+            }
+            bytes += std::mem::size_of::<SessionMessageEntry>()
+                + entry.id.len()
+                + entry
+                    .parts
+                    .iter()
+                    .map(|part| std::mem::size_of::<MessagePart>() + part.byte_len())
+                    .sum::<usize>();
+        }
+        self.cache.retain(|id, _| rows.contains_key(id));
+        Ok(Arc::new(PreparedTranscript {
+            rows,
+            historical,
+            fully_historical,
+            bytes,
+            navigation_baseline: Arc::new(zeron_doc::TranscriptBaseline::capture(&self.entries)),
+        }))
+    }
+}
 
 struct CachedRows {
     fingerprint: u64,
@@ -4110,8 +4232,16 @@ impl Transcript {
                 Some(doc_id) => state.sub_transcript(doc_id),
                 None => state.transcript.as_slice(),
             };
+            let prepared = self
+                .chat_id
+                .as_ref()
+                .and_then(|id| state.prepared_transcripts.get(id));
             for entry in entries {
-                new_rows.extend(self.rows_for(entry, false));
+                if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
+                    new_rows.extend(rows.iter().cloned());
+                } else {
+                    new_rows.extend(self.rows_for(entry, false));
+                }
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
@@ -4137,6 +4267,7 @@ impl Transcript {
                 .is_none_or(|previous| !Arc::ptr_eq(previous, baseline))
         });
         let mut historical_tools: HashMap<SharedString, HashSet<String>> = HashMap::new();
+        let mut fully_historical: HashSet<SharedString> = HashSet::new();
         if baseline_changed {
             let baseline = baseline.as_ref().unwrap();
             let state = self.state.read(cx);
@@ -4145,11 +4276,30 @@ impl Transcript {
                 None => &state.transcript,
             };
             let previous_markdown = std::mem::take(&mut self.historical_markdown);
-            let mut fully_historical = HashSet::new();
+            let prepared = self
+                .chat_id
+                .as_ref()
+                .and_then(|id| state.prepared_transcripts.get(id));
             let mut historical_rows = Vec::new();
             for entry in entries {
-                if baseline.covers(entry) {
-                    fully_historical.insert(entry.id.as_str());
+                let covered = prepared.map_or_else(
+                    || baseline.covers(entry),
+                    |p| {
+                        Arc::ptr_eq(baseline, &p.navigation_baseline)
+                            || p.fully_historical.contains(&entry.id)
+                    },
+                );
+                if covered {
+                    fully_historical.insert(entry.id.clone().into());
+                    continue;
+                }
+                if let Some(rows) = self
+                    .chat_id
+                    .as_ref()
+                    .and_then(|id| state.prepared_transcripts.get(id))
+                    .and_then(|p| p.historical.get(&entry.id))
+                {
+                    historical_rows.extend(rows.iter().cloned());
                     continue;
                 }
                 let Some(historical) = baseline.historical_entry(entry) else {
@@ -4165,12 +4315,17 @@ impl Transcript {
             historical_rows.extend(
                 new_rows
                     .iter()
-                    .filter(|row| fully_historical.contains(row.entry_id.as_ref()))
+                    .filter(|row| {
+                        fully_historical.contains(&row.entry_id)
+                            && matches!(row.kind, RowKind::LiveMarkdown { .. })
+                    })
                     .cloned(),
             );
             for row in historical_rows {
                 match &row.kind {
-                    RowKind::ToolGroup { tools, .. } => {
+                    RowKind::ToolGroup { tools, .. }
+                        if !fully_historical.contains(&row.entry_id) =>
+                    {
                         historical_tools
                             .entry(row.entry_id.clone())
                             .or_default()
@@ -4208,6 +4363,7 @@ impl Transcript {
         let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self
             .rows
             .iter()
+            .filter(|row| !fully_historical.contains(&row.entry_id))
             .filter_map(|row| match &row.kind {
                 RowKind::ToolGroup { tools, .. } => {
                     let reveal = self.tool_group_reveals.get(&row.id);
@@ -4240,11 +4396,16 @@ impl Transcript {
             }
             live_tool_groups.insert(row.id.clone());
             let historical = historical_tools.get(&row.entry_id);
+            let whole_group_historical =
+                fully_historical.contains(&row.entry_id) || (replay_baseline && baseline.is_none());
             let is_historical = |tool: &ToolItem| {
-                (replay_baseline && baseline.is_none())
-                    || historical.is_some_and(|ids| ids.contains(&tool.part_id))
+                whole_group_historical || historical.is_some_and(|ids| ids.contains(&tool.part_id))
             };
-            let historical_count = tools.iter().filter(|tool| is_historical(tool)).count();
+            let historical_count = if whole_group_historical {
+                tools.len()
+            } else {
+                tools.iter().filter(|tool| is_historical(tool)).count()
+            };
             let previous = previous_tools.get(&row.id);
             let is_new_group = historical_count == 0 && previous.is_none();
             let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
@@ -4264,6 +4425,11 @@ impl Transcript {
             }
             let first_row_delay = is_new_group.then_some(TOOL_FIRST_ROW_DELAY_MS).unwrap_or(0);
             let mut arrival_ix = 0;
+            if whole_group_historical {
+                reveal.starts.clear();
+                reveal.starts.resize(tools.len(), None);
+                continue;
+            }
             reveal.starts = tools
                 .iter()
                 .map(|tool| {
@@ -4326,21 +4492,15 @@ impl Transcript {
         // Veils live exactly as long as their live row — drop them on the
         // live→complete flip (any mid-fade chunk snaps to full, matching the
         // row's version splice).
-        self.veils.retain(|id, _| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
-        });
-        self.veil_baseline.retain(|id| {
-            new_rows
-                .iter()
-                .any(|r| &r.id == id && matches!(r.kind, RowKind::LiveMarkdown { .. }))
-        });
-        self.historical_markdown.retain(|id, _| {
-            new_rows
-                .iter()
-                .any(|row| &row.id == id && matches!(row.kind, RowKind::LiveMarkdown { .. }))
-        });
+        let active_markdown: HashSet<&SharedString> = new_rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::LiveMarkdown { .. }))
+            .map(|row| &row.id)
+            .collect();
+        self.veils.retain(|id, _| active_markdown.contains(id));
+        self.veil_baseline.retain(|id| active_markdown.contains(id));
+        self.historical_markdown
+            .retain(|id, _| active_markdown.contains(id));
 
         // Capture this before the row splice changes the list's measured end.
         // When the user is truly live-following, retaining the end anchor
@@ -5612,6 +5772,8 @@ impl Transcript {
                 .when(!sending, |el| {
                     el.child(
                         div()
+                            .relative()
+                            .top(px(1.0))
                             .text_color(theme.text_faint)
                             .child(SharedString::from(format_elapsed(elapsed_secs))),
                     )
@@ -5854,9 +6016,11 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
-            }
+            RowKind::ToolGroup {
+                tools,
+                auto_open,
+                summary,
+            } => self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx),
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -6152,6 +6316,7 @@ impl Transcript {
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
+        summary: &SharedString,
         auto_open: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -6185,6 +6350,16 @@ impl Transcript {
             reveal.rendered_open = Some(open);
         }
         let active = collapses && auto_open;
+
+        // A settled collapsed group has no visible body. Do not construct or
+        // format thousands of hidden chips merely to clip them to zero height.
+        // Keep the body during closing so the existing fold animation survives.
+        let body_visible = open
+            || (!cx.reduce_motion()
+                && fold
+                    .toggled_at
+                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total()));
+        let tools = if body_visible { tools.as_slice() } else { &[] };
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -6399,7 +6574,6 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
-        let summary: SharedString = tool_group_summary(tools).into();
         let shimmer_phase = if active && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
             self.tool_group_reveals
@@ -6468,7 +6642,7 @@ impl Transcript {
                     .flex()
                     .items_center()
                     .truncate()
-                    .child(tool_group_title(summary, shimmer_phase, theme)),
+                    .child(tool_group_title(summary.clone(), shimmer_phase, theme)),
             );
 
         let chips = div()
@@ -8085,11 +8259,16 @@ mod tests {
                 .find(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
                 .unwrap()
                 .clone();
-            let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+            let RowKind::ToolGroup {
+                tools,
+                auto_open,
+                summary,
+            } = &row.kind
+            else {
                 unreachable!()
             };
             assert!(!auto_open);
-            let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+            let _ = this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
             let reveal = &this.tool_group_reveals[&row.id];
             assert_eq!(
                 reveal.rendered_open,
@@ -8200,6 +8379,10 @@ mod tests {
 
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
             transcript.update(cx, |this, cx| this.sync(cx));
+            assert!(
+                !transcript.read(cx).rows.is_empty(),
+                "revisited transcript must have visible rows before the new watch responds"
+            );
             apply_frame(
                 TranscriptFrame::reset(&cached),
                 Some(zeron_doc::TranscriptBaseline::capture(&cached)),
@@ -8250,6 +8433,217 @@ mod tests {
                 vec![0, 0],
                 "tools accumulated while away must not acquire entrance animations in either catch-up batch"
             );
+        });
+    }
+
+    #[test]
+    fn background_preparation_reuses_unchanged_rows_and_replaces_same_length_text() {
+        let mut worker = TranscriptPreparation::default();
+        let original = vec![
+            assistant(
+                "a",
+                MessageStatus::Complete,
+                vec![MessagePart::Text {
+                    id: "p".into(),
+                    text: "alpha".into(),
+                }],
+            ),
+            assistant("b", MessageStatus::Complete, vec![tool_part("t", "pwd")]),
+        ];
+        let first = worker
+            .prepare(&zeron_doc::TranscriptUpdate {
+                frame: zeron_doc::TranscriptFrame::reset(&original),
+                context_usage: None,
+                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&original)),
+            })
+            .unwrap();
+        let mut changed = original.clone();
+        changed[0].parts = vec![MessagePart::Text {
+            id: "p".into(),
+            text: "omega".into(),
+        }];
+        let next = worker
+            .prepare(&zeron_doc::TranscriptUpdate {
+                frame: zeron_doc::diff_transcript(&original, &changed),
+                context_usage: None,
+                replay_baseline: None,
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.rows["b"], &next.rows["b"]));
+        assert!(!Arc::ptr_eq(&first.rows["a"], &next.rows["a"]));
+        assert!(diff_rows(&first.rows["a"], &next.rows["a"]).is_some());
+    }
+
+    #[gpui::test]
+    fn prepared_whale_open_and_revisit_do_not_build_rows_on_ui(cx: &mut gpui::TestAppContext) {
+        let (update, prepared, preparation_ms) = std::thread::spawn(|| {
+            let entries = if let Ok(path) = std::env::var("ZERON_WHALE_SNAPSHOT") {
+                let doc = zeron_doc::SessionDoc::init("fixture").unwrap();
+                doc.doc().import(&std::fs::read(path).unwrap()).unwrap();
+                zeron_doc::join_continuation_entries(doc.read_entries().unwrap())
+            } else {
+                vec![assistant("whale-turn", MessageStatus::Complete, (0..5000).map(|i| {
+                    MessagePart::Text { id: format!("part-{i}"), text: format!("## Result {i}\n\n**Markdown** with `code` and [links](https://example.com).\n") }
+                }).collect())]
+            };
+            let update = zeron_doc::TranscriptUpdate {
+                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+                frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
+                context_usage: None,
+            };
+            let start = Instant::now();
+            let prepared = TranscriptPreparation::default().prepare(&update).unwrap();
+            (update, prepared, start.elapsed().as_millis())
+        }).join().unwrap();
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            FORBID_ROW_PREPARATION.with(|flag| flag.set(true));
+            let start = Instant::now();
+            state.update(cx, |state, cx| {
+                state
+                    .receive_opening_transcript_update(update, false, cx)
+                    .unwrap();
+                state
+                    .prepared_transcripts
+                    .insert("whale".into(), prepared.clone());
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let open_ms = start.elapsed().as_millis();
+            assert!(!transcript.read(cx).rows.is_empty());
+            assert!(
+                transcript
+                    .read(cx)
+                    .tool_group_reveals
+                    .values()
+                    .all(|r| r.starts.iter().all(Option::is_none))
+            );
+            let start = Instant::now();
+            state.update(cx, |state, cx| state.select_chat(None, cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let revisit_ms = start.elapsed().as_millis();
+            assert!(Arc::ptr_eq(
+                &state.read(cx).prepared_transcripts["whale"],
+                &prepared
+            ));
+            assert!(
+                transcript
+                    .read(cx)
+                    .tool_group_reveals
+                    .values()
+                    .all(|r| r.starts.iter().all(Option::is_none))
+            );
+            FORBID_ROW_PREPARATION.with(|flag| flag.set(false));
+            eprintln!(
+                "background_preparation_ms={preparation_ms} ui_open_ms={open_ms} ui_revisit_ms={revisit_ms}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn opening_tail_full_history_and_cached_revisit_never_replay_tool_entrances(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let preview = vec![assistant(
+                "turn",
+                MessageStatus::Streaming,
+                vec![tool_part("tail-tool", "pwd")],
+            )];
+            let full = vec![assistant(
+                "turn",
+                MessageStatus::Streaming,
+                vec![
+                    tool_part("older-tool", "ls"),
+                    MessagePart::Text {
+                        id: "separator".into(),
+                        text: "Earlier result".into(),
+                    },
+                    tool_part("tail-tool", "pwd"),
+                ],
+            )];
+            let apply = |entries: &[SessionMessageEntry], pending, cx: &mut gpui::App| {
+                state.update(cx, |state, cx| {
+                    state
+                        .receive_opening_transcript_update(
+                            zeron_doc::TranscriptUpdate {
+                                frame: zeron_doc::TranscriptFrame::reset(entries),
+                                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                    entries,
+                                )),
+                                context_usage: None,
+                            },
+                            pending,
+                            cx,
+                        )
+                        .unwrap();
+                });
+                transcript.update(cx, |this, cx| this.sync(cx));
+            };
+            let assert_settled = |expected_tools, cx: &mut gpui::App| {
+                let this = transcript.read(cx);
+                assert_eq!(
+                    this.tool_group_reveals
+                        .values()
+                        .map(|r| r.starts.len())
+                        .sum::<usize>(),
+                    expected_tools
+                );
+                for reveal in this.tool_group_reveals.values() {
+                    assert!(
+                        reveal.header_started_at.is_none(),
+                        "historical header replayed"
+                    );
+                    assert!(
+                        reveal.starts.iter().all(Option::is_none),
+                        "historical tool replayed"
+                    );
+                }
+            };
+            apply(&preview, true, cx);
+            assert_settled(1, cx);
+            // Prepending history moves the tail tool from group 0 to group 1.
+            // Its new row identity must not turn it into a live entrance.
+            apply(&full, false, cx);
+            assert_settled(2, cx);
+            for _ in 0..3 {
+                state.update(cx, |state, cx| state.select_chat(Some("away".into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                assert_settled(2, cx);
+                apply(&preview, true, cx); // ignored because the cache is complete
+                assert_settled(2, cx);
+                apply(&full, false, cx);
+                assert_settled(2, cx);
+            }
+            let mut live = full.clone();
+            live[0].parts.push(tool_part("new-live-tool", "git status"));
+            state.update(cx, |state, cx| {
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::diff_transcript(&full, &live),
+                            replay_baseline: None,
+                            context_usage: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let this = transcript.read(cx);
+            let tail = &this.tool_group_reveals[&SharedString::from("turn#g1")];
+            assert!(tail.header_started_at.is_none());
+            assert!(
+                tail.starts[0].is_none(),
+                "existing tool must remain settled"
+            );
+            assert!(tail.starts[1].is_some(), "new live tool must still animate");
         });
     }
 
@@ -8466,10 +8860,16 @@ mod tests {
             replay_tool_group(&state, &transcript, "chat-a", cx);
             transcript.update(cx, |this, cx| {
                 let row = this.rows[0].clone();
-                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+                let RowKind::ToolGroup {
+                    tools,
+                    auto_open,
+                    summary,
+                } = &row.kind
+                else {
                     panic!("expected tools")
                 };
-                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                let _ =
+                    this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
                 assert_eq!(this.folds[&row.id].open, Some(true));
                 assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
                 assert!(
@@ -8490,11 +8890,17 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
                 let row = this.rows.last().unwrap().clone();
-                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
+                let RowKind::ToolGroup {
+                    tools,
+                    auto_open,
+                    summary,
+                } = &row.kind
+                else {
                     panic!("expected tools")
                 };
                 assert!(*auto_open);
-                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                let _ =
+                    this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
                 let reveal = &this.tool_group_reveals[&row.id];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts.iter().all(Option::is_some));
@@ -9469,7 +9875,10 @@ mod tests {
             vec![reasoning_part("r0", "thinking hard")],
         );
         let rows = rows_for_entry(&entry, false, &mut parse);
-        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+        let RowKind::ToolGroup {
+            tools, auto_open, ..
+        } = &rows[0].kind
+        else {
             panic!("expected a tool group");
         };
         // The live tail auto-opens the group; the chip itself is unresolved
@@ -9779,7 +10188,10 @@ mod tests {
             ]
         );
 
-        let RowKind::ToolGroup { tools, auto_open } = &rows[1].kind else {
+        let RowKind::ToolGroup {
+            tools, auto_open, ..
+        } = &rows[1].kind
+        else {
             panic!("ordinary group expected")
         };
         assert_eq!(tools.len(), 2);
@@ -9849,7 +10261,10 @@ mod tests {
         );
         let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
-        let RowKind::ToolGroup { tools, auto_open } = &rows[0].kind else {
+        let RowKind::ToolGroup {
+            tools, auto_open, ..
+        } = &rows[0].kind
+        else {
             panic!("agent group expected")
         };
         assert_eq!(tools.len(), 1);
@@ -12323,9 +12738,26 @@ mod tests {
         assert_ne!(flavour_word(seed, 0), flavour_word(seed, 7));
         // Deterministic per chat; different chats usually differ in phase.
         assert_eq!(flavour_word(seed, 3), flavour_word(seed, 3));
-        assert_eq!(format_elapsed(59), "59s");
-        assert_eq!(format_elapsed(92), "1m 32s");
-        assert_eq!(format_elapsed(-5), "0s");
+    }
+
+    #[test]
+    fn elapsed_format_scales_from_seconds_to_days() {
+        for (secs, expected) in [
+            (-5, "0s"),
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m 0s"),
+            (92, "1m 32s"),
+            (3_599, "59m 59s"),
+            (3_600, "1h 0m"),
+            (4_800, "1h 20m"),
+            (6_000, "1h 40m"),
+            (86_399, "23h 59m"),
+            (86_400, "1d 0h"),
+            (183_845, "2d 3h"),
+        ] {
+            assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");
+        }
     }
 
     #[test]
