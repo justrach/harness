@@ -22,7 +22,8 @@ are bounded to 64 pixels; SVGs retain their original colors.
 
 Native X11 checks cover compact and detailed rows, independently hidden labels,
 project icons and fallback icons, project groups, borderless accordions, hover controls, and dragging
-pinned sessions. Compact rows place status on the left and elapsed time on the right. Hover
+pinned sessions. Compact rows place status on the left, followed by harness and project icons,
+the name, remote/archive control, PR badge, and elapsed time on the right. Hover
 replaces the remote icon with Archive (or reveals it for local sessions), keeping
 status, PR, and time visible.
 The moving card follows the pointer continuously and neighbors animate around
@@ -36,3 +37,6 @@ settings persistence. Native macOS and Windows interactions were not exercised.
 
 Validation: `cargo test -p zeron-ui --lib -- --test-threads=1` passed all 1,119
 tests. The native fixture build, formatting checks, and `git diff --check` passed.
+
+Latest icon/order follow-up: all 40 sidebar regression tests passed; native screenshots
+were refreshed with the terminal-style remote icon and harness-first ordering.

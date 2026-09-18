@@ -6266,7 +6266,6 @@ impl Shell {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
                     .children(compact_status)
-                    .children(project_icon)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
@@ -6278,6 +6277,7 @@ impl Shell {
                             )
                         },
                     )
+                    .children(project_icon)
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
@@ -6292,6 +6292,14 @@ impl Shell {
                                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                 .flex_none()
                                 .text_color(subline),
+                        )
+                    })
+                    .when(compact || !show_label, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(subline)
+                                .children(corner.take()),
                         )
                     })
                     .when(compact, |el| {
@@ -6312,14 +6320,6 @@ impl Shell {
                                 )
                             }
                         }))
-                    })
-                    .when(compact || !show_label, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_color(subline)
-                                .children(corner.take()),
-                        )
                     })
                     .when(compact, |el| {
                         el.child(

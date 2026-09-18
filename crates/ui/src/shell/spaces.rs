@@ -4502,18 +4502,6 @@ impl Shell {
                         )
                         // Archived history recedes: dimmed mark at rest,
                         // restored on hover (t3code's grayscale favicon).
-                        .when(self.settings.sidebar_show_project_icon, |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .opacity(if hovered || is_selected { 1.0 } else { 0.4 })
-                                    .child(self.render_project_icon(
-                                        &id,
-                                        SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE,
-                                        cx,
-                                    )),
-                            )
-                        })
                         .when_some(brand, |el, (mark, tint)| {
                             el.child(
                                 crate::icons::icon(mark)
@@ -4524,6 +4512,18 @@ impl Shell {
                                     } else {
                                         tint.unwrap_or(theme.text_muted).opacity(0.4)
                                     }),
+                            )
+                        })
+                        .when(self.settings.sidebar_show_project_icon, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .opacity(if hovered || is_selected { 1.0 } else { 0.4 })
+                                    .child(self.render_project_icon(
+                                        &id,
+                                        SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE,
+                                        cx,
+                                    )),
                             )
                         })
                         .child(super::sidebar_faded_label(
