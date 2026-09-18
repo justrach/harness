@@ -144,6 +144,12 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
+    check_worktree_setup_and_reuse(false).await;
+    #[cfg(unix)]
+    check_worktree_setup_and_reuse(true).await;
+}
+
+async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     let tmp = tempfile::tempdir().unwrap();
     // Canonicalize: git records canonical paths in worktree gitdir links, and
     // macOS tempdirs live behind the /var → /private/var symlink.
@@ -160,6 +166,21 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
     git(&repo_dir, &["add", "."]);
     git(&repo_dir, &["commit", "-m", "init"]);
     let repo_path = repo_dir.to_string_lossy().to_string();
+    #[cfg(unix)]
+    let project_dir = if use_project_symlink {
+        let project_dir = tmp_path.join("project-link");
+        std::os::unix::fs::symlink(&repo_dir, &project_dir).unwrap();
+        assert_ne!(project_dir, repo_dir);
+        assert_eq!(project_dir.canonicalize().unwrap(), repo_dir);
+        project_dir
+    } else {
+        repo_dir.clone()
+    };
+    #[cfg(not(unix))]
+    let project_dir = {
+        assert!(!use_project_symlink);
+        repo_dir.clone()
+    };
 
     let cwds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
@@ -175,28 +196,32 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
         .create_space(
             "space-worktree-run",
             &core.device_id,
-            &repo_path,
+            &project_dir.to_string_lossy(),
             Some("Repo".into()),
             true,
         )
         .expect("create project");
-    core.project_actions
-        .upsert(
-            "space-worktree-run",
-            &repo_dir,
-            None,
-            ProjectActionDraft {
-                name: "Setup".into(),
-                command: "printf setup > setup-marker".into(),
-                icon: ProjectActionIcon::Configure,
-                run_on_worktree_create: true,
-            },
+    // Save through the same RPC as the editor: the Space may use an alias
+    // while the queued WorktreeSpec carries the canonical repository path.
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-worktree-run",
+                "action": ProjectActionDraft {
+                    name: "Setup".into(),
+                    command: "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker".into(),
+                    icon: ProjectActionIcon::Configure,
+                    run_on_worktree_create: true,
+                }
+            }),
         )
+        .await
         .expect("save setup Action");
 
     // Mirror the composer: createChat lands first (cwd-less; the engine
     // resolves the project folder), then the queued Run carries the spec.
-    let client = zeron_rpc::memory_client(core.rpc_service());
     client
         .call(
             zeron_rpc::methods::MUTATE,
@@ -236,13 +261,27 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
         first.join(".git").is_file(),
         "a linked worktree has a .git FILE"
     );
-    wait_for(|| first.join("setup-marker").is_file(), "setup Action").await;
     let setup = core
         .project_actions
         .take_setup_handoff(&first_command, CHAT)
         .expect("fresh worktree setup handoff");
+    assert!(
+        setup.setup_error.is_none(),
+        "setup failed: {:?}",
+        setup.setup_error
+    );
     assert!(setup.setup_action.is_some());
-    assert!(setup.setup_error.is_none());
+    wait_for(|| first.join("setup-marker").is_file(), "setup Action").await;
+    assert_eq!(
+        std::fs::read_to_string(first.join("setup-project-root")).unwrap(),
+        repo_path
+    );
+    assert_eq!(
+        std::fs::read_to_string(first.join("setup-worktree-path")).unwrap(),
+        first_cwd
+    );
+    // Reusing this checkout must not execute setup a second time.
+    std::fs::remove_file(first.join("setup-marker")).unwrap();
 
     // The chat row follows: cwd repointed at the worktree, branch stamped
     // with the actual zeron/<name> (the composer only knew the base).
@@ -282,6 +321,7 @@ async fn run_with_worktree_spec_materializes_on_host_and_reuses() {
         .expect("reuse completion handoff");
     assert!(reused.setup_action.is_none(), "setup must not run on reuse");
     assert!(reused.setup_error.is_none());
+    assert!(!first.join("setup-marker").exists());
 
     core.shutdown().await;
 }

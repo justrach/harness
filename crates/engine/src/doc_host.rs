@@ -4574,8 +4574,10 @@ impl DocHost {
                 "Project path does not match worktree repository".into(),
             ));
         }
+        // The store keys configuration by the original Space path, which may
+        // be a symlink. Keep canonical paths for validation and execution only.
         let setup_action = project_actions
-            .setup_action(space_id, &project_root)?
+            .setup_action(space_id, std::path::Path::new(&space.path))?
             .map(|action| {
                 launch_project_setup_action(
                     terminals,
