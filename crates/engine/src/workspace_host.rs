@@ -1796,6 +1796,67 @@ mod tests {
         assert_eq!(*preferences.borrow(), acknowledgement);
     }
 
+    #[tokio::test]
+    async fn sidebar_preferences_migration_requires_durable_storage_before_acknowledgement() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "migration-test".into(),
+                device_name: "Test".into(),
+                platform: "test".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_chat("live", None, Some("migration-test"), None, None)
+            .unwrap();
+        let server = zeron_sync::registry::mock_server::MockRegistryServer::start().await;
+        host.connect_registry_url(&server.url());
+        let mut preferences = host.watch_sidebar_preferences();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !preferences.borrow_and_update().synced {
+                preferences.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        host.inner.persist_snapshot().unwrap();
+
+        // Fail the real SQLite write, without a platform-dependent chmod or
+        // bypassing the migration entry point. This database is test-local.
+        let faults = rusqlite::Connection::open(dir.path().join("docs.sqlite3")).unwrap();
+        faults.execute_batch("CREATE TRIGGER fail_snapshot BEFORE INSERT ON snapshots BEGIN SELECT RAISE(FAIL, 'injected snapshot failure'); END;").unwrap();
+        let source = vec!["live".into(), "deleted".into()];
+        let failure = host.migrate_sidebar_pinned_sessions(&source).unwrap_err();
+        assert!(failure.to_string().contains("injected snapshot failure"));
+        let bytes = host
+            .inner
+            .store
+            .load_snapshot(REGISTRY_DOC_ID)
+            .unwrap()
+            .unwrap();
+        assert!(
+            RegistryDoc::from_bytes(&bytes, "reader")
+                .unwrap()
+                .sidebar_preferences()
+                .is_none()
+        );
+
+        faults.execute_batch("DROP TRIGGER fail_snapshot;").unwrap();
+        host.migrate_sidebar_pinned_sessions(&source).unwrap();
+        let reopened = DocsStore::open(dir.path()).unwrap();
+        let bytes = reopened.load_snapshot(REGISTRY_DOC_ID).unwrap().unwrap();
+        let restored = RegistryDoc::from_bytes(&bytes, "reopened").unwrap();
+        assert_eq!(
+            restored.sidebar_preferences().unwrap().pinned_session_ids,
+            ["live"]
+        );
+    }
+
     #[test]
     fn boot_repairs_the_legacy_unknown_device_sentinel() {
         assert_eq!(

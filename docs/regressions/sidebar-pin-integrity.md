@@ -31,3 +31,5 @@ cargo test --locked -p zeron-ui --lib pinned_session_tests -- --test-threads=1
 ```
 
 Coverage includes reversed stream arrival, absent versus explicitly empty preferences, archived/deleted IDs, unsynced menu/drop parity, full-capacity drops in local and remote profiles, offline readiness, invalid lists, operation/profile/attachment boundaries, ordered pending writes, rejection recovery and stale watch/ack delivery. Existing native drag tests cover empty Pinned targets, cross-section gaps, return animation, successful-drop animation suppression and unchanged normal activity ordering.
+
+Transport-level regressions inject replies through the actual RPC client to verify sequential dispatch, rejection recovery, the real confirmation timer and late acknowledgements. A mock-registry migration test injects a SQLite write failure and reopens the persisted snapshot to check that failed storage never produces a successful migration acknowledgement.

@@ -262,6 +262,167 @@ mod pinned_session_tests {
         }
     }
 
+    fn deliver_pin_rpc_reply(
+        runtime: &tokio::runtime::Runtime,
+        replies: &tokio::sync::mpsc::Sender<String>,
+        reply: serde_json::Value,
+    ) {
+        // The current-thread reactor drains the actual RpcClient reader before
+        // GPUI resumes. No wall-clock sleeps or hand-invoked completion handlers.
+        runtime.block_on(async {
+            replies.send(reply.to_string()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_rpc_replies_dispatch_each_queued_drop_once_and_recover_rejection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (engine, mut requests, replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, true, true);
+                    state.set_test_engine(engine);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx);
+                shell.replace_sidebar_pins(key, ids(&["second"]), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            first["params"]["pinnedSessionIds"],
+            serde_json::json!(["first"])
+        );
+        assert!(requests.try_recv().is_err());
+        deliver_pin_rpc_reply(
+            &runtime,
+            &replies,
+            serde_json::json!({"id": first["id"], "ok": {"ok": true, "sidebarPreferences": pin_snapshot(1, &["first"])}}),
+        );
+        cx.run_until_parked();
+        let second: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            second["params"]["pinnedSessionIds"],
+            serde_json::json!(["second"])
+        );
+        assert!(requests.try_recv().is_err());
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["second"]));
+                assert_eq!(
+                    shell.state.read(cx).sidebar_preferences.pinned_session_ids,
+                    ids(&["first"])
+                );
+                shell.state.update(cx, |state, _| {
+                    state.apply_sidebar_preferences(pin_snapshot(3, &["remote"]));
+                });
+            })
+            .unwrap();
+        deliver_pin_rpc_reply(
+            &runtime,
+            &replies,
+            serde_json::json!({"id": second["id"], "err": "rejected by test registry"}),
+        );
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["remote"]));
+                assert!(shell.sidebar_pin_write.is_none());
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_deref()
+                        .unwrap()
+                        .contains("rejected by test registry")
+                );
+            })
+            .unwrap();
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    fn sidebar_rpc_timeout_blocks_overtaking_until_the_late_reply_arrives(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (engine, mut requests, replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, true, true);
+                    state.set_test_engine(engine);
+                    state.sidebar_preferences = pin_snapshot(1, &["confirmed"]);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                shell.replace_sidebar_pins(key.clone(), ids(&["slow"]), cx);
+                shell.replace_sidebar_pins(key, ids(&["queued"]), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(21));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                assert!(!shell.replace_sidebar_pins(key, ids(&["overtaking"]), cx));
+            })
+            .unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "queued and fresh drops must not overtake the slow write"
+        );
+        deliver_pin_rpc_reply(
+            &runtime,
+            &replies,
+            serde_json::json!({"id": request["id"], "ok": {"ok": true, "sidebarPreferences": pin_snapshot(2, &["slow"])}}),
+        );
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.sidebar_pin_write.is_none());
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["slow"]));
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                assert!(shell.replace_sidebar_pins(key, ids(&["after-confirmation"]), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let next: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            next["params"]["pinnedSessionIds"],
+            serde_json::json!(["after-confirmation"])
+        );
+        assert!(requests.try_recv().is_err());
+    }
+
     #[gpui::test]
     fn sidebar_migration_removes_only_the_successfully_acknowledged_source(
         cx: &mut gpui::TestAppContext,
