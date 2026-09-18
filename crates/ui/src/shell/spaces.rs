@@ -182,6 +182,97 @@ mod pinned_session_tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    fn pin_test_shell(
+        cx: &mut gpui::TestAppContext,
+        path: &std::path::Path,
+    ) -> gpui::WindowHandle<super::Shell> {
+        use super::*;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: path.into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        })
+    }
+
+    fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
+        state.workspace_scope = Some(zeron_proto::WorkspaceScope::Synced);
+        state.auth = Some(zeron_proto::AuthState::SignedIn {
+            user: zeron_proto::UserProfile {
+                id: "user".into(),
+                email: "test@example.com".into(),
+                name: None,
+            },
+            org_id: Some("org".into()),
+        });
+        state.sidebar_preferences.synced = synced;
+        state.sidebar_preferences.initialized = initialized;
+    }
+
+    #[gpui::test]
+    fn sidebar_preferences_arriving_before_chats_never_prune_live_pins(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![]);
+                    remote_pin_state(state, true, true);
+                    state.sidebar_preferences.pinned_session_ids = ids(&["live-remote"]);
+                });
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["live-remote"]));
+                assert!(shell.mutate_task.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_migration_keeps_source_without_an_engine_ack(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_chats(vec![]);
+                    remote_pin_state(state, true, false);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                shell
+                    .settings
+                    .sidebar_pinned_session_ids_by_profile
+                    .insert(key.clone(), ids(&["live-remote"]));
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert_eq!(shell.settings.sidebar_pins(&key), ids(&["live-remote"]));
+                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
+            })
+            .unwrap();
+    }
+
     #[test]
     fn pins_lead_without_changing_unpinned_recency() {
         let recency = ids(&["newest", "p2", "middle", "p1", "oldest"]);

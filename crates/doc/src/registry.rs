@@ -1188,6 +1188,41 @@ impl RegistryDoc {
             .and_then(|row| row_to(&row))
     }
 
+    /// Reconcile only against an authoritative, single registry snapshot.
+    /// A missing row is initialized only by migration; an explicit empty row
+    /// always wins over legacy local pins. Callers hold the registry lock.
+    pub fn reconcile_sidebar_pins(
+        &mut self,
+        authoritative: bool,
+        migration: Option<&[String]>,
+    ) -> Result<bool, DocError> {
+        if !authoritative {
+            return Ok(false);
+        }
+        let preferences = self.sidebar_preferences();
+        let Some(source) = preferences
+            .as_ref()
+            .map(|preferences| preferences.pinned_session_ids.as_slice())
+            .or(migration)
+        else {
+            return Ok(false);
+        };
+        let known: std::collections::HashSet<_> =
+            self.read_chats()?.into_iter().map(|chat| chat.id).collect();
+        let mut seen = std::collections::HashSet::new();
+        let retained: Vec<String> = source
+            .iter()
+            .filter(|id| known.contains(*id) && seen.insert(id.as_str()))
+            .take(MAX_SIDEBAR_PINS)
+            .cloned()
+            .collect();
+        if preferences.is_some() && retained == source {
+            return Ok(false);
+        }
+        self.set_sidebar_pinned_sessions(&retained)?;
+        Ok(true)
+    }
+
     /// Replace the complete ordered pin list. The row is always upserted,
     /// including for an empty list, so "unpin all" cannot be mistaken for a
     /// missing row and re-imported by another desktop.

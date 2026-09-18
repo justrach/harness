@@ -861,6 +861,57 @@ fn sidebar_preferences_preserve_absent_empty_and_ordered_states() {
 }
 
 #[test]
+fn sidebar_cleanup_waits_for_authority_and_uses_one_snapshot() {
+    let mut doc = RegistryDoc::new("desktop");
+    doc.set_sidebar_pinned_sessions(&["live".into(), "archived".into(), "deleted".into()])
+        .unwrap();
+    assert!(!doc.reconcile_sidebar_pins(false, None).unwrap());
+    assert_eq!(
+        doc.sidebar_preferences().unwrap().pinned_session_ids.len(),
+        3
+    );
+    doc.upsert_chat(&chat("live", "remote")).unwrap();
+    let mut archived = chat("archived", "remote");
+    archived.archived = true;
+    doc.upsert_chat(&archived).unwrap();
+    assert!(doc.reconcile_sidebar_pins(true, None).unwrap());
+    assert_eq!(
+        doc.sidebar_preferences().unwrap().pinned_session_ids,
+        ["live", "archived"]
+    );
+    assert!(!doc.reconcile_sidebar_pins(true, None).unwrap());
+}
+
+#[test]
+fn sidebar_migration_waits_and_never_overwrites_existing_preferences() {
+    let mut doc = RegistryDoc::new("desktop");
+    let source = ["live".into(), "live".into(), "deleted".into()];
+    assert!(!doc.reconcile_sidebar_pins(false, Some(&source)).unwrap());
+    assert!(doc.sidebar_preferences().is_none());
+    doc.upsert_chat(&chat("live", "remote")).unwrap();
+    assert!(doc.reconcile_sidebar_pins(true, Some(&source)).unwrap());
+    assert_eq!(
+        doc.sidebar_preferences().unwrap().pinned_session_ids,
+        ["live"]
+    );
+    doc.set_sidebar_pinned_sessions(&[]).unwrap();
+    assert!(!doc.reconcile_sidebar_pins(true, Some(&source)).unwrap());
+    assert!(
+        doc.sidebar_preferences()
+            .unwrap()
+            .pinned_session_ids
+            .is_empty()
+    );
+}
+
+#[test]
+fn sidebar_cleanup_does_not_manufacture_an_empty_preference() {
+    let mut doc = RegistryDoc::new("desktop");
+    assert!(!doc.reconcile_sidebar_pins(true, None).unwrap());
+    assert!(doc.sidebar_preferences().is_none());
+}
+
+#[test]
 fn sidebar_preferences_reject_invalid_lists() {
     let mut doc = RegistryDoc::new("dev-a");
     let duplicate = vec!["chat-a".to_string(), "chat-a".to_string()];
@@ -884,11 +935,7 @@ fn sidebar_preferences_converge_between_devices() {
     desktop
         .set_sidebar_pinned_sessions(&["chat-b".into(), "chat-a".into()])
         .unwrap();
-    server_round(
-        &mut server,
-        &mut seq,
-        &mut [&mut desktop, &mut phone],
-    );
+    server_round(&mut server, &mut seq, &mut [&mut desktop, &mut phone]);
     assert_eq!(
         phone.sidebar_preferences().unwrap().pinned_session_ids,
         vec!["chat-b", "chat-a"]
@@ -897,15 +944,8 @@ fn sidebar_preferences_converge_between_devices() {
     phone
         .set_sidebar_pinned_sessions(&["chat-a".into(), "chat-b".into()])
         .unwrap();
-    server_round(
-        &mut server,
-        &mut seq,
-        &mut [&mut desktop, &mut phone],
-    );
-    assert_eq!(
-        desktop.sidebar_preferences(),
-        phone.sidebar_preferences()
-    );
+    server_round(&mut server, &mut seq, &mut [&mut desktop, &mut phone]);
+    assert_eq!(desktop.sidebar_preferences(), phone.sidebar_preferences());
     assert_eq!(
         desktop.sidebar_preferences().unwrap().pinned_session_ids,
         vec!["chat-a", "chat-b"]

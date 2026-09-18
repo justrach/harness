@@ -473,6 +473,9 @@ enum MutateParams {
     /// Replace the user's complete ordered sidebar pin list.
     #[serde(rename_all = "camelCase")]
     SetSidebarPinnedSessions { pinned_session_ids: Vec<String> },
+    /// Import legacy pins only if authoritative preferences are still absent.
+    #[serde(rename_all = "camelCase")]
+    MigrateSidebarPinnedSessions { pinned_session_ids: Vec<String> },
     /// Full-config replace on the chat row (zeron `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -888,6 +891,10 @@ impl EngineRpc {
             MutateParams::SetSidebarPinnedSessions { pinned_session_ids } => self
                 .workspace
                 .set_sidebar_pinned_sessions(&pinned_session_ids)
+                .map_err(failed),
+            MutateParams::MigrateSidebarPinnedSessions { pinned_session_ids } => self
+                .workspace
+                .migrate_sidebar_pinned_sessions(&pinned_session_ids)
                 .map_err(failed),
             MutateParams::SetChatConfig { chat_id, config } => self
                 .workspace

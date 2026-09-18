@@ -1562,6 +1562,9 @@ pub struct Shell {
     pinned_session_drag_generation: u64,
     sidebar_session_transfer: Option<SidebarSessionTransfer>,
     sidebar_session_return: Option<SidebarSessionReturn>,
+    /// One migration attempt per engine attachment; failed sources stay on disk
+    /// and can be retried on the next attachment without an observer retry loop.
+    sidebar_pin_migration: Option<(String, crate::state::EngineHandle)>,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
@@ -1920,6 +1923,7 @@ impl Shell {
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
             sidebar_session_return: None,
+            sidebar_pin_migration: None,
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
@@ -2295,73 +2299,7 @@ impl Shell {
             self.settings.space_filter = None;
             self.schedule_save(cx);
         }
-        // Local profiles keep their device-local list. Synced profiles wait
-        // for authoritative Registry state, import the old local list exactly
-        // once when the row is absent, and thereafter mutate only Registry.
-        // Deletion cleanup also waits for the complete chat frame: an offline
-        // absence is never evidence that a pin should be removed everywhere.
-        let profile_key = self.active_sidebar_pin_profile_key(cx);
-        let (scope, preferences, known_chat_ids) = {
-            let state = state.read(cx);
-            (
-                state.workspace_scope,
-                state.sidebar_preferences.clone(),
-                state.chats_synced.then(|| {
-                    state
-                        .chats
-                        .iter()
-                        .map(|chat| chat.id.clone())
-                        .collect::<std::collections::HashSet<_>>()
-                }),
-            )
-        };
-        if let (Some(profile_key), Some(known_chat_ids)) = (profile_key, known_chat_ids) {
-            match scope {
-                Some(WorkspaceScope::Local) => {
-                    let changed = self
-                        .settings
-                        .sidebar_pinned_session_ids_by_profile
-                        .get_mut(&profile_key)
-                        .is_some_and(|pins| spaces::retain_known_pins(pins, &known_chat_ids));
-                    if changed {
-                        if self.settings.sidebar_pins(&profile_key).is_empty() {
-                            self.settings
-                                .sidebar_pinned_session_ids_by_profile
-                                .remove(&profile_key);
-                        }
-                        self.schedule_save(cx);
-                    }
-                }
-                Some(WorkspaceScope::Synced | WorkspaceScope::Development)
-                    if preferences.synced =>
-                {
-                    if !preferences.initialized {
-                        let mut migrated = self.settings.sidebar_pins(&profile_key).to_vec();
-                        spaces::retain_known_pins(&mut migrated, &known_chat_ids);
-                        migrated.truncate(zeron_proto::MAX_SIDEBAR_PINS);
-                        self.settings
-                            .sidebar_pinned_session_ids_by_profile
-                            .remove(&profile_key);
-                        self.schedule_save(cx);
-                        self.replace_sidebar_pins(profile_key, migrated, cx);
-                    } else {
-                        if self
-                            .settings
-                            .sidebar_pinned_session_ids_by_profile
-                            .remove(&profile_key)
-                            .is_some()
-                        {
-                            self.schedule_save(cx);
-                        }
-                        let mut retained = preferences.pinned_session_ids;
-                        if spaces::retain_known_pins(&mut retained, &known_chat_ids) {
-                            self.replace_sidebar_pins(profile_key, retained, cx);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.reconcile_sidebar_pins(cx);
         if !self.pinned_session_drag_is_valid(cx) {
             self.cancel_pinned_session_drag(cx);
         }
@@ -4217,6 +4155,94 @@ impl Shell {
 
     fn archive_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.set_chat_archived(chat_id, true, cx);
+    }
+
+    fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
+        let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
+            return;
+        };
+        let state = self.state.read(cx);
+        if state.workspace_scope == Some(WorkspaceScope::Local) {
+            if !state.chats_synced {
+                return;
+            }
+            let known = state.chats.iter().map(|chat| chat.id.clone()).collect();
+            let changed = self
+                .settings
+                .sidebar_pinned_session_ids_by_profile
+                .get_mut(&profile_key)
+                .is_some_and(|pins| spaces::retain_known_pins(pins, &known));
+            if changed {
+                self.schedule_save(cx);
+            }
+            return;
+        }
+        // Never compare independent UI streams to infer remote deletions.
+        // Migration filters against the authoritative registry in the engine.
+        if !state.sidebar_preferences.synced {
+            return;
+        }
+        let Some(source) = self
+            .settings
+            .sidebar_pinned_session_ids_by_profile
+            .get(&profile_key)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
+        if self
+            .sidebar_pin_migration
+            .as_ref()
+            .is_some_and(|(key, previous)| key == &profile_key && previous.same_connection(&engine))
+        {
+            return;
+        }
+        self.sidebar_pin_migration = Some((profile_key.clone(), engine.clone()));
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::MUTATE,
+                    serde_json::json!({
+                        "op": "migrateSidebarPinnedSessions", "pinnedSessionIds": source,
+                    }),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                if result.is_ok() {
+                    // A profile switch or newer local edit must not discard a
+                    // different migration source while the RPC is in flight.
+                    if shell
+                        .settings
+                        .sidebar_pinned_session_ids_by_profile
+                        .get(&profile_key)
+                        == Some(&source)
+                    {
+                        shell
+                            .settings
+                            .sidebar_pinned_session_ids_by_profile
+                            .remove(&profile_key);
+                        shell.schedule_save(cx);
+                    }
+                } else if shell.active_sidebar_pin_profile_key(cx).as_ref() == Some(&profile_key)
+                    && shell
+                        .state
+                        .read(cx)
+                        .engine()
+                        .is_some_and(|current| current.same_connection(&engine))
+                {
+                    shell.sidebar_notice = Some(
+                        "Couldn't migrate pins. Local pins were kept; reconnect to retry.".into(),
+                    );
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn active_sidebar_pin_profile_key(&self, cx: &App) -> Option<String> {

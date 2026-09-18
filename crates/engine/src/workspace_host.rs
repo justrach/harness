@@ -654,6 +654,18 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_sidebar_pinned_sessions(pinned_session_ids))?)
     }
 
+    /// Import legacy desktop pins without replacing an existing remote row.
+    /// The source remains on the desktop until this operation is acknowledged.
+    pub fn migrate_sidebar_pinned_sessions(&self, pins: &[String]) -> Result<(), EngineError> {
+        let synced = self.sync_status().is_some_and(|status| status.synced);
+        if !synced {
+            return Err(EngineError::Other("Pins are still syncing".into()));
+        }
+        self.mutate(|doc| doc.reconcile_sidebar_pins(synced, Some(pins)))?;
+        self.inner.persist_snapshot()?;
+        Ok(())
+    }
+
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
 
     pub fn watch_chats(&self) -> watch::Receiver<Vec<Chat>> {
@@ -1134,7 +1146,18 @@ impl WorkspaceHostInner {
             .as_ref()
             .is_some_and(|room| room.stats().synced);
         let snapshot = {
-            let doc = lock(&self.reg);
+            let mut doc = lock(&self.reg);
+            match doc.reconcile_sidebar_pins(registry_synced, None) {
+                Ok(true) => {
+                    // Persist and transmit cleanup just like a user mutation.
+                    self.bump_changed();
+                    if let Some(room) = lock(&self.room).as_ref() {
+                        room.nudge();
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
+            }
             doc.read_all()
                 .map(|state| (state, doc.sidebar_preferences()))
         };
@@ -1274,17 +1297,19 @@ impl WorkspaceHostInner {
     }
 
     fn save_snapshot(&self) {
-        let bytes = lock(&self.reg).to_bytes();
-        match bytes {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot(REGISTRY_DOC_ID, &bytes) {
-                    tracing::warn!(error = %err, "registry snapshot save failed");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "registry snapshot export failed");
-            }
+        if let Err(error) = self.persist_snapshot() {
+            tracing::warn!(%error, "registry snapshot save failed");
         }
+    }
+
+    fn persist_snapshot(&self) -> Result<(), EngineError> {
+        // Keep export and disk write serialized: an older background snapshot
+        // must not overwrite an acknowledged migration's durable snapshot.
+        let doc = lock(&self.reg);
+        let bytes = doc.to_bytes()?;
+        self.store
+            .save_snapshot(REGISTRY_DOC_ID, &bytes)
+            .map_err(|error| EngineError::Other(format!("registry snapshot save failed: {error}")))
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.
@@ -1707,6 +1732,15 @@ mod tests {
         .unwrap();
         let mut preferences = host.watch_sidebar_preferences();
         assert!(!preferences.borrow().initialized);
+        assert!(
+            host.migrate_sidebar_pinned_sessions(&["remote".into()])
+                .is_err()
+        );
+        host.inner.publish();
+        assert!(
+            !preferences.borrow().initialized,
+            "an unsynced migration must not write an empty row"
+        );
 
         host.set_sidebar_pinned_sessions(&[]).unwrap();
         host.inner.publish();
