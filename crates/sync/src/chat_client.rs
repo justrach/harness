@@ -13,22 +13,17 @@
 //! transport pings prove nothing about the DO; room health is judged only by
 //! protocol frames with probe deadlines.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use futures::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::chat_frames::{self as wire, frame_type};
 use crate::types::{StaticUrl, SyncError, UrlProvider};
 
-const PING_INTERVAL: Duration = Duration::from_secs(15);
-const SILENCE_LEASE: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const HELLO_DEADLINE: Duration = Duration::from_secs(15);
 /// Backfill after hello must complete (rowsDone) within this deadline —
@@ -238,63 +233,21 @@ impl BinConnector for WsBinConnector {
                 .map_err(|e| SyncError::WebSocket(e.to_string()))?;
             let (out_tx, out_rx) = mpsc::channel(64);
             let (in_tx, in_rx) = mpsc::channel(64);
-            tokio::spawn(pump(ws, out_rx, in_tx));
+            tokio::spawn(crate::socket::pump(
+                ws,
+                out_rx,
+                in_tx,
+                WsMessage::Binary,
+                |frame| match frame {
+                    WsMessage::Binary(bytes) => Some(bytes),
+                    _ => None,
+                },
+            ));
             Ok(BinPipe {
                 tx: out_tx,
                 rx: in_rx,
             })
         })
-    }
-}
-
-/// Shuttle binary frames between the WebSocket and the actor's channels; the
-/// text `"ping"` keepalive rides the same socket (runtime-answered pair).
-async fn pump(
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    mut out_rx: mpsc::Receiver<Vec<u8>>,
-    in_tx: mpsc::Sender<Vec<u8>>,
-) {
-    let (mut sink, mut stream) = ws.split();
-    let mut ping = tokio::time::interval(PING_INTERVAL);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await;
-    let mut last_rx = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            frame = out_rx.recv() => match frame {
-                Some(bytes) => {
-                    if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
-                        break;
-                    }
-                }
-                None => {
-                    let _ = sink.send(WsMessage::Close(None)).await;
-                    break;
-                }
-            },
-            frame = stream.next() => match frame {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    last_rx = tokio::time::Instant::now();
-                    if in_tx.send(bytes.to_vec()).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(_)) => {
-                    // Text pong / control frames: transport liveness only.
-                    last_rx = tokio::time::Instant::now();
-                }
-                Some(Err(_)) | None => break,
-            },
-            _ = ping.tick() => {
-                if sink.send(WsMessage::Text("ping".into())).await.is_err() {
-                    break;
-                }
-            }
-            _ = tokio::time::sleep_until(last_rx + SILENCE_LEASE) => {
-                tracing::warn!("chat2 socket silent past lease; treating as dead");
-                break;
-            }
-        }
     }
 }
 
@@ -1092,7 +1045,8 @@ impl Actor {
         // so a message written on a dead network flushes ~2 RTTs after the
         // socket lands instead of waiting out a whole checkpoint download +
         // backfill ("typing works even when load doesn't").
-        if !self.push_pending(&mut pipe).await {
+        let mut in_flight = HashSet::new();
+        if !self.push_pending(&mut pipe, &mut in_flight).await {
             return SessionEnd::Reconnect;
         }
         let mut buffered: Vec<wire::WireFrame> = Vec::new();
@@ -1245,7 +1199,7 @@ impl Actor {
                     }
                 }
                 _ = self.nudge_rx.recv() => {
-                    if !self.push_pending(&mut pipe).await {
+                    if !self.push_pending(&mut pipe, &mut in_flight).await {
                         return SessionEnd::Reconnect;
                     }
                 }
@@ -1554,8 +1508,23 @@ impl Actor {
         pipe.tx.send(req).await.is_ok()
     }
 
-    async fn push_pending(&self, pipe: &mut BinPipe) -> bool {
-        let batches: Vec<PendingPush> = lock(&self.shared).pending.iter().cloned().collect();
+    async fn push_pending(&self, pipe: &mut BinPipe, in_flight: &mut HashSet<String>) -> bool {
+        let batches: Vec<PendingPush> = {
+            let shared = lock(&self.shared);
+            // New edits must not retransmit every slow-to-ack batch. Keep
+            // this set local to the session so a reconnect still replays
+            // the durable outbox with exactly the same batch IDs.
+            in_flight.retain(|id| shared.pending.iter().any(|p| &p.batch_id == id));
+            if shared.quota_blocked {
+                return true;
+            } // push_head owns quota retries
+            shared
+                .pending
+                .iter()
+                .filter(|p| !in_flight.contains(&p.batch_id))
+                .cloned()
+                .collect()
+        };
         for push in batches {
             if !ensure_durable(&self.shared, self.sink.as_ref(), &push) {
                 return false;
@@ -1570,6 +1539,7 @@ impl Actor {
             if pipe.tx.send(frame).await.is_err() {
                 return false;
             }
+            in_flight.insert(push.batch_id);
         }
         true
     }
