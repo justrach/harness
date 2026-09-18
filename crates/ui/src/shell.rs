@@ -6163,6 +6163,7 @@ impl Shell {
         };
         div()
             .id(SharedString::from(row_id.clone()))
+            .group("sidebar-session-row")
             .debug_selector({
                 let row_id = row_id.clone();
                 move || row_id.clone()

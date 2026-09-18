@@ -57,3 +57,9 @@ static favicon SVG/PNG/ICO locations. Common web apps rank first, then roots sor
 lexically. Local lookup caps app roots at 64; remote lookup uses two file-index
 searches capped at 200 results each, excludes ignored files, and accepts only the
 same supported layouts. The existing 30-second lookup timeout still applies.
+
+Project icons show the project name after hovering for 350ms. On row hover,
+monograms strengthen their tint to 24% and use a brighter dark-mode letter
+(or a darker light-mode letter) for contrast against the row highlight.
+Latest validation: all 42 sidebar tests passed; native tooltip, hover, drag, and
+filter-focus checks passed.

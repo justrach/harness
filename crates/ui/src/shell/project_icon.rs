@@ -170,6 +170,12 @@ fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
     } else {
         light
     }));
+    let mut hover_text = tone;
+    hover_text.l = if theme.appearance.is_dark() {
+        (tone.l + 0.12).min(0.95)
+    } else {
+        (tone.l - 0.10).max(0.15)
+    };
     let tile = div()
         .size_full()
         .flex()
@@ -178,6 +184,9 @@ fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
         .rounded(px(3.0))
         .bg(tone.opacity(0.08))
         .text_color(tone.opacity(0.85))
+        .group_hover("sidebar-session-row", move |style| {
+            style.bg(tone.opacity(0.24)).text_color(hover_text)
+        })
         .font_family(theme.font_mono.clone())
         .font_weight(gpui::FontWeight::MEDIUM)
         .child(
@@ -310,6 +319,18 @@ impl Render for ProjectIcon {
     }
 }
 
+fn project_icon_frame(chat_id: &str, name: &str, size: f32, child: impl IntoElement) -> AnyElement {
+    let name: SharedString = name.to_owned().into();
+    div()
+        .id(SharedString::from(format!("project-icon-{chat_id}")))
+        .size(px(size))
+        .flex_none()
+        .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: name.clone() }).into())
+        .tooltip_show_delay(Duration::from_millis(350))
+        .child(child)
+        .into_any_element()
+}
+
 impl Shell {
     pub(super) fn render_project_icon(
         &self,
@@ -341,11 +362,7 @@ impl Shell {
             checkout_id: space.checkout_id.clone(),
         });
         let Some(context) = context else {
-            return div()
-                .size(px(size))
-                .flex_none()
-                .child(monogram(&name, &seed, Theme::of(cx)))
-                .into_any_element();
+            return project_icon_frame(chat_id, &name, size, monogram(&name, &seed, Theme::of(cx)));
         };
         let key = format!(
             "{:?}:{:?}:{}:{:?}:{}",
@@ -358,23 +375,17 @@ impl Shell {
         let engine = state.engine().cloned();
         // Don't cache a remote miss before a connection exists.
         if context.target_device_id.is_some() && engine.is_none() {
-            return div()
-                .size(px(size))
-                .flex_none()
-                .child(monogram(&name, &seed, Theme::of(cx)))
-                .into_any_element();
+            return project_icon_frame(chat_id, &name, size, monogram(&name, &seed, Theme::of(cx)));
         }
         let mut cache = self.project_icons.borrow_mut();
         cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
         let entity = cache
             .entry(key)
-            .or_insert_with(|| cx.new(|cx| ProjectIcon::new(name, seed, context, engine, cx)))
+            .or_insert_with(|| {
+                cx.new(|cx| ProjectIcon::new(name.clone(), seed, context, engine, cx))
+            })
             .clone();
-        div()
-            .size(px(size))
-            .flex_none()
-            .child(entity)
-            .into_any_element()
+        project_icon_frame(chat_id, &name, size, entity)
     }
 }
 
