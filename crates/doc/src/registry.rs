@@ -713,6 +713,11 @@ impl RegistryDoc {
             ("lastSeenAt", opt_ms(device.last_seen_at)),
             ("createdAt", opt_ms(device.created_at)),
             ("version", opt_str(device.version.as_deref())),
+            (
+                "cursorSdkVersion",
+                opt_str(device.cursor_sdk_version.as_deref()),
+            ),
+            ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
             ("capabilities", json!(device.capabilities)),
         ]);
         self.write(KIND_DEVICES, &device.id.clone(), OpKind::Upsert, set);
@@ -1221,6 +1226,11 @@ impl RegistryDoc {
                     ("lastSeenAt", opt_ms(device.last_seen_at)),
                     ("createdAt", opt_ms(device.created_at)),
                     ("version", opt_str(device.version.as_deref())),
+                    (
+                        "cursorSdkVersion",
+                        opt_str(device.cursor_sdk_version.as_deref()),
+                    ),
+                    ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
                     ("capabilities", json!(device.capabilities)),
                 ]),
             );

@@ -23,6 +23,9 @@ pub struct Device {
     /// glance (Devices page). Optional so pre-existing docs stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Cursor SDK selected by the owning engine; absent on older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_sdk_version: Option<String>,
     /// Protocol/document features supported by the engine currently owning
     /// this device row. Missing on older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

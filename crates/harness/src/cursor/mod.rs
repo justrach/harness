@@ -109,6 +109,15 @@ impl Default for CursorHarness {
 }
 
 impl CursorHarness {
+    /// The SDK selected by this engine, not the viewer or installed native CLI.
+    pub fn sdk_version() -> &'static str {
+        if std::env::var_os("CURSOR_SDK_SHIM_EXECUTABLE").is_some() {
+            "custom override (unverified)"
+        } else {
+            CURSOR_SDK_PIN.strip_prefix("@cursor/sdk@").unwrap()
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

@@ -132,3 +132,33 @@ cargo run -p zeron-harness --example cursor_stability_probe -- models 1000
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- sessions 6
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=grok-4.6 cargo run -p zeron-harness --example cursor_stability_probe -- parked 6
 ```
+
+## Ongoing safeguards
+
+- `cursor-sdk-update.yml` checks npm's stable SDK version daily and on manual
+  dispatch. It opens or updates a dedicated dependency PR, never downgrades or
+  auto-merges, and explicitly dispatches compatibility checks on that branch.
+  Explicit dispatch matters: PRs created with `GITHUB_TOKEN` do not trigger
+  ordinary PR workflows. The repository permits Actions to create PRs.
+- `cursor-compatibility.yml` runs the complete harness suite on relevant PRs.
+  The release workflow also invokes it and requires success before publication.
+- The credential-free SDK auth contract test installs the **exact engine pin**,
+  exposes its actual transport interceptor from a disposable bundle copy, and
+  substitutes network/clock inputs. It checks token expiry, 100 concurrent
+  callers sharing a refresh, stream invalidation without replay, transient
+  exchange recovery, and rejection of invalid credentials without a retry storm.
+  Instrumentation intentionally fails if the private bundle layout changes;
+  an SDK update then requires review instead of silently skipping the test.
+  No real credentials or authenticated service are used by this CI test.
+- Existing harness tests cover parked sessions, steering bursts, cancellation,
+  crash recovery, large catalogs, and last-good model retention. Authenticated
+  service tests remain opt-in: the repository has no Cursor CI credential.
+- `engine.info` and the synced device row report the owning engine's selected
+  Cursor SDK. Settings → Devices displays it for local and remote devices.
+  Older engines report unknown; custom shim overrides are marked unverified.
+  Synced SDK metadata is tied to the app version so an older writer changing
+  its version cannot leave a newer SDK version falsely displayed.
+
+These workflows become active when this PR lands on the default branch.
+The version display describes the engine's configured SDK, not the native CLI
+or an assertion that Cursor has already been installed/used on that device.
