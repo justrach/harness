@@ -4388,6 +4388,13 @@ impl Shell {
         let shown = self.archived_shown.max(INITIAL);
         let visible_count = total.min(shown);
         let has_more = total > shown;
+        // "Show more" matches the row slot: compact rows are 29px, so the
+        // button shrinks with them instead of towering over the list.
+        let more_height = if self.settings.sidebar_compact {
+            super::sidebar_row_height(true, true, false, false)
+        } else {
+            36.0
+        };
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
             + rows
                 .iter()
@@ -4403,7 +4410,7 @@ impl Shell {
                 .sum::<f32>()
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
             + if has_more {
-                36.0 + SIDEBAR_LIST_GAP
+                more_height + SIDEBAR_LIST_GAP
             } else {
                 0.0
             };
@@ -4478,7 +4485,7 @@ impl Shell {
                         // Sits outside the rows' gapped column — match the
                         // list's 2px row gap or it fuses with the last row.
                         .mt(px(2.0))
-                        .h(px(36.0))
+                        .h(px(more_height))
                         .flex()
                         .flex_row()
                         .items_center()
