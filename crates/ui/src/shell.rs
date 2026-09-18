@@ -5991,24 +5991,24 @@ impl Shell {
                 .items_center()
                 .gap(px(4.0))
                 .h(px(18.0))
-                // The pill's padding bleeds right into the row's padding so
-                // its TEXT right-aligns exactly where the status word/time
-                // sits — the swap moves pixels around the label, not it.
-                // 4px: what's left of the row's 8px padding then equals the
-                // 4px of air above the pill (18px tall on the 14px line,
-                // 6px row padding minus the 2px overflow).
-                .px(px(4.0))
-                .mr(px(-4.0))
-                .rounded(px(5.0))
-                .bg(crate::theme::wash(0.10))
-                .hover(|s| s.bg(crate::theme::wash(0.18)))
+                .when(!compact, |el| {
+                    el.px(px(4.0))
+                        .mr(px(-4.0))
+                        .rounded(px(5.0))
+                        .bg(crate::theme::wash(0.10))
+                        .hover(|s| s.bg(crate::theme::wash(0.18)))
+                })
                 .child(
                     icon(if archived {
                         icons::ARCHIVE_UP_MINIMALISTIC
                     } else {
                         icons::ARCHIVE_MINIMALISTIC
                     })
-                    .size(px(11.0))
+                    .size(px(if compact {
+                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
+                    } else {
+                        11.0
+                    }))
                     .flex_none()
                     .text_color(theme.text_muted),
                 )

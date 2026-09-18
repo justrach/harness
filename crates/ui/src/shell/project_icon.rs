@@ -54,7 +54,36 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
     None
 }
 
+fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
+    // FNV-1a is stable across processes; use neutral theme ink at varied opacities.
+    let hash = seed.bytes().fold(2166136261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16777619)
+    });
+    let letter = name
+        .trim()
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+    let tile = div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .bg(theme.text.opacity(0.12 + (hash % 6) as f32 * 0.025))
+        .text_color(theme.text)
+        .text_size(crate::typography::ui_rems(9.0))
+        .line_height(px(13.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(letter);
+    crate::frost::frosted(3.0, crate::frost::MENU_BLUR, tile).into_any_element()
+}
+
 pub(super) struct ProjectIcon {
+    name: String,
+    seed: String,
     media: Option<MediaImage>,
     refreshed: std::time::Instant,
     _task: Task<()>,
@@ -62,6 +91,8 @@ pub(super) struct ProjectIcon {
 
 impl ProjectIcon {
     fn new(
+        name: String,
+        seed: String,
         context: FilesRequestContext,
         engine: Option<crate::state::EngineHandle>,
         cx: &mut Context<Self>,
@@ -116,6 +147,8 @@ impl ProjectIcon {
             });
         });
         Self {
+            name,
+            seed,
             media: None,
             refreshed: std::time::Instant::now(),
             _task: task,
@@ -130,10 +163,7 @@ impl Render for ProjectIcon {
                 .size_full()
                 .object_fit(gpui::ObjectFit::Contain)
                 .into_any_element(),
-            None => icon(icons::PROJECT_DEFAULT)
-                .size_full()
-                .text_color(Theme::of(cx).text_muted)
-                .into_any_element(),
+            None => monogram(&self.name, &self.seed, Theme::of(cx)),
         }
     }
 }
@@ -146,50 +176,57 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let state = self.state.read(cx);
-        let context = state
+        let space = state
             .chats
             .iter()
             .find(|chat| chat.id == chat_id)
-            .and_then(|chat| state.space_for_chat(chat))
-            .map(|space| FilesRequestContext {
-                target: zeron_proto::WorkspaceTarget {
-                    chat_id: None,
-                    space_id: Some(space.id.clone()),
-                    checkout_path: None,
-                },
-                target_device_id: (state.local_device_id.as_deref() != Some(&space.device_id))
-                    .then(|| space.device_id.clone()),
-                cwd: space.path.clone(),
-                checkout_id: space.checkout_id.clone(),
-            });
+            .and_then(|chat| state.space_for_chat(chat));
+        let name = space
+            .map(|space| space.display_name().to_string())
+            .unwrap_or_else(|| "Home".into());
+        let seed = space
+            .map(|space| space.path.clone())
+            .unwrap_or_else(|| "home".into());
+        let context = space.map(|space| FilesRequestContext {
+            target: zeron_proto::WorkspaceTarget {
+                chat_id: None,
+                space_id: Some(space.id.clone()),
+                checkout_path: None,
+            },
+            target_device_id: (state.local_device_id.as_deref() != Some(&space.device_id))
+                .then(|| space.device_id.clone()),
+            cwd: space.path.clone(),
+            checkout_id: space.checkout_id.clone(),
+        });
         let Some(context) = context else {
-            return icon(icons::PROJECT_DEFAULT)
+            return div()
                 .size(px(size))
                 .flex_none()
-                .text_color(Theme::of(cx).text_muted)
+                .child(monogram(&name, &seed, Theme::of(cx)))
                 .into_any_element();
         };
         let key = format!(
-            "{:?}:{:?}:{}:{:?}",
+            "{:?}:{:?}:{}:{:?}:{}",
             self.active_sidebar_pin_profile_key(cx),
             context.target_device_id,
             context.cwd,
-            context.checkout_id
+            context.checkout_id,
+            name
         );
         let engine = state.engine().cloned();
         // Don't cache a remote miss before a connection exists.
         if context.target_device_id.is_some() && engine.is_none() {
-            return icon(icons::PROJECT_DEFAULT)
+            return div()
                 .size(px(size))
                 .flex_none()
-                .text_color(Theme::of(cx).text_muted)
+                .child(monogram(&name, &seed, Theme::of(cx)))
                 .into_any_element();
         }
         let mut cache = self.project_icons.borrow_mut();
         cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
         let entity = cache
             .entry(key)
-            .or_insert_with(|| cx.new(|cx| ProjectIcon::new(context, engine, cx)))
+            .or_insert_with(|| cx.new(|cx| ProjectIcon::new(name, seed, context, engine, cx)))
             .clone();
         div()
             .size(px(size))
