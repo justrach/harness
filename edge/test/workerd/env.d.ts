@@ -3,6 +3,8 @@
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     TEST_LOG: DurableObjectNamespace;
+    CHAT_ROOMS: DurableObjectNamespace;
     PREVIEW_ROOMS: DurableObjectNamespace;
+    REGISTRY_ROOMS: DurableObjectNamespace;
   }
 }

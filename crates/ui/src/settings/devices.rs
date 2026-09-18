@@ -155,7 +155,7 @@ impl DevicesPage {
         viewport: gpui::Size<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let dialog = self.rename.as_ref()?;
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)
@@ -303,6 +303,17 @@ impl Render for DevicesPage {
                             .into_any_element(),
                     );
                 }
+                meta.push(
+                    div()
+                        .child(SharedString::from(format!(
+                            "Cursor SDK {}",
+                            device
+                                .cursor_sdk_version
+                                .as_deref()
+                                .unwrap_or("unknown (older engine)")
+                        )))
+                        .into_any_element(),
+                );
                 if !online {
                     meta.push(
                         div()

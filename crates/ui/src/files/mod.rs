@@ -605,6 +605,7 @@ impl FilesSurface {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let theme = &theme.for_popup();
         let menu = self.editor_context_menu.get()?;
         let editor = menu.editor.clone();
         let position = menu.position;

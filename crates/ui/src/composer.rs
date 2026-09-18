@@ -388,18 +388,14 @@ impl FlipMorph {
 // expanded, a bottom-justified row when compact) and only the TEXT glides
 // with the sweeping top edge. The helpers below are the pure math.
 
-/// Send/attach center sits 27px above the pill's outer bottom in expanded
-/// mode (`pb-2.5` 10 + half the 32px content zone + 1px hairline) but 24.5px
-/// in compact (centered in the 47px row) — an inherent 2.5px delta between
-/// the two SOURCE geometries. The morph glides it instead of snapping.
-pub const CLUSTER_Y_DELTA: f32 = 2.5;
+/// Send/attach center sits 29px above the expanded pill's bottom (12px
+/// padding + half the 32px control zone + 1px border), versus 24.5px in
+/// compact. The morph glides this optical adjustment instead of snapping.
+pub const CLUSTER_Y_DELTA: f32 = 4.5;
 
-/// The cluster's INTERNAL geometry is mode-independent. Reasoning/service
-/// tier and attachment form one utility group; Send is a distinct primary
-/// action. Both layouts reuse these distances so the flip cannot create a
-/// horizontal compression pulse.
-/// Only the wrapper's right inset differs: `pr-2` (8) compact vs `px-3` (12)
-/// expanded — a whole-cluster 4px shift that glides with the morph.
+/// Send's right inset differs between compact (8px) and expanded (12px).
+/// Glide this four-pixel shift during the morph. Attachment stays on the
+/// left; the model picker fades between the left and right groups.
 pub const CLUSTER_X_DELTA: f32 = 4.0;
 /// Optical join between the picker group and the paperclip. This is tighter
 /// than the structural spacing ladder because the narrow paperclip glyph
@@ -408,9 +404,19 @@ pub const ACTION_UTILITY_GAP: f32 = 2.0;
 /// Structural separation between utility actions and the primary Send action.
 pub const ACTION_PRIMARY_GAP: f32 = Theme::SPACE_SM;
 
+/// Fade out at the old endpoint, relocate while invisible, then fade in at
+/// the new endpoint. Only a six-pixel nudge is visible; a long label never
+/// sweeps across the prompt. Compact amount is reversible with the shared clock.
+fn model_handoff(compact: f32) -> (f32, f32, f32) {
+    let compact = compact.clamp(0.0, 1.0);
+    let side = if compact < 0.5 { 0.0 } else { 1.0 };
+    let opacity = ((compact - 0.5).abs() - 0.06).max(0.0) / 0.44;
+    let drift = (1.0 - opacity) * if side == 0.0 { 6.0 } else { -6.0 };
+    (side, opacity, drift)
+}
+
 /// The right inset for the in-flight morph: eases from the OLD mode's resting
-/// inset to the committed mode's (compact 8 ↔ expanded 12) — pairwise button
-/// distances stay constant; the cluster glides as one.
+/// inset to the committed mode's (compact 8 ↔ expanded 12).
 pub fn morph_cluster_inset(expanded: bool, progress: f32) -> f32 {
     let (from, to) = if expanded {
         (8.0, 8.0 + CLUSTER_X_DELTA)
@@ -437,10 +443,8 @@ pub fn collapse_text_glide(from: f32, progress: f32) -> f32 {
 }
 
 /// The decaying [`CLUSTER_Y_DELTA`] offset for the in-flight morph.
-/// The whole control cluster — chips AND attach/send — rides the stationary
-/// bottom anchor at FULL alpha throughout (round-9 follow-up: any fade on the
-/// picker chips read as flicker; their screen position is near-stationary
-/// across the flip, so nothing needs to be hidden).
+/// Controls share this bottom anchor; the model's horizontal fade is applied
+/// independently so its endpoint matches Attachment and Send.
 pub fn morph_cluster_dy(progress: f32) -> f32 {
     CLUSTER_Y_DELTA * (1.0 - progress)
 }
@@ -3732,6 +3736,14 @@ impl gpui::Element for ComposerTextElement {
 impl Render for ComposerInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
+        let popup_theme = theme.for_popup();
+        let theme = if self.key_context == "PaletteSearch"
+            || self.accessibility_role == gpui::Role::SearchInput
+        {
+            &popup_theme
+        } else {
+            theme
+        };
         let text_color = if self.content.is_empty() {
             theme.text_faint
         } else {
@@ -4112,6 +4124,10 @@ pub struct Composer {
     /// Pill height actually rendered last frame — a committed flip morphs
     /// from here, so mid-flight reversals hand off without a jump.
     last_rendered_height: f32,
+    model_handoff_position: f32,
+    model_handoff_from: f32,
+    model_handoff_morph: Option<FlipMorph>,
+    model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
     /// The shared clock owns this frame's height, including its final step.
     dock_height_changed: bool,
@@ -4310,6 +4326,10 @@ impl Composer {
             settle_task: None,
             flip_morph: None,
             last_rendered_height: 0.0,
+            model_handoff_position: 1.0,
+            model_handoff_from: 1.0,
+            model_handoff_morph: None,
+            model_bounds: Default::default(),
             dock_frame: None,
             dock_height_changed: false,
             dock_clearance_correction: 0.0,
@@ -5194,6 +5214,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let theme = &theme.for_popup();
         let token = self.mention.token.as_ref()?;
         let mut card = crate::popover::popover_card(theme)
             .w_full()
@@ -5311,6 +5332,7 @@ impl Composer {
                             .max_h(px(312.0))
                             .flex()
                             .flex_col()
+                            .gap(px(crate::popover::MENU_GAP))
                             .overflow_y_scroll()
                             .track_scroll(&self.mention_scroll)
                             .children(rows),
@@ -5507,6 +5529,7 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let theme = &theme.for_popup();
         // Only while a slash token is active.
         self.slash.token.as_ref()?;
         let commands = self
@@ -5628,6 +5651,7 @@ impl Composer {
                             .max_h(px(312.0))
                             .flex()
                             .flex_col()
+                            .gap(px(crate::popover::MENU_GAP))
                             .overflow_y_scroll()
                             .track_scroll(&self.slash_scroll)
                             .children(rows),
@@ -5893,7 +5917,12 @@ impl Composer {
             self.staged_comments(cx).len(),
         );
         match self.button_mode(cx) {
-            SendButtonMode::Stop => self.interrupt_selected(cx),
+            // Enter never stops a run: Stop mode implies an empty composer,
+            // so a stray extra Enter right after sending landed an interrupt
+            // on the just-dispatched prompt and the agent ate it silently
+            // (issue #406). Stop stays on the button — and on Esc when
+            // escape_stops_active_agent is enabled.
+            SendButtonMode::Stop => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
             SendButtonMode::Send => self.send(text, false, cx),
@@ -7535,9 +7564,8 @@ impl Render for Composer {
         let send_button = self.render_send_button(mode, cx);
         // Attach button — opens the native image picker (the original's hidden
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
-        // the same strip. The parent action cluster owns the spacing: adding a
-        // second margin here made the picker→attachment gap twice as wide as
-        // attachment→send and made the paperclip look detached.
+        // the same strip. The leading utility group owns the spacing between
+        // this button and the model picker.
         let attach = div()
             .id("composer-attach")
             .size(px(28.0))
@@ -7605,18 +7633,73 @@ impl Render for Composer {
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
         // (round-9 follow-up: the send/attach/chips must not ride the height,
-        // and none of them fade — the full cluster stays visible throughout).
+        // while the model picker fades between its two horizontal anchors).
         let cluster_dy = morph_cluster_dy(layout_morph_t);
+        // Share the height/route timeline instead of starting an independent
+        // animation. Reversals continue from the current handoff phase.
+        if self.model_handoff_morph != self.flip_morph {
+            self.model_handoff_from = self.model_handoff_position;
+            self.model_handoff_morph = self.flip_morph;
+        }
+        let compact_target = if expanded { 0.0 } else { 1.0 };
+        self.model_handoff_position =
+            if self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded {
+                dock_amount
+            } else {
+                self.flip_morph.map_or(compact_target, |morph| {
+                    motion::lerp(
+                        self.model_handoff_from,
+                        compact_target,
+                        motion::EASE_IN_OUT.eval(morph.raw(now_ms)),
+                    )
+                })
+            };
+        let surface_width = self
+            .surface_bounds
+            .get()
+            .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
+                f32::from(bounds.size.width)
+            });
+        let model_travel = (surface_width
+            - PILL_BORDER_V
+            - 12.0
+            - 28.0
+            - ACTION_UTILITY_GAP
+            - self
+                .model_bounds
+                .get()
+                .map_or(0.0, |bounds| f32::from(bounds.size.width))
+            - ACTION_PRIMARY_GAP
+            - 28.0
+            - morph_cluster_inset(expanded, layout_morph_t))
+        .max(0.0);
+        let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
+        let model_offset = (model_side - compact_target) * model_travel + model_drift;
+        let measured_model_bounds = self.model_bounds.clone();
+        let model_picker = div()
+            .min_w_0()
+            .max_w(px(surface_width * 0.45))
+            .relative()
+            .left(px(model_offset))
+            .opacity(model_opacity)
+            .child(self.pickers.clone())
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measured_model_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         let body = if expanded {
             // Expanded: textarea on top (`px-4 pb-1 pt-4`), actions row
-            // (`px-3 pb-2.5 pt-1`, h-8 chips → 46px) ABSOLUTE at the pill's
+            // (12px bottom + 2px top, 32px chips → 46px) ABSOLUTE at the pill's
             // stationary bottom — constant screen-y through the morph, with
-            // the 2.5px compact↔expanded centering delta gliding out. The
+            // the 4.5px compact↔expanded centering delta gliding out. The
             // text viewport follows the animated height so it cannot paint
             // over the controls. Its width stays fixed (no tween rewraps);
-            // top padding eases 12→16. The whole control cluster stays at
-            // full alpha — chips,
-            // attach and send are all (near-)stationary on the bottom anchor.
+            // top padding eases 12→16. Attachment and Send stay on the bottom
+            // anchor while the model chip fades between its horizontal slots.
             pill.h(px(pill_height))
                 .overflow_hidden()
                 .relative()
@@ -7651,8 +7734,8 @@ impl Render for Composer {
                         .gap(px(ACTION_PRIMARY_GAP))
                         .pl(px(12.0))
                         .pr(px(morph_cluster_inset(true, layout_morph_t)))
-                        .pt(px(4.0))
-                        .pb(px(10.0))
+                        .pt(px(2.0))
+                        .pb(px(12.0))
                         .child(
                             div()
                                 .flex_1()
@@ -7660,22 +7743,20 @@ impl Render for Composer {
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .justify_end()
                                 .gap(px(ACTION_UTILITY_GAP))
-                                .child(self.pickers.clone())
-                                .child(attach),
+                                .child(attach)
+                                .child(model_picker),
                         )
                         .child(send_button),
                 )
         } else {
-            // Compact pill: input and the actions cluster on one 47px line
-            // (`py-3 pl-4 pr-2` textarea, `gap-2 py-1.5 pl-1 pr-2` cluster;
-            // the 22.75px line centers to the same 12px inset as `py-3`).
+            // Compact pill: attachment on the left, input in the middle,
+            // then model and Send on the right, all on one 47px line.
             // The row is BOTTOM-justified: during the collapse morph the pill
             // top sweeps down over a stationary row, the text walks down from
             // its expanded resting place via a decaying relative offset, and
-            // the whole inline cluster (chips + attach/send) holds its spot at
-            // full alpha (2.5px centering delta gliding in).
+            // attachment/Send hold their spots (4.5px centering delta gliding
+            // in), with the model handoff sharing that same timeline.
             let text_glide = if self.dock_frame.is_some_and(|frame| frame.active) {
                 collapse_text_glide(dock_height(0.0), dock_amount)
             } else {
@@ -7700,37 +7781,36 @@ impl Render for Composer {
                         .items_center()
                         .child(
                             div()
+                                .flex_none()
+                                .pl(px(12.0))
+                                .relative()
+                                .top(px(-cluster_dy))
+                                .child(attach),
+                        )
+                        .child(
+                            div()
                                 .flex_1()
                                 .min_w_0()
-                                .pl(px(16.0))
-                                .pr(px(8.0))
+                                .px(px(8.0))
                                 .relative()
                                 .top(px(-text_glide))
                                 .child(self.render_input_with_completion()),
                         )
                         .child(
                             div()
+                                .min_w_0()
+                                .max_w(px(surface_width * 0.45))
+                                .relative()
+                                .top(px(-cluster_dy))
+                                .child(model_picker),
+                        )
+                        .child(
+                            div()
                                 .flex_none()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                // Same utility/primary grouping as expanded;
-                                // the right inset alone glides 12→8.
-                                .gap(px(ACTION_PRIMARY_GAP))
-                                .pl(px(4.0))
+                                .pl(px(ACTION_PRIMARY_GAP))
                                 .pr(px(morph_cluster_inset(false, layout_morph_t)))
                                 .relative()
                                 .top(px(-cluster_dy))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(ACTION_UTILITY_GAP))
-                                        .child(self.pickers.clone())
-                                        .child(attach),
-                                )
                                 .child(send_button),
                         ),
                 )
@@ -7860,9 +7940,15 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
-                                .child(div().flex_none().pr(px(10.0)).child(
-                                    crate::context_usage::render(usage, self.state.clone(), &theme),
-                                )),
+                                .children(crate::context_usage::has_window(usage).then(|| {
+                                    div().flex_none().pr(px(10.0)).child(
+                                        crate::context_usage::render(
+                                            usage,
+                                            self.state.clone(),
+                                            &theme,
+                                        ),
+                                    )
+                                })),
                         )
                     }),
             )
@@ -7968,11 +8054,34 @@ mod tests {
                     let origin = input.read(cx).last_bounds.unwrap().origin;
                     assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
                         "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
+                    let model = composer.model_bounds.get().unwrap();
+                    let left = surface.left() + px(1.0 + 12.0 + 28.0 + ACTION_UTILITY_GAP);
+                    let travel = surface.size.width - px(2.0 + 12.0 + 28.0 + ACTION_UTILITY_GAP
+                        + ACTION_PRIMARY_GAP + 28.0 + motion::lerp(12.0, 8.0, amount)) - model.size.width;
+                    let (side, _, drift) = model_handoff(amount);
+                    let expected_x = left + travel * side + px(drift);
+                    assert!((f32::from(model.left() - expected_x)).abs() <= 1.0,
+                        "model jumped: docked={docked}, amount={amount}, actual={model:?}, expected={expected_x:?}");
                     let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
                     assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
                     assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
                 }).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn model_handoff_hides_relocation_and_keeps_visible_motion_local() {
+        assert_eq!(model_handoff(0.0), (0.0, 1.0, 0.0));
+        assert_eq!(model_handoff(1.0), (1.0, 1.0, -0.0));
+        for amount in [0.44, 0.49, 0.50, 0.51, 0.56] {
+            assert!(model_handoff(amount).1 < 0.0001);
+        }
+        for step in 0..=100 {
+            let (side, opacity, drift) = model_handoff(step as f32 / 100.0);
+            assert!((0.0..=1.0).contains(&opacity));
+            assert!(drift.abs() <= 6.0);
+            assert!(side == 0.0 || side == 1.0);
         }
     }
 
@@ -8189,6 +8298,41 @@ mod tests {
                 "Pending edits must still block submission"
             );
         });
+    }
+
+    /// Issue #406: Enter submits — it must never stop a run. Stop mode only
+    /// exists on a live run with an EMPTY composer, so a habitual
+    /// double-Enter after sending interrupted the just-dispatched prompt
+    /// and the agent ate it silently. Keyboard stop is the Esc setting's
+    /// job; Enter on an empty composer is a no-op.
+    #[gpui::test]
+    fn enter_on_empty_composer_during_a_live_run_never_interrupts(cx: &mut gpui::TestAppContext) {
+        // RpcClient::new spawns its reader on tokio — give the test a reactor.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        // The client's write end: any RPC Enter dispatches lands here.
+        let (out, mut server_in) = tokio::sync::mpsc::channel::<String>(16);
+        let (_server_out, inbound) = tokio::sync::mpsc::channel::<String>(16);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zeron_rpc::RpcClient::new(out, inbound),
+            ));
+            state.selected_chat = Some("c".into());
+            // A send in flight reads as Working — the double-Enter window.
+            state.begin_pending_send("c", "m1", chrono::Utc::now());
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            assert_eq!(composer.button_mode(cx), SendButtonMode::Stop);
+            composer.on_submit(cx);
+            // interrupt_chat marks the chat before its RPC even flies.
+            assert!(!composer.interrupting.contains("c"));
+        });
+        // If Enter had dispatched an interrupt, the spawned call would have
+        // written its frame into the channel by the time the executor parks.
+        cx.run_until_parked();
+        assert!(server_in.try_recv().is_err());
     }
 
     /// The press intent is judged by eye everywhere except here: that a
@@ -9147,7 +9291,7 @@ mod tests {
         assert_eq!(collapse_text_glide(124.0, 1.0), 0.0);
         // At the commit instant the pieces start from the OLD mode's resting
         // geometry: text pad at the compact 12px inset, cluster displaced by
-        // exactly the 2.5px centering delta.
+        // exactly the 4.5px centering delta.
         assert_eq!(morph_text_pad(0.0), 12.0);
         assert_eq!(morph_cluster_dy(0.0), CLUSTER_Y_DELTA);
         // Collapse glide: starts where the expanded text sat (17px below the

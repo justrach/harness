@@ -918,7 +918,11 @@ impl Theme {
     /// scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+            && cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -926,6 +930,17 @@ impl Theme {
     /// theme, so forcing frost does not reintroduce Zeron's neutral hover.
     pub fn glass_hover(&self) -> Hsla {
         self.element_hover
+    }
+
+    /// Muted popup text is the theme foreground composited onto the glass.
+    /// Fixed opaque grays turn muddy over colorful or bright backgrounds.
+    pub fn for_popup(&self) -> Self {
+        let mut popup = self.clone();
+        if self.is_frost() {
+            popup.text_muted = self.text.opacity(0.64);
+            popup.text_faint = self.text.opacity(0.48);
+        }
+        popup
     }
 
     /// The theme-owned tint floating cards paint over their backdrop blur (see
@@ -2729,6 +2744,37 @@ mod tests {
         assert!((mid.l - 0.5).abs() < 1e-6 && (mid.a - 0.5).abs() < 1e-6);
         // Out-of-range t clamps.
         assert_eq!(mix(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn popup_foregrounds_keep_glass_and_solid_theme_surfaces_unchanged() {
+        for mut theme in [Theme::dark(), Theme::light()] {
+            theme.surface_treatment = SurfaceTreatment::Frosted;
+            let popup = theme.for_popup();
+            assert_eq!(popup.composer_sidebar_tint(), theme.composer_sidebar_tint());
+            assert_eq!(popup.surface_overlay, theme.surface_overlay);
+            assert_eq!(popup.text, theme.text);
+            for background in [
+                theme.bg,
+                hsla(0.60, 0.55, 0.35, 1.0),
+                hsla(0.57, 0.35, 0.82, 1.0),
+            ] {
+                let primary = painted_contrast(popup.text, background);
+                let secondary = painted_contrast(popup.text_muted, background);
+                let hint = painted_contrast(popup.text_faint, background);
+                assert!(
+                    primary > secondary && secondary > hint,
+                    "glass text hierarchy collapsed on {background:?}"
+                );
+                assert!(
+                    flatten(popup.text_muted, background) != popup.text_muted,
+                    "muted text must blend with the background"
+                );
+            }
+            theme.surface_treatment = SurfaceTreatment::Opaque;
+            assert_eq!(theme.for_popup().text_muted, theme.text_muted);
+            assert_eq!(theme.for_popup().text_faint, theme.text_faint);
+        }
     }
 
     #[test]

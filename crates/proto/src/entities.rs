@@ -8,6 +8,54 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HarnessId, ReasoningLevel, SandboxLevel};
 
+/// Admission limit for new pins. Concurrent offline additions may exceed it;
+/// existing pins remain visible, reorderable and removable without truncation.
+pub const MAX_SIDEBAR_PINS: usize = 200;
+
+/// Validate an optimistic projection without truncating concurrent overflow.
+pub fn validate_sidebar_pin_update(
+    current: &[String],
+    next: &[String],
+) -> Result<(), &'static str> {
+    let mut seen = std::collections::HashSet::new();
+    if next.iter().any(|id| id.is_empty() || !seen.insert(id)) {
+        return Err("Sidebar pins must be non-empty and unique");
+    }
+    if next.len() > MAX_SIDEBAR_PINS && next.iter().any(|id| !current.contains(id)) {
+        return Err("You can pin up to 200 sessions");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPreferences {
+    #[serde(default)]
+    pub pinned_session_ids: Vec<String>,
+}
+
+/// Watch payload for pins. `initialized` records known cached state, including
+/// an empty list; `synced` records receipt of an authoritative registry state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPreferencesState {
+    /// Monotonic within one engine attachment, not a cross-device order key.
+    /// Lets clients reject older watch frames after a mutation response.
+    #[serde(default)]
+    pub revision: u64,
+    pub synced: bool,
+    pub initialized: bool,
+    #[serde(default)]
+    pub pinned_session_ids: Vec<String>,
+}
+
+impl SidebarPreferencesState {
+    /// A cached initialized row remains editable offline. An unknown list does not.
+    pub fn can_edit(&self) -> bool {
+        self.synced || self.initialized
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
@@ -23,6 +71,9 @@ pub struct Device {
     /// glance (Devices page). Optional so pre-existing docs stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Cursor SDK selected by the owning engine; absent on older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_sdk_version: Option<String>,
     /// Protocol/document features supported by the engine currently owning
     /// this device row. Missing on older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -883,6 +934,10 @@ pub struct AgentLoginPoll {
     pub status: AgentLoginStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// a sign-in page that only became known after the start reply (the
+    /// agent had to install first); the app opens it once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
