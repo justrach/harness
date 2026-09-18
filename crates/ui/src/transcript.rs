@@ -5612,6 +5612,8 @@ impl Transcript {
                 .when(!sending, |el| {
                     el.child(
                         div()
+                            .relative()
+                            .top(px(1.0))
                             .text_color(theme.text_faint)
                             .child(SharedString::from(format_elapsed(elapsed_secs))),
                     )
