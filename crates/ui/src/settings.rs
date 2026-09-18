@@ -756,7 +756,7 @@ impl Default for UiSettings {
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
-            sidebar_compact: false,
+            sidebar_compact: true,
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
@@ -2166,11 +2166,11 @@ mod tests {
     #[test]
     fn sidebar_display_defaults_and_preferences_round_trip() {
         let settings: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(!settings.sidebar_compact);
+        assert!(settings.sidebar_compact);
         assert!(settings.sidebar_show_project_icon);
         assert!(settings.sidebar_show_project_label);
         let customized = UiSettings {
-            sidebar_compact: true,
+            sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_organization: SidebarOrganization::ByProject,

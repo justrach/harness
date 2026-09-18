@@ -40,7 +40,7 @@ remote pin conflicts, actual row-height hit testing, small pointer movements,
 project grouping/keyboard order, icon lookup priority, SVG/ICO decoding, and
 settings persistence. Native macOS and Windows interactions were not exercised.
 
-Validation: `cargo test -p zeron-ui --lib -- --test-threads=1` passed all 1,119
+Validation: `cargo test -p zeron-ui --lib -- --test-threads=1` passed all 1,121
 tests. The native fixture build, formatting checks, and `git diff --check` passed.
 
 Latest icon/order follow-up: all 40 sidebar regression tests passed; native screenshots
@@ -48,3 +48,12 @@ were refreshed with the Earth remote icon and harness-first ordering.
 
 The view-options popover opens to the right of the filter button and stays within
 the window bounds. Monogram letters use centered monospace text.
+
+Compact mode defaults on when no preference is saved; explicit detailed-mode
+preferences remain unchanged. Icon discovery keeps root-level artwork first,
+then checks web/frontend/client/site/website/app/desktop/docs and one-level apps,
+packages, services, and crates workspaces. It includes Next-style src/app and
+static favicon SVG/PNG/ICO locations. Common web apps rank first, then roots sort
+lexically. Local lookup caps app roots at 64; remote lookup uses two file-index
+searches capped at 200 results each, excludes ignored files, and accepts only the
+same supported layouts. The existing 30-second lookup timeout still applies.

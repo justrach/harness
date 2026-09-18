@@ -21,7 +21,91 @@ pub(super) const ICON_PATHS: &[&str] = &[
     "src-tauri/icons/icon.png",
     "assets/icon.png",
     "src/assets/icon.png",
+    "app/icon.svg",
+    "src/app/icon.svg",
+    "src/app/favicon.ico",
+    "static/favicon.svg",
+    "static/favicon.png",
+    "static/apple-touch-icon.png",
+    "public/icon.svg",
+    "public/logo.svg",
 ];
+
+const APP_NAMES: &[&str] = &[
+    "web", "frontend", "client", "site", "website", "app", "desktop", "docs",
+];
+const WORKSPACE_DIRS: &[&str] = &["apps", "packages", "services", "crates"];
+const MAX_APP_ROOTS: usize = 64;
+
+fn app_rank(root: &str) -> (usize, String) {
+    let name = root.rsplit('/').next().unwrap_or(root);
+    (
+        APP_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .unwrap_or(APP_NAMES.len()),
+        root.into(),
+    )
+}
+
+// Shared by remote search results and local discovery. Accept only known icon
+// locations directly in a common app root; never dependency/build tree matches.
+fn nested_icon_rank(path: &str) -> Option<(usize, String, usize)> {
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.iter().any(|part| {
+        part.is_empty()
+            || part.starts_with('.')
+            || *part == "node_modules"
+            || *part == "target"
+            || *part == "dist"
+    }) {
+        return None;
+    }
+    let count = if WORKSPACE_DIRS.contains(parts.first()?) {
+        2
+    } else if APP_NAMES.contains(parts.first()?) {
+        1
+    } else {
+        return None;
+    };
+    if parts.len() <= count {
+        return None;
+    }
+    let suffix = parts[count..].join("/");
+    let icon = ICON_PATHS
+        .iter()
+        .position(|candidate| *candidate == suffix)?;
+    let (rank, root) = app_rank(&parts[..count].join("/"));
+    Some((rank, root, icon))
+}
+
+fn local_icon_candidates(root: &std::path::Path) -> Vec<String> {
+    let mut roots: Vec<String> = APP_NAMES.iter().map(|name| name.to_string()).collect();
+    for container in WORKSPACE_DIRS {
+        if let Ok(entries) = std::fs::read_dir(root.join(container)) {
+            roots.extend(
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .filter_map(|entry| {
+                        let name = entry.file_name().into_string().ok()?;
+                        (!name.starts_with('.')
+                            && !["node_modules", "target", "dist"].contains(&name.as_str()))
+                        .then(|| format!("{container}/{name}"))
+                    }),
+            );
+        }
+    }
+    roots.sort_by_key(|root| app_rank(root));
+    roots.truncate(MAX_APP_ROOTS);
+    let mut paths: Vec<String> = ICON_PATHS.iter().map(|path| path.to_string()).collect();
+    paths.extend(
+        roots
+            .into_iter()
+            .flat_map(|root| ICON_PATHS.iter().map(move |path| format!("{root}/{path}"))),
+    );
+    paths
+}
 
 fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
     // A project can point at a subdirectory; match the remote workspace RPC's
@@ -31,7 +115,7 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
         .ancestors()
         .find(|path| path.join(".git").exists())
         .unwrap_or(&canonical);
-    for path in ICON_PATHS {
+    for path in local_icon_candidates(root) {
         let path = root.join(path);
         if !path.is_file() {
             continue;
@@ -150,6 +234,38 @@ impl ProjectIcon {
                         .read_image((*path).into(), file.checkout_id)
                         .await
                         .ok()?;
+                    return executor
+                        .spawn(async move { decode_project_icon(&mime, bytes).ok() })
+                        .await;
+                }
+                let mut candidates = Vec::new();
+                for query in ["icon", "logo"] {
+                    let matches = client
+                        .search(zeron_proto::SearchWorkspaceFilesRequest {
+                            target: context.target.clone(),
+                            query: query.into(),
+                            include_ignored: false,
+                            limit: Some(200),
+                        })
+                        .await
+                        .ok()?;
+                    candidates.extend(matches.into_iter().filter_map(|entry| {
+                        (entry.kind == zeron_proto::WorkspaceEntryKind::File)
+                            .then(|| nested_icon_rank(&entry.path).map(|rank| (rank, entry.path)))
+                            .flatten()
+                    }));
+                }
+                candidates.sort();
+                candidates.dedup();
+                if let Some((_, path)) = candidates.into_iter().next() {
+                    let file = client
+                        .read_file(zeron_proto::ReadWorkspaceFileRequest {
+                            target: context.target.clone(),
+                            path: path.clone(),
+                        })
+                        .await
+                        .ok()?;
+                    let (mime, bytes) = client.read_image(path, file.checkout_id).await.ok()?;
                     return executor
                         .spawn(async move { decode_project_icon(&mime, bytes).ok() })
                         .await;
@@ -289,6 +405,52 @@ mod tests {
         std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
         assert!(load_local_icon(temp.path()).is_none());
     }
+    #[test]
+    fn sidebar_monorepo_icons_keep_root_priority_and_prefer_web_apps() {
+        let temp = tempfile::tempdir().unwrap();
+        for (path, width) in [
+            ("packages/design/public/favicon.png", 4),
+            ("apps/docs/static/favicon.png", 5),
+            ("apps/web/src/app/favicon.ico", 6),
+        ] {
+            let file = temp.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            image::RgbaImage::new(width, width).save(file).unwrap();
+        }
+        assert_eq!(load_local_icon(temp.path()).unwrap().width, 6.0);
+        png(&temp.path().join("favicon.png"), 7);
+        assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
+    }
+
+    #[test]
+    fn sidebar_remote_monorepo_candidates_are_bounded_to_app_layouts() {
+        for path in [
+            "apps/store/public/favicon.svg",
+            "packages/dashboard/src/app/icon.svg",
+            "frontend/static/favicon.ico",
+            "crates/desktop/assets/icon.png",
+        ] {
+            assert!(nested_icon_rank(path).is_some(), "{path}");
+        }
+        for path in [
+            "node_modules/app/favicon.png",
+            "apps/web/node_modules/lib/favicon.png",
+            "apps/../favicon.png",
+            "apps/web/dist/favicon.png",
+            "random/deep/public/favicon.png",
+            "apps/web/src/button/icon.png",
+        ] {
+            assert!(nested_icon_rank(path).is_none(), "{path}");
+        }
+        let mut paths = [
+            "apps/docs/favicon.png",
+            "packages/ui/favicon.png",
+            "apps/web/public/favicon.svg",
+        ];
+        paths.sort_by_key(|path| nested_icon_rank(path));
+        assert_eq!(paths[0], "apps/web/public/favicon.svg");
+    }
+
     #[test]
     fn sidebar_project_icons_support_svg_and_ico() {
         let temp = tempfile::tempdir().unwrap();
