@@ -40,12 +40,38 @@
     "reason": "Provider Model Blocked: account requires admin enablement",
     "requestIdCaptured": true
   },
-  "originalAuthRootCause": "Not established; original failure not reproduced live or proven eliminated",
+  "originalAuthRootCause": "Old SDK lacks proactive token expiry refresh; strong match for local 64.8-minute session incident. Original customer mid-turn rejection not independently reproduced.",
   "sourceSha256": {
-    "crates/harness/src/cursor/mod.rs": "3abbdba3c7f7254b08740254bd260a937c319f682daaab6defc2c2ae5d7838f3",
+    "crates/harness/src/cursor/mod.rs": "233d2182a414edac6354e56e377fbd3ee5424ae5142a6afc846f9aabe5bfe8d9",
     "crates/harness/src/cursor/shim.mjs": "556a9f1a84882284895c503825a9bbbe84e147e675c9861d5551889f372ff352",
     "crates/harness/tests/cursor_shim.rs": "53752557f4038cb0561abe375c6d92e9411a66c9f22da25870e1d4a177fbe98e",
     "crates/harness/tests/fixtures/fake-cursor-sdk.mjs": "8d9f6cc4189e379b68ef64680cce3ea72ac6685a82be9b872753691447c7aff4",
-    "crates/harness/examples/cursor_stability_probe.rs": "d69dc41abc4babffda7204d79003c020c9bdbd67c2ab07f9c9c8ef6fe94279df"
+    "crates/harness/examples/cursor_stability_probe.rs": "4f206de4f9877586b8201d223ad06c6060fb58addac08dbd5033dbe98a3c8171",
+    "crates/harness/tests/fixtures/cursor-auth-clock.mjs": "c9179d7c06ee4be07d6dd6ff053624b59b6cde7159b86059e2d7c908b5fa55b0"
+  },
+  "localIncident": {
+    "shimAgeMinutes": 64.8121,
+    "idleMinutes": 25.055,
+    "failedRunMs": 971,
+    "nextRunAfterFailureMs": 15591,
+    "sameAgentContinuationSucceeded": true
+  },
+  "liveAuthRefresh": {
+    "method": "real SDK and service; test clock advanced to 60 seconds before JWT expiry",
+    "oldSdk": "1.0.28",
+    "oldInitialExchanges": 7,
+    "oldAdditionalExchanges": 0,
+    "oldAssertionPassed": false,
+    "newSdk": "1.0.31",
+    "newInitialExchanges": 7,
+    "newAdditionalExchanges": 2,
+    "newAssertionPassed": true,
+    "sameSessionRecallAndResume": true,
+    "actualServerExpiryForced": false
+  },
+  "finalCursorRegressionTests": {
+    "passed": 17,
+    "failed": 0,
+    "command": "cargo test -p zeron-harness --test cursor --test cursor_shim"
   }
 }

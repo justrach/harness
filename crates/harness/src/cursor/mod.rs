@@ -549,6 +549,14 @@ async fn run_session(session: Session) {
                             }
                         }
                         _ => {
+                            if frame.get("ev").and_then(Value::as_str) == Some("fatal")
+                                || frame.get("status").and_then(Value::as_str) == Some("error")
+                            {
+                                tracing::warn!(target: "zeron_harness::cursor",
+                                    session_id = ?session_id,
+                                    error = ?frame.get("error").or_else(|| frame.get("message")),
+                                    "Cursor SDK run failed");
+                            }
                             for ev in map_shim_frame(&frame, interrupted) {
                                 let is_done = matches!(ev, AgentEvent::Done { .. });
                                 let failed = matches!(ev, AgentEvent::Done { status: DoneStatus::Errored, .. });

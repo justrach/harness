@@ -166,6 +166,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
     let mut id = String::new();
     let mut text = String::new();
     let mut completed = 0;
+    let mut auth_exchanges_before = None;
     tokio::time::timeout(Duration::from_secs(300),async {
         while let Some(event)=stream.next().await {
             match event.unwrap() {
@@ -176,7 +177,27 @@ async fn parked(harness: &CursorHarness, count: usize) {
                     assert!(text.contains(&nonce),"lost parked context: {text}");
                     text.clear(); completed+=1;
                     println!("parked_turn={completed} checkpoint_recall=true");
+                    if completed==2 {
+                        if let Some(before)=auth_exchanges_before {
+                            let control=std::env::var("ZERON_CURSOR_AUTH_CLOCK").unwrap();
+                            let after=std::fs::read_to_string(format!("{control}.exchanges")).unwrap().lines().count();
+                            assert!(after>before,"SDK reused its near-expiry auth token: exchanges remained {before}");
+                            println!("auth_refresh_verified=true additional_exchanges={}",after-before);
+                        }
+                    }
                     if completed==count {break;}
+                    if completed==1 {
+                        if let Ok(control)=std::env::var("ZERON_CURSOR_AUTH_CLOCK") {
+                            let exchanges=std::fs::read_to_string(format!("{control}.exchanges")).unwrap();
+                            auth_exchanges_before=Some(exchanges.lines().count());
+                            let last:serde_json::Value=serde_json::from_str(exchanges.lines().last().unwrap()).unwrap();
+                            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+                            let offset=last["expiresAt"].as_i64().unwrap()-now-60_000;
+                            assert!(offset>0);
+                            std::fs::write(&control,serde_json::json!({"offsetMs":offset}).to_string()).unwrap();
+                            println!("auth_clock_advanced_ms={offset} exchanges_before={}",exchanges.lines().count());
+                        }
+                    }
                     tx.send(zeron_harness::SteerMessage{prompt:"Repeat the exact PARKED-STABILITY token from earlier. Reply only the token. Do not use tools or files.".into(),message_id:None}).await.unwrap();
                 }
                 _=>{}
