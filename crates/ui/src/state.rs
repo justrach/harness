@@ -1230,7 +1230,7 @@ impl AppState {
 
     /// The opt-in opening tail is provisional. Never replace a complete view
     /// with it, and don't treat it as a full reset for caching/scroll anchors.
-    fn receive_opening_transcript_update(
+    pub(crate) fn receive_opening_transcript_update(
         &mut self,
         update: zeron_doc::TranscriptUpdate,
         history_pending: bool,

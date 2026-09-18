@@ -121,3 +121,15 @@ claim that reconstructing/rendering all 37,630 parts is instantaneous, nor that
 work-laptop's installed build was tested.
 
 Final follow-up validation: 108 document, 197 engine, and 1,076 UI library tests pass.
+
+## Navigation animation preservation
+
+`opening_tail_full_history_and_cached_revisit_never_replay_tool_entrances`
+exercises the production opening-update reducer and transcript presentation:
+preview → full history → three cached revisits → a new live tool. It prepends
+an older tool group so the preview's tail tool changes group index when full
+history arrives. At every historical stage, all header and tool entrance epochs
+remain absent; after the live delta, only the new tool has an entrance epoch.
+This new test and all 11 existing `tool_group` tests pass. No animation behavior
+change was needed; both opening frames carry historical part baselines, and
+cache restoration captures its own baseline before presentation.

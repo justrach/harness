@@ -8264,6 +8264,111 @@ mod tests {
     }
 
     #[gpui::test]
+    fn opening_tail_full_history_and_cached_revisit_never_replay_tool_entrances(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let preview = vec![assistant(
+                "turn",
+                MessageStatus::Streaming,
+                vec![tool_part("tail-tool", "pwd")],
+            )];
+            let full = vec![assistant(
+                "turn",
+                MessageStatus::Streaming,
+                vec![
+                    tool_part("older-tool", "ls"),
+                    MessagePart::Text {
+                        id: "separator".into(),
+                        text: "Earlier result".into(),
+                    },
+                    tool_part("tail-tool", "pwd"),
+                ],
+            )];
+            let apply = |entries: &[SessionMessageEntry], pending, cx: &mut gpui::App| {
+                state.update(cx, |state, cx| {
+                    state
+                        .receive_opening_transcript_update(
+                            zeron_doc::TranscriptUpdate {
+                                frame: zeron_doc::TranscriptFrame::reset(entries),
+                                replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(
+                                    entries,
+                                )),
+                                context_usage: None,
+                            },
+                            pending,
+                            cx,
+                        )
+                        .unwrap();
+                });
+                transcript.update(cx, |this, cx| this.sync(cx));
+            };
+            let assert_settled = |expected_tools, cx: &mut gpui::App| {
+                let this = transcript.read(cx);
+                assert_eq!(
+                    this.tool_group_reveals
+                        .values()
+                        .map(|r| r.starts.len())
+                        .sum::<usize>(),
+                    expected_tools
+                );
+                for reveal in this.tool_group_reveals.values() {
+                    assert!(
+                        reveal.header_started_at.is_none(),
+                        "historical header replayed"
+                    );
+                    assert!(
+                        reveal.starts.iter().all(Option::is_none),
+                        "historical tool replayed"
+                    );
+                }
+            };
+            apply(&preview, true, cx);
+            assert_settled(1, cx);
+            // Prepending history moves the tail tool from group 0 to group 1.
+            // Its new row identity must not turn it into a live entrance.
+            apply(&full, false, cx);
+            assert_settled(2, cx);
+            for _ in 0..3 {
+                state.update(cx, |state, cx| state.select_chat(Some("away".into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                assert_settled(2, cx);
+                apply(&preview, true, cx); // ignored because the cache is complete
+                assert_settled(2, cx);
+                apply(&full, false, cx);
+                assert_settled(2, cx);
+            }
+            let mut live = full.clone();
+            live[0].parts.push(tool_part("new-live-tool", "git status"));
+            state.update(cx, |state, cx| {
+                state
+                    .receive_transcript_update(
+                        zeron_doc::TranscriptUpdate {
+                            frame: zeron_doc::diff_transcript(&full, &live),
+                            replay_baseline: None,
+                            context_usage: None,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let this = transcript.read(cx);
+            let tail = &this.tool_group_reveals[&SharedString::from("turn#g1")];
+            assert!(tail.header_started_at.is_none());
+            assert!(
+                tail.starts[0].is_none(),
+                "existing tool must remain settled"
+            );
+            assert!(tail.starts[1].is_some(), "new live tool must still animate");
+        });
+    }
+
+    #[gpui::test]
     fn tool_group_replay_cutoff_survives_coalesced_live_updates(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             let history = vec![assistant(
