@@ -245,6 +245,7 @@ fn device(id: &str, name: &str) -> Device {
         last_seen_at: Some(ts(1_000)),
         created_at: Some(ts(500)),
         version: Some("0.1.0".into()),
+        cursor_sdk_version: Some("1.0.31".into()),
         capabilities: Vec::new(),
     }
 }
@@ -529,6 +530,7 @@ fn field_mutators_round_trip() {
     assert_eq!(chat.last_message_preview.as_deref(), Some("preview text"));
     assert_eq!(chat.last_message_at, Some(ts(5_000)));
     let dev = &ws.read_devices().unwrap()[0];
+    assert_eq!(dev.cursor_sdk_version.as_deref(), Some("1.0.31"));
     assert_eq!(dev.name, "workstation");
     assert_eq!(dev.last_seen_at, Some(ts(6_000)));
 }
