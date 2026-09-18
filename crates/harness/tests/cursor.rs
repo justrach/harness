@@ -318,3 +318,61 @@ async fn model_discovery_maps_the_live_catalog() {
     assert_eq!(models[1].options[0].id, "thinking");
     assert_eq!(models[1].options[0].default_choice, "enabled");
 }
+
+#[tokio::test]
+async fn followup_crash_is_not_hidden_by_a_previous_completed_turn() {
+    let (controls, steer, _token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:followup-crash"), controls)
+        .await
+        .unwrap();
+    let dones = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut dones = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::Done { status, error, .. } = event.unwrap() {
+                dones.push((status, error));
+                if dones.len() == 1 {
+                    steer
+                        .send(SteerMessage {
+                            prompt: "follow up".into(),
+                            message_id: None,
+                        })
+                        .await
+                        .unwrap();
+                } else {
+                    break;
+                }
+            }
+        }
+        dones
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones.len(), 2);
+    assert_eq!(dones[0].0, DoneStatus::Completed);
+    assert_eq!(dones[1].0, DoneStatus::Errored);
+    assert!(dones[1].1.as_deref().unwrap().contains("followup exploded"));
+}
+
+#[tokio::test]
+async fn cancellation_racing_a_fatal_error_emits_exactly_one_terminal_event() {
+    let (controls, _steer, token) = controls();
+    let mut stream = harness()
+        .run(request("scenario:interrupt-fatal"), controls)
+        .await
+        .unwrap();
+    let statuses = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut statuses = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { .. } => token.cancel(),
+                AgentEvent::Done { status, .. } => statuses.push(status),
+                _ => {}
+            }
+        }
+        statuses
+    })
+    .await
+    .unwrap();
+    assert_eq!(statuses, vec![DoneStatus::Interrupted]);
+}

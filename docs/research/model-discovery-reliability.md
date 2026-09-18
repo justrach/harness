@@ -1,6 +1,11 @@
 # Model discovery reliability
 
-Validated on Linux, 2026-09-17, after merging origin/main at `15f6ec31`.
+Initial validation on Linux, 2026-09-17, after merging origin/main at `15f6ec31`.
+
+The Cursor fallback/cache policy described here is superseded by the
+[2026-09-18 stability follow-up](cursor-stability/README.md), which includes
+rate-limit handling, credential-scoped last-good catalogs, session recovery,
+and substantially expanded live and fault-injection evidence.
 
 ## Cursor failure and repair
 
