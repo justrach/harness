@@ -40,6 +40,18 @@ use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
 };
 
+// Recently viewed transcripts stay renderable while a fresh watch opens. Move
+// ownership on navigation; never clone whale payloads or retain live watches.
+const TRANSCRIPT_CACHE_CAP: usize = 12;
+const TRANSCRIPT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+struct CachedTranscript {
+    chat_id: String,
+    entries: Vec<SessionMessageEntry>,
+    context_usage: Option<zeron_proto::ContextUsage>,
+    bytes: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Engine handle
 // ---------------------------------------------------------------------------
@@ -658,11 +670,13 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
-    /// The selected chat's opening `WatchDocMessages` reset has landed. An
+    /// The selected chat has a transcript from a `WatchDocMessages` reset
+    /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
     transcript_baselines: HashMap<String, Arc<zeron_doc::TranscriptBaseline>>,
+    transcript_cache: std::collections::VecDeque<CachedTranscript>,
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
@@ -754,6 +768,7 @@ impl AppState {
             context_usage: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
+            transcript_cache: Default::default(),
             transcript_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -885,6 +900,8 @@ impl AppState {
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
+        self.transcript_cache
+            .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
@@ -1207,6 +1224,24 @@ impl AppState {
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
             cx.notify();
+        }
+        Ok(())
+    }
+
+    /// The opt-in opening tail is provisional. Never replace a complete view
+    /// with it, and don't treat it as a full reset for caching/scroll anchors.
+    pub(crate) fn receive_opening_transcript_update(
+        &mut self,
+        update: zeron_doc::TranscriptUpdate,
+        history_pending: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
+        if history_pending && self.transcript_replayed {
+            return Ok(());
+        }
+        self.receive_transcript_update(update, cx)?;
+        if history_pending {
+            self.transcript_replayed = false;
         }
         Ok(())
     }
@@ -1675,6 +1710,7 @@ impl AppState {
         self.spaces_synced = false;
         self.transcript.clear();
         self.transcript_baselines.clear();
+        self.transcript_cache.clear();
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
@@ -1901,8 +1937,48 @@ impl AppState {
             }
             return;
         }
+        // Take the destination before trimming: switching to the oldest warm
+        // transcript must not evict the very entry we are about to display.
+        let cached = self
+            .transcript_cache
+            .iter()
+            .position(|cached| Some(&cached.chat_id) == chat_id.as_ref())
+            .and_then(|index| self.transcript_cache.remove(index));
         if let Some(previous) = &self.selected_chat {
             self.transcript_baselines.remove(previous);
+            if self.transcript_replayed {
+                let entries = std::mem::take(&mut self.transcript);
+                let bytes = entries
+                    .iter()
+                    .map(|entry| {
+                        std::mem::size_of::<SessionMessageEntry>()
+                            + entry.id.len()
+                            + entry
+                                .parts
+                                .iter()
+                                .map(|part| {
+                                    std::mem::size_of::<zeron_doc::MessagePart>() + part.byte_len()
+                                })
+                                .sum::<usize>()
+                    })
+                    .sum();
+                self.transcript_cache.push_back(CachedTranscript {
+                    chat_id: previous.clone(),
+                    entries,
+                    context_usage: self.context_usage,
+                    bytes,
+                });
+                while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
+                    || self
+                        .transcript_cache
+                        .iter()
+                        .map(|cached| cached.bytes)
+                        .sum::<usize>()
+                        > TRANSCRIPT_CACHE_BYTES
+                {
+                    self.transcript_cache.pop_front();
+                }
+            }
         }
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
@@ -1910,6 +1986,15 @@ impl AppState {
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
+        if let Some(cached) = cached {
+            self.transcript_baselines.insert(
+                cached.chat_id,
+                Arc::new(zeron_doc::TranscriptBaseline::capture(&cached.entries)),
+            );
+            self.transcript = cached.entries;
+            self.context_usage = cached.context_usage;
+            self.transcript_replayed = true;
+        }
         self.transcript_task = None;
         self.queue.clear();
         self.queue_task = None;
@@ -2306,7 +2391,7 @@ fn spawn_transcript_watch(
         // deselected or deleted, so retrying can't outlive relevance.
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": chat_id });
+            let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
                 .client()
                 .subscribe(methods::WATCH_DOC_MESSAGES, params)
@@ -2323,7 +2408,15 @@ fn spawn_transcript_watch(
                 }
             };
             while let Some(value) = rx.recv().await {
-                let update: zeron_doc::TranscriptUpdate = match serde_json::from_value(value) {
+                let history_pending = value
+                    .get("historyPending")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move { serde_json::from_value(value) })
+                    .await;
+                let update: zeron_doc::TranscriptUpdate = match decoded {
                     Ok(frame) => frame,
                     Err(err) => {
                         // Schema skew (a newer peer's entry shape arriving
@@ -2339,7 +2432,9 @@ fn spawn_transcript_watch(
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        if let Err(err) = state.receive_transcript_update(update, cx) {
+                        if let Err(err) =
+                            state.receive_opening_transcript_update(update, history_pending, cx)
+                        {
                             tracing::warn!(%chat_id, error = %err, "resubscribing transcript");
                             desync = true;
                         }
@@ -3090,6 +3185,163 @@ mod tests {
             status: None,
             continuation_of: None,
         }
+    }
+
+    #[gpui::test]
+    fn opening_tail_is_visible_but_never_replaces_or_caches_complete_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let update = |id: &str| zeron_doc::TranscriptUpdate {
+                frame: TranscriptFrame::reset(&[user_entry(id)]),
+                context_usage: None,
+                replay_baseline: None,
+            };
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(state.transcript[0].id, "tail");
+            assert!(
+                !state.transcript_replayed,
+                "scroll-anchor fallback must await full history"
+            );
+            state.select_chat(None, cx);
+            assert!(
+                state.transcript_cache.is_empty(),
+                "a preview is not a complete cached copy"
+            );
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("full"), false, cx)
+                .unwrap();
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "reconnect must preserve the full view"
+            );
+            state.select_chat(None, cx);
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "revisit must preserve the cache"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn whale_transcript_revisit_is_synchronous_and_fresh_reset_wins(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("whale".into()), cx);
+            let entries: Vec<_> = (0..2000)
+                .map(|i| {
+                    let mut entry = user_entry(&format!("message-{i}"));
+                    entry.parts.push(zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(2048),
+                    });
+                    entry
+                })
+                .collect();
+            state.apply_transcript(entries);
+            let allocation = state.transcript.as_ptr();
+            for _ in 0..10 {
+                state.select_chat(Some("other".into()), cx);
+                assert!(
+                    state.transcript.is_empty(),
+                    "never show another chat's rows"
+                );
+                state.select_chat(Some("whale".into()), cx);
+                assert_eq!(
+                    state.transcript.len(),
+                    2000,
+                    "revisit must render before any RPC frame"
+                );
+                assert_eq!(
+                    state.transcript.as_ptr(),
+                    allocation,
+                    "move whale payloads, don't copy them"
+                );
+                assert!(state.transcript_replayed);
+                assert!(
+                    state
+                        .transcript_baseline("whale")
+                        .unwrap()
+                        .covers(&state.transcript[0])
+                );
+            }
+            state
+                .apply_transcript_frame(TranscriptFrame::reset(&[user_entry(
+                    "new-authoritative-row",
+                )]))
+                .unwrap();
+            assert_eq!(state.transcript.len(), 1);
+            assert_eq!(state.transcript[0].id, "new-authoritative-row");
+            state.select_chat(None, cx);
+            state.select_chat(Some("whale".into()), cx);
+            assert_eq!(state.transcript[0].id, "new-authoritative-row");
+            // An authoritative empty reset must still be honored.
+            state
+                .apply_transcript_frame(TranscriptFrame::reset(&[]))
+                .unwrap();
+            assert!(state.transcript.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_revisit_cache_is_bounded_and_account_scoped(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            for i in 0..20 {
+                state.select_chat(Some(format!("chat-{i}")), cx);
+                state.apply_transcript(vec![user_entry("row")]);
+            }
+            state.select_chat(None, cx);
+            assert_eq!(state.transcript_cache.len(), TRANSCRIPT_CACHE_CAP);
+            state.select_chat(Some("chat-0".into()), cx);
+            assert!(state.transcript.is_empty(), "oldest entry was evicted");
+            state.apply_chats(vec![chat("chat-19", 0, None)]);
+            assert_eq!(
+                state.transcript_cache.len(),
+                1,
+                "deleted chats leave no cached rows"
+            );
+            state.prepare_runtime_replacement(cx);
+            state.select_chat(Some("chat-19".into()), cx);
+            assert!(
+                state.transcript.is_empty(),
+                "account replacement must clear cached content"
+            );
+            assert!(state.transcript_cache.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_cache_rejects_oversize_and_unloaded_entries(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("loading".into()), cx);
+            state.select_chat(Some("oversize".into()), cx);
+            assert!(state.transcript_cache.is_empty());
+            let mut entry = user_entry("large");
+            entry.parts.push(zeron_doc::MessagePart::Text {
+                id: "text".into(),
+                text: "x".repeat(TRANSCRIPT_CACHE_BYTES + 1),
+            });
+            state.apply_transcript(vec![entry]);
+            state.select_chat(None, cx);
+            assert!(
+                state.transcript_cache.is_empty(),
+                "byte budget applies even to one whale"
+            );
+        });
     }
 
     #[test]
