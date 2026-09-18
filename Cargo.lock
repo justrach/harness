@@ -11724,7 +11724,7 @@ dependencies = [
 
 [[package]]
 name = "zeron"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "clap",
@@ -11745,7 +11745,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "chrono",
  "loro",
@@ -11759,7 +11759,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11797,7 +11797,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11822,7 +11822,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11850,7 +11850,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "chrono",
  "serde",
@@ -11860,7 +11860,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11879,7 +11879,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -11902,7 +11902,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -11936,7 +11936,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "clap",
@@ -11951,7 +11951,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -12017,7 +12017,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.76"
+version = "0.2.77"
 dependencies = [
  "anyhow",
  "futures",
