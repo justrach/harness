@@ -3568,7 +3568,8 @@ impl Shell {
             body.into_any_element()
         };
         let body = self.render_sidebar_disclosure_body("archived", open, body_height, body);
-        let section = section.pt(px(SIDEBAR_SECTION_GAP)).child(body);
+        // The active list already provides the spacing above Archived.
+        let section = section.child(body);
         Some(section.into_any_element())
     }
 
