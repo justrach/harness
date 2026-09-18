@@ -110,6 +110,8 @@ const TOOL_TEXT_SIZE: f32 = 12.0;
 const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
+/// Settled compact-mode subtitle under the work accordion.
+const WORKED_FOR_HEIGHT: f32 = 16.0;
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
@@ -1038,6 +1040,8 @@ pub enum RowKind {
         summary: SharedString,
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
+        /// Compact-mode settled duration for this turn, in seconds.
+        worked_secs: Option<i64>,
     },
     InputChip {
         /// First question's header (chat-view.tsx `InputChip`: the resolved
@@ -1376,6 +1380,7 @@ pub fn rows_for_entry(
                     summary: tool_group_summary(&tools).into(),
                     tools: Arc::new(tools),
                     auto_open,
+                    worked_secs: None,
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
@@ -1627,6 +1632,10 @@ pub fn rows_for_entry(
                         summary: tool_group_summary(&tools).into(),
                         tools: Arc::new(tools),
                         auto_open: false,
+                        worked_secs: (!streaming)
+                            .then(|| entry.duration_ms)
+                            .flatten()
+                            .map(|ms| (ms / 1000).max(0)),
                     },
                     entry_id: entry.id.clone().into(),
                     timestamp: None,
@@ -2157,6 +2166,10 @@ pub fn format_elapsed(secs: i64) -> String {
     } else {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
     }
+}
+
+fn worked_for_label(secs: i64) -> String {
+    format!("Worked for {}", format_elapsed(secs))
 }
 
 // ---------------------------------------------------------------------------
@@ -2963,6 +2976,15 @@ pub struct Transcript {
     /// Compact mode as last applied to this instance's row split. Render
     /// polls the setting each frame; a flip rebuilds every row.
     compact_mode: bool,
+    /// Compact work-group entry ids that were live this session — the
+    /// "Worked for" subtitle fades in only for those, not historical rows.
+    compact_live_entries: HashSet<SharedString>,
+    /// Last live elapsed (seconds) per assistant entry, used if `duration_ms`
+    /// has not landed on the doc yet when the turn settles.
+    compact_last_elapsed: HashMap<String, i64>,
+    /// When a compact work group first settled this session, so "Worked for"
+    /// can fade in without replaying on later paints.
+    compact_worked_fade_at: HashMap<SharedString, Instant>,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -3207,6 +3229,9 @@ impl Transcript {
             content_width: crate::settings::transcript_width(cx),
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
+            compact_live_entries: HashSet::new(),
+            compact_last_elapsed: HashMap::new(),
+            compact_worked_fade_at: HashMap::new(),
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -4783,7 +4808,27 @@ impl Transcript {
             // rows whose content hash changed are spliced — the reparsed tail).
             parse_for_row(streaming, key, text, live_parsers, tree_cache).0
         };
-        let rows = rows_for_entry(entry, pending, self.compact_mode, &mut parse);
+        let mut rows = rows_for_entry(entry, pending, self.compact_mode, &mut parse);
+        if self.compact_mode && !streaming {
+            let secs = entry
+                .duration_ms
+                .filter(|&ms| ms > 0)
+                .map(|ms| (ms / 1000).max(1))
+                .or_else(|| self.compact_last_elapsed.get(&entry.id).copied());
+            if let Some(secs) = secs.filter(|&s| s > 0) {
+                for row in &mut rows {
+                    if let RowKind::ToolGroup {
+                        worked_secs,
+                        auto_open,
+                        ..
+                    } = &mut row.kind
+                        && !*auto_open
+                    {
+                        *worked_secs = Some(secs);
+                    }
+                }
+            }
+        }
 
         if !streaming {
             self.row_cache.insert(
@@ -5812,7 +5857,7 @@ impl Transcript {
         }
     }
 
-    fn render_working_trailer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = chrono::Utc::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
@@ -5881,6 +5926,26 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id))
         };
+        if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
+            let entry_id = if let Some(doc_id) = &self.doc_override {
+                self.state
+                    .read(cx)
+                    .sub_transcript(doc_id)
+                    .last()
+                    .map(|e| e.id.clone())
+            } else {
+                self.state
+                    .read(cx)
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|e| e.role == MessageRole::Assistant)
+                    .map(|e| e.id.clone())
+            };
+            if let Some(entry_id) = entry_id {
+                self.compact_last_elapsed.insert(entry_id, elapsed_secs);
+            }
+        }
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
@@ -6169,7 +6234,16 @@ impl Transcript {
                 tools,
                 auto_open,
                 summary,
-            } => self.render_tool_group(&row.id, tools, summary, *auto_open, &theme, cx),
+                worked_secs,
+            } => self.render_tool_group(
+                &row.id,
+                tools,
+                summary,
+                *auto_open,
+                *worked_secs,
+                &theme,
+                cx,
+            ),
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
             }
@@ -6467,6 +6541,7 @@ impl Transcript {
         tools: &Arc<Vec<ToolItem>>,
         summary: &SharedString,
         auto_open: bool,
+        worked_secs: Option<i64>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -6508,6 +6583,18 @@ impl Transcript {
         // collapsed-body skip, which may empty `tools`.
         let active =
             collapses && (auto_open || (self.compact_mode && tools.iter().any(|t| !t.resolved)));
+        if self.compact_mode && active {
+            self.compact_live_entries.insert(row_id.clone());
+        }
+        let worked_secs = worked_secs.filter(|_| self.compact_mode && !active);
+        if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
+            self.compact_worked_fade_at
+                .insert(row_id.clone(), Instant::now());
+        }
+        let animate_worked = self
+            .compact_worked_fade_at
+            .get(row_id)
+            .is_some_and(|at| at.elapsed() < motion::FADE_IN.total());
 
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
@@ -6804,6 +6891,38 @@ impl Transcript {
                     .truncate()
                     .child(tool_group_title(summary.clone(), shimmer_phase, theme)),
             );
+        let worked_line = worked_secs.map(|secs| {
+            let label = div()
+                .pl(px(28.0))
+                .h(px(WORKED_FOR_HEIGHT))
+                .flex()
+                .items_center()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(worked_for_label(secs)));
+            if animate_worked && !cx.reduce_motion() {
+                motion::fade_in(SharedString::from(format!("{row_id}-worked")), label)
+                    .into_any_element()
+            } else {
+                label.into_any_element()
+            }
+        });
+        let header_height = TOOL_GROUP_HEADER_HEIGHT
+            + if worked_line.is_some() {
+                WORKED_FOR_HEIGHT
+            } else {
+                0.0
+            };
+        let header = if let Some(worked_line) = worked_line {
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(worked_line)
+                .into_any_element()
+        } else {
+            header.into_any_element()
+        };
 
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
@@ -7043,14 +7162,10 @@ impl Transcript {
             // retain their explicit mono/diff typography below this boundary.
             .font_family(theme.font_sans_fixed.clone())
             .when(collapses, |el| {
-                el.child(reveal_tool_row(
-                    header.into_any_element(),
-                    TOOL_GROUP_HEADER_HEIGHT,
-                    header_reveal,
-                ))
+                el.child(reveal_tool_row(header, header_height, header_reveal))
             })
             .child(body)
-            .when(motion_active, |group| {
+            .when(motion_active || animate_worked, |group| {
                 group.child(
                     canvas(
                         |_, _, _| (),
@@ -8075,6 +8190,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         Some(MessageStatus::Aborted) => 3,
     });
     acc.push(pending as u8);
+    acc.extend_from_slice(&entry.duration_ms.unwrap_or(0).to_le_bytes());
     for part in &entry.parts {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
@@ -8449,12 +8565,21 @@ mod tests {
                 tools,
                 auto_open,
                 summary,
+                ..
             } = &row.kind
             else {
                 unreachable!()
             };
             assert!(!auto_open);
-            let _ = this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
+            let _ = this.render_tool_group(
+                &row.id,
+                tools,
+                summary,
+                *auto_open,
+                None,
+                &Theme::dark(),
+                cx,
+            );
             let reveal = &this.tool_group_reveals[&row.id];
             assert_eq!(
                 reveal.rendered_open,
@@ -9050,12 +9175,20 @@ mod tests {
                     tools,
                     auto_open,
                     summary,
+                    ..
                 } = &row.kind
                 else {
                     panic!("expected tools")
                 };
-                let _ =
-                    this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
+                let _ = this.render_tool_group(
+                    &row.id,
+                    tools,
+                    summary,
+                    *auto_open,
+                    None,
+                    &Theme::dark(),
+                    cx,
+                );
                 assert_eq!(this.folds[&row.id].open, Some(true));
                 assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
                 assert!(
@@ -9080,13 +9213,21 @@ mod tests {
                     tools,
                     auto_open,
                     summary,
+                    ..
                 } = &row.kind
                 else {
                     panic!("expected tools")
                 };
                 assert!(*auto_open);
-                let _ =
-                    this.render_tool_group(&row.id, tools, summary, *auto_open, &Theme::dark(), cx);
+                let _ = this.render_tool_group(
+                    &row.id,
+                    tools,
+                    summary,
+                    *auto_open,
+                    None,
+                    &Theme::dark(),
+                    cx,
+                );
                 let reveal = &this.tool_group_reveals[&row.id];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts.iter().all(Option::is_some));
@@ -9751,6 +9892,7 @@ mod tests {
             device_id: "dev".into(),
             status: Some(status),
             continuation_of: None,
+            duration_ms: None,
         }
     }
 
@@ -10132,6 +10274,38 @@ mod tests {
         assert!(summary.contains("wrote a note"), "{summary}");
         assert!(summary.contains("Ran 2 commands"), "{summary}");
         assert!(summary.contains("Thought process"), "{summary}");
+        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(*worked_secs, None, "no duration stamped on the fixture");
+    }
+
+    #[test]
+    fn compact_mode_carries_worked_for_duration_on_the_work_group() {
+        let mut entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![tool_part("t0", "ls"), text_part("r0", "done")],
+        );
+        entry.duration_ms = Some(310_000);
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(*worked_secs, Some(310));
+        assert_eq!(worked_for_label(310), "Worked for 5m 10s");
+
+        let streaming = assistant("a1", MessageStatus::Streaming, vec![tool_part("t0", "ls")]);
+        let mut streaming = streaming;
+        streaming.duration_ms = Some(310_000);
+        let rows = rows_for_entry(&streaming, false, true, &mut parse);
+        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(
+            *worked_secs, None,
+            "live compact groups keep the working trailer, not a settled duration"
+        );
     }
 
     #[test]
@@ -12886,6 +13060,7 @@ mod tests {
             device_id: "dev".into(),
             status: None,
             continuation_of: None,
+            duration_ms: None,
         };
         let rows = rows_for_entry(&user, true, false, &mut parse);
         assert_eq!(rows.len(), 1);
@@ -13074,6 +13249,7 @@ mod tests {
             (59, "59s"),
             (60, "1m 0s"),
             (92, "1m 32s"),
+            (310, "5m 10s"),
             (3_599, "59m 59s"),
             (3_600, "1h 0m"),
             (4_800, "1h 20m"),
