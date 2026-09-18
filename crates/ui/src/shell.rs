@@ -3121,13 +3121,31 @@ impl Shell {
                 Duration::from_secs(20),
             )
             .await;
-            let entries: Option<Vec<zeron_doc::SessionMessageEntry>> = reply.ok().and_then(|v| {
-                let text = v.get("text")?.as_str()?.to_owned();
-                serde_json::from_str(&text).ok()
-            });
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    let value = reply.ok()?;
+                    let entries: Vec<zeron_doc::SessionMessageEntry> =
+                        serde_json::from_str(value.get("text")?.as_str()?).ok()?;
+                    let update = zeron_doc::TranscriptUpdate {
+                        replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
+                        frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
+                        context_usage: None,
+                    };
+                    let prepared = crate::transcript::TranscriptPreparation::default()
+                        .prepare(&update)
+                        .ok()?;
+                    let zeron_doc::TranscriptFrame::Reset { reset } = update.frame else {
+                        unreachable!()
+                    };
+                    Some((reset, prepared))
+                })
+                .await;
             state.update(cx, |s, cx| {
-                match entries {
-                    Some(entries) => s.set_subagent_snapshot(doc_id, entries),
+                match snapshot {
+                    Some((entries, prepared)) => {
+                        s.set_prepared_subagent_snapshot(doc_id, entries, prepared);
+                    }
                     None => s.watch_subagent_doc(doc_id, cx),
                 }
                 cx.notify();
