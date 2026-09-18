@@ -1047,7 +1047,12 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
     div().h(px(1.0)).bg(theme.border.opacity(0.6))
 }
 
-fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
+fn sidebar_disclosure_header(
+    theme: &Theme,
+    label: SharedString,
+    chevron: AnyElement,
+    with_rule: bool,
+) -> gpui::Div {
     div()
         .flex()
         .flex_row()
@@ -1065,7 +1070,7 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label),
         ))
-        .child(sidebar_separator(theme).flex_1())
+        .when(with_rule, |el| el.child(sidebar_separator(theme).flex_1()))
         .child(chevron)
 }
 
@@ -3157,7 +3162,7 @@ impl Shell {
             let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
             let toggle_key = collapse_key.clone();
             let toggle_motion_key = motion_key.clone();
-            let header = sidebar_disclosure_header(theme, visible_label, chevron)
+            let header = sidebar_disclosure_header(theme, visible_label, chevron, true)
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
@@ -3213,7 +3218,7 @@ impl Shell {
             format!("Pinned ({})", items.len()).into()
         };
         let chevron = self.sidebar_disclosure_chevron("pinned", open, theme);
-        let header = sidebar_disclosure_header(theme, label, chevron)
+        let header = sidebar_disclosure_header(theme, label, chevron, false)
             .id("pinned-toggle")
             .debug_selector(|| "pinned-toggle".into())
             .on_drag_move::<SidebarSessionDrag>(cx.listener(
@@ -3366,16 +3371,15 @@ impl Shell {
             } else {
                 0.0
             };
-        // Header (t3code settled-shelf toggle): muted 12px label, a hairline
-        // filling the middle, chevron flipping open/closed. The count only
-        // shows while collapsed — expanded, the rows speak for themselves.
+        // Match Pinned: a muted label with its disclosure chevron beside it.
+        // The count only shows while collapsed.
         let label: SharedString = if open {
             "Archived".into()
         } else {
             format!("Archived ({total})").into()
         };
         let chevron = self.sidebar_disclosure_chevron("archived", open, theme);
-        let header = sidebar_disclosure_header(theme, label, chevron)
+        let header = sidebar_disclosure_header(theme, label, chevron, false)
             .id("archived-toggle")
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = this.archived_open;
