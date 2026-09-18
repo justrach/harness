@@ -55,9 +55,9 @@ use zeron_proto::{
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 
-/// The pinned SDK (public beta 1.0.x line; inspected against 1.0.28's
+/// The pinned SDK (public beta 1.0.x line; inspected against 1.0.31's
 /// typings). Bump deliberately — see the module header.
-const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.28";
+const CURSOR_SDK_PIN: &str = "@cursor/sdk@1.0.31";
 const SHIM_NAME: &str = "zeron-cursor-shim.mjs";
 const SHIM_SOURCE: &str = include_str!("shim.mjs");
 

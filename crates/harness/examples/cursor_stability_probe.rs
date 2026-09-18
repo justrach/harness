@@ -31,7 +31,9 @@ async fn turn(
     let request = RunRequest {
         prompt,
         harness: None,
-        model: Some("composer-2.5".into()),
+        model: Some(
+            std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
+        ),
         reasoning: None,
         model_options: Default::default(),
         cwd: cwd.into(),
@@ -148,7 +150,9 @@ async fn parked(harness: &CursorHarness, count: usize) {
             "Remember this exact token: {nonce}. Reply only that token. Do not use tools or files."
         ),
         harness: None,
-        model: Some("composer-2.5".into()),
+        model: Some(
+            std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
+        ),
         reasoning: None,
         model_options: Default::default(),
         cwd: workspace.path().to_str().unwrap().into(),
@@ -238,7 +242,9 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
             format!("Remember token {nonce}. Reply only {nonce} and INITIAL. Do not use tools.")
         },
         harness: None,
-        model: Some("composer-2.5".into()),
+        model: Some(
+            std::env::var("ZERON_CURSOR_TEST_MODEL").unwrap_or_else(|_| "composer-2.5".into()),
+        ),
         reasoning: None,
         model_options: Default::default(),
         cwd: workspace.path().to_str().unwrap().into(),

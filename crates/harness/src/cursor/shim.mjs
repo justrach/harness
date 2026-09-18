@@ -54,10 +54,36 @@ const exitAfterFlush = async (code) => {
   });
   process.exit(code);
 };
+let fatalStarted = false;
 const fatal = async (message) => {
-  out({ ev: "fatal", message: String(message) });
+  if (fatalStarted) return;
+  fatalStarted = true;
+  out({ ev: "fatal", message: formatError(message) });
   await exitAfterFlush(1);
 };
+
+// SDK background promises can fail outside send()/wait(). Report the actual
+// error over the protocol before shutting down, rather than letting Node dump
+// a multi-megabyte minified source line and obscure the exception.
+for (const event of ["uncaughtException", "unhandledRejection"]) {
+  process.on(event, (error) => {
+    const deadline = setTimeout(() => process.exit(1), 2000);
+    deadline.unref();
+    void fatal(error).catch(() => process.exit(1));
+  });
+}
+
+// Only copy explicit diagnostic fields, never cause/config/headers or the
+// full SDK object (which can carry credentials and request bodies).
+function formatError(error, requestId) {
+  let text = String(error?.message ?? error ?? "Unknown Cursor SDK error");
+  const details = [];
+  for (const [key, value] of [["code", error?.code], ["requestId", error?.requestId ?? requestId]]) {
+    if (typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value)) details.push(`${key}=${value}`);
+  }
+  if (details.length) text += ` [${details.join(", ")}]`;
+  return text;
+}
 
 let sdk;
 try {
@@ -337,7 +363,7 @@ async function runTurn(prompt) {
       },
     });
   } catch (e) {
-    out({ ev: "turn", status: "error", error: withAuthHint(e?.message ?? e) });
+    out({ ev: "turn", status: "error", error: withAuthHint(formatError(e, run?.requestId)) });
     run = null;
     return;
   }
@@ -350,7 +376,7 @@ async function runTurn(prompt) {
     out({
       ev: "turn",
       status: interrupted ? "cancelled" : "error",
-      error: withAuthHint(e?.message ?? e),
+      error: withAuthHint(formatError(e, run?.requestId)),
     });
     return;
   }
@@ -358,7 +384,7 @@ async function runTurn(prompt) {
   out({
     ev: "turn",
     status: result?.status ?? "finished",
-    ...(result?.error?.message ? { error: withAuthHint(result.error.message) } : {}),
+    ...(result?.error?.message ? { error: withAuthHint(formatError(result.error, result.requestId)) } : {}),
   });
 }
 

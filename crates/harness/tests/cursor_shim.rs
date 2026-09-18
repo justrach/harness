@@ -300,3 +300,48 @@ async fn engine_death_does_not_leave_an_orphan_owning_the_conversation() {
     assert_eq!(frame(&mut lines).await["status"], "finished");
     finish(&mut recovered, stdin).await;
 }
+
+#[tokio::test]
+async fn reported_auth_error_preserves_diagnostics_and_never_replays_the_turn() {
+    for prompt in ["incident-auth", "background-auth", "background-throw"] {
+        let fixture = SessionFixture::new();
+        let (mut child, stdin, mut lines) = fixture.start(prompt, false).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        assert_eq!(
+            frame(&mut lines).await["text"],
+            "retained-conversation-history"
+        );
+        let failure = frame(&mut lines).await;
+        let message = if prompt.starts_with("background-") {
+            assert_eq!(failure["ev"], "fatal");
+            failure["message"].as_str().unwrap()
+        } else {
+            assert_eq!(failure["status"], "error");
+            failure["error"].as_str().unwrap()
+        };
+        assert!(message.contains("Authentication error"), "{message}");
+        assert!(message.contains("code=unauthenticated"), "{message}");
+        assert!(message.contains("requestId=request-"), "{message}");
+        assert!(!message.contains("DO-NOT-LOG"));
+        finish(&mut child, stdin).await;
+        let (mut child, stdin, mut lines) = fixture.start("normal", true).await;
+        assert_eq!(frame(&mut lines).await["agentId"], "agent-fixture");
+        assert_eq!(
+            frame(&mut lines).await["text"],
+            "retained-conversation-history"
+        );
+        assert_eq!(frame(&mut lines).await["status"], "finished");
+        finish(&mut child, stdin).await;
+        let store =
+            std::fs::read_to_string(fixture.dir.path().join("state/by-agent/agent-fixture"))
+                .unwrap();
+        let prompts =
+            std::fs::read_to_string(std::path::Path::new(store.trim()).join("prompts.ndjson"))
+                .unwrap();
+        let prompts: Vec<String> = prompts
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(prompts, vec![prompt, "normal"]);
+    }
+}

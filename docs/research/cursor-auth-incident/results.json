@@ -1,0 +1,51 @@
+{
+  "baseCommit": "10c9d3e2",
+  "sdk": "1.0.31",
+  "cli": "2026.09.15-d2fe57e",
+  "fullHarnessSuite": {
+    "passed": 298,
+    "failed": 0,
+    "ignored": 10
+  },
+  "productionShimRegression": {
+    "passed": true,
+    "scenarios": [
+      "reported auth run result",
+      "unhandled rejection",
+      "uncaught exception"
+    ],
+    "sameSessionResume": true,
+    "replays": 0,
+    "causeSecretOmitted": true
+  },
+  "liveModels": {
+    "elapsedMs": 3135,
+    "failures": 0,
+    "models": 39,
+    "requests": 1001
+  },
+  "liveComposerRecovery": {
+    "checkpointRecallFailures": 0,
+    "rounds": 6,
+    "verifiedAppends": 3,
+    "duplicateAppends": 0
+  },
+  "liveGrok": {
+    "failures": 0,
+    "parkedTurns": 6,
+    "resumedAfterClose": true
+  },
+  "liveFable": {
+    "passed": false,
+    "reason": "Provider Model Blocked: account requires admin enablement",
+    "requestIdCaptured": true
+  },
+  "originalAuthRootCause": "Not established; original failure not reproduced live or proven eliminated",
+  "sourceSha256": {
+    "crates/harness/src/cursor/mod.rs": "3abbdba3c7f7254b08740254bd260a937c319f682daaab6defc2c2ae5d7838f3",
+    "crates/harness/src/cursor/shim.mjs": "556a9f1a84882284895c503825a9bbbe84e147e675c9861d5551889f372ff352",
+    "crates/harness/tests/cursor_shim.rs": "53752557f4038cb0561abe375c6d92e9411a66c9f22da25870e1d4a177fbe98e",
+    "crates/harness/tests/fixtures/fake-cursor-sdk.mjs": "8d9f6cc4189e379b68ef64680cce3ea72ac6685a82be9b872753691447c7aff4",
+    "crates/harness/examples/cursor_stability_probe.rs": "d69dc41abc4babffda7204d79003c020c9bdbd67c2ab07f9c9c8ef6fe94279df"
+  }
+}

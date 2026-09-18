@@ -47,6 +47,15 @@ function instance(store) {
         async cancel(){if(prompt==='hung-cancel')return new Promise(()=>{});await finish('cancelled');},
         async wait(){
           if(prompt==='wait-error')throw new Error('stream disconnected');
+          if(prompt==='incident-auth')return {status:'error',requestId:'request-incident',error:{message:'Authentication error If you are logged in, try logging out and back in.',code:'unauthenticated',cause:{apiKey:'DO-NOT-LOG'}}};
+          if(['background-auth','background-throw'].includes(prompt)) {
+            setTimeout(()=>{
+              const error=Object.assign(new Error('Authentication error'),{code:'unauthenticated',requestId:'request-background',cause:{apiKey:'DO-NOT-LOG'}});
+              if(prompt==='background-throw')throw error;
+              void Promise.reject(error);
+            },0);
+            return pending;
+          }
           if(prompt==='auth-error')return {status:'error',error:{message:'ERROR_NOT_LOGGED_IN'}};
           if(['hang','hung-cancel'].includes(prompt))return pending;
           await finish('finished');return {status:'finished'};
