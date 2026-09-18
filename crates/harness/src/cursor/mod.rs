@@ -35,7 +35,10 @@
 //!   parked session (parity with the previous ACP behavior).
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod catalog;
+mod state;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -90,9 +93,8 @@ pub struct CursorHarness {
     executable: Option<PathBuf>,
     interrupt_grace: Duration,
     kill_grace: Duration,
-    /// Only overlapping requests share a successful catalog. Later requests
-    /// re-read credentials and discover account changes and model rollouts.
-    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
+    /// Credential-scoped successful catalog, with bounded refresh and backoff.
+    models_cache: catalog::Catalog,
 }
 
 impl Default for CursorHarness {
@@ -101,7 +103,7 @@ impl Default for CursorHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
-            models_cache: tokio::sync::Mutex::new(None),
+            models_cache: catalog::Catalog::default(),
         }
     }
 }
@@ -138,6 +140,19 @@ impl CursorHarness {
                 .output()
                 .await
                 .map_err(|e| HarnessError::Protocol(format!("cursor models probe: {e}")))?;
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Ok(frame) = serde_json::from_str::<Value>(line)
+                    && frame.get("ev").and_then(Value::as_str) == Some("fatal")
+                {
+                    return Err(HarnessError::Protocol(
+                        frame
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Cursor model discovery failed")
+                            .to_owned(),
+                    ));
+                }
+            }
             if !output.status.success() {
                 return Err(HarnessError::Protocol(format!(
                     "cursor models probe exited with {}",
@@ -224,27 +239,12 @@ impl Harness for CursorHarness {
         true
     }
 
-    /// Live, credential-aware SDK catalog. A failed/empty probe uses the
-    /// minimal fallback for this request only; the next request retries.
+    /// Keep a successful catalog during transient outages. A cold failure
+    /// is an error, never a fabricated two-model success.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        let requested_at = Instant::now();
-        let mut latest = self.models_cache.lock().await;
-        if let Some((completed_at, models)) = &*latest
-            && *completed_at >= requested_at
-        {
-            return Ok(models.clone());
-        }
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => {
-                *latest = Some((Instant::now(), models.clone()));
-                Ok(models)
-            }
-            Ok(_) => Ok(static_models()),
-            Err(error) => {
-                tracing::warn!(%error, "Cursor model discovery failed; using fallback");
-                Ok(static_models())
-            }
-        }
+        self.models_cache
+            .get(catalog::credential_context, || self.discover_models())
+            .await
     }
 
     // No `commands()` override: @cursor/sdk 1.0.28 exposes no slash-command
@@ -256,9 +256,17 @@ impl Harness for CursorHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let lease = if self.executable.is_none() {
+            Some(state::Lease::acquire(&state::state_root(), request.resume.as_deref()).await?)
+        } else {
+            None
+        };
         let (exe, args) = self.resolve_shim().await?;
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
+        if lease.is_some() {
+            cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
+        }
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -306,11 +314,13 @@ impl Harness for CursorHarness {
             // shim folds them into the SDK's ModelSelection params.
             "modelOptions": request.model_options,
             "resume": request.resume,
+            "storeDir": lease.as_ref().and_then(|lease| lease.store_dir.as_ref()),
         });
         let _ = stdin_tx.send(first.to_string());
 
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
+            lease,
             child,
             stdout_lines: BufReader::new(stdout).lines(),
             stdin_tx,
@@ -328,27 +338,6 @@ impl Harness for CursorHarness {
         })
         .boxed())
     }
-}
-
-/// The fallback pair when discovery fails: well-known ids that resolve as
-/// aliases in Cursor's real catalog, so a degraded picker still runs.
-fn static_models() -> Vec<Model> {
-    vec![
-        Model {
-            id: "auto".into(),
-            label: "Auto".into(),
-            description: Some("Cursor picks the model per request".into()),
-            reasoning_levels: Vec::new(),
-            options: Vec::new(),
-        },
-        Model {
-            id: "composer-2.5".into(),
-            label: "Composer 2.5".into(),
-            description: Some("Cursor's own fast coding model".into()),
-            reasoning_levels: Vec::new(),
-            options: Vec::new(),
-        },
-    ]
 }
 
 /// `Cursor.models.list()` items → picker models. Item shape (1.0.28
@@ -451,6 +440,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Str
 }
 
 struct Session {
+    lease: Option<state::Lease>,
     child: Child,
     stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
     stdin_tx: mpsc::UnboundedSender<String>,
@@ -469,6 +459,7 @@ fn new_message_id() -> String {
 
 async fn run_session(session: Session) {
     let Session {
+        lease: _lease,
         mut child,
         mut stdout_lines,
         stdin_tx,
@@ -505,6 +496,22 @@ async fn run_session(session: Session) {
 
     'main: loop {
         tokio::select! {
+            // A saturated steering queue must not starve cancellation.
+            biased;
+            _ = interrupt.cancelled(), if !interrupt_sent => {
+                interrupt_sent = true;
+                interrupted = true;
+                let _ = stdin_tx.send(json!({ "op": "interrupt" }).to_string());
+                if let Some(pid) = crate::process::signal_target(&child) {
+                    escalation = Some(tokio::spawn(async move {
+                        tokio::time::sleep(interrupt_grace).await;
+                        send_signal(&pid, Signal::Term);
+                        tokio::time::sleep(kill_grace).await;
+                        send_signal(&pid, Signal::Kill);
+                    }));
+                }
+            },
+
             line = stdout_lines.next_line() => match line {
                 Ok(Some(line)) => {
                     let line = line.trim();
@@ -544,6 +551,7 @@ async fn run_session(session: Session) {
                         _ => {
                             for ev in map_shim_frame(&frame, interrupted) {
                                 let is_done = matches!(ev, AgentEvent::Done { .. });
+                                let failed = matches!(ev, AgentEvent::Done { status: DoneStatus::Errored, .. });
                                 // Stamp the session id onto Dones the mapper
                                 // couldn't know.
                                 let ev = if let AgentEvent::Done { status, result, error, .. } = ev {
@@ -560,10 +568,12 @@ async fn run_session(session: Session) {
                                         done_after_interrupt = true;
                                         break 'main;
                                     }
+                                    if failed { break 'main; }
                                     // Turn boundary: a queued steer becomes
                                     // the next turn; otherwise park for the
                                     // mailbox (caller owns teardown).
                                     if let Some(text) = queued_steers.pop_front() {
+                                        any_done = false;
                                         let prev = std::mem::replace(
                                             &mut assistant_message_id,
                                             new_message_id(),
@@ -602,6 +612,7 @@ async fn run_session(session: Session) {
                 Some(msg) => {
                     if parked {
                         parked = false;
+                        any_done = false;
                         let prev = std::mem::replace(&mut assistant_message_id, new_message_id());
                         if !send(AgentEvent::Steered {
                             assistant_message_id: Some(prev),
@@ -623,20 +634,6 @@ async fn run_session(session: Session) {
                     if parked && queued_steers.is_empty() {
                         break 'main;
                     }
-                }
-            },
-
-            _ = interrupt.cancelled(), if !interrupt_sent => {
-                interrupt_sent = true;
-                interrupted = true;
-                let _ = stdin_tx.send(json!({ "op": "interrupt" }).to_string());
-                if let Some(pid) = crate::process::signal_target(&child) {
-                    escalation = Some(tokio::spawn(async move {
-                        tokio::time::sleep(interrupt_grace).await;
-                        send_signal(&pid, Signal::Term);
-                        tokio::time::sleep(kill_grace).await;
-                        send_signal(&pid, Signal::Kill);
-                    }));
                 }
             },
 
@@ -674,7 +671,15 @@ async fn run_session(session: Session) {
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    drop(stdin_tx);
+    // EOF asks the shim to cancel/close the SDK and settle its durable state.
+    // Signals remain the bounded fallback when the SDK cannot shut down.
+    if !matches!(
+        tokio::time::timeout(interrupt_grace, child.wait()).await,
+        Ok(Ok(_))
+    ) {
+        shutdown_child(&mut child, kill_grace).await;
+    }
     if let Some(handle) = escalation {
         handle.abort();
     }
@@ -898,7 +903,11 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
             }]
         }
         "fatal" => vec![AgentEvent::Done {
-            status: DoneStatus::Errored,
+            status: if interrupted {
+                DoneStatus::Interrupted
+            } else {
+                DoneStatus::Errored
+            },
             result: None,
             error: Some(
                 frame
