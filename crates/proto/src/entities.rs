@@ -8,6 +8,54 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HarnessId, ReasoningLevel, SandboxLevel};
 
+/// Admission limit for new pins. Concurrent offline additions may exceed it;
+/// existing pins remain visible, reorderable and removable without truncation.
+pub const MAX_SIDEBAR_PINS: usize = 200;
+
+/// Validate an optimistic projection without truncating concurrent overflow.
+pub fn validate_sidebar_pin_update(
+    current: &[String],
+    next: &[String],
+) -> Result<(), &'static str> {
+    let mut seen = std::collections::HashSet::new();
+    if next.iter().any(|id| id.is_empty() || !seen.insert(id)) {
+        return Err("Sidebar pins must be non-empty and unique");
+    }
+    if next.len() > MAX_SIDEBAR_PINS && next.iter().any(|id| !current.contains(id)) {
+        return Err("You can pin up to 200 sessions");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPreferences {
+    #[serde(default)]
+    pub pinned_session_ids: Vec<String>,
+}
+
+/// Watch payload for pins. `initialized` records known cached state, including
+/// an empty list; `synced` records receipt of an authoritative registry state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarPreferencesState {
+    /// Monotonic within one engine attachment, not a cross-device order key.
+    /// Lets clients reject older watch frames after a mutation response.
+    #[serde(default)]
+    pub revision: u64,
+    pub synced: bool,
+    pub initialized: bool,
+    #[serde(default)]
+    pub pinned_session_ids: Vec<String>,
+}
+
+impl SidebarPreferencesState {
+    /// A cached initialized row remains editable offline. An unknown list does not.
+    pub fn can_edit(&self) -> bool {
+        self.synced || self.initialized
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
