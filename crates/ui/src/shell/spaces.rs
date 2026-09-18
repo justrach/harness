@@ -146,6 +146,11 @@ fn promote_local_device_group<T>(
     }
 }
 
+/// Shared quiet rule for sidebar groups and palette sections.
+pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
+    div().h(px(1.0)).bg(theme.border.opacity(0.6))
+}
+
 fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyElement) -> gpui::Div {
     div()
         .flex()
@@ -155,15 +160,16 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
         .h(px(SIDEBAR_DISCLOSURE_HEADER_HEIGHT))
         .px(px(Theme::SPACE_SM))
         .cursor_pointer()
-        .child(
+        .child(super::sidebar_faded_label(
+            "sidebar-disclosure-label".into(),
+            false,
             div()
-                .flex_none()
                 .text_size(crate::typography::ui_rems(12.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted.opacity(0.5))
                 .child(label),
-        )
-        .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.6)))
+        ))
+        .child(sidebar_separator(theme).flex_1())
         .child(chevron)
 }
 
@@ -639,6 +645,7 @@ impl Shell {
     }
 
     fn render_sidebar_view_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let Some(menu_state) = self.sidebar_view_menu.get() else {
             return div().into_any_element();
         };
@@ -699,7 +706,7 @@ impl Shell {
                     icon(icons[ix])
                         .size(px(15.0))
                         .flex_none()
-                        .text_color(theme.text_muted.opacity(0.8)),
+                        .text_color(theme.text_muted),
                 )
                 .child(div().flex_1().child(SharedString::from(labels[ix])))
                 .child(div().w(px(14.0)).flex_none().when(selected[ix], |el| {
@@ -817,7 +824,7 @@ impl Shell {
                     .text_color(theme.text_muted),
             )
             // flex_1 pushes the caret to the trigger's right edge and gives
-            // long space names a bound to truncate against; the "@ device"
+            // long space names a bound to fade against; the "@ device"
             // tag hugs the name inside it rather than sitting by the caret.
             .child(
                 div()
@@ -827,16 +834,21 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(super::sidebar_faded_label(
+                        "spaces-filter-label".into(),
+                        false,
+                        label,
+                    ))
                     .when_some(device_tag, |el, (tag, offline)| {
-                        el.child(
+                        el.child(super::sidebar_faded_label(
+                            "spaces-filter-device".into(),
+                            false,
                             div()
-                                .flex_none()
                                 .text_size(crate::typography::ui_rems(10.0))
                                 .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(theme.text_muted.opacity(0.45))
                                 .child(tag),
-                        )
+                        ))
                         // Disconnected glyph, not the word (user request).
                         .when(offline, |el| {
                             el.child(
@@ -955,6 +967,7 @@ impl Shell {
     /// The dropdown card: search on top, "All projects" + space rows (check on
     /// the active filter; right-click for rename/remove) + "New project…".
     fn render_spaces_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
         let (search, active, focus, list_scroll) = {
             let Some(menu) = self.spaces_menu.get() else {
                 return div().into_any_element();
@@ -1135,7 +1148,7 @@ impl Shell {
                     icon(icons::PLUS)
                         .size(px(12.0))
                         .flex_none()
-                        .text_color(theme.text_muted.opacity(0.7)),
+                        .text_color(theme.text_muted),
                 )
                 .child(
                     div()
@@ -1592,11 +1605,10 @@ impl Shell {
                                     }),
                             )
                         })
-                        .child(
+                        .child(super::sidebar_faded_label(
+                            format!("archived-title-{id}").into(),
+                            true,
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(if hovered || is_selected {
                                     theme.text
@@ -1604,7 +1616,7 @@ impl Shell {
                                     theme.text.opacity(0.55)
                                 })
                                 .child(title),
-                        )
+                        ))
                         .child(right),
                 );
             }
@@ -2307,7 +2319,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let flow = self.add_space.as_mut()?;
         if std::mem::take(&mut flow.focus_pending) {
             window.focus(&flow.search.focus_handle(cx), cx);
@@ -2336,6 +2348,7 @@ impl Shell {
         let row = |ix: usize| {
             popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
                 .id(("project-result", ix))
+                .rounded(px(popover::PALETTE_ITEM_RADIUS))
                 .h(px(32.0))
                 .flex_none()
         };
@@ -2435,7 +2448,7 @@ impl Shell {
             .max_h(px((f32::from(viewport.height) - 220.0).clamp(100.0, 424.0)))
             .overflow_y_scroll()
             .track_scroll(&scroll)
-            .px(px(10.0))
+            .px(px(popover::CARD_INSET))
             .flex()
             .flex_col()
             .gap(px(SIDEBAR_LIST_GAP))
@@ -2721,7 +2734,7 @@ impl Shell {
                 }))
                 .child(header)
                 .child(crumbs)
-                .child(div().min_h_0().py(px(8.0)).child(results))
+                .child(div().min_h_0().py(px(popover::CARD_INSET)).child(results))
                 .when_some(error, |el, error| {
                     el.child(
                         div()
@@ -2816,7 +2829,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some((space_id, position)) = self.space_menu.get().cloned() {
@@ -3042,6 +3055,13 @@ mod tests {
 #[cfg(feature = "project-palette-fixture")]
 impl Shell {
     pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
+        if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() {
+            self.composer
+                .read(cx)
+                .pickers()
+                .clone()
+                .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
+        }
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };

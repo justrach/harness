@@ -21,6 +21,7 @@ pub mod change_requests;
 pub mod chat2_host;
 pub mod diff_sync;
 pub mod doc_host;
+mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 pub mod profile;
@@ -34,6 +35,7 @@ pub mod source_control;
 pub mod spaces;
 pub mod terminals;
 pub mod titles;
+mod transcript_history;
 pub mod uploads;
 pub mod workspace_files;
 pub mod workspace_host;
@@ -73,6 +75,8 @@ pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error(transparent)]
+    Token(#[from] zeron_rpc::TokenError),
     #[error("doc: {0}")]
     Doc(#[from] zeron_doc::DocError),
     #[error("journal: {0}")]

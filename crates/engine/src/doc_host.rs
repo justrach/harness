@@ -37,6 +37,7 @@ use zeron_doc::{
 use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
 use zeron_sync::DocsStore;
 
+use crate::http_error::describe_http_error;
 use crate::project_actions::{
     ProjectActionSetupHandoff, ProjectActionsStore, launch_project_setup_action,
 };
@@ -121,7 +122,7 @@ pub struct EdgeConfig {
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
     pub url: String,
     /// Fresh-bearer provider (the relay's `TokenSource`), consulted per
-    /// connect/request. `None` from the provider = signed out.
+    /// connect/request. Temporary failures preserve the signed-in session.
     pub token: Arc<dyn zeron_rpc::TokenSource>,
     /// This engine's device id, carried on room dials (`&device=`) so the
     /// edge can attribute sockets in logs. Debugging the 2026-08-04 deaf
@@ -159,8 +160,8 @@ impl EdgeConfig {
         Self::new(url, Arc::new(zeron_rpc::StaticToken(token.into())))
     }
 
-    /// The current bearer, refreshed by the provider if stale. `None` = signed out.
-    pub async fn bearer(&self) -> Option<String> {
+    /// The current bearer, or a distinct signed-out/temporarily-unavailable error.
+    pub async fn bearer(&self) -> Result<String, zeron_rpc::TokenError> {
         self.token.token().await
     }
 
@@ -193,9 +194,7 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
         let base = self.base.clone();
         let device = self.device_id.clone();
         Box::pin(async move {
-            let token = token.token().await.ok_or_else(|| {
-                zeron_sync::SyncError::Auth("no access token (signed out)".into())
-            })?;
+            let token = token.token().await.map_err(zeron_sync::SyncError::from)?;
             let mut url = format!("{base}?token={token}");
             if !device.is_empty() {
                 url.push_str(&format!("&device={device}"));
@@ -481,12 +480,24 @@ pub enum FinishQueueEditOutcome {
     Missing,
 }
 
+/// Content and its historical presentation cutoff travel atomically, even
+/// when the watch coalesces several backfill and live commits.
+#[derive(Clone, Default)]
+pub struct TranscriptSnapshot {
+    pub entries: Arc<Vec<SessionMessageEntry>>,
+    pub replay_baseline: Arc<zeron_doc::TranscriptBaseline>,
+}
+
 /// One open chat doc: the `SessionDoc`, its change plumbing, and the room client.
 pub struct ChatDocHandle {
     chat_id: String,
     device_id: String,
     doc: Arc<SessionDoc>,
-    messages_tx: watch::Sender<Arc<Vec<SessionMessageEntry>>>,
+    messages_tx: watch::Sender<TranscriptSnapshot>,
+    /// Serialize historical imports with publication so an async doc-change
+    /// task cannot publish recovered content before its presentation cutoff.
+    transcript_import: Mutex<()>,
+    transcript_history: Arc<Mutex<crate::transcript_history::TranscriptHistory>>,
     /// Pending-message queue watch (WatchQueue). Cheap to rebuild — a handful
     /// of short rows — so unlike the transcript mirror it publishes on every
     /// change without a dirty flag.
@@ -563,7 +574,7 @@ impl ChatDocHandle {
     /// Attach-time refresh: the mirror is only maintained while watched, so a
     /// doc that changed unwatched materializes here, once, instead of on every
     /// commit it sat through in the background.
-    pub fn watch_messages(&self) -> watch::Receiver<Arc<Vec<SessionMessageEntry>>> {
+    pub fn watch_messages(&self) -> watch::Receiver<TranscriptSnapshot> {
         self.touch();
         // Attach is a user signal: verify a quiet room is actually alive
         // (a doc-wedged DO keeps answering pings while delivering nothing,
@@ -575,7 +586,15 @@ impl ChatDocHandle {
         // Subscribe BEFORE the dirty check: a commit racing this attach then
         // sees a live receiver and publishes, instead of re-marking dirty
         // after our refresh and leaving the new watcher a cleared mirror.
-        let rx = self.messages_tx.subscribe();
+        let rx = {
+            let _import = lock(&self.transcript_import);
+            if self.messages_tx.receiver_count() == 0 {
+                // A new viewing session must not inherit the former viewer's
+                // live-part protection, even if no commit happened while away.
+                *lock(&self.transcript_history) = Default::default();
+            }
+            self.messages_tx.subscribe()
+        };
         if self.mirror_dirty.load(Ordering::Acquire) {
             self.publish_messages();
         }
@@ -670,18 +689,29 @@ impl ChatDocHandle {
     }
 
     fn publish_messages(&self) {
+        let _import = lock(&self.transcript_import);
         self.mirror_dirty.store(false, Ordering::Release);
         match self.doc.read_entries() {
             Ok(entries) => {
+                let replay_baseline =
+                    lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
                 let joined = join_continuation_entries(entries);
                 // send_replace: update the watch even with no subscribers yet, so a
                 // late subscriber's first borrow sees the current transcript.
-                self.messages_tx.send_replace(Arc::new(joined));
+                self.messages_tx.send_replace(TranscriptSnapshot {
+                    entries: Arc::new(joined),
+                    replay_baseline: replay_baseline.clone(),
+                });
             }
             Err(err) => {
                 tracing::warn!(chat = %self.chat_id, error = %err, "transcript read failed");
             }
         }
+    }
+
+    pub(crate) fn import_transcript<T>(&self, import: impl FnOnce() -> T) -> T {
+        let _guard = lock(&self.transcript_import);
+        import()
     }
 
     /// Per-commit publish path: unwatched docs just mark the mirror dirty —
@@ -691,7 +721,8 @@ impl ChatDocHandle {
         if self.messages_tx.receiver_count() == 0 {
             self.mirror_dirty.store(true, Ordering::Release);
             // Shrink the stale mirror: watch_messages rebuilds on attach.
-            self.messages_tx.send_replace(Arc::default());
+            self.messages_tx.send_replace(TranscriptSnapshot::default());
+            *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages();
         }
@@ -1233,13 +1264,28 @@ impl DocHost {
         let doc = Arc::new(doc);
 
         let (changed_tx, changed_rx) = watch::channel(0u64);
-        let sub = doc.doc().subscribe_root(Arc::new(move |_diff| {
+        let (messages_tx, _) = watch::channel(TranscriptSnapshot::default());
+        let transcript_history = Arc::new(Mutex::new(
+            crate::transcript_history::TranscriptHistory::default(),
+        ));
+        let history = transcript_history.clone();
+        let watched = messages_tx.clone();
+        let weak_doc = Arc::downgrade(&doc);
+        let sub = doc.doc().subscribe_root(Arc::new(move |diff| {
+            // This callback runs before the change worker can publish. The
+            // import origin belongs to the event, so concurrent local commits
+            // cannot inherit a remote replay's presentation classification.
+            if watched.receiver_count() > 0 {
+                if let Some(doc) = weak_doc.upgrade() {
+                    lock(&history).observe(doc.doc(), &diff);
+                }
+            } else {
+                *lock(&history) = Default::default();
+            }
             changed_tx.send_modify(|v| *v = v.wrapping_add(1));
         }));
-        // The mirror starts dirty and empty: many opens (command queueing,
-        // drains, nudges) never watch the transcript, and the first
-        // watch_messages attach materializes it on demand.
-        let (messages_tx, _) = watch::channel(Arc::default());
+        // The mirror starts dirty and empty; watch_messages materializes it
+        // once on attach instead of maintaining an unwatched transcript.
         let initial_queue = doc.read_queue().unwrap_or_default();
         // A queue already present when a handle is materialized came from a
         // persisted snapshot (or a synced checkpoint), not from a prompt the
@@ -1254,6 +1300,8 @@ impl DocHost {
             device_id: self.inner.config.device_id.clone(),
             doc: doc.clone(),
             messages_tx,
+            transcript_import: Mutex::default(),
+            transcript_history,
             queue_tx,
             drain_lock: tokio::sync::Mutex::new(()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
@@ -1373,7 +1421,8 @@ impl DocHost {
         let host = self.clone();
         let mut token_changes = edge.token_changes();
         self.spawn_worker(async move {
-            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone()));
+            let sink = Arc::new(crate::chat2_host::EngineChatSink::new(&doc, store, chat.clone())
+                .with_handle(weak.clone()));
             // The sink holds only a Weak doc ref (a strong one made every
             // chat2 handle read as perma-pinned — LRU eviction dead); this
             // task's own strong ref dies when the join resolves.
@@ -1423,7 +1472,7 @@ impl DocHost {
                 .await;
                 match dial {
                     Ok(Ok(client)) => {
-                        if edge.bearer().await.is_none() {
+                        if matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut)) {
                             return;
                         }
                         let Some(handle) = weak.upgrade() else {
@@ -1550,7 +1599,7 @@ impl DocHost {
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                                 },
                                 _ = crate::workspace_host::token_changed(&mut token_changes) => {
-                                    if edge.bearer().await.is_none() {
+                                    if matches!(edge.bearer().await, Err(zeron_rpc::TokenError::SignedOut)) {
                                         if let Some(handle) = weak.upgrade() {
                                             lock(&handle.chat2).take();
                                             // Keep journaling local cleanup after credentials disappear.
@@ -1704,7 +1753,7 @@ impl DocHost {
         }
         let snapshot = rebuilt.doc.export_snapshot().map_err(|e| e.to_string())?;
         let frontier = rebuilt.doc.doc().oplog_vv().encode();
-        let bearer = edge.bearer().await.ok_or("signed out")?;
+        let bearer = edge.bearer().await.map_err(|e| e.to_string())?;
         let url = format!(
             "{}/chat2/{}/checkpoint?seqCovered=0",
             edge.url.trim_end_matches('/'),
@@ -1722,7 +1771,7 @@ impl DocHost {
             .body(snapshot.clone())
             .send()
             .await
-            .map_err(|e| format!("seed checkpoint POST: {e}"))?;
+            .map_err(|e| format!("seed checkpoint POST: {}", describe_http_error(e)))?;
         if !res.status().is_success() {
             return Err(format!("seed checkpoint HTTP {}", res.status()));
         }
@@ -1916,7 +1965,7 @@ impl DocHost {
             let edge_tail = edge.clone();
             let chat = chat_id.clone();
             self.spawn_worker(async move {
-                let Some(bearer) = edge_tail.bearer().await else {
+                let Ok(bearer) = edge_tail.bearer().await else {
                     return;
                 };
                 let url = format!(
@@ -1999,7 +2048,7 @@ impl DocHost {
         let http = self.inner.http.clone();
         let weak_note = Arc::downgrade(handle);
         self.spawn_worker(async move {
-            let Some(bearer) = edge.bearer().await else {
+            let Ok(bearer) = edge.bearer().await else {
                 in_flight.store(false, Ordering::Release);
                 return;
             };
@@ -2040,6 +2089,7 @@ impl DocHost {
                         "chat2 checkpoint rejected");
                 }
                 Err(err) => {
+                    let err = describe_http_error(err);
                     tracing::warn!(chat = %chat_id, error = %err, "chat2 checkpoint POST failed");
                 }
             }
@@ -3177,9 +3227,12 @@ impl DocHost {
         let chat = chat_id.to_string();
         self.spawn_worker_on(&runtime, async move {
             // Fresh bearer per request — never the boot-time snapshot.
-            let Some(bearer) = edge.bearer().await else {
-                tracing::warn!(chat = %chat, "nudge skipped: signed out");
-                return;
+            let bearer = match edge.bearer().await {
+                Ok(bearer) => bearer,
+                Err(err) => {
+                    tracing::warn!(chat = %chat, error = %err, "nudge skipped: token unavailable");
+                    return;
+                }
             };
             let send = reqwest::Client::new()
                 .post(&url)
@@ -3195,6 +3248,7 @@ impl DocHost {
                 Ok(res) => tracing::warn!(chat = %chat, device = %host_device,
                     status = res.status().as_u16(), "nudge rejected"),
                 Err(err) => {
+                    let err = describe_http_error(err);
                     tracing::warn!(chat = %chat, error = %err, "nudge failed (best-effort)")
                 }
             }
@@ -3714,8 +3768,8 @@ impl DocHost {
             encode_part_segment(&payload.part_id)
         );
         self.spawn_worker_on(&runtime, async move {
-            let Some(bearer) = edge.bearer().await else {
-                return; // signed out; summary-only until the next session
+            let Ok(bearer) = edge.bearer().await else {
+                return; // token unavailable; serve the local summary
             };
             let mut puts: Vec<(String, &'static str, Vec<u8>)> = Vec::new();
             if let Some(output) = &payload.output {
@@ -3743,6 +3797,7 @@ impl DocHost {
                     Ok(res) => tracing::warn!(url, status = res.status().as_u16(),
                         "tool sidecar upload rejected"),
                     Err(err) => {
+                        let err = describe_http_error(err);
                         tracing::warn!(url, error = %err, "tool sidecar upload failed (best-effort)")
                     }
                 }
@@ -3773,9 +3828,7 @@ impl DocHost {
         let Some(edge) = self.inner.config.edge.clone() else {
             return Err(EngineError::Other("offline: no edge configured".into()));
         };
-        let Some(bearer) = edge.bearer().await else {
-            return Err(EngineError::Other("signed out".into()));
-        };
+        let bearer = edge.bearer().await?;
         // `valid` above guarantees the split; re-split to encode the part
         // segment for transport (PART_RE allows `#`, which a raw URL would
         // truncate as a fragment — the 2026-08-10 silent-collision bug).
@@ -3793,16 +3846,21 @@ impl DocHost {
             .bearer_auth(&bearer)
             .send()
             .await
-            .map_err(|e| EngineError::Other(format!("sidecar fetch failed: {e}")))?;
+            .map_err(|e| {
+                EngineError::Other(format!("sidecar fetch failed: {}", describe_http_error(e)))
+            })?;
         if !res.status().is_success() {
             return Err(EngineError::Other(format!(
                 "sidecar fetch: HTTP {}",
                 res.status().as_u16()
             )));
         }
-        res.text()
-            .await
-            .map_err(|e| EngineError::Other(format!("sidecar body read failed: {e}")))
+        res.text().await.map_err(|e| {
+            EngineError::Other(format!(
+                "sidecar body read failed: {}",
+                describe_http_error(e)
+            ))
+        })
     }
 
     /// §2.2 writer discipline: we host a chat iff its workspace row's `deviceId` is

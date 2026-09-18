@@ -271,6 +271,7 @@ impl Element for LinkRanges {
                 }
             }
             if let Some((index, position)) = *state.menu.borrow() {
+                let theme = theme.for_popup();
                 let menu = state.menu.clone();
                 let dismiss_menu = state.menu.clone();
                 let return_focus = state.focus[index].clone();

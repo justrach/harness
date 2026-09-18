@@ -74,6 +74,7 @@ actions!(
         ToggleChanges,
         AddSpacePalette,
         ToggleCommandPalette,
+        OpenModelPicker,
         NewSession,
         OpenSettings,
         NextSession,
@@ -100,7 +101,7 @@ pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
 
 /// Check the completed dispatch tree, not just the lifetime of the focused
 /// handle: a hidden editor can stay alive after its element has unmounted.
-fn restore_mounted_focus(
+pub(crate) fn restore_mounted_focus(
     root: &FocusHandle,
     preferred: &FocusHandle,
     unfocused: &FocusHandle,
@@ -376,6 +377,11 @@ pub fn apply_keymap(
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        KeyBinding::new(
+            &valid_or_default(&keymap.open_model_picker, "mod-/"),
+            OpenModelPicker,
+            None,
+        ),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
@@ -697,6 +703,27 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
 const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
+
+/// Keep the fade short so only the last few glyphs recede. Tracking clipped
+/// content lets the shared paint-time overflow gate leave fitting labels intact.
+fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) -> impl IntoElement {
+    let overflow = gpui::ScrollHandle::new();
+    crate::edge_fade::edge_faded(
+        20.0,
+        false,
+        false,
+        div()
+            .id(id)
+            .when(fill, |el| el.flex_1())
+            .min_w_0()
+            .overflow_hidden()
+            .track_scroll(&overflow)
+            .flex()
+            .child(div().flex_none().whitespace_nowrap().child(label)),
+    )
+    .fade_right(true)
+    .fade_label_overflow(&overflow)
+}
 
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
@@ -3525,6 +3552,7 @@ impl Shell {
     /// keeps this block on a single source.
     fn sync_independent_settings(&mut self, cx: &App) {
         let current = settings::current(cx);
+        self.settings.window_geometry = current.window_geometry;
         self.settings.new_thread_composer_background = current.new_thread_composer_background;
         self.settings.new_thread_background_effect = current.new_thread_background_effect;
         self.settings.open_web_links_in_zeron = current.open_web_links_in_zeron;
@@ -3534,6 +3562,7 @@ impl Shell {
         self.settings.terminal_font_size = current.terminal_font_size;
         self.settings.code_font_family = current.code_font_family;
         self.settings.code_font_size = current.code_font_size;
+        self.settings.transcript_width = current.transcript_width;
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {
@@ -5699,7 +5728,11 @@ impl Shell {
         };
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
-        let subline = theme.text_muted.opacity(0.5);
+        let subline = if search_query.is_some() {
+            theme.text_muted
+        } else {
+            theme.text_muted.opacity(0.5)
+        };
         let select_id = id.clone();
         let menu_id = id.clone();
         // Hover fades over transition-colors (zeron session-row.tsx) — both
@@ -5715,7 +5748,11 @@ impl Shell {
         // below its near-opaque selected fill, and blending toward it visibly
         // dimmed the active row under the pointer (user report).
         let hover_bg = if selected { selected_wash } else { hover };
-        let rest_text = if selected { text } else { text.opacity(0.8) };
+        let rest_text = if selected || search_query.is_some() {
+            text
+        } else {
+            text.opacity(0.8)
+        };
         div()
             .id(SharedString::from(row_id.clone()))
             .h(px(chat_row_height(
@@ -5725,7 +5762,11 @@ impl Shell {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .rounded(px(8.0))
+            .rounded(px(if search_query.is_some() {
+                popover::PALETTE_ITEM_RADIUS
+            } else {
+                8.0
+            }))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
@@ -5774,16 +5815,15 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(Theme::SPACE_SM))
-                    .child(
+                    .child(sidebar_faded_label(
+                        format!("chat-device-{id}").into(),
+                        true,
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_size(crate::typography::ui_rems(11.0))
                             .line_height(px(14.0))
                             .text_color(subline)
                             .child(popover::search_highlight(space_name, search_query, theme)),
-                    )
+                    ))
                     .child(div().text_color(subline).child(corner)),
             )
             // Line 2: harness identity belongs directly with the title,
@@ -5806,15 +5846,14 @@ impl Shell {
                             )
                         },
                     )
-                    .child(
+                    .child(sidebar_faded_label(
+                        format!("chat-title-{id}").into(),
+                        true,
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
-                    ),
+                    )),
             )
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
@@ -5833,15 +5872,15 @@ impl Shell {
                                     .flex_none()
                                     .text_color(subline),
                             )
-                            .child(
+                            .child(sidebar_faded_label(
+                                format!("chat-branch-{id}").into(),
+                                false,
                                 div()
-                                    .min_w_0()
-                                    .truncate()
                                     .text_size(crate::typography::ui_rems(11.0))
                                     .line_height(px(14.0))
                                     .text_color(subline)
                                     .child(popover::search_highlight(branch, search_query, theme)),
-                            )
+                            ))
                         })
                         // Stable invisible spring keeps the optional PR badge
                         // pinned right without changing no-PR paint.
@@ -6264,6 +6303,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
         let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
         // Bottom-of-sidebar identity: avatar circle + scope/account label and
@@ -6374,7 +6414,7 @@ impl Shell {
                         .pt(px(6.0))
                         .pb(px(4.0))
                         .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted.opacity(0.7))
+                        .text_color(theme.text_muted)
                         .truncate()
                         .child(menu_identity),
                 )
@@ -6459,7 +6499,7 @@ impl Shell {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let needs_org = matches!(
             self.state.read(cx).auth.as_ref(),
             Some(AuthState::NeedsOrganization { .. })
@@ -6964,7 +7004,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let theme = Theme::of(cx).clone();
+        let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
@@ -7018,7 +7058,7 @@ impl Shell {
                             .child(
                                 icon(icons::ALT_ARROW_RIGHT)
                                     .size(px(14.0))
-                                    .text_color(theme.text_muted.opacity(0.7)),
+                                    .text_color(theme.text_muted),
                             ),
                     )
                     .child(popover::menu_separator())
@@ -7718,13 +7758,8 @@ impl Shell {
     /// the subagent pane so both read as one control. `anim_key`/`hover_key`
     /// must be distinct per instance (they key global animation state).
     ///
-    /// Glass-forward like the composer pill it floats near: a backdrop blur
-    /// under the floating-card tint ([`Theme::glass_overlay`]), hover
-    /// brightening via the standard glass wash painted OVER the tint —
-    /// mixing the tint TOWARD the wash would thin the pill on hover, the
-    /// exact see-through regression the old opaque pill's comment warned
-    /// about. Opaque appearances keep the raised-surface treatment
-    /// (`frosted` passes through there anyway).
+    /// Use the shared popover tint and blur, with a separate hover wash so
+    /// the floating control retains the same glass surface in either theme.
     fn jump_pill(
         &self,
         anim_key: &'static str,
@@ -7732,10 +7767,10 @@ impl Shell {
         transcript: Entity<Transcript>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = Theme::of(cx);
-        let glass = theme.is_glass();
+        let theme = Theme::of(cx).for_popup();
+        let glass = theme.is_frost();
         let base = if glass {
-            theme.glass_overlay()
+            popover::surface_bg(&theme)
         } else {
             motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
         };
@@ -7750,7 +7785,7 @@ impl Shell {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .shadow_md()
+            .when(!glass, |el| el.shadow_md())
             .cursor_pointer()
             .bg(base)
             .on_hover(motion::hover_listener(hover_key))
@@ -7787,7 +7822,12 @@ impl Shell {
         // glyphs — so the pill always composes over the transcript content
         // scrolling under it, and never loses its washes to the kind-sorted
         // draw order (frost.rs module docs).
-        crate::frost::frosted(15.0, 16.0, motion::dialog_in(anim_key, pill)).into_any_element()
+        crate::frost::frosted(
+            15.0,
+            crate::frost::MENU_BLUR,
+            motion::dialog_in(anim_key, pill),
+        )
+        .into_any_element()
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
@@ -9646,6 +9686,7 @@ impl Render for Shell {
                 window,
                 |this: &mut Shell, window, cx| {
                     if !window.is_window_active() {
+                        this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
                         this.composer.update(cx, |composer, cx| {
                             composer.set_queue_shortcut_revealed(false, cx)
@@ -9780,6 +9821,12 @@ impl Render for Shell {
             )
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
+                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                    let pickers = this.composer.read(cx).pickers().clone();
+                    pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
@@ -11367,6 +11414,14 @@ mod exit_regressions {
             };
             let terminal_size = 15.0 + index as f32;
             let code_size = 11.0 + index as f32;
+            let transcript_width = 736.0 + 16.0 * index as f32;
+            let geometry = Some(settings::WindowGeometry {
+                display_uuid: Some(uuid::Uuid::from_u128(7)),
+                x: 80.0 + index as f32,
+                y: 60.0,
+                width: 1100.0,
+                height: 750.0,
+            });
             window
                 .update(cx, |shell, _, cx| {
                     // Selection changes in Appearance, independently of the shell's
@@ -11375,11 +11430,13 @@ mod exit_regressions {
                     shell.schedule_save(cx);
                     settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.window_geometry = geometry;
                         settings.open_web_links_in_zeron = open_links_in_zeron;
                         settings.terminal_font_family = terminal_family.clone();
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
                         settings.code_font_size = code_size;
+                        settings.transcript_width = transcript_width;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
@@ -11387,21 +11444,25 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
+                        assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.new_thread_background_effect, effect);
                         assert_eq!(current.open_web_links_in_zeron, open_links_in_zeron);
                         assert_eq!(current.terminal_font_family, terminal_family);
                         assert_eq!(current.terminal_font_size, terminal_size);
                         assert_eq!(current.code_font_family, code_family);
                         assert_eq!(current.code_font_size, code_size);
+                        assert_eq!(current.transcript_width, transcript_width);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
+                    assert_eq!(loaded.window_geometry, geometry);
                     assert_eq!(loaded.new_thread_background_effect, effect);
                     assert_eq!(loaded.open_web_links_in_zeron, open_links_in_zeron);
                     assert_eq!(loaded.terminal_font_family, terminal_family);
                     assert_eq!(loaded.terminal_font_size, terminal_size);
                     assert_eq!(loaded.code_font_family, code_family);
                     assert_eq!(loaded.code_font_size, code_size);
+                    assert_eq!(loaded.transcript_width, transcript_width);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
