@@ -3378,13 +3378,11 @@ impl Shell {
         let view_trigger = if self.sidebar_view_menu.get().is_some() {
             let closing = self.sidebar_view_menu.closing_since();
             let menu = self.render_sidebar_view_menu(theme, cx);
-            view_trigger
-                .relative()
-                .child(popover::anchored_menu_below_end(
-                    "sidebar-view-options-menu",
-                    menu,
-                    closing,
-                ))
+            view_trigger.relative().child(popover::anchored_menu_right(
+                "sidebar-view-options-menu",
+                menu,
+                closing,
+            ))
         } else {
             view_trigger
         };

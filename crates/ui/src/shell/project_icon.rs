@@ -55,7 +55,7 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
 }
 
 fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
-    // FNV-1a is stable across processes; use neutral theme ink at varied opacities.
+    // FNV-1a keeps each project’s muted badge hue stable across processes.
     let hash = seed.bytes().fold(2166136261u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(16777619)
     });
@@ -66,18 +66,35 @@ fn monogram(name: &str, seed: &str, theme: &Theme) -> AnyElement {
         .unwrap_or('?')
         .to_uppercase()
         .to_string();
+    let hue = [0.04, 0.11, 0.36, 0.48, 0.58, 0.68, 0.79, 0.91][(hash % 8) as usize];
+    let tone = gpui::hsla(
+        hue,
+        0.48,
+        if theme.appearance.is_dark() {
+            0.70
+        } else {
+            0.38
+        },
+        1.0,
+    );
     let tile = div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(3.0))
-        .bg(theme.text.opacity(0.12 + (hash % 6) as f32 * 0.025))
-        .text_color(theme.text)
-        .text_size(crate::typography::ui_rems(9.0))
-        .line_height(px(13.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(letter);
+        .bg(tone.opacity(0.08))
+        .text_color(tone.opacity(0.85))
+        .font_family(theme.font_mono.clone())
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(
+            div()
+                .w_full()
+                .text_center()
+                .text_size(px(9.0))
+                .line_height(px(13.0))
+                .child(letter),
+        );
     crate::frost::frosted(3.0, crate::frost::MENU_BLUR, tile).into_any_element()
 }
 
