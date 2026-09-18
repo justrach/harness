@@ -44,7 +44,7 @@ Validation: `cargo test -p zeron-ui --lib -- --test-threads=1` passed all 1,119
 tests. The native fixture build, formatting checks, and `git diff --check` passed.
 
 Latest icon/order follow-up: all 40 sidebar regression tests passed; native screenshots
-were refreshed with the terminal remote icon and harness-first ordering.
+were refreshed with the Earth remote icon and harness-first ordering.
 
 The view-options popover opens to the right of the filter button and stays within
 the window bounds. Monogram letters use centered monospace text.
