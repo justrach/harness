@@ -47,7 +47,7 @@ const PROBE_QUIET_DEFAULT: Duration = Duration::from_secs(900);
 /// and the session redials (the fetch itself is Range-resumable, so a retry
 /// picks up where the bytes stopped). Sized for MAX_CHECKPOINT_BYTES over
 /// the 1.2 Mbps links this design exists for.
-const CHECKPOINT_FETCH_DEADLINE: Duration = Duration::from_secs(120);
+const CHECKPOINT_FETCH_DEADLINE: Duration = Duration::from_secs(300);
 /// Re-push cadence after a `quota` rejection (server window is 60 s; pending
 /// batches must not wait for the next enqueue/probe to retry).
 const QUOTA_RETRY: Duration = Duration::from_secs(5);
@@ -109,10 +109,17 @@ pub enum RowImportOutcome {
     PendingDependencies,
 }
 
-/// Where remote bytes land. The engine implements this over its doc handle;
-/// every method persists doc content AND the room cursor in one transaction
-/// (`DocsStore::save_snapshot_with_cursor`) so they can never diverge.
+/// Where remote bytes land. Imports may be coalesced in memory, but durable
+/// snapshots must commit content AND an applied cursor in one transaction.
+/// Capture the cursor before exporting, so disk may lag without skipping rows.
 pub trait ChatDocSink: Send + Sync + 'static {
+    /// Only causal-aware snapshot/cursor transactions may skip legacy repair.
+    fn cursor_is_verified(&self) -> bool {
+        false
+    }
+    /// Catch-up may lower the room cursor after a reset or legacy repair.
+    fn reset_cursor(&self, _cursor: u64) {}
+
     /// Durable publication hooks. In-memory/test sinks may use the defaults.
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         Ok(Vec::new())
@@ -325,6 +332,36 @@ fn ensure_durable(shared: &Mutex<Shared>, sink: &dyn ChatDocSink, push: &Pending
     }
 }
 
+// Old clients could persist cursors beyond missing causal history. Repair
+// legacy snapshots once, on either transport; verified atomic snapshots keep
+// their cursor even if the host has been unable to upload a large checkpoint.
+fn apply_cursor_amnesty(
+    shared: &Mutex<Shared>,
+    sink: &dyn ChatDocSink,
+    state: &wire::StateHeader,
+    done: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if done.swap(true, Relaxed) || sink.cursor_is_verified() {
+        return;
+    }
+    let clamp_to = if state.checkpoint_size > 0 {
+        state.checkpoint_seq
+    } else {
+        0
+    };
+    let mut shared = lock(shared);
+    if shared.cursor > clamp_to {
+        tracing::info!(
+            from = shared.cursor,
+            to = clamp_to,
+            "chat2: one-time legacy cursor repair"
+        );
+        sink.reset_cursor(0);
+        shared.cursor = clamp_to;
+    }
+}
+
 fn apply_remote_row(
     shared: &Mutex<Shared>,
     sink: &dyn ChatDocSink,
@@ -408,6 +445,7 @@ pub struct ChatClient {
     presence_out: mpsc::Sender<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
+    offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Default)]
@@ -542,6 +580,7 @@ impl ChatClient {
             ..Shared::default()
         }));
         let flags = Arc::new(Flags::default());
+        let offline_task = Arc::new(Mutex::new(None));
 
         let actor = Actor {
             shared: shared.clone(),
@@ -558,8 +597,9 @@ impl ChatClient {
             presence_rx,
             flags: flags.clone(),
             resumed: false,
-            cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
+            cursor_amnesty_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport,
+            offline_task: offline_task.clone(),
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let task = tokio::spawn(actor.run(ready_tx));
@@ -576,6 +616,7 @@ impl ChatClient {
                 presence_out: presence_tx,
                 flags,
                 task: Some(task),
+                offline_task,
             }),
             Ok(Err(err)) => {
                 task.abort();
@@ -709,11 +750,21 @@ impl ChatClient {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+        // A fallback pull may still be importing after the socket actor exits.
+        // Join its cancellation before the host takes its final snapshot.
+        let offline = lock(&self.offline_task).take();
+        if let Some(task) = offline {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
 impl Drop for ChatClient {
     fn drop(&mut self) {
+        if let Some(task) = lock(&self.offline_task).take() {
+            task.abort();
+        }
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -738,9 +789,10 @@ struct Actor {
     flags: Arc<Flags>,
     /// Once-per-actor cursor amnesty (see run_session): a cursor above the
     /// room's checkpoint is re-verified by refetching the rows above it.
-    cursor_amnesty_done: std::sync::atomic::AtomicBool,
+    cursor_amnesty_done: Arc<std::sync::atomic::AtomicBool>,
     /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
     transport: Option<Arc<dyn ChatTransport>>,
+    offline_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
     /// False until the first backfill of THIS client instance completes.
@@ -797,7 +849,10 @@ impl Actor {
                 .dial_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            let dial = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()).await;
+            let dial = tokio::select! {
+                result = tokio::time::timeout(CONNECT_TIMEOUT, self.connector.connect()) => result,
+                _ = self.shutdown.changed() => return,
+            };
             let pipe = match dial {
                 Ok(Ok(pipe)) => pipe,
                 Ok(Err(err)) => {
@@ -953,6 +1008,7 @@ impl Actor {
         // event, and masking it was exactly how the s2 wedge class stayed
         // invisible.
         if lock(&self.shared).cursor > state.head_seq {
+            self.sink.reset_cursor(0);
             self.flags.server_resets.fetch_add(1, Relaxed);
             tracing::warn!(
                 cursor = lock(&self.shared).cursor,
@@ -962,36 +1018,12 @@ impl Actor {
             );
             let _ = self.events.send(ChatEvent::ServerReset);
         }
-        // Cursor amnesty, once per client: a cursor above the checkpoint seq
-        // claims history the doc may have silently parked and dropped —
-        // parked imports vanish on export while the cursor advances, and
-        // nothing ever re-reads below the cursor ("Add Tweets" wedge:
-        // cursor 75 over a checkpoint-only doc, 2026-08-18). Clamp and
-        // refetch: re-imports are no-ops and the trim policy bounds the
-        // cost to the rows since the last checkpoint.
-        if !self.cursor_amnesty_done.swap(true, Relaxed) {
-            // Checkpoint-less rooms amnesty to ZERO: the same parked-import
-            // wedge (empty doc under an advanced cursor — 2026-08-19: a live
-            // broadcast mid-join outran the backfill and the cursor skipped
-            // the hole) with no checkpoint to clamp to. Refetching the whole
-            // log is bounded by the checkpoint threshold policy (a room
-            // past ~200 rows/512KB HAS a checkpoint) and re-imports are
-            // no-ops, so this is the cheap universal heal.
-            let clamp_to = if state.checkpoint_size > 0 {
-                state.checkpoint_seq
-            } else {
-                0
-            };
-            let mut shared = lock(&self.shared);
-            if shared.cursor > clamp_to {
-                tracing::info!(
-                    from = shared.cursor,
-                    to = clamp_to,
-                    "chat2: cursor amnesty — refetching rows the doc may have parked"
-                );
-                shared.cursor = clamp_to;
-            }
-        }
+        apply_cursor_amnesty(
+            &self.shared,
+            self.sink.as_ref(),
+            &state,
+            &self.cursor_amnesty_done,
+        );
         let cursor = lock(&self.shared).cursor;
         self.flags.connected.store(true, Relaxed);
         if ready.is_none() {
@@ -1302,7 +1334,8 @@ impl Actor {
         let fetcher = self.fetcher.clone();
         let events = self.events.clone();
         let busy = self.sync_busy.clone();
-        tokio::spawn(async move {
+        let amnesty = self.cursor_amnesty_done.clone();
+        let task = tokio::spawn(async move {
             let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
             for push in batches {
                 if !ensure_durable(&shared, sink.as_ref(), &push) {
@@ -1379,6 +1412,15 @@ impl Actor {
                     serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
                 {
                     lock(&shared).server = Some(state);
+                    apply_cursor_amnesty(&shared, sink.as_ref(), &state, &amnesty);
+                    let repaired_cursor = lock(&shared).cursor;
+                    if repaired_cursor < cursor && cursor <= state.head_seq {
+                        // This response was requested above the repaired
+                        // frontier. Discard it and repull from the honest
+                        // cursor rather than certifying an unfilled hole.
+                        busy.store(false, Relaxed);
+                        return;
+                    }
                     let (repair_causal_history, repair_generation) = {
                         let shared = lock(&shared);
                         (shared.needs_checkpoint, shared.causal_gap_generation)
@@ -1388,6 +1430,9 @@ impl Actor {
                     let plan = plan_catch_up(cursor, &state, contained);
                     if repair_causal_history || cursor > state.head_seq {
                         was_live = false;
+                    }
+                    if cursor > state.head_seq {
+                        sink.reset_cursor(0);
                     }
                     if let CatchUpPlan::CheckpointThenRows { .. } = plan {
                         was_live = false;
@@ -1465,6 +1510,7 @@ impl Actor {
             }
             busy.store(false, Relaxed);
         });
+        *lock(&self.offline_task) = Some(task);
     }
 
     /// If a row/ack gap was flagged, request a backfill from the honest

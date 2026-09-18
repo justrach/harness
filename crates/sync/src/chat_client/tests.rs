@@ -51,6 +51,7 @@ struct RecordingSink {
     checkpoints: Mutex<Vec<(Vec<u8>, u64)>>,
     cursor_advances: Mutex<Vec<u64>>,
     frontier_contained: std::sync::atomic::AtomicBool,
+    verified_cursor: std::sync::atomic::AtomicBool,
     pending_until_checkpoint: std::sync::atomic::AtomicBool,
     /// Global apply order across rows and checkpoints — the overlap test
     /// pins "checkpoint imports before any row that buffered during it".
@@ -58,6 +59,11 @@ struct RecordingSink {
 }
 
 impl ChatDocSink for RecordingSink {
+    fn cursor_is_verified(&self) -> bool {
+        self.verified_cursor
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn apply_replay_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
         lock(&self.replay_rows).push(cursor);
         self.apply_row(bytes, cursor)
@@ -1867,4 +1873,105 @@ async fn edits_do_not_retransmit_batches_waiting_for_slow_acknowledgments() {
     }
     assert_eq!(client.stats().cursor, 20);
     client.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn verified_snapshot_does_not_replay_thirteen_thousand_checkpoint_rows() {
+    let (pipe, mut end) = pipe_pair();
+    let sink = Arc::new(RecordingSink::default());
+    sink.verified_cursor
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    sink.frontier_contained
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (fetch, calls) = fetcher(b"checkpoint");
+    let server = tokio::spawn(async move {
+        let after = serve_join(
+            &mut end,
+            serde_json::json!({"headSeq": 69000, "seqFloor": 53000, "checkpointSeq": 53984,
+                "checkpointSize": 21000000, "rowCount": 16000, "rowBytes": 30000000}),
+            b"frontier",
+            vec![],
+            false,
+        )
+        .await;
+        assert_eq!(
+            after, 69000,
+            "verified cursor must not clamp to the old checkpoint"
+        );
+        end
+    });
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        69000,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let end = server.await.unwrap();
+    assert!(lock(&sink.rows).is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(client.stats().cursor, 69000);
+    drop(end);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_cancels_dial_and_joins_http_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    struct HungConnector;
+    impl BinConnector for HungConnector {
+        fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct HungTransport(Arc<AtomicBool>);
+    impl ChatTransport for HungTransport {
+        fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+            struct InFlight(Arc<AtomicBool>);
+            impl Drop for InFlight {
+                fn drop(&mut self) {
+                    self.0.store(false, SeqCst);
+                }
+            }
+            let active = self.0.clone();
+            Box::pin(async move {
+                active.store(true, SeqCst);
+                let _guard = InFlight(active);
+                std::future::pending().await
+            })
+        }
+        fn push(&self, _: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    let active = Arc::new(AtomicBool::new(false));
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_transport(
+        Arc::new(HungConnector),
+        Arc::new(RecordingSink::default()),
+        fetch,
+        "device",
+        0,
+        ChatTuning::default(),
+        Some(Arc::new(HungTransport(active.clone()))),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !active.load(SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_millis(200), client.shutdown())
+        .await
+        .expect("shutdown must interrupt both hanging transports");
+    assert!(
+        !active.load(SeqCst),
+        "fallback must be dropped before final snapshot"
+    );
 }

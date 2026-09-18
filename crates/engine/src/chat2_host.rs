@@ -3,8 +3,8 @@
 //! [`zeron_sync::chat_client::CheckpointFetcher`], binding a
 //! [`crate::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
 //!
-//! The C2 rule is enforced HERE: every sink method persists doc content AND
-//! the room cursor in one `save_snapshot_with_cursor` transaction, so a
+//! The C2 rule is enforced by the coalescing persister: doc content AND its
+//! applied cursor commit in one transaction (at most once per second during replay), so a
 //! restored backup can never disagree with its own cursor — the root cause
 //! of the redownload-forever class the old s2 clients suffered.
 
@@ -39,14 +39,24 @@ pub struct EngineChatSink {
     store: Arc<DocsStore>,
     chat_id: String,
     handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
+    persistence: Arc<crate::chat_persistence::ChatPersistence>,
 }
 
 impl EngineChatSink {
     pub fn new(doc: &Arc<SessionDoc>, store: Arc<DocsStore>, chat_id: impl Into<String>) -> Self {
+        let chat_id = chat_id.into();
+        let cursor = store.snapshot_cursor(&chat_id).unwrap_or(0);
+        let persistence = crate::chat_persistence::ChatPersistence::new(
+            doc,
+            store.clone(),
+            chat_id.clone(),
+            cursor,
+        );
         Self {
             doc: Arc::downgrade(doc),
             store,
-            chat_id: chat_id.into(),
+            chat_id,
+            persistence,
             handle: std::sync::Weak::new(),
         }
     }
@@ -55,6 +65,11 @@ impl EngineChatSink {
         mut self,
         handle: std::sync::Weak<crate::doc_host::ChatDocHandle>,
     ) -> Self {
+        if let Some(owner) = handle.upgrade()
+            && let Some(persistence) = &owner.persistence
+        {
+            self.persistence = persistence.clone();
+        }
         self.handle = handle;
         self
     }
@@ -87,36 +102,25 @@ impl EngineChatSink {
                     "chat2 sink: row import failed; skipping row");
             }
         }
-        self.persist_with_cursor(cursor);
+        self.persistence.applied(cursor, false);
         RowImportOutcome::Applied
     }
 
-    /// Export the CURRENT doc and persist it with `cursor` in one tx.
+    /// Checkpoint/ACK boundaries bypass the debounce but still queue the
+    /// export and transaction off the networking runtime.
     fn persist_with_cursor(&self, cursor: u64) {
-        let Some(doc) = self.doc.upgrade() else {
-            return;
-        };
-        match doc.export_snapshot() {
-            Ok(bytes) => {
-                if let Err(err) = self.store.save_snapshot_with_cursor(
-                    &self.chat_id,
-                    &bytes,
-                    cursor,
-                    CHAT2_DOC_EPOCH,
-                ) {
-                    tracing::warn!(chat = %self.chat_id, error = %err,
-                        "chat2 sink: snapshot persist failed (will retry on next change)");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(chat = %self.chat_id, error = %err,
-                    "chat2 sink: snapshot export failed");
-            }
-        }
+        self.persistence.applied(cursor, true);
     }
 }
 
 impl ChatDocSink for EngineChatSink {
+    fn cursor_is_verified(&self) -> bool {
+        self.persistence.initial_cursor_verified
+    }
+    fn reset_cursor(&self, cursor: u64) {
+        self.persistence.reset_cursor(cursor);
+    }
+
     fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
         let rejected = self
             .store
@@ -265,7 +269,10 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
             // the ChatClient's own deadline bounds wall clock.
             for _attempt in 0..4 {
                 let bearer = edge.bearer().await.map_err(SyncError::from)?;
-                let mut req = http.get(&url).bearer_auth(&bearer);
+                let mut req = http
+                    .get(&url)
+                    .bearer_auth(&bearer)
+                    .timeout(std::time::Duration::from_secs(300));
                 if !got.is_empty() {
                     req = req.header("range", format!("bytes={}-", got.len()));
                 }
