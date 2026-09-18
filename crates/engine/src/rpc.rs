@@ -2351,33 +2351,44 @@ impl RpcService for EngineRpc {
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
-                let snapshot = self
-                    .project_actions
-                    .snapshot(&space.id, std::path::Path::new(&space.path))
-                    .map_err(|err| RpcError::Failed(err.to_string()))?;
+                let actions = self.project_actions.clone();
+                // Snapshots discover repository files; keep all filesystem work
+                // (including mutation persistence below) off the async worker.
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    actions.snapshot(&space.id, std::path::Path::new(&space.path))
+                })
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
             methods::UPSERT_PROJECT_ACTION => {
                 let p: UpsertProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
-                let snapshot = self
-                    .project_actions
-                    .upsert(
+                let actions = self.project_actions.clone();
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    actions.upsert(
                         &space.id,
                         std::path::Path::new(&space.path),
                         p.action_id.as_deref(),
                         p.action,
                     )
-                    .map_err(|err| RpcError::Failed(err.to_string()))?;
+                })
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
             methods::DELETE_PROJECT_ACTION => {
                 let p: DeleteProjectActionParams = parse_params(params)?;
                 let space = self.local_project_action_space(&p.space_id)?;
-                let snapshot = self
-                    .project_actions
-                    .delete(&space.id, std::path::Path::new(&space.path), &p.action_id)
-                    .map_err(|err| RpcError::Failed(err.to_string()))?;
+                let actions = self.project_actions.clone();
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    actions.delete(&space.id, std::path::Path::new(&space.path), &p.action_id)
+                })
+                .await
+                .map_err(|err| RpcError::Failed(err.to_string()))?
+                .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&snapshot)
             }
             methods::RUN_PROJECT_ACTION => {

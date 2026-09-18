@@ -4,7 +4,7 @@
 //! owning engine is the only authority that can persist or execute them.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -521,19 +521,14 @@ fn snapshot_from_actions(
 
 fn read_project_file(project_root: &Path) -> (Vec<ProjectActionDraft>, Option<String>) {
     let path = project_root.join(PROJECT_FILE);
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata,
+    let file = match open_project_file(&path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), None),
         Err(err) => return project_file_issue(format!("could not read file: {err}")),
     };
-    if metadata.len() > MAX_PROJECT_FILE_BYTES {
-        return project_file_issue(format!(
-            "file exceeds the {MAX_PROJECT_FILE_BYTES} byte limit"
-        ));
-    }
-    let bytes = match std::fs::read(&path) {
+    let bytes = match read_project_file_bytes(file) {
         Ok(bytes) => bytes,
-        Err(err) => return project_file_issue(format!("could not read file: {err}")),
+        Err(err) => return project_file_issue(err),
     };
     let file: ProjectFile = match serde_json::from_slice(&bytes) {
         Ok(file) => file,
@@ -558,6 +553,68 @@ fn read_project_file(project_root: &Path) -> (Vec<ProjectActionDraft>, Option<St
         }
     }
     (actions, None)
+}
+
+fn open_project_file(path: &Path) -> std::io::Result<std::fs::File> {
+    // Reject known special files before opening them. The handle check below
+    // is still required: the repository can replace this path after metadata.
+    // Windows metadata itself opens the target, so use the controlled open there.
+    #[cfg(not(windows))]
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::other("expected a regular file"));
+    }
+    open_regular_project_file(path)
+}
+
+fn open_regular_project_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let invalid = || std::io::Error::other("expected a regular file");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A concurrent replacement with a FIFO must not wait for a writer.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
+        // An untrusted path may resolve to a pipe; do not allow its server to
+        // impersonate this process even though we reject the resulting handle.
+        options.security_qos_flags(SECURITY_IDENTIFICATION);
+    }
+    let file = options.open(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+        // Windows metadata attributes alone do not distinguish all devices.
+        // SAFETY: the handle belongs to the live File and is only queried.
+        if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK {
+            return Err(invalid());
+        }
+    }
+    if !file.metadata()?.is_file() {
+        return Err(invalid());
+    }
+    Ok(file)
+}
+
+fn read_project_file_bytes(reader: impl Read) -> Result<Vec<u8>, String> {
+    // Bound the actual read, even if the file grows or reports an inaccurate
+    // size. The extra byte detects overflow without accepting truncated JSON.
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_PROJECT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("could not read file: {err}"))?;
+    if bytes.len() as u64 > MAX_PROJECT_FILE_BYTES {
+        return Err(format!(
+            "file exceeds the {MAX_PROJECT_FILE_BYTES} byte limit"
+        ));
+    }
+    Ok(bytes)
 }
 
 fn project_file_issue(message: String) -> (Vec<ProjectActionDraft>, Option<String>) {
@@ -770,6 +827,246 @@ mod tests {
                 .unwrap()
                 .contains("exceeds")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_file_rejects_device_symlinks() {
+        let (_temp, store_root, project_root) = roots();
+        let store = ProjectActionsStore::open(&store_root).unwrap();
+        for target in ["/dev/null", "/dev/zero"] {
+            let path = project_root.join(PROJECT_FILE);
+            std::os::unix::fs::symlink(target, &path).unwrap();
+            let snapshot = store.snapshot("space", &project_root).unwrap();
+            assert!(snapshot.importable_actions.is_empty());
+            assert!(
+                snapshot
+                    .project_file_issue
+                    .unwrap()
+                    .contains("regular file")
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn project_file_enforces_actual_read_limit() {
+        let (_temp, store_root, project_root) = roots();
+        let store = ProjectActionsStore::open(&store_root).unwrap();
+        let path = project_root.join(PROJECT_FILE);
+        let mut json =
+            br#"{"actions":[{"name":"Test","command":"echo test","icon":"test"}]}"#.to_vec();
+        json.resize(MAX_PROJECT_FILE_BYTES as usize, b' ');
+        std::fs::write(&path, &json).unwrap();
+        let snapshot = store.snapshot("space", &project_root).unwrap();
+        assert!(snapshot.project_file_issue.is_none());
+        assert_eq!(snapshot.importable_actions.len(), 1);
+
+        // Grow a file after it has been opened and validated. A metadata-only
+        // limit would miss the extra bytes, which are still valid JSON whitespace.
+        let file = open_project_file(&path).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[b' '; 4096])
+            .unwrap();
+        assert!(
+            read_project_file_bytes(file)
+                .unwrap_err()
+                .contains("exceeds")
+        );
+
+        // Even a reader with no EOF must consume only the limit plus one byte.
+        let mut stream = std::io::repeat(b' ').take(u64::MAX);
+        assert!(
+            read_project_file_bytes(&mut stream)
+                .unwrap_err()
+                .contains("exceeds")
+        );
+        assert_eq!(u64::MAX - stream.limit(), MAX_PROJECT_FILE_BYTES + 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_file_rejects_windows_devices() {
+        assert!(
+            open_regular_project_file(Path::new(r"\\.\NUL"))
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn project_actions_rpc_does_not_block_async_worker() {
+        use zeron_rpc::{RpcService, methods};
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            temp.path(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_space(
+                "space",
+                &core.device_id,
+                &temp.path().to_string_lossy(),
+                None,
+                true,
+            )
+            .unwrap();
+        let saved = core
+            .project_actions
+            .upsert("space", temp.path(), None, draft("Test", "echo test"))
+            .unwrap();
+        let rpc = core.rpc_service();
+        for (method, params) in [
+            (
+                methods::LIST_PROJECT_ACTIONS,
+                serde_json::json!({"spaceId": "space"}),
+            ),
+            (
+                methods::UPSERT_PROJECT_ACTION,
+                serde_json::json!({"spaceId": "space", "action": {"name": "Build", "command": "echo build", "icon": "build"}}),
+            ),
+            (
+                methods::DELETE_PROJECT_ACTION,
+                serde_json::json!({"spaceId": "space", "actionId": saved.actions[0].id}),
+            ),
+        ] {
+            let store = core.project_actions.clone();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = std::thread::spawn(move || {
+                let _guard = lock(&store.inner.state);
+                ready_tx.send(()).unwrap();
+                // A synchronous regression must fail, not deadlock the test.
+                release_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+            });
+            ready_rx.recv().unwrap();
+            let mut request = std::pin::pin!(rpc.handle(method, params));
+            let poll = futures::poll!(request.as_mut());
+            let yielded = poll.is_pending();
+            assert!(
+                rpc.handle(methods::LOCAL_DEVICE, serde_json::json!({}))
+                    .await
+                    .is_ok()
+            );
+            let _ = release_tx.send(());
+            let released = blocker.join().unwrap();
+            assert!(yielded && released, "{method} blocked the async worker");
+            request.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_file_regular_symlink_remains_importable() {
+        let (temp, store_root, project_root) = roots();
+        let target = temp.path().join("actions.json");
+        std::fs::write(
+            &target,
+            r#"{"actions":[{"name":"Setup","command":"echo setup","icon":"configure","runOnWorktreeCreate":true}]}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, project_root.join(PROJECT_FILE)).unwrap();
+        let store = ProjectActionsStore::open(&store_root).unwrap();
+        let snapshot = store.snapshot("space", &project_root).unwrap();
+        assert!(snapshot.project_file_issue.is_none());
+        assert!(snapshot.actions.is_empty());
+        assert_eq!(snapshot.importable_actions.len(), 1);
+        assert!(
+            store
+                .setup_action("space", &project_root)
+                .unwrap()
+                .is_none()
+        );
+        let saved = store
+            .upsert(
+                "space",
+                &project_root,
+                None,
+                snapshot.importable_actions[0].clone(),
+            )
+            .unwrap();
+        assert_eq!(saved.actions.len(), 1);
+        assert!(saved.importable_actions.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_file_special_files_do_not_block() {
+        const CHILD_ENV: &str = "ZERON_TEST_PROJECT_FILE_SPECIAL_FILES";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            use std::os::unix::{ffi::OsStrExt, fs::symlink, net::UnixListener};
+            let (_temp, store_root, project_root) = roots();
+            let store = ProjectActionsStore::open(&store_root).unwrap();
+            let path = project_root.join(PROJECT_FILE);
+            let fifo = project_root.join("fifo");
+            let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            // SAFETY: a valid NUL-terminated path in an isolated temporary directory.
+            assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+            symlink(&fifo, &path).unwrap();
+            let assert_rejected = || {
+                let snapshot = store.snapshot("space", &project_root).unwrap();
+                assert!(snapshot.importable_actions.is_empty());
+                assert!(
+                    snapshot
+                        .project_file_issue
+                        .unwrap()
+                        .contains("regular file")
+                );
+            };
+            assert_rejected();
+            std::fs::remove_file(&path).unwrap();
+            // Simulate replacement after the preliminary metadata check. The
+            // open itself must not block, and must recheck the resulting handle.
+            std::fs::write(&path, br#"{"actions":[]}"#).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().is_file());
+            std::fs::rename(&fifo, &path).unwrap();
+            assert!(
+                open_regular_project_file(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("regular file")
+            );
+            assert_rejected();
+            std::fs::remove_file(&path).unwrap();
+            let socket = UnixListener::bind(&path).unwrap();
+            assert_rejected();
+            drop(socket);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            assert_rejected();
+            return;
+        }
+        // Isolate potential blocking regressions so they fail instead of hanging
+        // the test runner forever. No FIFO writer is ever started.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "project_actions::tests::project_file_special_files_do_not_block",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "special-file checks failed: {status}");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("project file discovery blocked on a special file");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

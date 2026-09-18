@@ -1138,6 +1138,83 @@ async fn terminal_guards_input_size_and_cwd() {
     terminals.close(&session.id).expect("close");
 }
 
+#[tokio::test]
+async fn project_actions_crud_preserves_saved_actions_with_invalid_imports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-actions",
+            &core.device_id,
+            &project.to_string_lossy(),
+            None,
+            true,
+        )
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let path = project.join("zeron.json");
+    // Directories must be reported as an import issue without preventing CRUD.
+    std::fs::create_dir(&path).unwrap();
+    let listed = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert!(listed["projectFileIssue"].is_string());
+    assert!(listed["importableActions"].as_array().unwrap().is_empty());
+    let saved = client
+        .call(
+            methods::UPSERT_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions",
+                "action": {"name": "Test", "command": "echo test", "icon": "test"}
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(saved["projectFileIssue"].is_string());
+    assert_eq!(saved["actions"].as_array().unwrap().len(), 1);
+    let listed = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed["actions"], saved["actions"]);
+    let deleted = client
+        .call(
+            methods::DELETE_PROJECT_ACTION,
+            serde_json::json!({
+                "spaceId": "space-actions", "actionId": saved["actions"][0]["id"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(deleted["projectFileIssue"].is_string());
+    assert!(deleted["actions"].as_array().unwrap().is_empty());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"actions":[{"name":"Suggestion","command":"echo suggestion","icon":"play"}]}"#,
+    )
+    .unwrap();
+    let recovered = client
+        .call(
+            methods::LIST_PROJECT_ACTIONS,
+            serde_json::json!({"spaceId": "space-actions"}),
+        )
+        .await
+        .unwrap();
+    assert!(recovered["projectFileIssue"].is_null());
+    assert_eq!(recovered["importableActions"].as_array().unwrap().len(), 1);
+    assert!(recovered["actions"].as_array().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_actions_run_in_fresh_host_resolved_terminals() {
     let tmp = tempfile::tempdir().expect("tempdir");
