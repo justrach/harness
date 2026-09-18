@@ -8206,6 +8206,10 @@ mod tests {
 
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
             transcript.update(cx, |this, cx| this.sync(cx));
+            assert!(
+                !transcript.read(cx).rows.is_empty(),
+                "revisited transcript must have visible rows before the new watch responds"
+            );
             apply_frame(
                 TranscriptFrame::reset(&cached),
                 Some(zeron_doc::TranscriptBaseline::capture(&cached)),
