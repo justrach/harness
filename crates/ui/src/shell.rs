@@ -708,9 +708,6 @@ const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
 #[cfg(test)]
 const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
-/// Divider box between pinned and regular sessions.
-const SIDEBAR_PINNED_DIVIDER_HEIGHT: f32 = 13.0;
-const SIDEBAR_PINNED_DIVIDER_KEY: &str = "sidebar-pinned-divider";
 const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
 const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
@@ -896,6 +893,7 @@ struct PinnedSessionDragState {
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
+    regular_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
     moving_row: Option<(AnyElement, f32)>,
@@ -1460,6 +1458,7 @@ pub struct Shell {
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
+    pub(super) sessions_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1875,6 +1874,7 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
             pinned_open: true,
+            sessions_open: true,
             archived_shown: 0,
             archived_hover: None,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
@@ -5862,8 +5862,8 @@ impl Shell {
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
         // relative time instead. Hovering the ROW swaps the corner for the
-        // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
-        // accordion), t3code's settle-on-hover.
+        // ARCHIVE button. Compact rows keep status first and elapsed time last;
+        // their archive control occupies the remote-icon slot on hover.
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
         let row_id = if search_query.is_some() {
@@ -5921,7 +5921,45 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        let corner_body: AnyElement = if let Some(label) = jump_label {
+        let compact_status = compact.then(|| {
+            let glyph = if working {
+                loaders::mini_glyph_spinner(
+                    format!("{row_id}-working"),
+                    2.0,
+                    theme.glyph,
+                    self.sidebar_pane.entity_id(),
+                    cx,
+                )
+                .into_any_element()
+            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
+                icon(icons::CHECK)
+                    .size(px(11.0))
+                    .text_color(status_color)
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(status_color)
+                    .into_any_element()
+            };
+            div()
+                .id(SharedString::from(format!("{row_id}-status")))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("chat-status-{id}")
+                })
+                .size(px(13.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .aria_label(status_label.unwrap_or("Idle"))
+                .child(glyph)
+                .into_any_element()
+        });
+        let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
+        let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
             // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
@@ -5988,26 +6026,13 @@ impl Shell {
                 })
                 .into_any_element()
         } else if compact {
-            if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
+            if remote {
+                icon(icons::REMOTE_SERVER)
+                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                    .text_color(theme.text_muted.opacity(0.5))
                     .into_any_element()
             } else {
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
-                    .into_any_element()
+                div().into_any_element()
             }
         } else {
             match status_label {
@@ -6072,7 +6097,15 @@ impl Shell {
                 .aria_label(if corner_hovered {
                     if archived { "Unarchive" } else { "Archive" }
                 } else {
-                    status_label.unwrap_or("Idle")
+                    if compact {
+                        if remote {
+                            "Remote session"
+                        } else {
+                            "Session actions"
+                        }
+                    } else {
+                        status_label.unwrap_or("Idle")
+                    }
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
                 .flex_none()
@@ -6227,7 +6260,12 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
+                    .gap(px(if compact {
+                        4.0
+                    } else {
+                        SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
+                    }))
+                    .children(compact_status)
                     .children(project_icon)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
@@ -6248,7 +6286,7 @@ impl Shell {
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
                     ))
-                    .when((compact || !show_label) && remote, |el| {
+                    .when(!compact && !show_label && remote, |el| {
                         el.child(
                             icon(icons::REMOTE_SERVER)
                                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
@@ -6281,6 +6319,21 @@ impl Shell {
                                 .flex_none()
                                 .text_color(subline)
                                 .children(corner.take()),
+                        )
+                    })
+                    .when(compact, |el| {
+                        el.child(
+                            div()
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-time-{id}")
+                                })
+                                .w(px(30.0))
+                                .flex_none()
+                                .text_right()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(subline)
+                                .child(compact_jump_label.unwrap_or(time_ago)),
                         )
                     }),
             )
@@ -6514,7 +6567,23 @@ impl Shell {
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
         let keyed = session_rows.rows;
-        let has_pinned_divider = pinned_count > 0 && pinned_count < keyed.len();
+        let regular_count = session_rows.regular_count;
+        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
+            + keyed
+                .iter()
+                .skip(pinned_count)
+                .map(|(_, height, _)| height)
+                .sum::<f32>()
+            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(pinned_count + 1) as f32;
+        let regular_body_height =
+            if keyed.len() == pinned_count && self.sidebar_session_transfer.is_some() {
+                spaces::SIDEBAR_DISCLOSURE_BODY_INSET
+                    + 48.0
+                    + self.sidebar_transfer_extra_gap("regular")
+            } else {
+                regular_body_height
+            };
         let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + self.sidebar_transfer_extra_gap("pinned")
             + keyed
@@ -6545,11 +6614,20 @@ impl Shell {
             ));
         }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if has_pinned_divider && self.pinned_open && ix == pinned_count {
+            if ungrouped && ix == pinned_count {
                 order.push((
-                    SIDEBAR_PINNED_DIVIDER_KEY.to_string(),
-                    SIDEBAR_PINNED_DIVIDER_HEIGHT,
+                    "sidebar-sessions-header".into(),
+                    spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                        + if show_pinned_section { 12.0 } else { 0.0 }
+                        + if self.sessions_open {
+                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                        } else {
+                            0.0
+                        },
                 ));
+            }
+            if ungrouped && ix >= pinned_count && !self.sessions_open {
+                continue;
             }
             if ix < pinned_count && !self.pinned_open {
                 continue;
@@ -6706,15 +6784,8 @@ impl Shell {
             let mut pinned_items = list_items;
             let regular_items = pinned_items.split_off(pinned_count);
             let regular_empty = regular_items.is_empty();
-            let pinned_group = show_pinned_section.then(|| {
-                self.render_pinned_section(
-                    pinned_items,
-                    pinned_body_height,
-                    has_pinned_divider,
-                    theme,
-                    cx,
-                )
-            });
+            let pinned_group = show_pinned_section
+                .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
             div()
                 .id("sidebar-active-sessions")
                 .flex()
@@ -6726,64 +6797,75 @@ impl Shell {
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
                         el.child(
-                            div()
-                                .id("sidebar-regular-sessions")
-                                .debug_selector(|| "sidebar-regular-sessions".into())
-                                .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                                    move |this,
-                                          event: &gpui::DragMoveEvent<SidebarSessionDrag>,
-                                          _,
-                                          _| {
-                                        if regular_empty
-                                            && event.bounds.contains(&event.event.position)
-                                        {
-                                            let top = f32::from(
-                                                event.bounds.top()
-                                                    - this.sidebar_scroll.bounds().top()
-                                                    - this.sidebar_scroll.offset().y,
-                                            );
-                                            if let Some(drag) =
-                                                this.sidebar_session_transfer.as_mut()
+                            self.render_sessions_section(
+                                div()
+                                    .id("sidebar-regular-sessions")
+                                    .debug_selector(|| "sidebar-regular-sessions".into())
+                                    .on_drag_move::<SidebarSessionDrag>(cx.listener(
+                                        move |this,
+                                              event: &gpui::DragMoveEvent<SidebarSessionDrag>,
+                                              _,
+                                              _| {
+                                            if regular_empty
+                                                && event.bounds.contains(&event.event.position)
                                             {
-                                                drag.preview = Some(SidebarSessionGap {
-                                                    group: "regular".into(),
-                                                    index: 0,
-                                                    pinned: false,
-                                                    top,
-                                                });
+                                                let top = f32::from(
+                                                    event.bounds.top()
+                                                        - this.sidebar_scroll.bounds().top()
+                                                        - this.sidebar_scroll.offset().y,
+                                                );
+                                                if let Some(drag) =
+                                                    this.sidebar_session_transfer.as_mut()
+                                                {
+                                                    drag.preview = Some(SidebarSessionGap {
+                                                        group: "regular".into(),
+                                                        index: 0,
+                                                        pinned: false,
+                                                        top,
+                                                    });
+                                                }
+                                                return;
                                             }
-                                            return;
-                                        }
-                                        if event.bounds.contains(&event.event.position)
-                                            && let Some(drag) =
-                                                this.sidebar_session_transfer.as_mut()
-                                            && drag.preview.as_ref().is_some_and(|gap| gap.pinned)
-                                        {
-                                            drag.preview = None;
-                                        }
-                                    },
-                                ))
-                                .on_drop::<SidebarSessionDrag>(cx.listener(
-                                    |this, payload, _, cx| {
-                                        this.finish_sidebar_session_transfer(
-                                            payload,
-                                            SidebarSessionDrop::Regular,
-                                            cx,
-                                        );
-                                    },
-                                ))
-                                .flex()
-                                .flex_col()
-                                .gap(px(SIDEBAR_LIST_GAP))
-                                .when(regular_items.is_empty(), |el| {
-                                    el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
-                                        .justify_center()
-                                        .px(px(10.0))
-                                        .text_color(theme.text_muted)
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .child("Drop here to unpin")
-                                })
-                                .children(regular_items),
+                                            if event.bounds.contains(&event.event.position)
+                                                && let Some(drag) =
+                                                    this.sidebar_session_transfer.as_mut()
+                                                && drag
+                                                    .preview
+                                                    .as_ref()
+                                                    .is_some_and(|gap| gap.pinned)
+                                            {
+                                                drag.preview = None;
+                                            }
+                                        },
+                                    ))
+                                    .on_drop::<SidebarSessionDrag>(cx.listener(
+                                        |this, payload, _, cx| {
+                                            this.finish_sidebar_session_transfer(
+                                                payload,
+                                                SidebarSessionDrop::Regular,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(SIDEBAR_LIST_GAP))
+                                    .when(regular_items.is_empty(), |el| {
+                                        el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
+                                            .justify_center()
+                                            .px(px(10.0))
+                                            .text_color(theme.text_muted)
+                                            .text_size(crate::typography::ui_rems(12.0))
+                                            .child("Drop here to unpin")
+                                    })
+                                    .children(regular_items)
+                                    .into_any_element(),
+                                regular_body_height,
+                                regular_count,
+                                show_pinned_section,
+                                theme,
+                                cx,
+                            ),
                         )
                     },
                 )

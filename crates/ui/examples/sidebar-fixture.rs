@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
         settings.sidebar_show_branch = true;
         settings.sidebar_compact = std::env::var_os("ZERON_SIDEBAR_COMPACT").is_some();
         settings.sidebar_show_project_label = std::env::var_os("ZERON_SIDEBAR_HIDE_LABEL").is_none();
-        settings.sidebar_organization = settings::SidebarOrganization::ByProject;
+        settings.sidebar_organization = settings::SidebarOrganization::InOneList;
         settings.sidebar_width = 310.0;
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
         let project_path = data.join("fieldnotes");
