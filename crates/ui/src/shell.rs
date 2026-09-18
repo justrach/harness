@@ -60,6 +60,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
+mod sidebar_pins;
 mod spaces;
 mod tabs;
 
@@ -1565,6 +1566,8 @@ pub struct Shell {
     /// One migration attempt per engine attachment; failed sources stay on disk
     /// and can be retried on the next attachment without an observer retry loop.
     sidebar_pin_migration: Option<(String, crate::state::EngineHandle)>,
+    sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
+    sidebar_pin_write_generation: u64,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
@@ -1924,6 +1927,8 @@ impl Shell {
             sidebar_session_transfer: None,
             sidebar_session_return: None,
             sidebar_pin_migration: None,
+            sidebar_pin_write: None,
+            sidebar_pin_write_generation: 0,
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
@@ -4158,6 +4163,7 @@ impl Shell {
     }
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
+        self.discard_stale_sidebar_pin_writes(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
@@ -4202,43 +4208,22 @@ impl Shell {
         }
         self.sidebar_pin_migration = Some((profile_key.clone(), engine.clone()));
         cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(
-                    methods::MUTATE,
-                    serde_json::json!({
-                        "op": "migrateSidebarPinnedSessions", "pinnedSessionIds": source,
-                    }),
-                )
-                .await;
+            let request = engine.client().call(
+                methods::MUTATE,
+                serde_json::json!({
+                    "op": "migrateSidebarPinnedSessions", "pinnedSessionIds": source,
+                }),
+            );
+            let deadline = cx.background_executor().timer(Duration::from_secs(20));
+            let result = match futures::future::select(Box::pin(request), Box::pin(deadline)).await
+            {
+                futures::future::Either::Left((result, _)) => result
+                    .map_err(|error| error.to_string())
+                    .and_then(sidebar_pins::preferences_reply),
+                futures::future::Either::Right(_) => Err("Migration confirmation timed out".into()),
+            };
             this.update(cx, |shell, cx| {
-                if result.is_ok() {
-                    // A profile switch or newer local edit must not discard a
-                    // different migration source while the RPC is in flight.
-                    if shell
-                        .settings
-                        .sidebar_pinned_session_ids_by_profile
-                        .get(&profile_key)
-                        == Some(&source)
-                    {
-                        shell
-                            .settings
-                            .sidebar_pinned_session_ids_by_profile
-                            .remove(&profile_key);
-                        shell.schedule_save(cx);
-                    }
-                } else if shell.active_sidebar_pin_profile_key(cx).as_ref() == Some(&profile_key)
-                    && shell
-                        .state
-                        .read(cx)
-                        .engine()
-                        .is_some_and(|current| current.same_connection(&engine))
-                {
-                    shell.sidebar_notice = Some(
-                        "Couldn't migrate pins. Local pins were kept; reconnect to retry.".into(),
-                    );
-                }
-                cx.notify();
+                shell.finish_sidebar_pin_migration(&profile_key, &engine, &source, result, cx);
             })
             .ok();
         })
@@ -4255,6 +4240,9 @@ impl Shell {
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
+        if let Some(pins) = self.optimistic_sidebar_pins(cx) {
+            return pins.clone();
+        }
         let state = self.state.read(cx);
         match state.workspace_scope {
             Some(WorkspaceScope::Local) => self
@@ -4327,18 +4315,7 @@ impl Shell {
                 self.schedule_save(cx);
             }
             Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
-                self.state.update(cx, |state, cx| {
-                    state.sidebar_preferences.initialized = true;
-                    state.sidebar_preferences.pinned_session_ids = pinned_session_ids.clone();
-                    cx.notify();
-                });
-                self.mutate(
-                    serde_json::json!({
-                        "op": "setSidebarPinnedSessions",
-                        "pinnedSessionIds": pinned_session_ids,
-                    }),
-                    cx,
-                );
+                return self.queue_sidebar_pin_write(profile_key, pinned_session_ids, cx);
             }
             None => return false,
         }

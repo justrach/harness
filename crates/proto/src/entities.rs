@@ -40,6 +40,10 @@ pub struct SidebarPreferences {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarPreferencesState {
+    /// Monotonic within one engine attachment, not a cross-device order key.
+    /// Lets clients reject older watch frames after a mutation response.
+    #[serde(default)]
+    pub revision: u64,
     pub synced: bool,
     pub initialized: bool,
     #[serde(default)]

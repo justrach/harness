@@ -239,6 +239,315 @@ mod pinned_session_tests {
         .unwrap()
     }
 
+    fn pin_test_engine() -> (
+        crate::state::EngineHandle,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Sender<String>,
+    ) {
+        let (out, requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        (
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound)),
+            requests,
+            replies,
+        )
+    }
+
+    fn pin_snapshot(revision: u64, pins: &[&str]) -> zeron_proto::SidebarPreferencesState {
+        zeron_proto::SidebarPreferencesState {
+            revision,
+            synced: true,
+            initialized: true,
+            pinned_session_ids: ids(pins),
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_migration_removes_only_the_successfully_acknowledged_source(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (engine, _requests, _replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, true, false);
+                    state.set_test_engine(engine.clone());
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                let source = ids(&["legacy"]);
+                shell
+                    .settings
+                    .sidebar_pinned_session_ids_by_profile
+                    .insert(key.clone(), source.clone());
+                shell.finish_sidebar_pin_migration(
+                    &key,
+                    &engine,
+                    &source,
+                    Err("disk failure".into()),
+                    cx,
+                );
+                assert_eq!(shell.settings.sidebar_pins(&key), source);
+                assert!(!shell.state.read(cx).sidebar_preferences.initialized);
+                shell
+                    .settings
+                    .sidebar_pinned_session_ids_by_profile
+                    .insert(key.clone(), ids(&["new-source"]));
+                shell.finish_sidebar_pin_migration(
+                    &key,
+                    &engine,
+                    &source,
+                    Ok(pin_snapshot(1, &["legacy"])),
+                    cx,
+                );
+                assert_eq!(shell.settings.sidebar_pins(&key), ids(&["new-source"]));
+                shell.finish_sidebar_pin_migration(
+                    &key,
+                    &engine,
+                    &ids(&["new-source"]),
+                    Ok(pin_snapshot(2, &["legacy"])),
+                    cx,
+                );
+                assert!(
+                    !shell
+                        .settings
+                        .sidebar_pinned_session_ids_by_profile
+                        .contains_key(&key)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_unconfirmed_write_stops_the_queue_without_overwriting_observed_pins(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (engine, _requests, _replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, true, true);
+                    state.set_test_engine(engine);
+                    state.sidebar_preferences = pin_snapshot(2, &["confirmed"]);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx);
+                shell.replace_sidebar_pins(key, ids(&["second"]), cx);
+                let id = shell.sidebar_pin_write.as_ref().unwrap().id;
+                shell.mark_pin_write_unconfirmed(id, cx);
+                assert!(shell.sidebar_pin_write.as_ref().unwrap().unconfirmed);
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["confirmed"]));
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                assert!(!shell.replace_sidebar_pins(key, ids(&["third"]), cx));
+                assert_eq!(
+                    shell.finish_sidebar_pin_write(id, Err("late error".into()), cx),
+                    None
+                );
+                assert!(shell.sidebar_pin_write.is_none());
+                shell.state.update(cx, |state, _| {
+                    state.apply_sidebar_preferences(pin_snapshot(3, &["first"]));
+                });
+                assert_eq!(
+                    shell.active_sidebar_pins(cx),
+                    ids(&["first"]),
+                    "a timed-out request may still commit and must be reconciled via its watch"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_optimistic_writes_preserve_newer_edits_and_watch_state_on_failure(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (engine, mut requests, _replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        let write_id = window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, false, true);
+                    state.sidebar_preferences = pin_snapshot(1, &["original"]);
+                    state.set_test_engine(engine);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                assert!(shell.replace_sidebar_pins(key.clone(), ids(&["first"]), cx));
+                assert!(shell.replace_sidebar_pins(key, ids(&["second"]), cx));
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["second"]));
+                assert_eq!(
+                    shell.state.read(cx).sidebar_preferences.pinned_session_ids,
+                    ids(&["original"])
+                );
+                assert!(
+                    shell.mutate_task.is_none(),
+                    "pin writes cannot be cancelled by generic sidebar mutations"
+                );
+                shell.sidebar_pin_write.as_ref().unwrap().id
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            request["params"]["pinnedSessionIds"],
+            serde_json::json!(["first"])
+        );
+        assert!(
+            requests.try_recv().is_err(),
+            "only one write may be in flight"
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.apply_sidebar_preferences(pin_snapshot(7, &["remote"]));
+                });
+                assert_eq!(
+                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
+                    Some(ids(&["second"]))
+                );
+                assert_eq!(
+                    shell.active_sidebar_pins(cx),
+                    ids(&["second"]),
+                    "an older failure must not roll back a newer drop"
+                );
+                assert_eq!(
+                    shell.finish_sidebar_pin_write(write_id, Err("rejected".into()), cx),
+                    None
+                );
+                assert_eq!(
+                    shell.active_sidebar_pins(cx),
+                    ids(&["remote"]),
+                    "failure restores latest observed state, not the old backup"
+                );
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_deref()
+                        .unwrap()
+                        .contains("Couldn't save pins")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_write_acknowledgements_ignore_older_watches_and_previous_operations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let (engine, _requests, _replies) = pin_test_engine();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, true, true);
+                    state.set_test_engine(engine);
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                shell.replace_sidebar_pins(key.clone(), ids(&["saved"]), cx);
+                let first = shell.sidebar_pin_write.as_ref().unwrap().id;
+                shell.finish_sidebar_pin_write(first, Ok(pin_snapshot(5, &["saved"])), cx);
+                shell.state.update(cx, |state, _| {
+                    assert!(!state.apply_sidebar_preferences(pin_snapshot(4, &["stale"])));
+                });
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["saved"]));
+                shell.replace_sidebar_pins(key, ids(&["new-drop"]), cx);
+                let second = shell.sidebar_pin_write.as_ref().unwrap().id;
+                shell.finish_sidebar_pin_write(first, Err("late failure".into()), cx);
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["new-drop"]));
+                shell.state.update(cx, |state, _| {
+                    state.apply_sidebar_preferences(pin_snapshot(8, &["newer-remote"]));
+                });
+                shell.finish_sidebar_pin_write(second, Ok(pin_snapshot(6, &["new-drop"])), cx);
+                assert_eq!(shell.active_sidebar_pins(cx), ids(&["newer-remote"]));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn sidebar_write_replies_cannot_cross_profile_or_engine_boundaries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        for change_profile in [true, false] {
+            let (engine, _requests, _replies) = pin_test_engine();
+            let (replacement, _other_requests, _other_replies) = pin_test_engine();
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.state.update(cx, |state, _| {
+                        remote_pin_state(state, true, true);
+                        state.set_test_engine(engine);
+                    });
+                    let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                    shell.replace_sidebar_pins(key, ids(&["pending"]), cx);
+                    let id = shell.sidebar_pin_write.as_ref().unwrap().id;
+                    shell.state.update(cx, |state, _| {
+                        if change_profile {
+                            state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                        } else {
+                            state.set_test_engine(replacement);
+                        }
+                        state.sidebar_preferences = pin_snapshot(0, &["new-runtime"]);
+                    });
+                    shell.finish_sidebar_pin_write(id, Ok(pin_snapshot(99, &["old-runtime"])), cx);
+                    assert_eq!(
+                        shell.state.read(cx).sidebar_preferences.pinned_session_ids,
+                        ids(&["new-runtime"])
+                    );
+                    assert!(shell.sidebar_pin_write.is_none());
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_drop_without_engine_returns_without_an_optimistic_pin(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    remote_pin_state(state, false, true);
+                    state.chats = vec![pin_test_chat("normal")];
+                });
+                shell.settings.space_filter = None;
+                let payload = SidebarSessionDrag {
+                    chat_id: "normal".into(),
+                    visible_ids: std::sync::Arc::new(vec![]),
+                    filter: None,
+                    profile_key: shell.active_sidebar_pin_profile_key(cx).unwrap(),
+                };
+                shell.begin_sidebar_session_transfer(
+                    &payload,
+                    gpui::point(px(0.0), px(0.0)),
+                    window,
+                    cx,
+                );
+                shell.finish_sidebar_session_transfer(&payload, SidebarSessionDrop::Pinned(0), cx);
+                assert!(shell.active_sidebar_pins(cx).is_empty());
+                assert!(shell.sidebar_session_return.is_some());
+                assert!(shell.sidebar_pin_write.is_none());
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn sidebar_menu_and_drop_both_reject_unknown_remote_preferences(cx: &mut gpui::TestAppContext) {
         use super::*;

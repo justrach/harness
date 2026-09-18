@@ -281,6 +281,7 @@ impl WorkspaceHost {
         let (spaces_tx, _) = watch::channel(state.spaces);
         let preferences = doc.sidebar_preferences();
         let (sidebar_preferences_tx, _) = watch::channel(SidebarPreferencesState {
+            revision: 0,
             synced: false,
             initialized: preferences.is_some(),
             pinned_session_ids: preferences
@@ -693,6 +694,14 @@ impl WorkspaceHost {
 
     pub fn watch_sidebar_preferences(&self) -> watch::Receiver<SidebarPreferencesState> {
         self.inner.sidebar_preferences_tx.subscribe()
+    }
+
+    /// Mutation acknowledgements and watches share the same ordered revision.
+    pub fn sidebar_preferences_snapshot(&self) -> SidebarPreferencesState {
+        let synced = self.sync_status().is_some_and(|status| status.synced);
+        let doc = lock(&self.inner.reg);
+        self.inner.publish_sidebar_preferences(&doc, synced);
+        self.inner.sidebar_preferences_tx.borrow().clone()
     }
 
     /// WatchSessions source: remote devices' rows from the registry merged with
@@ -1164,11 +1173,11 @@ impl WorkspaceHostInner {
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
+            self.publish_sidebar_preferences(&doc, registry_synced);
             doc.read_all()
-                .map(|state| (state, doc.sidebar_preferences()))
         };
         match snapshot {
-            Ok((mut state, preferences)) => {
+            Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
                 // Retain the latest value even with no subscribers, but don't
                 // wake every list for unrelated registry/presence changes.
@@ -1182,21 +1191,38 @@ impl WorkspaceHostInner {
                 }
                 publish_if_changed(&self.sessions_tx, state.sessions);
                 publish_if_changed(&self.spaces_tx, state.spaces);
-                publish_if_changed(
-                    &self.sidebar_preferences_tx,
-                    SidebarPreferencesState {
-                        synced: registry_synced,
-                        initialized: preferences.is_some(),
-                        pinned_session_ids: preferences
-                            .map(|preferences| preferences.pinned_session_ids)
-                            .unwrap_or_default(),
-                    },
-                );
             }
             Err(err) => {
                 tracing::warn!(error = %err, "registry read failed");
             }
         }
+    }
+
+    /// Called under the registry lock so publications cannot overtake one another.
+    fn publish_sidebar_preferences(&self, doc: &RegistryDoc, synced: bool) {
+        let preferences = doc.sidebar_preferences();
+        let initialized = preferences.is_some();
+        let pins = preferences
+            .map(|p| p.pinned_session_ids)
+            .unwrap_or_default();
+        self.sidebar_preferences_tx.send_if_modified(|current| {
+            // Readiness is sticky for this host. A caller that sampled stats
+            // before another publisher acquired the lock must not regress it.
+            let synced = synced || current.synced;
+            if current.synced == synced
+                && current.initialized == initialized
+                && current.pinned_session_ids == pins
+            {
+                return false;
+            }
+            *current = SidebarPreferencesState {
+                revision: current.revision + 1,
+                synced,
+                initialized,
+                pinned_session_ids: pins,
+            };
+            true
+        });
     }
 
     /// Fold the 15s presence heartbeats into the device rows' `lastSeenAt`
@@ -1755,6 +1781,19 @@ mod tests {
         assert!(state.initialized);
         assert!(!state.synced);
         assert!(state.pinned_session_ids.is_empty());
+        let first_revision = state.revision;
+        drop(state);
+        let acknowledgement = host.sidebar_preferences_snapshot();
+        assert_eq!(acknowledgement.revision, first_revision);
+        assert!(
+            !preferences.has_changed().unwrap(),
+            "unchanged acknowledgements must not churn watches"
+        );
+        host.set_sidebar_pinned_sessions(&["cached".into()])
+            .unwrap();
+        let acknowledgement = host.sidebar_preferences_snapshot();
+        assert!(acknowledgement.revision > first_revision);
+        assert_eq!(*preferences.borrow(), acknowledgement);
     }
 
     #[test]

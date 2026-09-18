@@ -1730,7 +1730,17 @@ impl RpcService for EngineRpc {
             }
             methods::MUTATE => {
                 let p: MutateParams = parse_params(params)?;
+                let sidebar_pins = matches!(
+                    &p,
+                    MutateParams::SetSidebarPinnedSessions { .. }
+                        | MutateParams::MigrateSidebarPinnedSessions { .. }
+                );
                 self.mutate(p)?;
+                if sidebar_pins {
+                    return RpcReply::value(&serde_json::json!({
+                        "ok": true, "sidebarPreferences": self.workspace.sidebar_preferences_snapshot(),
+                    }));
+                }
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::WATCH_CHECKOUT_DIFFS => {

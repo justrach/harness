@@ -938,6 +938,14 @@ impl AppState {
 
     // ---- reducers (pure) ----
 
+    pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
+        if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
+            return false;
+        }
+        self.sidebar_preferences = value;
+        true
+    }
+
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
         self.chats = chats;
@@ -1867,10 +1875,7 @@ impl AppState {
                 cx,
                 handle.clone(),
                 methods::WATCH_SIDEBAR_PREFERENCES,
-                |state, value| {
-                    state.sidebar_preferences = value;
-                    true
-                },
+                AppState::apply_sidebar_preferences,
             ),
             spawn_watch(
                 cx,
