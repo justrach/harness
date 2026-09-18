@@ -56,11 +56,11 @@ fn main() -> anyhow::Result<()> {
             }
             s.devices.push(serde_json::from_value(serde_json::json!({"id":"remote","name":"Build server","platform":"linux","lastSeenAt":chrono::Utc::now()})).unwrap());
             s.spaces.push(serde_json::from_value(serde_json::json!({"id":"backend","deviceId":"remote","name":"API server","path":"/projects/backend","createdAt":chrono::Utc::now()})).unwrap());
-            for ix in [2, 3, 5, 7] {
+            for ix in [2, 3, 5, 7, 8] {
                 s.chats[ix].device_id = "remote".into();
                 s.chats[ix].space_id = Some("backend".into());
             }
-            for ix in [1, 2, 4] {
+            for ix in [1, 2, 4, 8] {
                 let chat = s.chats[ix].clone();
                 let source = chat.source_context.as_ref().unwrap();
                 s.fixture_sidebar_change_request(zeron_proto::CheckoutChangeRequestStatus {

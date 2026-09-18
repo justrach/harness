@@ -10,7 +10,8 @@ Set `ZERON_SIDEBAR_HIDE_LABEL=1` to start with the project/device label hidden.
 The sidebar view menu persists all three display preferences and project grouping.
 Ungrouped rows live in a collapsible Sessions accordion; project/device groups
 remain separate accordions. All sidebar accordion headers have no divider rules.
-Archived project artwork uses the same dimmed treatment as archived harness icons.
+Archived sessions share active-session metadata and layout preferences, with muted
+project/harness artwork and an Unarchive action in the same hover slot.
 
 Repository artwork follows [Conductor's documented filename priority](https://www.conductor.build/docs/faq#where-does-conductor-get-the-repo-icon).
 The first existing file wins; missing or invalid artwork uses the supplied code

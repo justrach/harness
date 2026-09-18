@@ -1163,11 +1163,31 @@ mod pinned_session_tests {
                             .unwrap()
                         })
                         .collect();
+                    let mut archived = state.chats[0].clone();
+                    archived.id = "archived".into();
+                    archived.archived = true;
+                    state.chats.push(archived);
                 });
                 shell
             }))
         });
         let shell = host.read_with(cx, |host, _| host.0.clone());
+
+        // Archived rows share geometry and metadata in every sidebar layout.
+        let active = cx.debug_bounds("chat-older").unwrap();
+        let archived = cx.debug_bounds("chat-archived").unwrap();
+        assert_eq!(active.size, archived.size);
+        assert_eq!(cx.debug_bounds("chat-branch-archived").is_some(), !compact);
+        assert_eq!(
+            cx.debug_bounds("chat-device-archived").is_some(),
+            !compact && show_label
+        );
+        if compact {
+            assert!(cx.debug_bounds("chat-status-archived").is_some());
+            let time = cx.debug_bounds("chat-time-archived").unwrap();
+            cx.simulate_mouse_move(archived.center(), None, gpui::Modifiers::default());
+            assert_eq!(cx.debug_bounds("chat-time-archived").unwrap(), time);
+        }
 
         // Sessions owns all unpinned rows, including their keyboard traversal.
         for open in [false, true] {
@@ -3653,9 +3673,61 @@ impl Shell {
         visible
     }
 
-    /// Pinned sessions form a manually ordered section above the configured
-    /// projection. Unpinned rows retain the selected automatic sort and any
-    /// device grouping; all rows remain keyed for the FLIP resort glide.
+    /// Shared metadata and visibility settings for active and archived sessions.
+    fn sidebar_chat_data(
+        &self,
+        status: ChatIndicator,
+        chat: zeron_proto::Chat,
+        state: &AppState,
+    ) -> ActiveChatRow {
+        // Line 1 is "project @ device" (t3code's project row);
+        // project-less sessions read as their home-dir cwd `~`.
+        let space = state.space_for_chat(&chat);
+        let project = match (space, chat.space_id.as_deref()) {
+            (Some(space), _) => space.display_name().to_string(),
+            (None, None) => "~".to_string(),
+            (None, Some(_)) => "?".to_string(),
+        };
+        let device = state
+            .device_name(&chat.device_id)
+            .unwrap_or("Unknown device")
+            .to_string();
+        let mut folder = project.clone();
+        // Unknown device → no fragment, same as the archived list.
+        if state.device_name(&chat.device_id).is_some() {
+            folder = format!("{folder} @ {device}");
+        }
+        // The branch shows whenever the engine has stamped one —
+        // main-checkout sessions included, not just worktrees.
+        let branch = crate::change_requests::conversation_branch(&chat, &state.spaces)
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string)
+            .filter(|_| self.settings.sidebar_show_branch);
+        let change_request = state
+            .change_request_for_chat(&chat)
+            .cloned()
+            .filter(|_| self.settings.sidebar_show_pull_request);
+        let group = match self.settings.sidebar_organization {
+            SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
+            SidebarOrganization::ByProject => Some((
+                chat.space_id
+                    .clone()
+                    .unwrap_or_else(|| format!("home:{}", chat.device_id)),
+                project,
+            )),
+            SidebarOrganization::InOneList => None,
+        };
+        ActiveChatRow {
+            status,
+            chat: chat.clone(),
+            folder,
+            branch,
+            change_request,
+            group,
+        }
+    }
+
     pub(super) fn render_active_rows(
         &mut self,
         theme: &Theme,
@@ -3684,63 +3756,9 @@ impl Shell {
             });
             chats
                 .into_iter()
-                .map(|(status, chat)| {
-                    // Line 1 is "project @ device" (t3code's project row);
-                    // project-less sessions read as their home-dir cwd `~`.
-                    let space = state.space_for_chat(&chat);
-                    let project = match (space, chat.space_id.as_deref()) {
-                        (Some(space), _) => space.display_name().to_string(),
-                        (None, None) => "~".to_string(),
-                        (None, Some(_)) => "?".to_string(),
-                    };
-                    let device = state
-                        .device_name(&chat.device_id)
-                        .unwrap_or("Unknown device")
-                        .to_string();
-                    let mut folder = project.clone();
-                    // Unknown device → no fragment, same as the archived list.
-                    if state.device_name(&chat.device_id).is_some() {
-                        folder = format!("{folder} @ {device}");
-                    }
-                    // The branch shows whenever the engine has stamped one —
-                    // main-checkout sessions included, not just worktrees.
-                    let branch = crate::change_requests::conversation_branch(&chat, &state.spaces)
-                        .map(str::trim)
-                        .filter(|b| !b.is_empty())
-                        .map(str::to_string);
-                    let change_request = state.change_request_for_chat(&chat).cloned();
-                    let group = match self.settings.sidebar_organization {
-                        SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
-                        SidebarOrganization::ByProject => Some((
-                            chat.space_id
-                                .clone()
-                                .unwrap_or_else(|| format!("home:{}", chat.device_id)),
-                            project,
-                        )),
-                        SidebarOrganization::InOneList => None,
-                    };
-                    ActiveChatRow {
-                        status,
-                        chat: chat.clone(),
-                        folder,
-                        branch,
-                        change_request,
-                        group,
-                    }
-                })
+                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
                 .collect()
         };
-        if !self.settings.sidebar_show_branch {
-            for row in &mut rows {
-                row.branch = None;
-            }
-        }
-        if !self.settings.sidebar_show_pull_request {
-            for row in &mut rows {
-                row.change_request = None;
-            }
-        }
-
         let pinned_order = frozen_pinned
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
@@ -4322,13 +4340,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The sidebar's archived shelf — a direct port of t3code's settled
-    /// shelf: header is label + chevron ("Archived (N)" closed,
-    /// "Archived" open), rows are 36px SLIM one-liners (dimmed harness mark,
-    /// title, time-ago right — the time yields to Unarchive on row hover),
-    /// and the tail pages behind an explicit "Show N more" row (initial 10,
-    /// +25 a click). `None` when nothing is archived under the current
-    /// project filter.
+    /// Archived sessions share active-row data and layout, with a restore action.
+    /// The shelf starts with ten sessions and pages by 25.
     pub(super) fn render_archived_section(
         &mut self,
         theme: &Theme,
@@ -4355,13 +4368,32 @@ impl Shell {
         if rows.is_empty() {
             return None;
         }
+        let rows: Vec<_> = {
+            let state = self.state.read(cx);
+            rows.into_iter()
+                .map(|chat| {
+                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
+                })
+                .collect()
+        };
         let total = rows.len();
         let open = self.archived_open;
         let shown = self.archived_shown.max(INITIAL);
         let visible_count = total.min(shown);
         let has_more = total > shown;
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-            + visible_count as f32 * 36.0
+            + rows
+                .iter()
+                .take(shown)
+                .map(|row| {
+                    sidebar_row_height(
+                        self.settings.sidebar_compact,
+                        self.settings.sidebar_show_project_label,
+                        row.branch.is_some(),
+                        row.change_request.is_some(),
+                    )
+                })
+                .sum::<f32>()
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
             + if has_more {
                 36.0 + SIDEBAR_LIST_GAP
@@ -4392,153 +4424,42 @@ impl Shell {
         let section = div().flex().flex_col().child(header);
         let body = {
             let selected = self.state.read(cx).selected_chat.clone();
-            let selected_wash = crate::theme::glass_selected_bg();
             let mut list = div()
                 .flex()
                 .flex_col()
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP));
-            for chat in rows.into_iter().take(shown) {
-                let id = chat.id.clone();
-                let hovered = self.archived_hover.as_deref() == Some(id.as_str());
-                let is_selected = selected.as_deref() == Some(id.as_str());
-                let title: SharedString = transcript::single_line(
-                    &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                )
-                .into();
-                let time_ago: SharedString =
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now).into();
-                let brand = if self.settings.sidebar_show_harness {
-                    chat.config
-                        .as_ref()
-                        .map(|c| crate::pickers::harness_brand_icon(c.harness))
-                } else {
-                    None
-                };
-                // Right slot: time at rest; the Unarchive affordance takes
-                // its place on row hover (t3code: "only the time/jump label
-                // yields to the settle affordance").
-                let right: AnyElement = if hovered {
-                    let restore_id = id.clone();
-                    // Metrics match the active rows' Archive pill exactly
-                    // (18px pill, 11px icon, 10px label, padding bled right)
-                    // — two sizes of the same affordance read as a mistake.
-                    div()
-                        .id(SharedString::from(format!("archived-restore-{id}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .h(px(18.0))
-                        .px(px(4.0))
-                        .mr(px(-4.0))
-                        .rounded(px(5.0))
-                        .bg(crate::theme::wash(0.10))
-                        .hover(|s| s.bg(crate::theme::wash(0.18)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.set_chat_archived(restore_id.clone(), false, cx);
-                        }))
-                        .child(
-                            crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(theme.text_muted),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from("Unarchive")),
-                        )
-                        .into_any_element()
-                } else {
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted.opacity(0.55))
-                        .child(time_ago)
-                        .into_any_element()
-                };
-                let hover_id = id.clone();
-                let open_id = id.clone();
-                let menu_id = id.clone();
+            for row in rows.into_iter().take(shown) {
+                let chat = row.chat;
+                let is_selected = selected.as_deref() == Some(chat.id.as_str());
+                let harness = self
+                    .settings
+                    .sidebar_show_harness
+                    .then(|| chat.config.as_ref().map(|c| c.harness))
+                    .flatten();
                 list = list.child(
-                    div()
-                        .id(SharedString::from(format!("archived-{id}")))
-                        .h(px(36.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP))
-                        .px(px(Theme::SPACE_SM))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .when(is_selected, |el| el.bg(selected_wash))
-                        .when(!is_selected, |el| el.hover(|s| s.bg(theme.glass_hover())))
-                        .on_hover(cx.listener(move |this, entered: &bool, _, cx| {
-                            if *entered {
-                                if this.archived_hover.as_deref() != Some(hover_id.as_str()) {
-                                    this.archived_hover = Some(hover_id.clone());
-                                    cx.notify();
-                                }
-                            } else if this.archived_hover.as_deref() == Some(hover_id.as_str()) {
-                                this.archived_hover = None;
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_chat(open_id.clone(), cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                this.chat_menu.open(ChatMenuState {
-                                    chat_id: menu_id.clone(),
-                                    position: event.position,
-                                    page: ChatMenuPage::Root,
-                                });
-                                cx.notify();
-                            }),
+                    self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(
+                            &chat.title.clone().unwrap_or_else(|| "New session".into()),
                         )
-                        // Archived history recedes: dimmed mark at rest,
-                        // restored on hover (t3code's grayscale favicon).
-                        .when_some(brand, |el, (mark, tint)| {
-                            el.child(
-                                crate::icons::icon(mark)
-                                    .size(px(SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE))
-                                    .flex_none()
-                                    .text_color(if hovered || is_selected {
-                                        tint.unwrap_or(theme.text_muted)
-                                    } else {
-                                        tint.unwrap_or(theme.text_muted).opacity(0.4)
-                                    }),
-                            )
-                        })
-                        .when(self.settings.sidebar_show_project_icon, |el| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .opacity(if hovered || is_selected { 1.0 } else { 0.4 })
-                                    .child(self.render_project_icon(
-                                        &id,
-                                        SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE,
-                                        cx,
-                                    )),
-                            )
-                        })
-                        .child(super::sidebar_faded_label(
-                            format!("archived-title-{id}").into(),
-                            true,
-                            div()
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(if hovered || is_selected {
-                                    theme.text
-                                } else {
-                                    theme.text.opacity(0.55)
-                                })
-                                .child(title),
-                        ))
-                        .child(right),
+                        .into(),
+                        format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), now)
+                            .into(),
+                        row.folder.into(),
+                        row.branch.map(SharedString::from),
+                        row.change_request,
+                        harness,
+                        row.status,
+                        is_selected,
+                        true,
+                        false,
+                        None,
+                        None,
+                        None,
+                        theme,
+                        cx,
+                    ),
                 );
             }
             let mut body = div().w_full().flex().flex_col().child(list);

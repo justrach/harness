@@ -713,13 +713,9 @@ const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
 const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
-/// Harness/title geometry follows the row hierarchy: active multi-line cards
-/// keep identity close on the standard 8px rhythm, while the one-line archived
-/// shelf gives its larger mark a little more separation.
+/// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
-const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
@@ -730,7 +726,8 @@ fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) ->
         false,
         false,
         div()
-            .id(id)
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
             .when(fill, |el| el.flex_1())
             .min_w_0()
             .overflow_hidden()
@@ -1464,10 +1461,6 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
-    /// Archived slim row under the pointer — swaps its time label for the
-    /// Unarchive affordance and restores the dimmed harness mark (t3code's
-    /// settled-row hover).
-    pub(super) archived_hover: Option<String>,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -1876,7 +1869,6 @@ impl Shell {
             pinned_open: true,
             sessions_open: true,
             archived_shown: 0,
-            archived_hover: None,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -5885,6 +5877,14 @@ impl Shell {
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
+        let project_icon = project_icon.map(|icon| {
+            div()
+                .flex_none()
+                .opacity(if archived_muted { 0.4 } else { 1.0 })
+                .child(icon)
+                .into_any_element()
+        });
         let content_id = id.clone();
         // Send-truth overrides: a send unadopted past the grace window is
         // FAILED (explicit, with the transcript's retry affordance); a send
@@ -6156,6 +6156,8 @@ impl Shell {
         let hover_bg = if selected { selected_wash } else { hover };
         let rest_text = if selected || search_query.is_some() {
             text
+        } else if archived {
+            text.opacity(0.55)
         } else {
             text.opacity(0.8)
         };
@@ -6273,7 +6275,13 @@ impl Shell {
                                 icon(path)
                                     .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.8)),
+                                    .text_color(
+                                        tint.unwrap_or(subline).opacity(if archived_muted {
+                                            0.4
+                                        } else {
+                                            0.8
+                                        }),
+                                    ),
                             )
                         },
                     )
@@ -11875,8 +11883,6 @@ mod tests {
     #[test]
     fn sidebar_harness_geometry_reflects_row_hierarchy() {
         assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
-        assert!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP < SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP);
-        assert!(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE < SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE);
     }
 
     #[test]
