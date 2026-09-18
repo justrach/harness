@@ -26,7 +26,8 @@ project icons and fallback icons, project groups, borderless accordions, hover c
 pinned sessions. Compact rows place status on the left, followed by harness and project icons,
 the name, remote/archive control, PR badge, and elapsed time on the right. Hover
 replaces the remote icon with Archive (or reveals it for local sessions), keeping
-status, PR, and time visible.
+status, PR, and time visible. Local rows reserve no empty action slot at rest,
+so the title uses that space until Archive appears on hover.
 The moving card follows the pointer continuously and neighbors animate around
 its destination. Clicking Pinned was checked against the filter button's pixels
 both during mouse-down and immediately after mouse-up; its border remains unchanged.

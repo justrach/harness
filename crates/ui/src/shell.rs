@@ -6302,14 +6302,21 @@ impl Shell {
                                 .text_color(subline),
                         )
                     })
-                    .when(compact || !show_label, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_color(subline)
-                                .children(corner.take()),
-                        )
-                    })
+                    .when(
+                        if compact {
+                            remote || corner_hovered
+                        } else {
+                            !show_label
+                        },
+                        |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(subline)
+                                    .children(corner.take()),
+                            )
+                        },
+                    )
                     .when(compact, |el| {
                         el.children(change_request.clone().map(|summary| {
                             if preview {

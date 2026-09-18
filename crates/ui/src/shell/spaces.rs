@@ -1148,6 +1148,7 @@ mod pinned_session_tests {
                 shell.settings.sidebar_show_project_label = show_label;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
                     state.chats = ["older", "newer"]
                         .into_iter()
                         .enumerate()
@@ -1213,7 +1214,9 @@ mod pinned_session_tests {
             let time = cx.debug_bounds("chat-time-older").unwrap();
             assert!(status.right() < time.left());
             let row = cx.debug_bounds("chat-older").unwrap();
+            let title = cx.debug_bounds("chat-title-older").unwrap();
             cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+            assert!(cx.debug_bounds("chat-title-older").unwrap().size.width < title.size.width);
             assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), status);
             assert_eq!(cx.debug_bounds("chat-time-older").unwrap(), time);
         }
