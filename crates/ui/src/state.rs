@@ -4622,3 +4622,20 @@ impl AppState {
         self.engine = Some(engine);
     }
 }
+
+#[cfg(feature = "project-palette-fixture")]
+impl AppState {
+    /// Seed provider metadata for the isolated native sidebar review fixture.
+    pub fn fixture_sidebar_change_request(
+        &mut self,
+        snapshot: zeron_proto::CheckoutChangeRequestStatus,
+    ) {
+        let key = crate::change_requests::ChangeRequestWatchKey {
+            device_id: snapshot.device_id.clone(),
+            cwd: snapshot.cwd.clone(),
+            branch: snapshot.branch.clone(),
+            checkout_id: Some(snapshot.checkout_id.clone()),
+        };
+        self.change_requests.store(key, snapshot);
+    }
+}

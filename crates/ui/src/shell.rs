@@ -60,6 +60,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
+mod project_icon;
 mod sidebar_pins;
 mod spaces;
 mod tabs;
@@ -694,9 +695,18 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
         47.0 + metadata_height
     }
 }
+fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
+    if compact {
+        29.0
+    } else {
+        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+    }
+}
+
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
+#[cfg(test)]
 const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
 /// Divider box between pinned and regular sessions.
 const SIDEBAR_PINNED_DIVIDER_HEIGHT: f32 = 13.0;
@@ -1552,9 +1562,11 @@ pub struct Shell {
     sidebar_view_menu: popover::Popup<spaces::SidebarViewMenu>,
     /// Natural-tab-order focus target for the icon-only view-options button.
     sidebar_view_trigger_focus: gpui::FocusHandle,
-    /// Chat id whose STATUS CORNER is under the pointer — just that corner
-    /// swaps to the archive button (t3code's settle-on-hover); hovering the
-    /// row body leaves the status readable.
+    /// Current pinned-row metrics shared by hit testing and displacement animations.
+    sidebar_pinned_heights: Vec<f32>,
+    project_icons:
+        std::cell::RefCell<std::collections::HashMap<String, Entity<project_icon::ProjectIcon>>>,
+    /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
@@ -1919,6 +1931,8 @@ impl Shell {
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
             sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
+            sidebar_pinned_heights: Vec::new(),
+            project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
@@ -5857,6 +5871,19 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
+        let compact = search_query.is_none() && self.settings.sidebar_compact;
+        let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
+        let remote = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .is_some_and(|chat| {
+                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
+            });
+        let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
+            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let content_id = id.clone();
         // Send-truth overrides: a send unadopted past the grace window is
@@ -5947,17 +5974,41 @@ impl Shell {
                     .flex_none()
                     .text_color(theme.text_muted),
                 )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if archived {
-                            "Unarchive"
-                        } else {
-                            "Archive"
-                        })),
+                .when(!compact, |el| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(if archived {
+                                "Unarchive"
+                            } else {
+                                "Archive"
+                            })),
+                    )
+                })
+                .into_any_element()
+        } else if compact {
+            if working {
+                loaders::mini_glyph_spinner(
+                    format!("{row_id}-working"),
+                    2.0,
+                    theme.glyph,
+                    self.sidebar_pane.entity_id(),
+                    cx,
                 )
                 .into_any_element()
+            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
+                icon(icons::CHECK)
+                    .size(px(11.0))
+                    .text_color(status_color)
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(status_color)
+                    .into_any_element()
+            }
         } else {
             match status_label {
                 Some(label) => {
@@ -6018,6 +6069,12 @@ impl Shell {
             let archive_id = id.clone();
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
+                .aria_label(if corner_hovered {
+                    if archived { "Unarchive" } else { "Archive" }
+                } else {
+                    status_label.unwrap_or("Idle")
+                })
+                .when(compact, |el| el.w(px(18.0)).justify_center())
                 .flex_none()
                 // Pin the corner to line 1's text height so the archive pill
                 // (taller, padded) overflows vertically instead of growing the
@@ -6041,6 +6098,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
+        let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -6074,7 +6132,9 @@ impl Shell {
                 let row_id = row_id.clone();
                 move || row_id.clone()
             })
-            .h(px(chat_row_height(
+            .h(px(sidebar_row_height(
+                compact,
+                show_label,
                 branch.is_some(),
                 change_request.is_some(),
             )))
@@ -6139,24 +6199,26 @@ impl Shell {
                 })
             })
             // Line 1: "project @ device", status word / time-ago right.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(Theme::SPACE_SM))
-                    .child(sidebar_faded_label(
-                        format!("chat-device-{content_id}").into(),
-                        true,
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .line_height(px(14.0))
-                            .text_color(subline)
-                            .child(popover::search_highlight(space_name, search_query, theme)),
-                    ))
-                    .child(div().text_color(subline).child(corner)),
-            )
+            .when(!compact && show_label, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .child(sidebar_faded_label(
+                            format!("chat-device-{content_id}").into(),
+                            true,
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(subline)
+                                .child(popover::search_highlight(space_name, search_query, theme)),
+                        ))
+                        .child(div().text_color(subline).children(corner.take())),
+                )
+            })
             // Line 2: harness identity belongs directly with the title,
             // instead of floating as unrelated metadata below it.
             .child(
@@ -6166,6 +6228,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
+                    .children(project_icon)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
@@ -6184,11 +6247,46 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
-                    )),
+                    ))
+                    .when((compact || !show_label) && remote, |el| {
+                        el.child(
+                            icon(icons::REMOTE_SERVER)
+                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .flex_none()
+                                .text_color(subline),
+                        )
+                    })
+                    .when(compact, |el| {
+                        el.children(change_request.clone().map(|summary| {
+                            if preview {
+                                crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                            } else {
+                                crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                            }
+                        }))
+                    })
+                    .when(compact || !show_label, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_color(subline)
+                                .children(corner.take()),
+                        )
+                    }),
             )
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
-            .when(shows_metadata, |row| {
+            .when(!compact && shows_metadata, |row| {
                 row.child(
                     div()
                         .w_full()
@@ -6283,7 +6381,8 @@ impl Shell {
                         }
                     }
                     if payload.visible_ids.contains(&payload.chat_id)
-                        && let Some(over) = spaces::pinned_session_drop_index(rel_y, count)
+                        && let Some(over) =
+                            spaces::row_drop_index(rel_y, &this.sidebar_pinned_heights, false)
                     {
                         this.update_pinned_session_drag(&payload, over, cx);
                     }
@@ -6412,7 +6511,7 @@ impl Shell {
         let session_rows = self.render_active_rows(theme, cx);
         let moving_row = session_rows
             .moving_row
-            .map(|(row, height)| self.render_moving_sidebar_session(row, height));
+            .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
         let keyed = session_rows.rows;
         let has_pinned_divider = pinned_count > 0 && pinned_count < keyed.len();
@@ -6512,9 +6611,19 @@ impl Shell {
                         return element;
                     }
                     let start = crate::terminal::panel::slide_offset(ix, from, prev_over)
-                        * SIDEBAR_SESSION_SLOT;
-                    let target =
-                        crate::terminal::panel::slide_offset(ix, from, over) * SIDEBAR_SESSION_SLOT;
+                        * (self
+                            .sidebar_pinned_heights
+                            .get(from)
+                            .copied()
+                            .unwrap_or(61.0)
+                            + SIDEBAR_LIST_GAP);
+                    let target = crate::terminal::panel::slide_offset(ix, from, over)
+                        * (self
+                            .sidebar_pinned_heights
+                            .get(from)
+                            .copied()
+                            .unwrap_or(61.0)
+                            + SIDEBAR_LIST_GAP);
                     if self.reduced_motion {
                         return div()
                             .relative()

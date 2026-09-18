@@ -79,6 +79,7 @@ fn pinned_session_pointer_y(pointer_y: f32, viewport_top: f32, scroll_top: f32) 
         - SIDEBAR_DISCLOSURE_BODY_INSET
 }
 
+#[cfg(test)]
 pub(super) fn pinned_session_drop_index(rel_y: f32, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
@@ -88,10 +89,31 @@ pub(super) fn pinned_session_drop_index(rel_y: f32, count: usize) -> Option<usiz
         .then(|| ((rel_y / super::SIDEBAR_SESSION_SLOT).floor() as usize).min(count - 1))
 }
 
+/// Hit testing shares the exact row metrics used by layout, including mixed PR rows.
+pub(super) fn row_drop_index(y: f32, heights: &[f32], clamp: bool) -> Option<usize> {
+    if heights.is_empty() {
+        return None;
+    }
+    let total =
+        heights.iter().sum::<f32>() + heights.len().saturating_sub(1) as f32 * SIDEBAR_LIST_GAP;
+    if !clamp && !(0.0..=total).contains(&y) {
+        return None;
+    }
+    let mut bottom = 0.0;
+    for (index, height) in heights.iter().enumerate() {
+        bottom += height + SIDEBAR_LIST_GAP;
+        if y < bottom {
+            return Some(index);
+        }
+    }
+    Some(heights.len() - 1)
+}
+
 /// Keep a sidebar-wide drag physically bounded to the pinned section. The
 /// strict drop helper above still identifies whether the pointer is actually
 /// inside the section; this helper supplies the nearest valid pinned slot
 /// while the pointer is over regular sessions.
+#[cfg(test)]
 pub(super) fn pinned_session_clamped_index(rel_y: f32, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
@@ -835,6 +857,45 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn sidebar_project_groups_preserve_pin_order_and_keyboard_order(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("pin".into());
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.spaces = ["a", "b"].into_iter().map(|id| serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "local", "path": format!("/project/{id}"), "createdAt": Utc::now()
+                    })).unwrap()).collect();
+                    state.chats = [("pin", "a"), ("b-new", "b"), ("a-new", "a"), ("b-old", "b")]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, (id, project))| {
+                            let mut chat = pin_test_chat(id);
+                            chat.space_id = Some(project.into());
+                            chat.created_at = Utc::now() - chrono::Duration::minutes(ix as i64);
+                            chat
+                        })
+                        .collect();
+                });
+                assert_eq!(
+                    shell.sidebar_visible_order(cx),
+                    ids(&["pin", "b-new", "b-old", "a-new"])
+                );
+                shell.settings.space_filter = Some("a".into());
+                assert_eq!(shell.sidebar_visible_order(cx), ids(&["pin", "a-new"]));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn sidebar_remote_pins_ignore_old_local_preferences(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let window = pin_test_shell(cx, dir.path());
@@ -1023,6 +1084,24 @@ mod pinned_session_tests {
 
     #[gpui::test]
     fn session_section_drops_preserve_live_activity_order(cx: &mut gpui::TestAppContext) {
+        exercise_session_section_drops(cx, false, true);
+    }
+
+    #[gpui::test]
+    fn compact_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
+        exercise_session_section_drops(cx, true, false);
+    }
+
+    #[gpui::test]
+    fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
+        exercise_session_section_drops(cx, false, false);
+    }
+
+    fn exercise_session_section_drops(
+        cx: &mut gpui::TestAppContext,
+        compact: bool,
+        show_label: bool,
+    ) {
         use super::*;
 
         struct SidebarHost(Entity<Shell>);
@@ -1075,6 +1154,8 @@ mod pinned_session_tests {
                 );
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
                 shell.settings.sidebar_show_branch = true;
+                shell.settings.sidebar_compact = compact;
+                shell.settings.sidebar_show_project_label = show_label;
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
                     state.chats = ["older", "newer"]
@@ -1113,8 +1194,13 @@ mod pinned_session_tests {
         assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
         assert_eq!(
             f32::from(dragged_card.size.height),
-            super::super::chat_row_height(true, false)
+            super::super::sidebar_row_height(compact, show_label, true, false)
         );
+        // Even a sub-row move follows the pointer immediately, before a drop slot changes.
+        let pointer = from + gpui::point(px(8.0), px(7.0));
+        cx.simulate_mouse_move(pointer, Some(MouseButton::Left), gpui::Modifiers::default());
+        let moving = cx.debug_bounds("chat-older").unwrap();
+        assert!((f32::from(moving.origin.y - source_bounds.origin.y) - 7.0).abs() < 1.0);
         let slot = cx.debug_bounds("session-slot-newer").unwrap();
         let target = gpui::point(slot.center().x, slot.top() + px(3.0));
         cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
@@ -1497,6 +1583,16 @@ mod pinned_session_tests {
     }
 
     #[test]
+    fn sidebar_hit_testing_uses_compact_and_mixed_row_heights() {
+        assert_eq!(super::row_drop_index(31.0, &[29.0, 29.0], false), Some(1));
+        assert_eq!(super::row_drop_index(61.0, &[29.0, 29.0], false), None);
+        assert_eq!(super::row_drop_index(48.0, &[45.0, 63.0], false), Some(1));
+        assert_eq!(super::row_drop_index(-1.0, &[29.0], false), None);
+        assert_eq!(super::row_drop_index(-1.0, &[29.0], true), Some(0));
+        assert_eq!(super::row_drop_index(500.0, &[29.0, 45.0], true), Some(1));
+    }
+
+    #[test]
     fn pinned_drop_index_quantizes_clamps_and_rejects_outside() {
         assert_eq!(pinned_session_drop_index(-1.0, 3), None);
         assert_eq!(pinned_session_drop_index(0.0, 3), Some(0));
@@ -1702,6 +1798,10 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
+    ByProject,
+    Compact,
+    ShowProjectIcon,
+    ShowProjectLabel,
     ByDevice,
     InOneList,
     LastUpdated,
@@ -1717,19 +1817,23 @@ impl SidebarViewRow {
     fn closes_menu(self) -> bool {
         matches!(
             self,
-            Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
         )
     }
 }
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 7] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
     SidebarViewRow::ByDevice,
+    SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
+    SidebarViewRow::ShowProjectIcon,
+    SidebarViewRow::Compact,
+    SidebarViewRow::ShowProjectLabel,
 ];
 
 // list items stay tightly related at 2px, while section boundaries use 12px
@@ -2126,7 +2230,7 @@ impl Shell {
         slide.retarget(target);
         let (from, to, epoch) = (slide.from, slide.to, slide.epoch);
         let frame = div().relative().child(row);
-        if self.reduced_motion {
+        if !returning || self.reduced_motion {
             frame.top(px(to)).into_any_element()
         } else {
             frame
@@ -2146,6 +2250,7 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.chat_status_hover = None;
         self.cancel_pinned_session_drag(cx);
         self.sidebar_session_return = None;
         self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
@@ -2273,6 +2378,7 @@ impl Shell {
     }
 
     pub(super) fn cancel_sidebar_session_transfer(&mut self, cx: &mut Context<Self>) {
+        self.chat_status_hover = None;
         self.cancel_pinned_session_drag(cx);
         if let Some(mut transfer) = self.sidebar_session_transfer.take() {
             transfer.preview = None;
@@ -2335,13 +2441,10 @@ impl Shell {
         &mut self,
         row: AnyElement,
         height: f32,
+        theme: &Theme,
     ) -> AnyElement {
         let viewport = self.sidebar_scroll.bounds();
         let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
-        let pinned_slot = self
-            .pinned_session_drag
-            .as_ref()
-            .map(|drag| (drag.over as f32 - drag.from as f32) * SIDEBAR_SESSION_SLOT);
         let returning = self.sidebar_session_transfer.is_none();
         let transfer = if let Some(transfer) = self.sidebar_session_transfer.as_mut() {
             transfer
@@ -2351,30 +2454,16 @@ impl Shell {
         let origin = f32::from(transfer.origin.get().y - viewport.top()) + scroll_top;
         let target = if returning {
             origin
-        } else if let Some(gap) = transfer
-            .preview
-            .as_ref()
-            .filter(|gap| !(gap.pinned && transfer.source_group == "pinned"))
-        {
-            gap.top
-        } else if let Some(offset) = pinned_slot.filter(|_| {
-            f32::from(transfer.pointer.y - viewport.top()) + scroll_top
-                <= SIDEBAR_LIST_PAD_TOP
-                    + SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                    + transfer.payload.visible_ids.len() as f32 * SIDEBAR_SESSION_SLOT
-        }) {
-            origin + offset
         } else {
-            let pointer_top =
-                f32::from(transfer.pointer.y - transfer.cursor_offset.y - viewport.top())
-                    + scroll_top;
-            let slot = ((pointer_top - origin) / SIDEBAR_SESSION_SLOT).round();
-            (origin + slot * SIDEBAR_SESSION_SLOT).clamp(
-                scroll_top,
-                (scroll_top + f32::from(viewport.size.height) - height).max(scroll_top),
-            )
+            f32::from(transfer.pointer.y - transfer.cursor_offset.y - viewport.top()) + scroll_top
         };
-        transfer.slide.retarget(target);
+        if returning {
+            transfer.slide.retarget(target);
+        } else {
+            transfer.slide.from = target;
+            transfer.slide.to = target;
+            transfer.slide.started = std::time::Instant::now();
+        }
         let from = transfer.slide.from;
         let to = transfer.slide.to;
         let epoch = transfer.slide.epoch;
@@ -2383,6 +2472,8 @@ impl Shell {
             .left(px(Theme::SPACE_SM))
             .right(px(Theme::SPACE_SM))
             .h(px(height))
+            .rounded(px(8.0))
+            .when(!returning, |el| el.bg(theme.surface_raised).shadow_md())
             .child(row);
         if self.reduced_motion {
             frame.top(px(to)).into_any_element()
@@ -2403,6 +2494,7 @@ impl Shell {
         target: SidebarSessionDrop,
         cx: &mut Context<Self>,
     ) {
+        self.chat_status_hover = None;
         let matches_drag = self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             drag.payload.chat_id == payload.chat_id
                 && drag.payload.profile_key == payload.profile_key
@@ -2536,8 +2628,8 @@ impl Shell {
         let scroll_top = -f32::from(self.sidebar_scroll.offset().y);
         let rel_y = pinned_session_pointer_y(pointer_y, viewport_top, scroll_top);
         let inside_pinned_section =
-            pinned_session_drop_index(rel_y, payload.visible_ids.len()).is_some();
-        let Some(over) = pinned_session_clamped_index(rel_y, payload.visible_ids.len()) else {
+            row_drop_index(rel_y, &self.sidebar_pinned_heights, false).is_some();
+        let Some(over) = row_drop_index(rel_y, &self.sidebar_pinned_heights, true) else {
             if let Some(drag) = self.pinned_session_drag.as_mut() {
                 drag.pointer_y = None;
                 drag.autoscroll_active = false;
@@ -2625,7 +2717,7 @@ impl Shell {
         };
 
         let rel_y = pinned_session_pointer_y(pointer_y, viewport_top, next_scroll);
-        let Some(over) = pinned_session_drop_index(rel_y, drag.visible_ids.len()) else {
+        let Some(over) = row_drop_index(rel_y, &self.sidebar_pinned_heights, false) else {
             if let Some(drag) = self.pinned_session_drag.as_mut() {
                 drag.autoscroll_active = false;
             }
@@ -2835,7 +2927,21 @@ impl Shell {
     }
 
     fn activate_sidebar_view_row(&mut self, row: SidebarViewRow, cx: &mut Context<Self>) {
+        self.cancel_sidebar_session_transfer(cx);
+        self.cancel_pinned_session_drag(cx);
         match row {
+            SidebarViewRow::ByProject => {
+                self.settings.sidebar_organization = SidebarOrganization::ByProject
+            }
+            SidebarViewRow::ShowProjectLabel => {
+                self.settings.sidebar_show_project_label = !self.settings.sidebar_show_project_label
+            }
+            SidebarViewRow::Compact => {
+                self.settings.sidebar_compact = !self.settings.sidebar_compact
+            }
+            SidebarViewRow::ShowProjectIcon => {
+                self.settings.sidebar_show_project_icon = !self.settings.sidebar_show_project_icon
+            }
             SidebarViewRow::ByDevice => {
                 self.settings.sidebar_organization = SidebarOrganization::ByDevice
             }
@@ -2911,30 +3017,42 @@ impl Shell {
 
         let labels = [
             "By device",
+            "By project",
             "In one list",
             "Last updated",
             "Created",
             "Branch",
             "Pull request",
             "Harness",
+            "Project icon",
+            "Compact mode",
+            "Project @ device",
         ];
         let icons = [
             icons::LAPTOP,
+            icons::FOLDER,
             icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
             icons::BOT,
+            icons::PROJECT_DEFAULT,
+            icons::LIST,
+            icons::FOLDER,
         ];
         let selected = [
             organization == SidebarOrganization::ByDevice,
+            organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
             show_branch,
             show_pr,
             show_harness,
+            self.settings.sidebar_show_project_icon,
+            self.settings.sidebar_compact,
+            self.settings.sidebar_show_project_label,
         ];
         let mut rows: Vec<AnyElement> = SIDEBAR_VIEW_ROWS
             .iter()
@@ -2971,8 +3089,8 @@ impl Shell {
                 .into_any_element()
             })
             .collect();
-        let show_rows = rows.split_off(4);
-        let sort_rows = rows.split_off(2);
+        let show_rows = rows.split_off(5);
+        let sort_rows = rows.split_off(3);
         let organization_rows = rows;
 
         popover::popover_card(theme)
@@ -3146,7 +3264,7 @@ impl Shell {
             .rounded(px(8.0))
             .border_1()
             .border_color(theme.border.opacity(0.0))
-            .in_focus(|el| el.border_color(theme.border_strong))
+            .focus_visible(|el| el.border_color(theme.border_strong))
             .cursor_pointer()
             .text_color(theme.text_muted)
             .bg(if view_open {
@@ -3184,7 +3302,7 @@ impl Shell {
             .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
             .tooltip_show_delay(std::time::Duration::from_millis(350))
             .child(
-                icon(icons::SORT)
+                icon(icons::SIDEBAR_SORT)
                     .size(px(16.0))
                     .text_color(theme.text_muted),
             );
@@ -3438,17 +3556,31 @@ impl Shell {
             .map(|(_, chat)| chat.clone())
             .collect();
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
-        let ordered = if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
+        let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
+            .into_iter()
+            .partition(|chat| pinned_order.contains(&chat.id));
+        let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
             let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
             for chat in chats {
-                let key = Some((chat.device_id.clone(), String::new()));
+                let key = Some((
+                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
+                        chat.space_id
+                            .clone()
+                            .unwrap_or_else(|| format!("home:{}", chat.device_id))
+                    } else {
+                        chat.device_id.clone()
+                    },
+                    String::new(),
+                ));
                 if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
                     existing.push(chat);
                 } else {
                     groups.push((key, vec![chat]));
                 }
             }
-            promote_local_device_group(&mut groups, state.local_device_id.as_deref());
+            if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
+                promote_local_device_group(&mut groups, state.local_device_id.as_deref());
+            }
             groups
                 .into_iter()
                 .flat_map(|(_, rows)| rows)
@@ -3457,6 +3589,11 @@ impl Shell {
         } else {
             chats.into_iter().map(|chat| chat.id).collect()
         };
+        let ordered = pinned_chats
+            .into_iter()
+            .map(|chat| chat.id)
+            .chain(ordered)
+            .collect::<Vec<_>>();
         let mut visible = project_pinned_first(&ordered, pinned_order);
         if !self.pinned_open {
             let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
@@ -3523,7 +3660,13 @@ impl Shell {
                     let change_request = state.change_request_for_chat(&chat).cloned();
                     let group = match self.settings.sidebar_organization {
                         SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
-                        SidebarOrganization::ByProject | SidebarOrganization::InOneList => None,
+                        SidebarOrganization::ByProject => Some((
+                            chat.space_id
+                                .clone()
+                                .unwrap_or_else(|| format!("home:{}", chat.device_id)),
+                            project,
+                        )),
+                        SidebarOrganization::InOneList => None,
                     };
                     ActiveChatRow {
                         status,
@@ -3570,6 +3713,17 @@ impl Shell {
             .len();
         let regular_rows = rows.split_off(pinned_count);
         let pinned_rows = rows;
+        self.sidebar_pinned_heights = pinned_rows
+            .iter()
+            .map(|row| {
+                sidebar_row_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                    row.branch.is_some(),
+                    row.change_request.is_some(),
+                )
+            })
+            .collect();
         let visible_pinned_ids = std::sync::Arc::new(
             pinned_rows
                 .iter()
@@ -3620,7 +3774,9 @@ impl Shell {
                         .map_or_else(|| "regular".into(), |(key, _)| format!("regular:{key}"))
                 };
                 drag.source_index = index;
-                drag.row_height = super::chat_row_height(
+                drag.row_height = sidebar_row_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
                     rows[index].change_request.is_some(),
                 );
@@ -3727,7 +3883,12 @@ impl Shell {
                     .sidebar_show_harness
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
-                let height = super::chat_row_height(branch.is_some(), change_request.is_some());
+                let height = sidebar_row_height(
+                    self.settings.sidebar_compact,
+                    self.settings.sidebar_show_project_label,
+                    branch.is_some(),
+                    change_request.is_some(),
+                );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = slot.checked_sub(if self.pinned_open { 0 } else { pinned_count });
@@ -3877,7 +4038,8 @@ impl Shell {
             };
             let organization = match self.settings.sidebar_organization {
                 SidebarOrganization::ByDevice => "device",
-                SidebarOrganization::ByProject | SidebarOrganization::InOneList => "list",
+                SidebarOrganization::ByProject => "project",
+                SidebarOrganization::InOneList => "list",
             };
             let collapse_key = format!("{organization}:{key}");
             let motion_key = format!("group:{collapse_key}");
@@ -4257,6 +4419,13 @@ impl Shell {
                         )
                         // Archived history recedes: dimmed mark at rest,
                         // restored on hover (t3code's grayscale favicon).
+                        .when(self.settings.sidebar_show_project_icon, |el| {
+                            el.child(self.render_project_icon(
+                                &id,
+                                SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE,
+                                cx,
+                            ))
+                        })
                         .when_some(brand, |el, (mark, tint)| {
                             el.child(
                                 crate::icons::icon(mark)
