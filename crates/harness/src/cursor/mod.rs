@@ -496,6 +496,22 @@ async fn run_session(session: Session) {
 
     'main: loop {
         tokio::select! {
+            // A saturated steering queue must not starve cancellation.
+            biased;
+            _ = interrupt.cancelled(), if !interrupt_sent => {
+                interrupt_sent = true;
+                interrupted = true;
+                let _ = stdin_tx.send(json!({ "op": "interrupt" }).to_string());
+                if let Some(pid) = crate::process::signal_target(&child) {
+                    escalation = Some(tokio::spawn(async move {
+                        tokio::time::sleep(interrupt_grace).await;
+                        send_signal(&pid, Signal::Term);
+                        tokio::time::sleep(kill_grace).await;
+                        send_signal(&pid, Signal::Kill);
+                    }));
+                }
+            },
+
             line = stdout_lines.next_line() => match line {
                 Ok(Some(line)) => {
                     let line = line.trim();
@@ -618,20 +634,6 @@ async fn run_session(session: Session) {
                     if parked && queued_steers.is_empty() {
                         break 'main;
                     }
-                }
-            },
-
-            _ = interrupt.cancelled(), if !interrupt_sent => {
-                interrupt_sent = true;
-                interrupted = true;
-                let _ = stdin_tx.send(json!({ "op": "interrupt" }).to_string());
-                if let Some(pid) = crate::process::signal_target(&child) {
-                    escalation = Some(tokio::spawn(async move {
-                        tokio::time::sleep(interrupt_grace).await;
-                        send_signal(&pid, Signal::Term);
-                        tokio::time::sleep(kill_grace).await;
-                        send_signal(&pid, Signal::Kill);
-                    }));
                 }
             },
 

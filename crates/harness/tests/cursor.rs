@@ -376,3 +376,111 @@ async fn cancellation_racing_a_fatal_error_emits_exactly_one_terminal_event() {
     .unwrap();
     assert_eq!(statuses, vec![DoneStatus::Interrupted]);
 }
+
+#[tokio::test]
+async fn steering_spam_preserves_every_turn_in_order_and_closes_cleanly() {
+    for _ in 0..10 {
+        let (controls, steer, _) = controls();
+        let mut stream = harness()
+            .run(request("scenario:burst"), controls)
+            .await
+            .unwrap();
+        let producer = tokio::spawn(async move {
+            for n in 0..200 {
+                steer
+                    .send(SteerMessage {
+                        prompt: format!("ITEM-{n}"),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut texts = Vec::new();
+        let mut dones = 0;
+        let mut transitions = 0;
+        let mut ids = std::collections::HashSet::new();
+        let mut current = None;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    AgentEvent::SessionStarted {
+                        assistant_message_id,
+                        ..
+                    } => {
+                        ids.insert(assistant_message_id.clone());
+                        current = Some(assistant_message_id);
+                    }
+                    AgentEvent::Steered {
+                        assistant_message_id,
+                        next_assistant_message_id,
+                    } => {
+                        assert_eq!(assistant_message_id, current);
+                        let next = next_assistant_message_id.unwrap();
+                        assert!(ids.insert(next.clone()));
+                        current = Some(next);
+                        transitions += 1;
+                    }
+                    AgentEvent::TextDelta { text } => texts.push(text),
+                    AgentEvent::Done { status, .. } => {
+                        assert_eq!(status, DoneStatus::Completed);
+                        dones += 1;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        producer.await.unwrap();
+        assert_eq!(
+            texts,
+            std::iter::once("INITIAL".into())
+                .chain((0..200).map(|n| format!("ITEM-{n}")))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(dones, 201);
+        assert_eq!(transitions, 200);
+        assert_eq!(ids.len(), 201);
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_saturated_steering_queue_never_starts_queued_turns() {
+    for _ in 0..20 {
+        let (controls, steer, token) = controls();
+        let mut stream = harness()
+            .run(request("scenario:burst-cancel"), controls)
+            .await
+            .unwrap();
+        for n in 0..100 {
+            steer
+                .send(SteerMessage {
+                    prompt: format!("MUST-NOT-RUN-{n}"),
+                    message_id: None,
+                })
+                .await
+                .unwrap();
+        }
+        token.cancel();
+        drop(steer);
+        let mut dones = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                match event.unwrap() {
+                    AgentEvent::Steered { .. } | AgentEvent::TextDelta { .. } => {
+                        panic!("cancelled queue executed")
+                    }
+                    AgentEvent::Done { status, .. } => {
+                        assert_eq!(status, DoneStatus::Interrupted);
+                        dones += 1;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(dones, 1);
+    }
+}

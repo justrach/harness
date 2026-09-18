@@ -21,6 +21,10 @@ esac
 
 case "$first" in
 
+*scenario:burst*)
+  exec node "$(dirname "$0")/cursor-steering-peer.mjs" "$first"
+  ;;
+
 *scenario:followup-crash*)
   emit '{"ev":"ready","agentId":"agent-crash-followup","model":"composer-2.5"}'
   emit '{"ev":"turn","status":"finished"}'

@@ -197,6 +197,154 @@ async fn parked(harness: &CursorHarness, count: usize) {
     );
 }
 
+// Queue faster than the SDK can complete turns, including channel backpressure.
+async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
+    let workspace = tempfile::tempdir().unwrap();
+    let nonce = format!("BURST-{}", uuid::Uuid::new_v4());
+    // Establish a completed checkpoint before testing cancellation of a later
+    // turn. An interrupted first turn may not have a provider checkpoint yet.
+    let seed = if cancel {
+        Some(
+            turn(
+                harness,
+                workspace.path().to_str().unwrap(),
+                None,
+                format!("Remember token {nonce}. Reply only {nonce}. Do not use tools."),
+                "",
+            )
+            .await
+            .0,
+        )
+    } else {
+        None
+    };
+    let (tx, steering) = mpsc::channel(8);
+    let token = CancellationToken::new();
+    let controls = RunControls {
+        steering,
+        interrupt: token.clone(),
+        request_input: Box::new(|_| {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(vec![]);
+            rx
+        }),
+    };
+    let request = RunRequest {
+        prompt: if cancel {
+            format!(
+                "Remember token {nonce}. First run shell command `sleep 30`, then reply only {nonce}."
+            )
+        } else {
+            format!("Remember token {nonce}. Reply only {nonce} and INITIAL. Do not use tools.")
+        },
+        harness: None,
+        model: Some("composer-2.5".into()),
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: workspace.path().to_str().unwrap().into(),
+        sandbox: SandboxLevel::DangerFullAccess,
+        auto_approve: true,
+        attachments: vec![],
+        worktree: None,
+        resume: seed,
+    };
+    let mut stream = harness.run(request, controls).await.unwrap();
+    let producer = tokio::spawn(async move {
+        for n in 0..count {
+            let prompt = if cancel {
+                "Append one line to forbidden-replay.txt using a shell command.".into()
+            } else {
+                format!(
+                    "Reply only the BURST token from the initial prompt and marker ITEM-{n:04}. Do not use tools."
+                )
+            };
+            if tx
+                .send(zeron_harness::SteerMessage {
+                    prompt,
+                    message_id: None,
+                })
+                .await
+                .is_err()
+            {
+                return n;
+            }
+        }
+        count
+    });
+    let mut id = String::new();
+    let mut text = String::new();
+    let mut completed = 0;
+    let mut steered = 0;
+    let mut cancelled = 0;
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::SessionStarted { session_id, .. } => id = session_id,
+                AgentEvent::TextDelta { text: chunk } => text.push_str(&chunk),
+                AgentEvent::Steered { .. } => steered += 1,
+                AgentEvent::ToolCall { .. } if cancel => {
+                    // Let the producer fill the harness queue before cancelling.
+                    while !producer.is_finished() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    token.cancel();
+                }
+                AgentEvent::Done { status, error, .. } => {
+                    if cancel {
+                        assert_eq!(status, DoneStatus::Interrupted, "{error:?}");
+                        cancelled += 1;
+                    } else {
+                        assert_eq!(status, DoneStatus::Completed, "{error:?}");
+                        assert!(text.contains(&nonce), "lost context: {text}");
+                        let marker = if completed == 0 {
+                            "INITIAL".into()
+                        } else {
+                            format!("ITEM-{:04}", completed - 1)
+                        };
+                        assert!(
+                            text.contains(&marker),
+                            "out of order/missing turn: expected {marker}, got {text}"
+                        );
+                        completed += 1;
+                        text.clear();
+                        println!("burst_completed={completed} ordered=true context=true");
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("burst must settle and close");
+    assert_eq!(producer.await.unwrap(), count, "every steer was enqueued");
+    if cancel {
+        assert_eq!(cancelled, 1);
+        assert_eq!(steered, 0);
+    } else {
+        assert_eq!(completed, count + 1);
+        assert_eq!(steered, count);
+    }
+    assert!(!id.is_empty());
+    let (resumed, text) = turn(
+        harness,
+        workspace.path().to_str().unwrap(),
+        Some(id.clone()),
+        "Repeat the exact BURST token from the first prompt. Do not use tools.".into(),
+        "",
+    )
+    .await;
+    assert_eq!(resumed, id);
+    assert!(text.contains(&nonce), "resume lost context: {text}");
+    assert!(
+        !workspace.path().join("forbidden-replay.txt").exists(),
+        "cancelled queued prompt executed"
+    );
+    println!(
+        "{}",
+        serde_json::json!({"queued":count,"completed":completed,"steered":steered,"interrupted":cancelled,"resumed":true,"failures":0})
+    );
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -240,6 +388,9 @@ async fn main() {
             "{}",
             serde_json::json!({"requests": count+1+usize::from(mode == "outage"), "models":baseline.len(), "elapsedMs":start.elapsed().as_millis(), "failures":0})
         );
+    } else if mode == "burst" || mode == "cancel-burst" {
+        assert!(std::env::var_os("ZERON_CURSOR_STATE_DIR").is_some());
+        burst(&harness, count, mode == "cancel-burst").await;
     } else if mode == "parked" {
         assert!(std::env::var_os("ZERON_CURSOR_STATE_DIR").is_some());
         parked(&harness, count).await;

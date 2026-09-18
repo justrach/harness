@@ -50,7 +50,7 @@ Machine-readable evidence: [results.json](results.json).
 
 | Check | Result |
 | --- | --- |
-| Full harness regression suite | 295 passed, 0 failed, 10 opt-in tests ignored; includes other harnesses |
+| Full harness regression suite | 297 passed, 0 failed, 10 opt-in tests ignored; includes other harnesses |
 | Engine restart/publication regressions | 11 passed, 0 failed, 3 opt-in tests ignored |
 | Live catalog burst | 10,001 requests; all 39 rows preserved; zero failures |
 | Live catalog + injected rate-limit outage | Warm real catalog, let its TTL expire, inject outage, issue 10,000 requests, then recover against real service; all 39 rows preserved; only 3 measured shim starts |
@@ -71,6 +71,27 @@ exercise Zeron's actual SDK driver, not a substitution with CLI print mode.
 All live prompts use disposable workspaces and synthetic tokens. The fault
 prompts deliberately write only a disposable side-effect counter and sleep.
 
+## Steering burst follow-up
+
+Rapid steering is tested with a bounded channel of eight entries, deliberately
+forcing backpressure. Ten deterministic bursts of 200 prompts check exact order,
+unique assistant message IDs, one completion per turn, and clean closure when
+the sender disconnects. Twenty cancellation bursts of 100 prompts verify one
+interrupted completion and no queued turn promotion. Cancellation now takes
+priority over simultaneously ready output/steering events.
+
+Against the real SDK, 24 immediately queued prompts completed in order with
+context retained, followed by successful same-session resume. A separate burst
+of 100 queued tool prompts was cancelled during a running tool: none were
+promoted, no queued file write occurred, and the established conversation
+checkpoint was recalled after resume.
+
+An exploratory cancellation of the very first turn exposed a provider limit:
+that unfinished turn had no resumable context checkpoint. The resumed session
+was usable but could not recall its interrupted first prompt. The established-
+conversation test therefore seeds a completed checkpoint first. This is not
+evidence that every partial, uncheckpointed turn survives interruption.
+
 ## Reproduce
 
 The automated suite requires Node; subprocess catalog fixtures also use a POSIX
@@ -86,6 +107,13 @@ The following live probes require an authenticated SDK and consume Cursor quota:
 cargo run -p zeron-harness --example cursor_stability_probe -- models 10000
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- sessions 20
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- parked 20
+```
+
+Rapid live steering and cancellation (each consumes provider quota):
+
+```sh
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- burst 24
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- cancel-burst 100
 ```
 
 To measure the live-catalog outage test (about two minutes, including real TTLs):
