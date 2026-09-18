@@ -297,11 +297,6 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     });
 }
 
-pub fn data_dir(cx: &App) -> Option<std::path::PathBuf> {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.data_dir.clone())
-}
-
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()

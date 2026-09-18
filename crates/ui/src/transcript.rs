@@ -33,15 +33,14 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity,
-    ListAlignment,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
     ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
     PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
     TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::{SessionStatus, ToolCall};
+use zeron_proto::ToolCall;
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -1632,9 +1631,13 @@ pub fn rows_for_entry(
                         tools: Arc::new(tools),
                         auto_open: false,
                         worked_secs: (!streaming)
-                            .then(|| entry.duration_ms)
-                            .flatten()
-                            .map(|ms| (ms / 1000).max(0)),
+                            .then(|| {
+                                entry
+                                    .duration_ms
+                                    .filter(|&ms| ms > 0)
+                                    .map(|ms| (ms / 1000).max(1))
+                            })
+                            .flatten(),
                     },
                     entry_id: entry.id.clone().into(),
                     timestamp: None,
@@ -2169,29 +2172,6 @@ pub fn format_elapsed(secs: i64) -> String {
 
 fn worked_for_label(secs: i64) -> String {
     format!("Worked for {}", format_elapsed(secs))
-}
-
-fn compact_durations_path(cx: &App) -> Option<std::path::PathBuf> {
-    crate::settings::data_dir(cx).map(|dir| dir.join("compact-turn-durations.json"))
-}
-
-fn load_compact_durations(cx: &App) -> HashMap<String, i64> {
-    let Some(path) = compact_durations_path(cx) else {
-        return HashMap::new();
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn save_compact_durations(map: &HashMap<String, i64>, cx: &App) {
-    let Some(path) = compact_durations_path(cx) else {
-        return;
-    };
-    if let Ok(raw) = serde_json::to_string(map) {
-        let _ = std::fs::write(path, raw);
-    }
 }
 
 /// Compact-mode header: the live tool summary crossfades into "Worked for".
@@ -3299,7 +3279,7 @@ impl Transcript {
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
-            compact_last_elapsed: load_compact_durations(cx),
+            compact_last_elapsed: HashMap::new(),
             compact_worked_fade_at: HashMap::new(),
             highlights: HighlightStore::default(),
             show_jump_button: false,
@@ -4475,12 +4455,12 @@ impl Transcript {
                 {
                     new_rows.extend(rows.iter().cloned());
                 } else {
-                    new_rows.extend(self.rows_for(entry, false, cx));
+                    new_rows.extend(self.rows_for(entry, false));
                 }
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
-                    new_rows.extend(self.rows_for(echo, true, cx));
+                    new_rows.extend(self.rows_for(echo, true));
                 }
             }
             (
@@ -4850,103 +4830,24 @@ impl Transcript {
         cx.notify();
     }
 
-    fn remember_compact_elapsed(&mut self, cx: &App) -> bool {
-        if !self.compact_mode {
-            return false;
-        }
-        let Some(chat_id) = self.chat_id.clone() else {
-            return false;
-        };
-        let state = self.state.read(cx);
-        let Some(entry_id) = state
-            .transcript
-            .iter()
-            .rev()
-            .find(|entry| entry.role == MessageRole::Assistant)
-            .map(|entry| entry.id.clone())
-        else {
-            return false;
-        };
-        let Some(session) = state.session_for(&chat_id) else {
-            return false;
-        };
-        let secs = match session.status {
-            SessionStatus::Working | SessionStatus::AwaitingInput => session
-                .started_at
-                .map(|start| chrono::Utc::now().signed_duration_since(start).num_seconds())
-                .unwrap_or(0),
-            SessionStatus::Idle | SessionStatus::Errored => {
-                if self.compact_last_elapsed.contains_key(&entry_id) {
-                    return false;
-                }
-                (session.updated_at.timestamp_millis()
-                    - state
-                        .transcript
-                        .iter()
-                        .rev()
-                        .find(|entry| entry.id == entry_id)
-                        .map(|entry| entry.created_at)
-                        .unwrap_or(0))
-                    / 1000
-            }
-        };
-        if secs <= 0 || secs >= 6 * 3600 {
-            return false;
-        }
-        let changed = self.compact_last_elapsed.get(&entry_id) != Some(&secs);
-        if changed {
-            self.compact_last_elapsed.insert(entry_id, secs);
-            save_compact_durations(&self.compact_last_elapsed, cx);
-        }
-        changed
-    }
-
-    fn compact_worked_secs_for(&self, entry: &SessionMessageEntry, cx: &App) -> Option<i64> {
+    fn compact_worked_secs_for(&self, entry: &SessionMessageEntry) -> Option<i64> {
         if !self.compact_mode || entry.role != MessageRole::Assistant {
             return None;
         }
         if entry.status == Some(MessageStatus::Streaming) {
             return None;
         }
-        if let Some(ms) = entry.duration_ms.filter(|&ms| ms > 0) {
-            return Some((ms / 1000).max(1));
+        if let Some(ms) = entry.duration_ms {
+            return (ms > 0).then_some((ms / 1000).max(1));
         }
-        if let Some(secs) = self
-            .compact_last_elapsed
+        self.compact_last_elapsed
             .get(&entry.id)
             .copied()
             .filter(|&secs| secs > 0)
-        {
-            return Some(secs);
-        }
-        let chat_id = self.chat_id.as_deref()?;
-        let state = self.state.read(cx);
-        let last = state
-            .transcript
-            .iter()
-            .rev()
-            .find(|e| e.role == MessageRole::Assistant)?;
-        if last.id != entry.id {
-            return None;
-        }
-        let session = state.session_for(chat_id)?;
-        if !matches!(
-            session.status,
-            SessionStatus::Idle | SessionStatus::Errored
-        ) {
-            return None;
-        }
-        let secs = (session.updated_at.timestamp_millis() - entry.created_at) / 1000;
-        (secs > 0 && secs < 6 * 3600).then_some(secs)
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(
-        &mut self,
-        entry: &SessionMessageEntry,
-        pending: bool,
-        cx: &App,
-    ) -> Vec<Row> {
+    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
@@ -4973,7 +4874,7 @@ impl Transcript {
             };
             rows_for_entry(entry, pending, self.compact_mode, &mut parse)
         };
-        if let Some(secs) = self.compact_worked_secs_for(entry, cx) {
+        if let Some(secs) = self.compact_worked_secs_for(entry) {
             for row in &mut rows {
                 if let RowKind::ToolGroup {
                     worked_secs,
@@ -8417,10 +8318,6 @@ impl Render for Transcript {
             self.last_source = None;
             self.sync(cx);
         }
-        if self.remember_compact_elapsed(cx) {
-            self.last_source = None;
-            self.sync(cx);
-        }
         let code_fences_generation = crate::settings::code_fences_generation(cx);
         if self.code_fences_generation != code_fences_generation {
             self.code_fences_generation = code_fences_generation;
@@ -10461,6 +10358,35 @@ mod tests {
         assert_eq!(
             *worked_secs, None,
             "live compact groups keep the working trailer, not a settled duration"
+        );
+
+        let mut zero = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![tool_part("t0", "ls"), text_part("r0", "done")],
+        );
+        zero.duration_ms = Some(0);
+        let rows = rows_for_entry(&zero, false, true, &mut parse);
+        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(
+            *worked_secs, None,
+            "a zero stamp is a real finish, not a missing field to guess from"
+        );
+
+        let missing = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![tool_part("t0", "ls"), text_part("r0", "done")],
+        );
+        let rows = rows_for_entry(&missing, false, true, &mut parse);
+        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(
+            *worked_secs, None,
+            "pre-durationMs history keeps the tool summary"
         );
     }
 
