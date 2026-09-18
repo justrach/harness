@@ -2001,13 +2001,17 @@ pub fn sending_bridge(
     }
 }
 
-/// "1m 32s"-style elapsed formatting.
+/// Compact elapsed formatting, using at most two units up to days.
 pub fn format_elapsed(secs: i64) -> String {
     let secs = secs.max(0);
     if secs < 60 {
         format!("{secs}s")
-    } else {
+    } else if secs < 3_600 {
         format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs < 86_400 {
+        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
     }
 }
 
@@ -5612,6 +5616,8 @@ impl Transcript {
                 .when(!sending, |el| {
                     el.child(
                         div()
+                            .relative()
+                            .top(px(1.0))
                             .text_color(theme.text_faint)
                             .child(SharedString::from(format_elapsed(elapsed_secs))),
                     )
@@ -12323,9 +12329,26 @@ mod tests {
         assert_ne!(flavour_word(seed, 0), flavour_word(seed, 7));
         // Deterministic per chat; different chats usually differ in phase.
         assert_eq!(flavour_word(seed, 3), flavour_word(seed, 3));
-        assert_eq!(format_elapsed(59), "59s");
-        assert_eq!(format_elapsed(92), "1m 32s");
-        assert_eq!(format_elapsed(-5), "0s");
+    }
+
+    #[test]
+    fn elapsed_format_scales_from_seconds_to_days() {
+        for (secs, expected) in [
+            (-5, "0s"),
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m 0s"),
+            (92, "1m 32s"),
+            (3_599, "59m 59s"),
+            (3_600, "1h 0m"),
+            (4_800, "1h 20m"),
+            (6_000, "1h 40m"),
+            (86_399, "23h 59m"),
+            (86_400, "1d 0h"),
+            (183_845, "2d 3h"),
+        ] {
+            assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");
+        }
     }
 
     #[test]
