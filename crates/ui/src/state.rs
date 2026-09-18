@@ -1228,6 +1228,24 @@ impl AppState {
         Ok(())
     }
 
+    /// The opt-in opening tail is provisional. Never replace a complete view
+    /// with it, and don't treat it as a full reset for caching/scroll anchors.
+    fn receive_opening_transcript_update(
+        &mut self,
+        update: zeron_doc::TranscriptUpdate,
+        history_pending: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
+        if history_pending && self.transcript_replayed {
+            return Ok(());
+        }
+        self.receive_transcript_update(update, cx)?;
+        if history_pending {
+            self.transcript_replayed = false;
+        }
+        Ok(())
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -2373,7 +2391,7 @@ fn spawn_transcript_watch(
         // deselected or deleted, so retrying can't outlive relevance.
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": chat_id });
+            let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
                 .client()
                 .subscribe(methods::WATCH_DOC_MESSAGES, params)
@@ -2390,7 +2408,15 @@ fn spawn_transcript_watch(
                 }
             };
             while let Some(value) = rx.recv().await {
-                let update: zeron_doc::TranscriptUpdate = match serde_json::from_value(value) {
+                let history_pending = value
+                    .get("historyPending")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move { serde_json::from_value(value) })
+                    .await;
+                let update: zeron_doc::TranscriptUpdate = match decoded {
                     Ok(frame) => frame,
                     Err(err) => {
                         // Schema skew (a newer peer's entry shape arriving
@@ -2406,7 +2432,9 @@ fn spawn_transcript_watch(
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        if let Err(err) = state.receive_transcript_update(update, cx) {
+                        if let Err(err) =
+                            state.receive_opening_transcript_update(update, history_pending, cx)
+                        {
                             tracing::warn!(%chat_id, error = %err, "resubscribing transcript");
                             desync = true;
                         }
@@ -3157,6 +3185,54 @@ mod tests {
             status: None,
             continuation_of: None,
         }
+    }
+
+    #[gpui::test]
+    fn opening_tail_is_visible_but_never_replaces_or_caches_complete_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let update = |id: &str| zeron_doc::TranscriptUpdate {
+                frame: TranscriptFrame::reset(&[user_entry(id)]),
+                context_usage: None,
+                replay_baseline: None,
+            };
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(state.transcript[0].id, "tail");
+            assert!(
+                !state.transcript_replayed,
+                "scroll-anchor fallback must await full history"
+            );
+            state.select_chat(None, cx);
+            assert!(
+                state.transcript_cache.is_empty(),
+                "a preview is not a complete cached copy"
+            );
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("full"), false, cx)
+                .unwrap();
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "reconnect must preserve the full view"
+            );
+            state.select_chat(None, cx);
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "revisit must preserve the cache"
+            );
+        });
     }
 
     #[gpui::test]

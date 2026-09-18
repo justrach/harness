@@ -61,10 +61,63 @@ cargo test -p zeron-engine --lib -- --nocapture
 cargo test -p zeron-ui --lib --no-default-features -- --test-threads=1
 ```
 
-Results: 196 engine tests and 1,075 UI tests passed. The focused transcript view
+Initial revisit validation: 196 engine tests and 1,075 UI tests passed. The focused transcript view
 suite also passed all 107 tests. Changed Rust files pass rustfmt; `git diff
 --check` passes.
 
 A cache miss (first visit, process restart, or budget eviction) still reads the
 local engine snapshot. The cache is a bounded presentation optimization, not a
 replacement for durable local storage or authoritative synchronization.
+
+## First-open follow-up: actual whale snapshot
+
+The revisit fixes above did not address the first-open cost. A read-only copy of
+the locally available **Zlang Performance And Safety** snapshot was profiled
+without connecting to the edge. No transcript content or snapshot is committed.
+It contains 37,630 parts across just 16 joined messages (21,628,288 snapshot bytes).
+The original 2,000-message fixture did not represent this shape.
+
+Linux debug measurements before first paint (not a laptop or rendered-frame benchmark):
+
+| Stage | Original full opening | New 128-part opening |
+| --- | ---: | ---: |
+| Snapshot file read | ~16 ms | ~16 ms |
+| CRDT import | ~24 ms | ~24 ms |
+| Transcript materialization | ~604 ms | ~2.2 ms |
+| JSON encoding + decoding | ~1,007 ms | ~2.6 ms |
+| Opening response | 16,414,959 bytes | 44,127 bytes |
+
+The bottleneck is whole-history materialization and transfer before anything can
+be displayed, not disk I/O. In addition, the viewport builds presentation rows
+from the opening response; that rendering cost is not included in this probe.
+
+The desktop now opts into `WatchDocMessages { openingTail: true }`. The engine
+reads the last 128 parts directly from local CRDT containers, preserving part
+contents and continuation root IDs, and yields that provisional frame before
+building the full mirror. The next frame is the ordinary complete reset, then
+normal live deltas. Full snapshot opening/materialization runs on the blocking
+pool and UI typed-frame decoding runs on the background executor. Nothing is
+truncated in storage, and no remote response gates this local opening.
+
+The provisional frame carries `historyPending: true`. The UI never uses it to
+replace a complete cached/reconnecting view, never caches it as complete, and
+keeps saved-scroll fallback gated until the full reset arrives. Clients that do
+not opt in retain their existing full-reset protocol.
+
+New tests prove the first opening arrives while full publication is held
+blocked; every original part and a write between preview/attach appear in the
+full reset; subsequent live deltas still arrive; previews preserve continuation
+IDs and leave the snapshot unchanged; and incomplete history cannot overwrite
+or contaminate the full UI cache.
+
+Reproduce the read-only timing comparison with an exported snapshot:
+
+```sh
+cargo run -p zeron-engine --example transcript_load_probe -- /path/to/session.bin
+```
+
+The new path removes the full-history barrier to initial content. It does not
+claim that reconstructing/rendering all 37,630 parts is instantaneous, nor that
+work-laptop's installed build was tested.
+
+Final follow-up validation: 108 document, 197 engine, and 1,076 UI library tests pass.
