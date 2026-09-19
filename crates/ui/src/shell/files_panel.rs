@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_toggle_owns_both_portions_and_files_toggle_opens_the_pane_alone(
+    fn pane_toggle_drives_surfaces_only_and_last_tab_close_collapses_them(
         cx: &mut TestAppContext,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -525,10 +525,10 @@ mod tests {
                 // Widths settle immediately so the assertions see end states.
                 shell.reduced_motion = true;
                 // A fresh pane toggle lands on the surface host alone.
-                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(cx);
                 assert!(shell.right_pane_open(cx));
                 assert!(!shell.files_panel_open(cx));
-                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(cx);
                 assert!(!shell.right_pane_open(cx));
                 assert!(!shell.files_panel_open(cx));
 
@@ -537,14 +537,13 @@ mod tests {
                 assert!(shell.files_panel_open(cx));
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.files_visible_width(cx) > 0.0);
-                // Closing the pane hides that portion too, and reopening
-                // restores exactly what was visible.
-                shell.toggle_right_pane(window, cx);
-                assert!(!shell.files_panel_open(cx));
-                assert!(!shell.right_pane_open(cx));
-                shell.toggle_right_pane(window, cx);
-                assert!(shell.files_panel_open(cx));
-                assert!(!shell.right_pane_open(cx));
+                // With only the explorer docked, the pane toggle opens the
+                // surface host beside it instead of closing the pane, and it
+                // never hides the explorer.
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
 
                 // Opening a file docks the surface host beside the explorer;
                 // programmatic opens never close an open pane.
@@ -552,20 +551,28 @@ mod tests {
                 assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
                 shell.set_surfaces_open(true, cx);
                 assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
-                shell.toggle_right_pane(window, cx);
-                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
-                assert_eq!(shell.files_reserved_width(cx), 0.0);
-                shell.toggle_right_pane(window, cx);
-                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
                 assert_eq!(shell.file_surfaces.len(), 1);
 
-                // Undocking the explorer alone leaves the surface host open;
-                // the pane toggle then remembers the surfaces-only shape.
+                // Closing the last surface tab collapses the surface host and
+                // leaves the pane open with just the explorer.
+                let file = shell.right_surface_rows(cx)[0].0;
+                shell.close_right_surface(file, window, cx);
+                assert!(shell.file_surfaces.is_empty());
+                assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
+
+                // Only the explorer toggle undocks it; with nothing else open
+                // that closes the pane entirely.
                 shell.toggle_files_panel(window, cx);
-                assert!(shell.right_pane_open(cx) && !shell.files_panel_open(cx));
-                shell.toggle_right_pane(window, cx);
-                shell.toggle_right_pane(window, cx);
-                assert!(shell.right_pane_open(cx) && !shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
+                assert_eq!(shell.files_reserved_width(cx), 0.0);
+
+                // With the explorer undocked, the last tab close closes the
+                // whole pane.
+                shell.add_file_surface("src/main.rs".into(), window, cx);
+                assert!(shell.right_pane_open(cx));
+                let file = shell.right_surface_rows(cx)[0].0;
+                shell.close_right_surface(file, window, cx);
+                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
             })
             .unwrap();
     }

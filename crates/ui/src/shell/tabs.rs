@@ -401,7 +401,7 @@ impl Shell {
                                 icons::SIDEBAR_MINIMALISTIC,
                                 &theme,
                                 cx.listener(|this, _, window, cx| {
-                                    this.toggle_right_pane(window, cx)
+                                    this.toggle_right_pane(cx)
                                 }),
                             )),
                     )

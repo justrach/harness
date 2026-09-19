@@ -516,10 +516,6 @@ pub struct ChatPanels {
     /// The surface host portion of the right pane is visible (historically
     /// the Changes pane). The pane itself shows when either portion does.
     pub changes_open: bool,
-    /// What the pane toggle hid last time, so reopening restores the same
-    /// portions instead of always landing on the surface host.
-    pub reopen_surfaces: bool,
-    pub reopen_files: bool,
     /// Which surface tab renders; validated against the live tab list each
     /// frame (a closed tab falls back gracefully).
     pub right_active: RightSurface,
@@ -2483,39 +2479,21 @@ impl Shell {
         cx.notify();
     }
 
-    /// The user's pane toggle (titlebar button, keyboard). The right pane is
-    /// one container holding the surface host and the docked explorer:
-    /// closing hides both portions; reopening restores whichever were
-    /// visible when it closed, defaulting to the surface host.
-    fn toggle_right_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = self.panel_key(cx);
-        let surfaces = self.right_pane_open(cx);
-        let files = self.files_panel_open(cx);
-        if surfaces || files {
-            self.panels.update(&key, |p| {
-                p.reopen_surfaces = surfaces;
-                p.reopen_files = files;
-            });
-            if files {
-                self.close_files_panel(cx);
-            }
-            if surfaces {
-                self.set_surfaces_open(false, cx);
-            }
-            return;
-        }
-        let remembered = self.panels.get(&key);
-        let (open_surfaces, open_files) = if remembered.reopen_surfaces || remembered.reopen_files
+    /// The user's pane toggle (titlebar button, keyboard). It drives only the
+    /// surface host portion of the right pane: with just the explorer docked
+    /// it opens the surface host beside it, and it never hides the explorer —
+    /// only the explorer's own toggle undocks that portion.
+    fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        self.set_surfaces_open(!self.right_pane_open(cx), cx);
+    }
+
+    /// Closing the last surface tab closes the surface host; a docked
+    /// explorer keeps the pane open on its own.
+    fn collapse_surfaces_if_empty(&mut self, panel_key: &str, cx: &mut Context<Self>) {
+        if panel_key == self.panel_key(cx)
+            && self.right_tabs.get(panel_key).is_none_or(Vec::is_empty)
         {
-            (remembered.reopen_surfaces, remembered.reopen_files)
-        } else {
-            (true, false)
-        };
-        if open_files {
-            self.add_files_surface(window, cx);
-        }
-        if open_surfaces {
-            self.set_surfaces_open(true, cx);
+            self.set_surfaces_open(false, cx);
         }
     }
 
@@ -3363,6 +3341,7 @@ impl Shell {
                 p.right_active = RightSurface::Picker;
             }
         });
+        self.collapse_surfaces_if_empty(&key, cx);
         cx.notify();
     }
 
@@ -3499,6 +3478,7 @@ impl Shell {
                 panel.right_active = RightSurface::Picker;
             }
         });
+        self.collapse_surfaces_if_empty(panel_key, cx);
         cx.notify();
     }
 
@@ -10653,7 +10633,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
-                    this.toggle_right_pane(window, cx);
+                    this.toggle_right_pane(cx);
                     if !this.right_pane_open(cx) {
                         // The hidden editor can retain a focus handle after unmounting.
                         // Restore a mounted target so the next shortcut can reopen it.
@@ -12200,7 +12180,7 @@ mod exit_regressions {
                 shell.active_chat = "preview".into();
                 shell.viewport_width = 1000.;
                 shell.right_tween = tween;
-                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(cx);
                 assert_eq!(
                     shell.right_tween.unwrap().from,
                     width,
@@ -12227,7 +12207,7 @@ mod exit_regressions {
                     .panels
                     .update(&key, |panel| panel.right_active = RightSurface::File(0));
                 assert!(files.read(cx).test_images_visible());
-                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(cx);
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.tween_active(shell.right_tween));
                 assert!(
@@ -12922,7 +12902,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "session".into();
-                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(cx);
                 assert!(shell.right_pane_open(cx));
 
                 shell.add_browser_surface(None, window, cx);
@@ -12941,17 +12921,19 @@ mod exit_regressions {
                     RightSurface::Browser(first)
                 );
 
-                // …and again for the last tab.
+                // …and again for the last tab, which also collapses the
+                // surface host (nothing left to show).
                 assert!(shell.close_active_surface(window, cx));
                 assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert!(!shell.right_pane_open(cx));
 
-                // An open pane with nothing left to close falls through to the
-                // window-close rung instead of being consumed.
+                // A closed pane falls through to the window-close rung
+                // instead of being consumed.
                 assert!(!shell.close_active_surface(window, cx));
 
-                // So does an already-closed pane.
-                shell.toggle_right_pane(window, cx);
-                assert!(!shell.right_pane_open(cx));
+                // So does an open pane with nothing left to close.
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
                 assert!(!shell.close_active_surface(window, cx));
             })
             .unwrap();
