@@ -1040,6 +1040,9 @@ pub enum RowKind {
         auto_open: bool,
         /// Compact-mode settled duration for this turn, in seconds.
         worked_secs: Option<i64>,
+        /// Compact-mode work header. Expanded content is sibling rows tagged
+        /// [`Row::compact_fold`], not chips.
+        compact_shell: bool,
     },
     InputChip {
         /// First question's header (chat-view.tsx `InputChip`: the resolved
@@ -1084,6 +1087,8 @@ pub struct Row {
     /// settled row, beside the timestamp; tools and transport-only metadata
     /// are deliberately excluded.
     pub copy_text: Option<SharedString>,
+    /// Hidden while the named compact-work fold is closed.
+    pub compact_fold: Option<SharedString>,
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -1325,6 +1330,7 @@ pub fn rows_for_entry(
             // `createdAt` exists — the optimistic echo included).
             timestamp: Some(entry.created_at),
             copy_text,
+            compact_fold: None,
         }];
     }
 
@@ -1379,10 +1385,12 @@ pub fn rows_for_entry(
                     tools: Arc::new(tools),
                     auto_open,
                     worked_secs: None,
+                    compact_shell: false,
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
                 copy_text: None,
+                compact_fold: None,
             });
             *group_ix += 1;
         };
@@ -1524,6 +1532,7 @@ pub fn rows_for_entry(
                                 entry_id: entry_id.clone(),
                                 timestamp: None,
                                 copy_text: None,
+                                compact_fold: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
@@ -1554,6 +1563,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            compact_fold: None,
                             kind: RowKind::GeneratedImage {
                                 owner: entry.device_id.clone(),
                                 path: path.clone(),
@@ -1587,6 +1597,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            compact_fold: None,
                         });
                     }
                     MessagePart::Error {
@@ -1604,6 +1615,7 @@ pub fn rows_for_entry(
                             entry_id: entry_id.clone(),
                             timestamp: None,
                             copy_text: None,
+                            compact_fold: None,
                         });
                     }
                     // Tools and thoughts are grouped by the outer arms;
@@ -1614,36 +1626,63 @@ pub fn rows_for_entry(
         }
     }
     if compact {
-        // One group for the whole turn, sitting where its first foldable
-        // part appeared. Never auto-opens — collapsed-by-default is the
-        // point of the mode; `auto_open` stays false even mid-stream and the
-        // render path gates the arrival reveal on the mode as well.
+        // Collapsed: one work header. Expanded: the same rows compact-off
+        // would emit for the work parts, tagged so the fold can hide them.
         if !pending_group.is_empty() {
             let tools = std::mem::take(&mut pending_group);
-            rows.insert(
-                compact_group_pos.unwrap_or(rows.len()),
-                Row {
-                    id: format!("{}#work", entry.id).into(),
-                    version: tool_fingerprint(&tools, false),
-                    turn_start: false,
-                    kind: RowKind::ToolGroup {
-                        summary: tool_group_summary(&tools).into(),
-                        tools: Arc::new(tools),
-                        auto_open: false,
-                        worked_secs: (!streaming)
-                            .then(|| {
-                                entry
-                                    .duration_ms
-                                    .filter(|&ms| ms > 0)
-                                    .map(|ms| (ms / 1000).max(1))
-                            })
-                            .flatten(),
-                    },
-                    entry_id: entry.id.clone().into(),
-                    timestamp: None,
-                    copy_text: None,
+            let work_id: SharedString = format!("{}#work", entry.id).into();
+            let work_parts: Vec<MessagePart> = entry
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(ix, part)| is_compact_work_part(*ix, part, reply_start))
+                .map(|(_, part)| part.clone())
+                .collect();
+            let mut inner = if work_parts.is_empty() {
+                Vec::new()
+            } else {
+                let work_entry = SessionMessageEntry {
+                    parts: work_parts,
+                    duration_ms: None,
+                    continuation_of: None,
+                    ..entry.clone()
+                };
+                rows_for_entry(&work_entry, pending, false, parse)
+            };
+            for row in &mut inner {
+                row.turn_start = false;
+                row.timestamp = None;
+                row.copy_text = None;
+                row.compact_fold = Some(work_id.clone());
+            }
+            let header = Row {
+                id: work_id,
+                version: tool_fingerprint(&tools, false),
+                turn_start: false,
+                kind: RowKind::ToolGroup {
+                    summary: tool_group_summary(&tools).into(),
+                    tools: Arc::new(tools),
+                    auto_open: false,
+                    worked_secs: (!streaming)
+                        .then(|| {
+                            entry
+                                .duration_ms
+                                .filter(|&ms| ms > 0)
+                                .map(|ms| (ms / 1000).max(1))
+                        })
+                        .flatten(),
+                    compact_shell: true,
                 },
-            );
+                entry_id: entry.id.clone().into(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            };
+            let pos = compact_group_pos.unwrap_or(rows.len());
+            for (i, row) in inner.into_iter().enumerate() {
+                rows.insert(pos + i, row);
+            }
+            rows.insert(pos, header);
         }
     } else {
         flush_group(
@@ -1667,6 +1706,21 @@ pub fn rows_for_entry(
         last.version ^= 1 << 62;
     }
     rows
+}
+
+fn is_compact_work_part(
+    ix: usize,
+    part: &MessagePart,
+    reply_start: Option<usize>,
+) -> bool {
+    match part {
+        MessagePart::Tool { .. } => true,
+        MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
+        MessagePart::Text { text, .. } => {
+            !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start)
+        }
+        _ => false,
+    }
 }
 
 /// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
@@ -4878,10 +4932,9 @@ impl Transcript {
             for row in &mut rows {
                 if let RowKind::ToolGroup {
                     worked_secs,
-                    auto_open,
+                    compact_shell: true,
                     ..
                 } = &mut row.kind
-                    && !*auto_open
                 {
                     *worked_secs = Some(secs);
                 }
@@ -4897,6 +4950,13 @@ impl Transcript {
                 },
             );
         }
+        rows.retain(|row| match &row.compact_fold {
+            None => true,
+            Some(id) => self
+                .folds
+                .get(id)
+                .is_some_and(|fold| fold.open == Some(true)),
+        });
         rows
     }
 
@@ -5099,14 +5159,36 @@ impl Transcript {
         cx.notify();
     }
 
-    fn toggle_fold(&mut self, row_id: SharedString, open_height: f32, auto_open: bool) {
-        let entry = self.folds.entry(row_id).or_default();
-        let currently_open = entry.open.unwrap_or(auto_open);
-        entry.from = if currently_open { open_height } else { 0.0 };
-        entry.open = Some(!currently_open);
-        entry.epoch += 1;
-        entry.toggled_at = Some(Instant::now());
-        entry.disclosure_at = entry.toggled_at;
+    fn toggle_fold(
+        &mut self,
+        row_id: SharedString,
+        open_height: f32,
+        auto_open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let is_shell = self.rows.iter().any(|row| {
+            row.id == row_id
+                && matches!(
+                    row.kind,
+                    RowKind::ToolGroup {
+                        compact_shell: true,
+                        ..
+                    }
+                )
+        });
+        {
+            let entry = self.folds.entry(row_id).or_default();
+            let currently_open = entry.open.unwrap_or(auto_open);
+            entry.from = if currently_open { open_height } else { 0.0 };
+            entry.open = Some(!currently_open);
+            entry.epoch += 1;
+            entry.toggled_at = Some(Instant::now());
+            entry.disclosure_at = entry.toggled_at;
+        }
+        if is_shell {
+            self.last_source = None;
+            self.sync(cx);
+        }
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -6293,12 +6375,14 @@ impl Transcript {
                 auto_open,
                 summary,
                 worked_secs,
+                compact_shell,
             } => self.render_tool_group(
                 &row.id,
                 tools,
                 summary,
                 *auto_open,
                 *worked_secs,
+                *compact_shell,
                 &theme,
                 cx,
             ),
@@ -6600,6 +6684,7 @@ impl Transcript {
         summary: &SharedString,
         auto_open: bool,
         worked_secs: Option<i64>,
+        compact_shell: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -6931,7 +7016,7 @@ impl Transcript {
             .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open);
+                this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
                 cx.notify();
             }))
             .child(
@@ -6971,6 +7056,29 @@ impl Transcript {
                         None => tool_group_title(summary.clone(), shimmer_phase, theme),
                     }),
             );
+
+        if compact_shell {
+            let view = cx.entity_id();
+            return div()
+                .relative()
+                .flex()
+                .flex_col()
+                .font_family(theme.font_sans_fixed.clone())
+                .child(header)
+                .when(motion_active || animate_worked, |group| {
+                    group.child(
+                        canvas(
+                            |_, _, _| (),
+                            move |_, _, window, _| {
+                                window.on_next_frame(move |_, cx| cx.notify(view));
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                })
+                .into_any_element();
+        }
 
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
@@ -8629,6 +8737,7 @@ mod tests {
                 summary,
                 *auto_open,
                 None,
+                false,
                 &Theme::dark(),
                 cx,
             );
@@ -9238,6 +9347,7 @@ mod tests {
                     summary,
                     *auto_open,
                     None,
+                    false,
                     &Theme::dark(),
                     cx,
                 );
@@ -9277,6 +9387,7 @@ mod tests {
                     summary,
                     *auto_open,
                     None,
+                    false,
                     &Theme::dark(),
                     cx,
                 );
@@ -9649,6 +9760,7 @@ mod tests {
             entry_id: entry_id.into(),
             timestamp: None,
             copy_text: None,
+            compact_fold: None,
         }
     }
 
@@ -10283,10 +10395,17 @@ mod tests {
         assert!(tools[0].resolved, "a followed thought is settled");
     }
 
+    fn compact_visible(rows: &[Row]) -> Vec<&Row> {
+        rows.iter()
+            .filter(|row| row.compact_fold.is_none())
+            .collect()
+    }
+
     #[test]
     fn compact_mode_folds_the_whole_turn_into_one_collapsed_group() {
-        // Reasoning + tools + narration + the reply: everything before the
-        // trailing text run rides one closed-by-default accordion.
+        // Collapsed: work header + reply. Expanded: header + the compact-off
+        // layout for work parts (thoughts/tools as groups, narration as
+        // markdown) + reply.
         let entry = assistant(
             "a1",
             MessageStatus::Complete,
@@ -10299,34 +10418,44 @@ mod tests {
             ],
         );
         let rows = rows_for_entry(&entry, false, true, &mut parse);
-        assert_eq!(rows.len(), 2, "one work accordion + the reply");
+        let visible = compact_visible(&rows);
+        assert_eq!(visible.len(), 2, "collapsed: work header + the reply");
         let RowKind::ToolGroup {
-            tools, auto_open, ..
-        } = &rows[0].kind
+            tools,
+            auto_open,
+            compact_shell,
+            ..
+        } = &visible[0].kind
         else {
             panic!("expected a tool group");
         };
+        assert!(*compact_shell);
         assert!(!*auto_open, "the work group never opens itself");
         assert_eq!(tools.len(), 4);
         assert_eq!(tools[0].kind, ToolItemKind::Thought);
         assert_eq!(tools[1].kind, ToolItemKind::Call);
         assert_eq!(tools[2].kind, ToolItemKind::Note);
         assert_eq!(tools[3].kind, ToolItemKind::Call);
-        // The narration text is the note chip's flattened detail.
-        assert!(matches!(
-            tools[2].detail.as_deref(),
-            Some(ToolDetail::Thought { lines, .. })
-                if lines
-                    .iter()
-                    .flatten()
-                    .any(|r| r.text.contains("checking the layout"))
-        ));
-        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
+        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
         let summary = tool_group_summary(tools);
         assert!(summary.contains("wrote a note"), "{summary}");
         assert!(summary.contains("Ran 2 commands"), "{summary}");
         assert!(summary.contains("Thought process"), "{summary}");
-        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
+
+        assert!(rows.iter().any(|row| {
+            row.compact_fold.is_some() && matches!(row.kind, RowKind::Markdown { .. })
+        }));
+        assert!(rows.iter().any(|row| {
+            row.compact_fold.is_some()
+                && matches!(
+                    &row.kind,
+                    RowKind::ToolGroup {
+                        compact_shell: false,
+                        ..
+                    }
+                )
+        }));
+        let RowKind::ToolGroup { worked_secs, .. } = &visible[0].kind else {
             panic!("expected a tool group");
         };
         assert_eq!(*worked_secs, None, "no duration stamped on the fixture");
@@ -10415,10 +10544,24 @@ mod tests {
             ],
         );
         let rows = rows_for_entry(&entry, false, true, &mut parse);
-        assert_eq!(rows.len(), 3, "work group + two reply parts");
-        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
-        assert!(matches!(rows[2].kind, RowKind::Markdown { .. }));
+        let visible = compact_visible(&rows);
+        assert_eq!(visible.len(), 3, "work header + two reply parts");
+        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
+        assert!(matches!(visible[2].kind, RowKind::Markdown { .. }));
+        assert!(
+            rows.iter().any(|row| {
+                row.compact_fold.is_some()
+                    && matches!(
+                        &row.kind,
+                        RowKind::ToolGroup {
+                            compact_shell: false,
+                            ..
+                        }
+                    )
+            }),
+            "expanded work restores the ordinary tool group"
+        );
     }
 
     #[test]
@@ -10436,23 +10579,29 @@ mod tests {
             ],
         );
         let rows = rows_for_entry(&entry, false, true, &mut parse);
-        assert_eq!(rows.len(), 1, "the streaming text tail folds too");
+        let visible = compact_visible(&rows);
+        assert_eq!(visible.len(), 1, "the streaming text tail folds too");
         let RowKind::ToolGroup {
             tools, auto_open, ..
-        } = &rows[0].kind
+        } = &visible[0].kind
         else {
             panic!("expected a tool group");
         };
         assert!(!*auto_open);
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[2].kind, ToolItemKind::Note);
+        assert!(rows.iter().any(|row| {
+            row.compact_fold.is_some()
+                && matches!(row.kind, RowKind::LiveMarkdown { .. } | RowKind::Markdown { .. })
+        }));
 
         // On settle the same parts surface the reply as its own row.
         let done = assistant("a1", MessageStatus::Complete, entry.parts.clone());
         let rows = rows_for_entry(&done, false, true, &mut parse);
-        assert_eq!(rows.len(), 2);
-        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(rows[1].kind, RowKind::Markdown { .. }));
+        let visible = compact_visible(&rows);
+        assert_eq!(visible.len(), 2);
+        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
     }
 
     #[test]
@@ -10473,11 +10622,13 @@ mod tests {
             ],
         );
         let rows = rows_for_entry(&entry, false, true, &mut parse);
-        assert_eq!(rows.len(), 3);
-        assert!(matches!(rows[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(rows[1].kind, RowKind::ErrorChip { .. }));
-        assert!(matches!(rows[2].kind, RowKind::Markdown { .. }));
-        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+        let visible = compact_visible(&rows);
+        assert_eq!(visible.len(), 3);
+        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
+        assert!(matches!(visible[1].kind, RowKind::ErrorChip { .. }));
+        assert!(matches!(visible[2].kind, RowKind::Markdown { .. }));
+        assert!(visible[1].compact_fold.is_none());
+        let RowKind::ToolGroup { tools, .. } = &visible[0].kind else {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
