@@ -165,6 +165,10 @@ fn expected(raw: &str, readable: &str, id: HarnessId) -> String {
             &zeron_proto::file_mentions::local_file_link("src/é file.rs", false),
             "[é file.rs](src/%C3%A9%20file.rs)",
         )
+    } else if id == HarnessId::Opencode {
+        // OpenCode receives canonical identity and converts it locally so a
+        // disappearing project command cannot become ordinary slash text.
+        raw.into()
     } else {
         readable.into()
     }

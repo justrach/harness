@@ -383,7 +383,14 @@ impl SessionsEngine {
                 // Register acceptance before a fast boundary can retire it.
                 let mut pending = lock(&ledger);
                 let message = SteerMessage {
-                    prompt: zeron_proto::invocation::harness_prompt(&request.prompt, harness_id),
+                    // OpenCode must see the canonical selection before it
+                    // decodes the provider command: a project-scoped command
+                    // can disappear between composer discovery and delivery.
+                    prompt: if harness_id == HarnessId::Opencode {
+                        request.prompt.clone()
+                    } else {
+                        zeron_proto::invocation::harness_prompt(&request.prompt, harness_id)
+                    },
                     message_id: Some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
@@ -561,7 +568,11 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
-            prompt: zeron_proto::invocation::harness_prompt(prompt, harness_id),
+            prompt: if harness_id == HarnessId::Opencode {
+                prompt.to_owned()
+            } else {
+                zeron_proto::invocation::harness_prompt(prompt, harness_id)
+            },
             message_id: Some(user_id.clone()),
         };
         {
@@ -1531,7 +1542,7 @@ async fn drive_run(
     let started = match prepared {
         Ok(()) => {
             let mut wire_request = request;
-            if harness_id != HarnessId::Cursor {
+            if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
                 wire_request.prompt =
                     zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
             }
