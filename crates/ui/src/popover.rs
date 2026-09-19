@@ -308,8 +308,8 @@ pub const MENU_GAP: f32 = 2.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
-/// Concentric corners: the row radius follows the card's inset curve.
-pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - CARD_INSET;
+/// Concentric corners: rows sit inside both the card's 1px border and padding.
+pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
@@ -1128,7 +1128,7 @@ pub fn search_input_frame(_theme: &Theme, input: AnyElement) -> gpui::Div {
         .mb(px(4.0))
         .px(px(10.0))
         .py(px(6.0))
-        .rounded(px(8.0))
+        .rounded(px(MENU_ITEM_RADIUS))
         .bg(ink(0.04))
         .text_size(crate::typography::ui_rems(13.0))
         .child(input)

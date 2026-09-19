@@ -4650,7 +4650,10 @@ pub enum ComposerEvent {
     /// A prompt was sent optimistically — give the transcript its exact row
     /// identity so it can anchor the prompt at the top with the reply's
     /// reserved space below it.
-    Sent { chat_id: String, message_id: String },
+    Sent {
+        chat_id: String,
+        message_id: String,
+    },
     /// A new worktree's host-side setup attempt completed after its chat id
     /// was minted. The shell attaches an already-open terminal to that exact
     /// chat, even when the user has selected another chat in the meantime.
