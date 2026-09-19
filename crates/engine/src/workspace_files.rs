@@ -1204,6 +1204,7 @@ fn read_image_blocking(
         .as_str()
     {
         "png" => "image/png",
+        "ico" => "image/x-icon",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
