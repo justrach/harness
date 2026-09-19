@@ -159,7 +159,11 @@ impl Shell {
     /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
     /// Replaces the tab strip; inherits its titlebar duties (drag region,
     /// animated left inset, the toggle-changes button on git projects).
-    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_session_title_bar(
+        &mut self,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // The canvas titles as NOTHING (user request — a "New session"
         // header over the empty canvas was noise); the bar keeps its height,
@@ -217,7 +221,8 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let right_pane_open = !on_canvas && self.right_pane_open(cx);
+        let takeover = right_pane_open && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -243,10 +248,11 @@ impl Shell {
         } else {
             content_left
         };
+        let row_gap = 8.0;
         let files_width = self.files_visible_width(cx);
         let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
         // The title row's gaps are outside the fixed-width panel controls.
-        let gap_budget = if takeover { 8.0 } else { 16.0 };
+        let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
         let right_visible = self.right_visible_width(cx);
         let widths = panel_titlebar_widths(
             right_visible,
@@ -271,10 +277,24 @@ impl Shell {
         } else {
             None
         };
+        // The trailing strip always carries the pane toggle and the Files
+        // slot; the surface tabs reveal to their left only while the pane is open.
+        let trailing_width = if on_canvas {
+            0.0
+        } else {
+            let surface = if right_pane_open {
+                widths.surface_reveal
+            } else {
+                0.0
+            };
+            surface + 28.0 + widths.files_controls
+        };
+        let available_titlebar_width =
+            (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
+
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
-            let right_open = self.right_pane_open(cx);
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()
@@ -282,7 +302,7 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_center();
-            if right_open {
+            if right_pane_open {
                 // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
                 // options that used to live here moved into the pane's own
                 // second row; expand stays in this band (user request).
@@ -371,12 +391,17 @@ impl Shell {
             )
         };
 
+        let actions = (!takeover && !on_canvas)
+            .then(|| {
+                self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
+            })
+            .flatten();
         let inner = div()
             .size_full()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .gap(px(8.0))
+            .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
             // In panel takeover the header strip spans the whole band — the
@@ -386,6 +411,7 @@ impl Shell {
                 el.child(
                     div()
                         .min_w_0()
+                        .overflow_hidden()
                         .flex()
                         .flex_row()
                         .items_center()
@@ -417,7 +443,8 @@ impl Shell {
                         .when_some(target, |el, target| {
                             el.child(
                                 div()
-                                    .flex_none()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .text_color(theme.text_muted.opacity(0.5))
                                     .child(target),
@@ -426,6 +453,7 @@ impl Shell {
                 )
             })
             .child(div().flex_1())
+            .children(actions)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
