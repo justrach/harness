@@ -276,7 +276,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     .update(cx, |shell, window, cx| {
                         shell.settings.files_panel_width = FILES_PANEL_MAX;
                         shell.settings.right_pane_width = 760.0;
-                        shell.toggle_right_pane(cx);
+                        shell.set_surfaces_open(true, cx);
                         window.resize(gpui::size(px(1200.0), px(800.0)));
                         window.bounds_changed(cx);
                     })
@@ -289,7 +289,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
                         assert_eq!(shell.settings.files_panel_width, FILES_PANEL_MAX);
                         assert!(shell.right_surface_rows(cx).is_empty());
-                        shell.toggle_right_pane(cx);
+                        shell.set_surfaces_open(false, cx);
                         shell.settings.files_panel_width = FILES_PANEL_DEFAULT;
                         shell.settings.right_pane_width = RIGHT_PANE_DEFAULT;
                         window.resize(gpui::size(px(1400.0), px(800.0)));

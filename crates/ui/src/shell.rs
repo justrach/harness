@@ -510,10 +510,16 @@ fn workspace_file_title(path: &str) -> SharedString {
 /// the app run; a fresh open with no surface tabs lands on the picker.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ChatPanels {
+    /// The explorer portion of the right pane is docked.
     pub files_open: bool,
     pub terminal_open: bool,
-    /// Right pane visible (the surface host — historically the Changes pane).
+    /// The surface host portion of the right pane is visible (historically
+    /// the Changes pane). The pane itself shows when either portion does.
     pub changes_open: bool,
+    /// What the pane toggle hid last time, so reopening restores the same
+    /// portions instead of always landing on the surface host.
+    pub reopen_surfaces: bool,
+    pub reopen_files: bool,
     /// Which surface tab renders; validated against the live tab list each
     /// frame (a closed tab falls back gracefully).
     pub right_active: RightSurface,
@@ -2477,7 +2483,49 @@ impl Shell {
         cx.notify();
     }
 
-    fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+    /// The user's pane toggle (titlebar button, keyboard). The right pane is
+    /// one container holding the surface host and the docked explorer:
+    /// closing hides both portions; reopening restores whichever were
+    /// visible when it closed, defaulting to the surface host.
+    fn toggle_right_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.panel_key(cx);
+        let surfaces = self.right_pane_open(cx);
+        let files = self.files_panel_open(cx);
+        if surfaces || files {
+            self.panels.update(&key, |p| {
+                p.reopen_surfaces = surfaces;
+                p.reopen_files = files;
+            });
+            if files {
+                self.close_files_panel(cx);
+            }
+            if surfaces {
+                self.set_surfaces_open(false, cx);
+            }
+            return;
+        }
+        let remembered = self.panels.get(&key);
+        let (open_surfaces, open_files) = if remembered.reopen_surfaces || remembered.reopen_files
+        {
+            (remembered.reopen_surfaces, remembered.reopen_files)
+        } else {
+            (true, false)
+        };
+        if open_files {
+            self.add_files_surface(window, cx);
+        }
+        if open_surfaces {
+            self.set_surfaces_open(true, cx);
+        }
+    }
+
+    /// Show or hide the surface host portion of the right pane. A no-op when
+    /// already in the requested state, so programmatic opens (a file, a
+    /// browser link, a subagent chip) never close a pane the user has open.
+    fn set_surfaces_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.active_chat.is_empty() || self.right_pane_open(cx) == open {
+            return;
+        }
         // Reverse from the visible width when toggled during an animation.
         let from = self.right_visible_width(cx);
         self.right_edge_bounce = None;
@@ -2491,7 +2539,7 @@ impl Shell {
         );
         let was_expanded = self.right_pane_expanded;
         let key = self.panel_key(cx);
-        let open = self.panels.toggle_changes(&key);
+        self.panels.update(&key, |p| p.changes_open = open);
         if !open {
             self.suspend_file_images(cx);
             // Closing always leaves takeover mode — reopening at full bleed
@@ -2839,9 +2887,7 @@ impl Shell {
         }
         let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux")));
         if outcome == LinkOutcome::Internal {
-            if !self.right_pane_open(cx) {
-                self.toggle_right_pane(cx);
-            }
+            self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
         outcome
@@ -2921,9 +2967,7 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
+        self.set_surfaces_open(true, cx);
         let panel_key = self.panel_key(cx);
         let lookup = (panel_key.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
@@ -3152,9 +3196,7 @@ impl Shell {
     ) {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
+        self.set_surfaces_open(true, cx);
         if let Some((&id, _)) = self
             .subagent_tabs
             .iter()
@@ -8663,7 +8705,7 @@ impl Shell {
         let window_corner = Self::window_corner_radius(window) > 0.0;
         {
             let bl = window_corner && self.sidebar_now() < 0.5;
-            let br = window_corner && !self.right_pane_open(cx);
+            let br = window_corner && !self.right_pane_open(cx) && !self.files_panel_open(cx);
             panel.update(cx, |panel, cx| panel.set_window_corners(bl, br, cx));
         }
         let border = Theme::of(cx).border;
@@ -8952,14 +8994,18 @@ impl Shell {
             .when(!self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
             })
-            // The panel's right edge IS the window's right edge: it carries
-            // the CSD window's rounded corners directly (gpui cannot clip
-            // children rounded — each full-bleed layer rounds itself; see
-            // [`Self::window_corner_radius`]).
-            .when(Self::window_corner_radius(window) > 0.0, |el| {
-                let corner = Self::window_corner_radius(window);
-                el.rounded_tr(px(corner)).rounded_br(px(corner))
-            })
+            // With the explorer undocked the panel's right edge IS the
+            // window's right edge: it carries the CSD window's rounded corners
+            // directly (gpui cannot clip children rounded — each full-bleed
+            // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
+            // the explorer column is the rightmost layer and rounds instead.
+            .when(
+                Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
+                |el| {
+                    let corner = Self::window_corner_radius(window);
+                    el.rounded_tr(px(corner)).rounded_br(px(corner))
+                },
+            )
             .bg(panel_bg)
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
@@ -10607,7 +10653,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
-                    this.toggle_right_pane(cx);
+                    this.toggle_right_pane(window, cx);
                     if !this.right_pane_open(cx) {
                         // The hidden editor can retain a focus handle after unmounting.
                         // Restore a mounted target so the next shortcut can reopen it.
@@ -10797,7 +10843,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let files_panel = self.render_files_panel(cx);
+                let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
@@ -10907,15 +10953,25 @@ impl Render for Shell {
                             .child(sidebar)
                             .child(sidebar_seam)
                             .child(card)
+                            // The right pane is ONE container: the surface
+                            // host column and the docked explorer column
+                            // sit side by side under a shared titlebar
+                            // strip; the resize seam straddles its left edge.
                             .child(
                                 div()
                                     .h_full()
                                     .flex_none()
                                     .relative()
-                                    .child(right)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .flex()
+                                            .flex_row()
+                                            .child(right)
+                                            .child(files_panel),
+                                    )
                                     .child(right_seam),
-                            )
-                            .child(files_panel),
+                            ),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(cx))
@@ -12144,7 +12200,7 @@ mod exit_regressions {
                 shell.active_chat = "preview".into();
                 shell.viewport_width = 1000.;
                 shell.right_tween = tween;
-                shell.toggle_right_pane(cx);
+                shell.toggle_right_pane(window, cx);
                 assert_eq!(
                     shell.right_tween.unwrap().from,
                     width,
@@ -12171,7 +12227,7 @@ mod exit_regressions {
                     .panels
                     .update(&key, |panel| panel.right_active = RightSurface::File(0));
                 assert!(files.read(cx).test_images_visible());
-                shell.toggle_right_pane(cx);
+                shell.toggle_right_pane(window, cx);
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.tween_active(shell.right_tween));
                 assert!(
@@ -12866,7 +12922,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "session".into();
-                shell.toggle_right_pane(cx);
+                shell.toggle_right_pane(window, cx);
                 assert!(shell.right_pane_open(cx));
 
                 shell.add_browser_surface(None, window, cx);
@@ -12894,7 +12950,7 @@ mod exit_regressions {
                 assert!(!shell.close_active_surface(window, cx));
 
                 // So does an already-closed pane.
-                shell.toggle_right_pane(cx);
+                shell.toggle_right_pane(window, cx);
                 assert!(!shell.right_pane_open(cx));
                 assert!(!shell.close_active_surface(window, cx));
             })
@@ -13006,9 +13062,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (u64, Entity<crate::browser::BrowserSurface>) {
-        if !self.right_pane_open(cx) {
-            self.toggle_right_pane(cx);
-        }
+        self.set_surfaces_open(true, cx);
         // Hosted Macs can expose only a 1024px desktop. Use the app's
         // normal collapsed-sidebar layout to keep both conversation and
         // preview readable in that real window.
@@ -13045,7 +13099,8 @@ impl Shell {
     }
     pub fn fixture_toggle_sidebar(&mut self, right: bool, cx: &mut Context<Self>) {
         if right {
-            self.toggle_right_pane(cx);
+            // The fixtures drive the surface host only; the explorer stays put.
+            self.set_surfaces_open(!self.right_pane_open(cx), cx);
         } else {
             self.toggle_sidebar(cx);
         }

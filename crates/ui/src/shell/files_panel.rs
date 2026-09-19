@@ -212,9 +212,10 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Undock the explorer portion. With the surface host closed too, this
+    /// closes the right pane entirely.
+    pub(super) fn close_files_panel(&mut self, cx: &mut Context<Self>) {
         if !self.files_panel_open(cx) {
-            self.add_files_surface(window, cx);
             return;
         }
         let from = self.files_visible_width(cx);
@@ -222,6 +223,17 @@ impl Shell {
             .update(&self.panel_key(cx), |p| p.files_open = false);
         self.clear_surface_transitions();
         self.files_tween = Some(WidthTween::new(from, 0.0));
+        cx.notify();
+    }
+
+    /// The explorer's own toggle. Opening docks the explorer into the right
+    /// pane — opening the pane with just that portion when it was closed.
+    pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.files_panel_open(cx) {
+            self.add_files_surface(window, cx);
+            return;
+        }
+        self.close_files_panel(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         if self.right_pane_open(cx) {
             self.focus_right_file_editor(self.resolved_right_active(cx), window, cx);
@@ -246,7 +258,11 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn render_files_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_files_panel(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active = self.panel_key(cx);
         let visible = matches!(self.route, Route::Chat) && self.files_panel_open(cx);
         for (key, files) in &self.files {
@@ -274,6 +290,11 @@ impl Shell {
         let target = self.files_target(cx);
         let content_width =
             stable_panel_content_width(target, self.active_tween_endpoints(self.files_tween));
+        // The explorer is the right pane's rightmost column: its left hairline
+        // is the divider from the surface host (or the pane's own edge when
+        // that portion is closed), and it carries the CSD window's right
+        // corners in place of the surface column (see `render_right_pane`).
+        let corner = Self::window_corner_radius(window);
         let inner = div()
             .w(px(content_width))
             .h_full()
@@ -282,6 +303,10 @@ impl Shell {
             .border_l_1()
             .border_color(theme.border)
             .bg(theme.panel_bg())
+            .when(corner > 0.0, |el| {
+                el.rounded_tr(px(corner)).rounded_br(px(corner))
+            })
+            .overflow_hidden()
             .children(content);
         div()
             .id("files-panel")
@@ -464,6 +489,83 @@ mod tests {
                 assert_eq!(shell.files_reserved_width(cx), 0.0);
                 shell.route = Route::Chat;
                 assert!(shell.files_panel_open(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn pane_toggle_owns_both_portions_and_files_toggle_opens_the_pane_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.active_chat = "chat".into();
+                // Widths settle immediately so the assertions see end states.
+                shell.reduced_motion = true;
+                // A fresh pane toggle lands on the surface host alone.
+                shell.toggle_right_pane(window, cx);
+                assert!(shell.right_pane_open(cx));
+                assert!(!shell.files_panel_open(cx));
+                shell.toggle_right_pane(window, cx);
+                assert!(!shell.right_pane_open(cx));
+                assert!(!shell.files_panel_open(cx));
+
+                // The explorer toggle opens the pane with only its portion.
+                shell.toggle_files_panel(window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx));
+                assert!(shell.files_visible_width(cx) > 0.0);
+                // Closing the pane hides that portion too, and reopening
+                // restores exactly what was visible.
+                shell.toggle_right_pane(window, cx);
+                assert!(!shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx));
+                shell.toggle_right_pane(window, cx);
+                assert!(shell.files_panel_open(cx));
+                assert!(!shell.right_pane_open(cx));
+
+                // Opening a file docks the surface host beside the explorer;
+                // programmatic opens never close an open pane.
+                shell.add_file_surface("src/main.rs".into(), window, cx);
+                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
+                shell.set_surfaces_open(true, cx);
+                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
+                shell.toggle_right_pane(window, cx);
+                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
+                assert_eq!(shell.files_reserved_width(cx), 0.0);
+                shell.toggle_right_pane(window, cx);
+                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
+                assert_eq!(shell.file_surfaces.len(), 1);
+
+                // Undocking the explorer alone leaves the surface host open;
+                // the pane toggle then remembers the surfaces-only shape.
+                shell.toggle_files_panel(window, cx);
+                assert!(shell.right_pane_open(cx) && !shell.files_panel_open(cx));
+                shell.toggle_right_pane(window, cx);
+                shell.toggle_right_pane(window, cx);
+                assert!(shell.right_pane_open(cx) && !shell.files_panel_open(cx));
             })
             .unwrap();
     }
