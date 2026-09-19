@@ -512,8 +512,6 @@ fn flush_latest(cx: &mut App) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarOrganization {
-    /// Legacy persisted value. Project scope now belongs exclusively to the
-    /// project selector and is normalized to [`Self::InOneList`] on load.
     ByProject,
     ByDevice,
     #[default]
@@ -623,6 +621,9 @@ pub struct UiSettings {
     pub sidebar_sort: SidebarSort,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
+    pub sidebar_show_project_label: bool,
+    pub sidebar_compact: bool,
+    pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     pub sidebar_show_pull_request: bool,
@@ -754,6 +755,9 @@ impl Default for UiSettings {
             sidebar_grouped: false,
             sidebar_organization: SidebarOrganization::InOneList,
             sidebar_sort: SidebarSort::LastUpdated,
+            sidebar_show_project_label: true,
+            sidebar_compact: true,
+            sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_pull_request: true,
@@ -1317,9 +1321,6 @@ impl UiSettings {
     pub fn clamped(mut self) -> Self {
         self.transcript_width = normalize_transcript_width(self.transcript_width);
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
-        if self.sidebar_organization == SidebarOrganization::ByProject {
-            self.sidebar_organization = SidebarOrganization::InOneList;
-        }
         self.sidebar_width = clamp_or(
             self.sidebar_width,
             SIDEBAR_MIN,
@@ -1972,6 +1973,9 @@ mod tests {
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
+            sidebar_compact: true,
+            sidebar_show_project_icon: false,
+            sidebar_show_project_label: false,
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_pull_request: false,
@@ -2160,7 +2164,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_project_organization_normalizes_to_one_list() {
+    fn sidebar_display_defaults_and_preferences_round_trip() {
+        let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.sidebar_compact);
+        assert!(settings.sidebar_show_project_icon);
+        assert!(settings.sidebar_show_project_label);
+        let customized = UiSettings {
+            sidebar_compact: false,
+            sidebar_show_project_icon: false,
+            sidebar_show_project_label: false,
+            sidebar_organization: SidebarOrganization::ByProject,
+            ..settings
+        };
+        let restored: UiSettings =
+            serde_json::from_str(&serde_json::to_string(&customized).unwrap()).unwrap();
+        assert_eq!(restored.clamped(), customized);
+    }
+
+    #[test]
+    fn project_organization_survives_loading() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -2170,7 +2192,7 @@ mod tests {
 
         assert_eq!(
             UiSettings::load(dir.path()).sidebar_organization,
-            SidebarOrganization::InOneList
+            SidebarOrganization::ByProject
         );
     }
 

@@ -48,6 +48,8 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
+    (PROJECT_DEFAULT, "project-default"),
+    (REMOTE_SERVER, "remote-server"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
     (MONITOR, "monitor"),
     (SUN, "sun"),

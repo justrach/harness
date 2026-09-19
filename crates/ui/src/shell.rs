@@ -60,6 +60,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod command_palette;
+mod project_icon;
 mod sidebar_pins;
 mod spaces;
 mod tabs;
@@ -694,25 +695,27 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
         47.0 + metadata_height
     }
 }
+fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
+    if compact {
+        29.0
+    } else {
+        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+    }
+}
+
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
 /// Fixed vertical slot occupied by one active sidebar card.
+#[cfg(test)]
 const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
-/// Divider box between pinned and regular sessions.
-const SIDEBAR_PINNED_DIVIDER_HEIGHT: f32 = 13.0;
-const SIDEBAR_PINNED_DIVIDER_KEY: &str = "sidebar-pinned-divider";
 const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
 const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
 const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
-/// Harness/title geometry follows the row hierarchy: active multi-line cards
-/// keep identity close on the standard 8px rhythm, while the one-line archived
-/// shelf gives its larger mark a little more separation.
+/// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-const SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE: f32 = 14.0;
-const SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP: f32 = 10.0;
 
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
@@ -723,7 +726,8 @@ fn sidebar_faded_label(id: SharedString, fill: bool, label: impl IntoElement) ->
         false,
         false,
         div()
-            .id(id)
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
             .when(fill, |el| el.flex_1())
             .min_w_0()
             .overflow_hidden()
@@ -886,6 +890,7 @@ struct PinnedSessionDragState {
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
+    regular_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
     moving_row: Option<(AnyElement, f32)>,
@@ -1450,15 +1455,12 @@ pub struct Shell {
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
+    pub(super) sessions_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
-    /// Archived slim row under the pointer — swaps its time label for the
-    /// Unarchive affordance and restores the dimmed harness mark (t3code's
-    /// settled-row hover).
-    pub(super) archived_hover: Option<String>,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
@@ -1552,9 +1554,11 @@ pub struct Shell {
     sidebar_view_menu: popover::Popup<spaces::SidebarViewMenu>,
     /// Natural-tab-order focus target for the icon-only view-options button.
     sidebar_view_trigger_focus: gpui::FocusHandle,
-    /// Chat id whose STATUS CORNER is under the pointer — just that corner
-    /// swaps to the archive button (t3code's settle-on-hover); hovering the
-    /// row body leaves the status readable.
+    /// Current pinned-row metrics shared by hit testing and displacement animations.
+    sidebar_pinned_heights: Vec<f32>,
+    project_icons:
+        std::cell::RefCell<std::collections::HashMap<String, Entity<project_icon::ProjectIcon>>>,
+    /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
@@ -1863,8 +1867,8 @@ impl Shell {
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
             pinned_open: true,
+            sessions_open: true,
             archived_shown: 0,
-            archived_hover: None,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -1919,6 +1923,8 @@ impl Shell {
             spaces_menu_bar: popover::MenuScrollbarState::default(),
             sidebar_view_menu: popover::Popup::default(),
             sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
+            sidebar_pinned_heights: Vec::new(),
+            project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
             pinned_session_drag: None,
@@ -5848,8 +5854,8 @@ impl Shell {
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
         // relative time instead. Hovering the ROW swaps the corner for the
-        // ARCHIVE button (UNARCHIVE on rows in the sidebar's archived
-        // accordion), t3code's settle-on-hover.
+        // ARCHIVE button. Compact rows keep status first and elapsed time last;
+        // their archive control occupies the remote-icon slot on hover.
         // A chat can appear on both surfaces at once. Namespace every hover
         // key and child id so the palette never animates the sidebar copy.
         let row_id = if search_query.is_some() {
@@ -5857,7 +5863,28 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
+        let compact = search_query.is_none() && self.settings.sidebar_compact;
+        let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
+        let remote = self
+            .state
+            .read(cx)
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .is_some_and(|chat| {
+                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
+            });
+        let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
+            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
+        let project_icon = project_icon.map(|icon| {
+            div()
+                .flex_none()
+                .opacity(if archived_muted { 0.4 } else { 1.0 })
+                .child(icon)
+                .into_any_element()
+        });
         let content_id = id.clone();
         // Send-truth overrides: a send unadopted past the grace window is
         // FAILED (explicit, with the transcript's retry affordance); a send
@@ -5894,7 +5921,45 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        let corner_body: AnyElement = if let Some(label) = jump_label {
+        let compact_status = compact.then(|| {
+            let glyph = if working {
+                loaders::mini_glyph_spinner(
+                    format!("{row_id}-working"),
+                    2.0,
+                    theme.glyph,
+                    self.sidebar_pane.entity_id(),
+                    cx,
+                )
+                .into_any_element()
+            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
+                icon(icons::CHECK)
+                    .size(px(11.0))
+                    .text_color(status_color)
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(status_color)
+                    .into_any_element()
+            };
+            div()
+                .id(SharedString::from(format!("{row_id}-status")))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("chat-status-{id}")
+                })
+                .size(px(13.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .aria_label(status_label.unwrap_or("Idle"))
+                .child(glyph)
+                .into_any_element()
+        });
+        let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
+        let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
             // The jump hint replaces the status/time corner while the modifier
             // is held, cut to the sidebar PR badge's exact cloth
             // (`pull_request_badge`, Sidebar surface): pinned 16px, px 4,
@@ -5926,38 +5991,49 @@ impl Shell {
                 .items_center()
                 .gap(px(4.0))
                 .h(px(18.0))
-                // The pill's padding bleeds right into the row's padding so
-                // its TEXT right-aligns exactly where the status word/time
-                // sits — the swap moves pixels around the label, not it.
-                // 4px: what's left of the row's 8px padding then equals the
-                // 4px of air above the pill (18px tall on the 14px line,
-                // 6px row padding minus the 2px overflow).
-                .px(px(4.0))
-                .mr(px(-4.0))
-                .rounded(px(5.0))
-                .bg(crate::theme::wash(0.10))
-                .hover(|s| s.bg(crate::theme::wash(0.18)))
+                .when(!compact, |el| {
+                    el.px(px(4.0))
+                        .mr(px(-4.0))
+                        .rounded(px(5.0))
+                        .bg(crate::theme::wash(0.10))
+                        .hover(|s| s.bg(crate::theme::wash(0.18)))
+                })
                 .child(
                     icon(if archived {
                         icons::ARCHIVE_UP_MINIMALISTIC
                     } else {
                         icons::ARCHIVE_MINIMALISTIC
                     })
-                    .size(px(11.0))
+                    .size(px(if compact {
+                        SIDEBAR_ACTIVE_HARNESS_ICON_SIZE
+                    } else {
+                        11.0
+                    }))
                     .flex_none()
                     .text_color(theme.text_muted),
                 )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if archived {
-                            "Unarchive"
-                        } else {
-                            "Archive"
-                        })),
-                )
+                .when(!compact, |el| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(if archived {
+                                "Unarchive"
+                            } else {
+                                "Archive"
+                            })),
+                    )
+                })
                 .into_any_element()
+        } else if compact {
+            if remote {
+                icon(icons::REMOTE_SERVER)
+                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                    .text_color(theme.text_muted.opacity(0.5))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            }
         } else {
             match status_label {
                 Some(label) => {
@@ -6018,6 +6094,20 @@ impl Shell {
             let archive_id = id.clone();
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
+                .aria_label(if corner_hovered {
+                    if archived { "Unarchive" } else { "Archive" }
+                } else {
+                    if compact {
+                        if remote {
+                            "Remote session"
+                        } else {
+                            "Session actions"
+                        }
+                    } else {
+                        status_label.unwrap_or("Idle")
+                    }
+                })
+                .when(compact, |el| el.w(px(18.0)).justify_center())
                 .flex_none()
                 // Pin the corner to line 1's text height so the archive pill
                 // (taller, padded) overflows vertically instead of growing the
@@ -6041,6 +6131,7 @@ impl Shell {
                 .child(corner_body)
                 .into_any_element()
         };
+        let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
         let subline = if search_query.is_some() {
@@ -6065,16 +6156,21 @@ impl Shell {
         let hover_bg = if selected { selected_wash } else { hover };
         let rest_text = if selected || search_query.is_some() {
             text
+        } else if archived {
+            text.opacity(0.55)
         } else {
             text.opacity(0.8)
         };
         div()
             .id(SharedString::from(row_id.clone()))
+            .group("sidebar-session-row")
             .debug_selector({
                 let row_id = row_id.clone();
                 move || row_id.clone()
             })
-            .h(px(chat_row_height(
+            .h(px(sidebar_row_height(
+                compact,
+                show_label,
                 branch.is_some(),
                 change_request.is_some(),
             )))
@@ -6139,24 +6235,26 @@ impl Shell {
                 })
             })
             // Line 1: "project @ device", status word / time-ago right.
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(Theme::SPACE_SM))
-                    .child(sidebar_faded_label(
-                        format!("chat-device-{content_id}").into(),
-                        true,
-                        div()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .line_height(px(14.0))
-                            .text_color(subline)
-                            .child(popover::search_highlight(space_name, search_query, theme)),
-                    ))
-                    .child(div().text_color(subline).child(corner)),
-            )
+            .when(!compact && show_label, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM))
+                        .child(sidebar_faded_label(
+                            format!("chat-device-{content_id}").into(),
+                            true,
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(subline)
+                                .child(popover::search_highlight(space_name, search_query, theme)),
+                        ))
+                        .child(div().text_color(subline).children(corner.take())),
+                )
+            })
             // Line 2: harness identity belongs directly with the title,
             // instead of floating as unrelated metadata below it.
             .child(
@@ -6165,7 +6263,12 @@ impl Shell {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP))
+                    .gap(px(if compact {
+                        4.0
+                    } else {
+                        SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
+                    }))
+                    .children(compact_status)
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
@@ -6173,10 +6276,17 @@ impl Shell {
                                 icon(path)
                                     .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
-                                    .text_color(tint.unwrap_or(subline).opacity(0.8)),
+                                    .text_color(
+                                        tint.unwrap_or(subline).opacity(if archived_muted {
+                                            0.4
+                                        } else {
+                                            0.8
+                                        }),
+                                    ),
                             )
                         },
                     )
+                    .children(project_icon)
                     .child(sidebar_faded_label(
                         format!("chat-title-{content_id}").into(),
                         true,
@@ -6184,11 +6294,68 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(13.0))
                             .line_height(px(17.0))
                             .child(popover::search_highlight(title, search_query, theme)),
-                    )),
+                    ))
+                    .when(!compact && !show_label && remote, |el| {
+                        el.child(
+                            icon(icons::REMOTE_SERVER)
+                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                .flex_none()
+                                .text_color(subline),
+                        )
+                    })
+                    .when(
+                        if compact {
+                            remote || corner_hovered
+                        } else {
+                            !show_label
+                        },
+                        |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(subline)
+                                    .children(corner.take()),
+                            )
+                        },
+                    )
+                    .when(compact, |el| {
+                        el.children(change_request.clone().map(|summary| {
+                            if preview {
+                                crate::change_requests::pull_request_badge_preview(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                            } else {
+                                crate::change_requests::pull_request_badge(
+                                    format!("{row_id}-compact-pr").into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
+                                    theme,
+                                )
+                            }
+                        }))
+                    })
+                    .when(compact, |el| {
+                        el.child(
+                            div()
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("chat-time-{id}")
+                                })
+                                .w(px(30.0))
+                                .flex_none()
+                                .text_right()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(subline)
+                                .child(compact_jump_label.unwrap_or(time_ago)),
+                        )
+                    }),
             )
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
-            .when(shows_metadata, |row| {
+            .when(!compact && shows_metadata, |row| {
                 row.child(
                     div()
                         .w_full()
@@ -6283,7 +6450,8 @@ impl Shell {
                         }
                     }
                     if payload.visible_ids.contains(&payload.chat_id)
-                        && let Some(over) = spaces::pinned_session_drop_index(rel_y, count)
+                        && let Some(over) =
+                            spaces::row_drop_index(rel_y, &this.sidebar_pinned_heights, false)
                     {
                         this.update_pinned_session_drag(&payload, over, cx);
                     }
@@ -6412,10 +6580,26 @@ impl Shell {
         let session_rows = self.render_active_rows(theme, cx);
         let moving_row = session_rows
             .moving_row
-            .map(|(row, height)| self.render_moving_sidebar_session(row, height));
+            .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
         let keyed = session_rows.rows;
-        let has_pinned_divider = pinned_count > 0 && pinned_count < keyed.len();
+        let regular_count = session_rows.regular_count;
+        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
+        let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
+            + keyed
+                .iter()
+                .skip(pinned_count)
+                .map(|(_, height, _)| height)
+                .sum::<f32>()
+            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(pinned_count + 1) as f32;
+        let regular_body_height =
+            if keyed.len() == pinned_count && self.sidebar_session_transfer.is_some() {
+                spaces::SIDEBAR_DISCLOSURE_BODY_INSET
+                    + 48.0
+                    + self.sidebar_transfer_extra_gap("regular")
+            } else {
+                regular_body_height
+            };
         let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + self.sidebar_transfer_extra_gap("pinned")
             + keyed
@@ -6446,11 +6630,20 @@ impl Shell {
             ));
         }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if has_pinned_divider && self.pinned_open && ix == pinned_count {
+            if ungrouped && ix == pinned_count {
                 order.push((
-                    SIDEBAR_PINNED_DIVIDER_KEY.to_string(),
-                    SIDEBAR_PINNED_DIVIDER_HEIGHT,
+                    "sidebar-sessions-header".into(),
+                    spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
+                        + if show_pinned_section { 12.0 } else { 0.0 }
+                        + if self.sessions_open {
+                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
+                        } else {
+                            0.0
+                        },
                 ));
+            }
+            if ungrouped && ix >= pinned_count && !self.sessions_open {
+                continue;
             }
             if ix < pinned_count && !self.pinned_open {
                 continue;
@@ -6512,9 +6705,19 @@ impl Shell {
                         return element;
                     }
                     let start = crate::terminal::panel::slide_offset(ix, from, prev_over)
-                        * SIDEBAR_SESSION_SLOT;
-                    let target =
-                        crate::terminal::panel::slide_offset(ix, from, over) * SIDEBAR_SESSION_SLOT;
+                        * (self
+                            .sidebar_pinned_heights
+                            .get(from)
+                            .copied()
+                            .unwrap_or(61.0)
+                            + SIDEBAR_LIST_GAP);
+                    let target = crate::terminal::panel::slide_offset(ix, from, over)
+                        * (self
+                            .sidebar_pinned_heights
+                            .get(from)
+                            .copied()
+                            .unwrap_or(61.0)
+                            + SIDEBAR_LIST_GAP);
                     if self.reduced_motion {
                         return div()
                             .relative()
@@ -6597,15 +6800,8 @@ impl Shell {
             let mut pinned_items = list_items;
             let regular_items = pinned_items.split_off(pinned_count);
             let regular_empty = regular_items.is_empty();
-            let pinned_group = show_pinned_section.then(|| {
-                self.render_pinned_section(
-                    pinned_items,
-                    pinned_body_height,
-                    has_pinned_divider,
-                    theme,
-                    cx,
-                )
-            });
+            let pinned_group = show_pinned_section
+                .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
             div()
                 .id("sidebar-active-sessions")
                 .flex()
@@ -6617,64 +6813,75 @@ impl Shell {
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
                         el.child(
-                            div()
-                                .id("sidebar-regular-sessions")
-                                .debug_selector(|| "sidebar-regular-sessions".into())
-                                .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                                    move |this,
-                                          event: &gpui::DragMoveEvent<SidebarSessionDrag>,
-                                          _,
-                                          _| {
-                                        if regular_empty
-                                            && event.bounds.contains(&event.event.position)
-                                        {
-                                            let top = f32::from(
-                                                event.bounds.top()
-                                                    - this.sidebar_scroll.bounds().top()
-                                                    - this.sidebar_scroll.offset().y,
-                                            );
-                                            if let Some(drag) =
-                                                this.sidebar_session_transfer.as_mut()
+                            self.render_sessions_section(
+                                div()
+                                    .id("sidebar-regular-sessions")
+                                    .debug_selector(|| "sidebar-regular-sessions".into())
+                                    .on_drag_move::<SidebarSessionDrag>(cx.listener(
+                                        move |this,
+                                              event: &gpui::DragMoveEvent<SidebarSessionDrag>,
+                                              _,
+                                              _| {
+                                            if regular_empty
+                                                && event.bounds.contains(&event.event.position)
                                             {
-                                                drag.preview = Some(SidebarSessionGap {
-                                                    group: "regular".into(),
-                                                    index: 0,
-                                                    pinned: false,
-                                                    top,
-                                                });
+                                                let top = f32::from(
+                                                    event.bounds.top()
+                                                        - this.sidebar_scroll.bounds().top()
+                                                        - this.sidebar_scroll.offset().y,
+                                                );
+                                                if let Some(drag) =
+                                                    this.sidebar_session_transfer.as_mut()
+                                                {
+                                                    drag.preview = Some(SidebarSessionGap {
+                                                        group: "regular".into(),
+                                                        index: 0,
+                                                        pinned: false,
+                                                        top,
+                                                    });
+                                                }
+                                                return;
                                             }
-                                            return;
-                                        }
-                                        if event.bounds.contains(&event.event.position)
-                                            && let Some(drag) =
-                                                this.sidebar_session_transfer.as_mut()
-                                            && drag.preview.as_ref().is_some_and(|gap| gap.pinned)
-                                        {
-                                            drag.preview = None;
-                                        }
-                                    },
-                                ))
-                                .on_drop::<SidebarSessionDrag>(cx.listener(
-                                    |this, payload, _, cx| {
-                                        this.finish_sidebar_session_transfer(
-                                            payload,
-                                            SidebarSessionDrop::Regular,
-                                            cx,
-                                        );
-                                    },
-                                ))
-                                .flex()
-                                .flex_col()
-                                .gap(px(SIDEBAR_LIST_GAP))
-                                .when(regular_items.is_empty(), |el| {
-                                    el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
-                                        .justify_center()
-                                        .px(px(10.0))
-                                        .text_color(theme.text_muted)
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .child("Drop here to unpin")
-                                })
-                                .children(regular_items),
+                                            if event.bounds.contains(&event.event.position)
+                                                && let Some(drag) =
+                                                    this.sidebar_session_transfer.as_mut()
+                                                && drag
+                                                    .preview
+                                                    .as_ref()
+                                                    .is_some_and(|gap| gap.pinned)
+                                            {
+                                                drag.preview = None;
+                                            }
+                                        },
+                                    ))
+                                    .on_drop::<SidebarSessionDrag>(cx.listener(
+                                        |this, payload, _, cx| {
+                                            this.finish_sidebar_session_transfer(
+                                                payload,
+                                                SidebarSessionDrop::Regular,
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(SIDEBAR_LIST_GAP))
+                                    .when(regular_items.is_empty(), |el| {
+                                        el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
+                                            .justify_center()
+                                            .px(px(10.0))
+                                            .text_color(theme.text_muted)
+                                            .text_size(crate::typography::ui_rems(12.0))
+                                            .child("Drop here to unpin")
+                                    })
+                                    .children(regular_items)
+                                    .into_any_element(),
+                                regular_body_height,
+                                regular_count,
+                                show_pinned_section,
+                                theme,
+                                cx,
+                            ),
                         )
                     },
                 )
@@ -11684,8 +11891,6 @@ mod tests {
     #[test]
     fn sidebar_harness_geometry_reflects_row_hierarchy() {
         assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
-        assert!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP < SIDEBAR_ARCHIVED_HARNESS_TITLE_GAP);
-        assert!(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE < SIDEBAR_ARCHIVED_HARNESS_ICON_SIZE);
     }
 
     #[test]
