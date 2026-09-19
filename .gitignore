@@ -10,4 +10,4 @@ node_modules
 .wrangler
 build/
 edge/dist/
-agents.md
+.agents
