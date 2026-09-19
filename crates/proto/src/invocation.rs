@@ -183,6 +183,28 @@ pub fn invocation_links(text: &str) -> Vec<(Range<usize>, Invocation)> {
     links
 }
 
+/// Reject a provider-native skill when its canonical identity has no portable
+/// file behind it. File-backed skills remain usable as readable references on
+/// another harness; native-only catalog entries cannot be represented there.
+pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Result<(), String> {
+    for (_, invocation) in invocation_links(text) {
+        if let Invocation::Skill {
+            name,
+            path,
+            command: Some(command),
+        } = invocation
+            && native_skill_identity(&path)
+            && command.harness != harness
+        {
+            return Err(format!(
+                "Skill ${name} is native to {:?} and cannot be sent to {:?}",
+                command.harness, harness
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Keep selected skill identity intact until Codex builds native input blocks.
 /// Other providers receive readable Markdown and their advertised command text.
 pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
@@ -397,6 +419,55 @@ mod tests {
                 harness_prompt(&skill.link(), harness),
                 "Use the skill [$review](/repo/SKILL.md)"
             );
+        }
+    }
+
+    #[test]
+    fn native_only_skill_commands_cannot_cross_harnesses() {
+        let skill = Invocation::Skill {
+            name: "plugin:review".into(),
+            path: "opencode-skill:plugin:review".into(),
+            command: Some(SkillCommand {
+                name: "plugin:review".into(),
+                harness: crate::HarnessId::Opencode,
+            }),
+        };
+        let raw = format!("{} inspect tests", skill.link());
+        for harness in HARNESSES {
+            let result = validate_harness_invocations(&raw, harness);
+            if harness == crate::HarnessId::Opencode {
+                assert!(result.is_ok(), "{harness:?}: {result:?}");
+            } else {
+                let error = result.expect_err("foreign native skill must be rejected");
+                assert!(error.contains("plugin:review"), "{harness:?}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn file_backed_skill_commands_keep_the_cross_harness_fallback() {
+        let skill = Invocation::Skill {
+            name: "review".into(),
+            path: "/repo/with space/SKILL.md".into(),
+            command: Some(SkillCommand {
+                name: "plugin:review".into(),
+                harness: crate::HarnessId::Opencode,
+            }),
+        };
+        let raw = format!("{} inspect tests", skill.link());
+        for harness in HARNESSES {
+            validate_harness_invocations(&raw, harness).unwrap();
+            let delivered = harness_prompt(&raw, harness);
+            if harness == crate::HarnessId::Opencode {
+                assert_eq!(delivered, "/plugin:review inspect tests");
+            } else if harness == crate::HarnessId::Codex {
+                assert_eq!(invocation_links(&delivered)[0].1, skill);
+            } else {
+                assert_eq!(
+                    delivered, "Use the skill [$review](/repo/with%20space/SKILL.md) inspect tests",
+                    "{harness:?}"
+                );
+            }
         }
     }
 

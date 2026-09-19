@@ -361,6 +361,10 @@ impl SessionsEngine {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = expand_home(&request.cwd);
+        // Native-only catalog entries have no portable file fallback. Reject
+        // cross-harness delivery before recording or routing the user turn.
+        zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
+            .map_err(EngineError::Other)?;
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
@@ -553,6 +557,8 @@ impl SessionsEngine {
         let Some((run_id, harness_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
+            .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
             prompt: zeron_proto::invocation::harness_prompt(prompt, harness_id),
