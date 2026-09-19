@@ -5009,6 +5009,28 @@ struct InvocationCandidate {
     invocation: zeron_proto::invocation::Invocation,
 }
 
+fn invocation_insertion(
+    invocation: &zeron_proto::invocation::Invocation,
+    supported: bool,
+) -> String {
+    if !supported
+        && matches!(
+            invocation,
+            zeron_proto::invocation::Invocation::Command { .. }
+        )
+    {
+        invocation.prompt_text()
+    } else {
+        invocation.link()
+    }
+}
+
+fn references_require_update(text: &str, supported: bool) -> bool {
+    !supported
+        && (!zeron_proto::invocation::invocation_links(text).is_empty()
+            || !zeron_proto::file_mentions::file_mention_links(text).is_empty())
+}
+
 /// Slash-command completion state: like [`FileMentionState`] but the
 /// candidate list is scoped to device, harness and workspace, then filtered
 /// locally per keystroke. Commands and skills share focus and keyboard handling.
@@ -6793,8 +6815,10 @@ impl Composer {
             self.execute_workspace_command(action, token.range, cx);
             return;
         }
+        let insertion =
+            invocation_insertion(&command.invocation, self.reference_delivery_supported(cx));
         self.input.update(cx, |input, cx| {
-            input.replace_plain_token(token.range, &command.invocation.link(), cx)
+            input.replace_plain_token(token.range, &insertion, cx)
         });
         self.reset_slash(None, cx);
         cx.notify();
@@ -7160,6 +7184,28 @@ impl Composer {
         )
     }
 
+    fn reference_delivery_supported(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let target = state
+            .selected_chat_row()
+            .map(|chat| chat.device_id.clone())
+            .or_else(|| state.effective_device_id());
+        target.is_some_and(|device| {
+            state.device_supports(&device, capabilities::COMPOSER_REFERENCES_V1)
+        })
+    }
+
+    /// Check before consuming drafts, attachments, or an edited queue row.
+    pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if references_require_update(text, self.reference_delivery_supported(cx)) {
+            self.failure = Some("Update the selected device’s Zeron to send file, command, or skill references. Your draft is preserved.".into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     fn send_blocked(&self, cx: &App) -> bool {
@@ -7277,6 +7323,9 @@ impl Composer {
     /// is on), `Mutate createChat` with the `ChatConfig` + cwd, and the model /
     /// reasoning / options on the Run request itself (§1.7).
     fn send(&mut self, text: String, queue: bool, cx: &mut Context<Self>) {
+        if !self.check_reference_delivery(&text, cx) {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -9826,7 +9875,14 @@ mod tests {
                     composer.accept_slash(cx);
                     assert_eq!(
                         composer.input.read(cx).text(),
-                        format!("café {} after", invocation.link())
+                        format!(
+                            "café {} after",
+                            match &invocation {
+                                zeron_proto::invocation::Invocation::Command { .. } =>
+                                    "/review".to_string(),
+                                _ => invocation.link(),
+                            }
+                        )
                     );
                     assert!(composer.failure.is_none());
                 }
@@ -11452,6 +11508,88 @@ mod tests {
     }
 
     #[test]
+    fn legacy_host_commands_remain_literal_and_saved_references_need_an_update() {
+        use zeron_proto::invocation::Invocation;
+        let command = Invocation::Command {
+            name: "compact".into(),
+        };
+        assert_eq!(invocation_insertion(&command, false), "/compact");
+        assert_eq!(invocation_insertion(&command, true), command.link());
+        let skill = Invocation::Skill {
+            name: "review".into(),
+            path: "/repo/SKILL.md".into(),
+            command: None,
+        };
+        for reference in [
+            command.link(),
+            skill.link(),
+            local_file_link("src/lib.rs", false),
+        ] {
+            assert!(references_require_update(&reference, false));
+            assert!(!references_require_update(&reference, true));
+            for literal in [
+                format!("`{reference}`"),
+                format!("    {reference}"),
+                format!("\\{reference}"),
+            ] {
+                assert!(!references_require_update(&literal, false));
+            }
+        }
+        assert!(!references_require_update("/compact", false));
+    }
+
+    #[gpui::test]
+    fn unsupported_host_preserves_reference_drafts_and_queue_edits(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                let draft = zeron_proto::invocation::Invocation::Command {
+                    name: "compact".into(),
+                }
+                .link();
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text(draft.clone(), cx));
+                let attachment = attachments::stage_png_bytes("draft.png".into(), Vec::new());
+                let attachment_id = attachment.id.clone();
+                composer
+                    .attachments
+                    .insert(composer.current_key.clone(), vec![attachment]);
+                composer.state.update(cx, |state, _| {
+                    state.selected_device = Some("peer".into());
+                    state.devices =
+                        vec![serde_json::from_value(serde_json::json!({
+                    "id": "peer", "name": "Peer", "platform": "linux", "capabilities": []
+                })).unwrap()];
+                });
+                assert!(!composer.reference_delivery_supported(cx));
+                composer.send(draft.clone(), false, cx);
+                assert!(
+                    composer
+                        .failure
+                        .as_deref()
+                        .unwrap()
+                        .contains("Update the selected device")
+                );
+                assert_eq!(composer.input.read(cx).text(), draft);
+                assert_eq!(composer.staged()[0].id, attachment_id);
+                composer.editing_queued = Some("queued-draft".into());
+                assert!(composer.commit_queue_edit(cx));
+                assert_eq!(composer.editing_queued.as_deref(), Some("queued-draft"));
+                assert!(!composer.queue_edit_finishing);
+                assert_eq!(composer.input.read(cx).text(), draft);
+                composer.state.update(cx, |state, _| {
+                    state.devices[0]
+                        .capabilities
+                        .push(capabilities::COMPOSER_REFERENCES_V1.into());
+                });
+                assert!(composer.reference_delivery_supported(cx));
+                assert!(composer.check_reference_delivery(&draft, cx));
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn partial_discovery_keeps_commands_and_skills_independently() {
         let command = SlashCommand {
             name: "review".into(),
@@ -11474,6 +11612,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].invocation.prefix(), '/');
         assert!(supported && warning.is_some());
+        assert_eq!(invocation_insertion(&rows[0].invocation, false), "/review");
         let (rows, _, warning) = merge_invocation_results(
             Err(RpcError::Failed("commands unavailable".into())),
             Ok(Some(vec![skill])),

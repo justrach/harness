@@ -80,6 +80,15 @@ skills are removed from the slash picker when separation is enabled.
 File discovery covers the standard directories implemented by each adapter;
 custom plugin paths and provider configuration are exposed where the native
 catalog provides them. It is not a complete parser of every provider’s config.
+Unreadable files, directories, and directory entries are skipped with diagnostics
+so an unrelated skill root cannot suppress valid results.
+
+Hosts advertise `composer-references-v1` for canonical reference delivery.
+Selecting a provider command for an older host inserts literal slash text.
+Sending an existing file, command, or skill chip to an unsupported host asks the
+user to update that device and preserves the draft and attachments; the same
+check applies when committing an edited queued message. Literal code examples
+do not require this capability.
 
 Provider references:
 

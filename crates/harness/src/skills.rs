@@ -189,12 +189,30 @@ fn scan_root(
         let canonical = match std::fs::canonicalize(&dir) {
             Ok(path) => path,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "skipping inaccessible skill directory");
+                continue;
+            }
         };
         if !seen.insert(canonical) {
             continue;
         }
-        let mut children = std::fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
+        let children = match std::fs::read_dir(&dir) {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "skipping unreadable skill directory");
+                continue;
+            }
+        };
+        let mut children: Vec<_> = children
+            .filter_map(|entry| match entry {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    tracing::warn!(path = %dir.display(), %error, "skipping unreadable skill directory entry");
+                    None
+                }
+            })
+            .collect();
         children.sort_by_key(|entry| entry.file_name());
         for entry in children {
             entries += 1;
@@ -601,6 +619,32 @@ mod tests {
         assert!(skills.iter().any(|skill| skill.name == "root"));
         assert!(skills.iter().any(|skill| skill.name == "team:review"));
         assert!(!skills.iter().any(|skill| skill.name == "outside"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directories_do_not_hide_other_skill_roots() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(&home, ".agents/skills/global/SKILL.md", "Global");
+        write(&repo, ".agents/skills/project/SKILL.md", "Project");
+        // Exercise both an inaccessible root and a nested directory; the
+        // provider's other roots must survive.
+        for denied in [
+            home.join(".cursor/skills"),
+            home.join(".agents/skills/private"),
+        ] {
+            std::fs::create_dir_all(&denied).unwrap();
+            std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+            let result = discover_at(HarnessId::Cursor, &repo, &home);
+            std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let skills = result.unwrap();
+            assert!(skills.iter().any(|skill| skill.name == "global"));
+            assert!(skills.iter().any(|skill| skill.name == "project"));
+        }
     }
 
     #[cfg(unix)]
