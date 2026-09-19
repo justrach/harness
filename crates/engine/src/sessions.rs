@@ -379,7 +379,7 @@ impl SessionsEngine {
                 // Register acceptance before a fast boundary can retire it.
                 let mut pending = lock(&ledger);
                 let message = SteerMessage {
-                    prompt: request.prompt.clone(),
+                    prompt: zeron_proto::invocation::harness_prompt(&request.prompt, harness_id),
                     message_id: Some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
@@ -545,16 +545,17 @@ impl SessionsEngine {
             .map(|h| {
                 (
                     h.run_id.clone(),
+                    h.runtime_config.harness_id,
                     h.steer_tx.clone(),
                     h.routed_steers.clone(),
                 )
             });
-        let Some((run_id, steer_tx, ledger)) = target else {
+        let Some((run_id, harness_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
-            prompt: prompt.to_string(),
+            prompt: zeron_proto::invocation::harness_prompt(prompt, harness_id),
             message_id: Some(user_id.clone()),
         };
         {
@@ -1394,7 +1395,7 @@ fn finish_segment<'a>(
 }
 
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
-fn expand_home(cwd: &str) -> String {
+pub(crate) fn expand_home(cwd: &str) -> String {
     match cwd.strip_prefix("~") {
         Some("") => crate::repos::home_dir().to_string_lossy().into_owned(),
         Some(rest) if rest.starts_with('/') => crate::repos::home_dir()
@@ -1517,7 +1518,11 @@ async fn drive_run(
         Ok(())
     };
     let started = match prepared {
-        Ok(()) => harness.run(request, controls).await,
+        Ok(()) => {
+            let mut wire_request = request;
+            wire_request.prompt = zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+            harness.run(wire_request, controls).await
+        },
         Err(error) => Err(error),
     };
     let mut stream = match started {

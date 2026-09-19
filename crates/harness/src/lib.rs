@@ -119,6 +119,23 @@ pub trait Harness: Send + Sync {
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
     }
+    /// Discover commands in the same directory as the eventual session.
+    async fn commands_for(
+        &self,
+        _cwd: &std::path::Path,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        self.commands().await
+    }
+    /// Project-scoped skills; None means this provider does not advertise skills.
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        if self.id() == HarnessId::Mock {
+            return Ok(None);
+        }
+        skills::discover(self.id(), cwd).await.map(Some)
+    }
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
     async fn run_title(
@@ -156,6 +173,7 @@ pub mod opencode;
 pub mod process;
 mod scratch;
 pub mod shell_env;
+pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;
 

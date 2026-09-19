@@ -388,11 +388,42 @@ impl Harness for OpencodeHarness {
         self.model_catalog(true).await.map(|c| c.models)
     }
 
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        let mut skills = crate::skills::discover(self.id(), cwd).await?;
+        let _guard = self.probe_lock.lock().await;
+        let directory = cwd
+            .to_str()
+            .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
+        let mut server = self.server(Some(directory)).await?;
+        let result = server.commands_wire(Some(directory)).await;
+        server.shutdown(self.kill_grace).await;
+        let commands = result?;
+        merge_skill_commands(&mut skills, &commands);
+        Ok(Some(skills))
+    }
+
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         self.commands_cache
             .get_or_try_init(|| self.probe_commands())
             .await
             .cloned()
+    }
+
+    async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
+        let _guard = self.probe_lock.lock().await;
+        let directory = cwd
+            .to_str()
+            .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
+        let mut server = self.server(Some(directory)).await?;
+        let result = server
+            .commands_wire(Some(directory))
+            .await
+            .map(|v| commands_from_wire(&v));
+        server.shutdown(self.kill_grace).await;
+        result
     }
 
     async fn run(
@@ -410,7 +441,7 @@ impl Harness for OpencodeHarness {
             request,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
-            known_commands: self.commands_cache.get().cloned(),
+            known_commands: None, // Resolve the live session directory, never a global probe cache.
         }));
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
@@ -1075,6 +1106,39 @@ fn agent_option(agents: &Value) -> ModelOption {
         label: "Agent".into(),
         choices,
         default_choice: String::new(),
+    }
+}
+
+/// OpenCode exposes plugin/configured skills in its native command catalog.
+/// Source metadata prevents a command with the same name being misclassified.
+fn merge_skill_commands(skills: &mut Vec<zeron_proto::invocation::Skill>, commands: &Value) {
+    for command in commands.as_array().into_iter().flatten() {
+        if command["source"] != "skill" {
+            continue;
+        }
+        let Some(name) = command["name"]
+            .as_str()
+            .filter(|name| zeron_proto::invocation::valid_skill_command_name(name))
+        else {
+            continue;
+        };
+        if let Some(skill) = skills.iter_mut().find(|skill| skill.name == name) {
+            skill.command = Some(zeron_proto::invocation::SkillCommand {
+                name: name.into(),
+                harness: HarnessId::Opencode,
+            });
+        } else {
+            skills.push(zeron_proto::invocation::Skill {
+                name: name.into(),
+                path: format!("opencode-skill:{name}"),
+                description: command["description"].as_str().unwrap_or_default().into(),
+                enabled: true,
+                command: Some(zeron_proto::invocation::SkillCommand {
+                    name: name.into(),
+                    harness: HarnessId::Opencode,
+                }),
+            });
+        }
     }
 }
 
@@ -2135,11 +2199,14 @@ async fn post_prompt(
         attachments,
     } = spec;
     let protocol = server.protocol().await;
-    if let Some(rest) = prompt.strip_prefix('/') {
-        let mut split = rest.splitn(2, char::is_whitespace);
-        let name = split.next().unwrap_or_default();
-        let arguments = split.next().unwrap_or_default().trim().to_owned();
-        if !name.is_empty() && commands.iter().any(|c| c.name == name) {
+    if let Some((name, arguments)) = zeron_proto::invocation::leading_command(prompt) {
+        if commands.iter().any(|c| c.name == name) {
+            if !attachments.is_empty() {
+                return Err(HarnessError::Protocol(
+                    "OpenCode commands cannot include attachments; send them in a separate prompt"
+                        .into(),
+                ));
+            }
             // 1.x names the args `arguments`; 2.x `text`.
             let (path, cmd_body) = match protocol {
                 Protocol::V1 => (

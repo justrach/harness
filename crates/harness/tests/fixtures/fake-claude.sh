@@ -124,6 +124,12 @@ case "$first" in
   ;;
 
 *'"subtype":"initialize"'*)
+  if [ -f .command-fixture ]; then
+    rid=$(printf '%s' "$first" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+    name=$(cat .command-fixture)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$rid\",\"response\":{\"commands\":[{\"name\":\"$name\"}]}}}"
+    exec sleep 30
+  fi
   # Command discovery: the initialize control request arrives as the FIRST
   # stdin line (no user message ever follows). Shape mirrors 2.1.228's
   # control_response: commands under response.response.

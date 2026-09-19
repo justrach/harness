@@ -1438,8 +1438,8 @@ impl Composer {
         if self.editing_queued.is_none() {
             return false;
         }
-        let text = self.input.read(cx).text().trim().to_string();
-        if text.is_empty() && self.staged().is_empty() && self.staged_appshots().is_empty() {
+        let text = self.input.read(cx).text().to_string();
+        if text.trim().is_empty() && self.staged().is_empty() && self.staged_appshots().is_empty() {
             self.finish_queue_edit("discard", None, cx);
         } else {
             self.finish_queue_edit("commit", Some(text), cx);

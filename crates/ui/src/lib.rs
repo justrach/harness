@@ -23,6 +23,7 @@ pub mod changes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+mod composer_markdown;
 mod composer_dock;
 mod context_usage;
 pub mod edge_fade;

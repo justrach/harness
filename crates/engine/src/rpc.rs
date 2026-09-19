@@ -671,6 +671,32 @@ impl EngineRpc {
             .map_err(Into::into)
     }
 
+    /// Catalogs also serve projectless sessions, which have no workspace space.
+    /// Keep workspace validation for project targets and use only a known local
+    /// chat's persisted cwd (or home) for a projectless conversation.
+    async fn catalog_root(&self, p: &FileSearchParams) -> Result<std::path::PathBuf, RpcError> {
+        if p.space_id.is_none() && p.path.is_none() {
+            let Some(chat_id) = &p.chat_id else {
+                return Ok(home_dir());
+            };
+            let chat = self
+                .workspace
+                .chat(chat_id)
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+            if chat.device_id != self.doc_host.device_id() {
+                return Err(RpcError::BadParams("chat belongs to another device".into()));
+            }
+            if chat.space_id.is_none() {
+                return Ok(chat
+                    .cwd
+                    .map(|cwd| std::path::PathBuf::from(crate::sessions::expand_home(&cwd)))
+                    .unwrap_or_else(home_dir));
+            }
+        }
+        self.file_search_root(p).await
+    }
+
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
@@ -1031,6 +1057,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
+            | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
             | methods::QUEUE_COMMAND
             | methods::TAKE_PROJECT_ACTION_SETUP
@@ -1412,20 +1439,64 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
             }
+            methods::LIST_SKILLS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    harness: HarnessId,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                        path: p.path,
+                    })
+                    .await?;
+                let harness = self
+                    .registry
+                    .resolve(p.harness)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let skills = harness
+                    .skills(&root)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&skills)
+            }
             methods::LIST_COMMANDS => {
-                // Same shape as ListModels: forces a lazy resolve, then the
-                // harness's own (cached) discovery — ACP agents advertise
-                // availableCommands, claude answers the initialize control
-                // request, codex lists skills; only harnesses whose wire has
-                // no listing (cursor, mock) fall through to the trait's
-                // empty default.
-                let p: ListModelsParams = parse_params(params)?;
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    harness: HarnessId,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let root = self
+                    .catalog_root(&FileSearchParams {
+                        query: String::new(),
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                        path: p.path,
+                    })
+                    .await?;
                 let harness = self
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let commands = harness
-                    .commands()
+                    .commands_for(&root)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&commands)

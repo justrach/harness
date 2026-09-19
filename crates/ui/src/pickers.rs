@@ -222,9 +222,8 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
 /// The TraitsPicker trigger summary: the effective reasoning level plus every
 /// model option's effective choice — the explicit pick when one is saved and
 /// still offered, else the option's default — joined with " · " ("High · 1M ·
-/// Fast", Cursor's "Agent · Balance"). Defaults are spelled out rather than
-/// hidden so the run's configuration reads without opening the popover; `None`
-/// only when the model has nothing to describe (no ladder, no options).
+/// Fast", Cursor's "Agent · Balance"). The Standard service tier is omitted;
+/// other effective choices stay visible. `None` means there is no visible suffix.
 pub fn traits_summary(
     model: Option<&Model>,
     reasoning: Option<ReasoningLevel>,
@@ -241,6 +240,9 @@ pub fn traits_summary(
                 .and_then(|v| v.as_str())
                 .filter(|id| option.choices.iter().any(|c| c.id == *id))
                 .unwrap_or(&option.default_choice);
+            if option.id == "serviceTier" && matches!(choice_id, "default" | "standard") {
+                continue;
+            }
             if let Some(choice) = option.choices.iter().find(|c| c.id == choice_id) {
                 parts.push(choice.label.clone());
             }
@@ -451,7 +453,7 @@ struct ModelRowData {
 }
 
 /// Which picker popover is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PickerKind {
     Branch,
     /// The checkout-kind dropdown in the composer footer (Current
@@ -512,6 +514,7 @@ pub struct Pickers {
     space_owner: Option<String>,
     device_owner: Option<String>,
     target_generation: u64,
+    menu_geometry: HashMap<PickerKind, popover::MenuGeometry>,
     open: popover::Popup<PickerKind>,
     /// The harness/model picker's rail selection (favorites vs the effective
     /// harness's list). Re-primed on every open.
@@ -520,7 +523,6 @@ pub struct Pickers {
     setting_active: usize,
     setting_on_left: bool,
     setting_hover: popover::HoverIntent<ModelSetting>,
-    model_space_below: Option<f32>,
     setting_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scroll: gpui::ScrollHandle,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
@@ -698,6 +700,7 @@ impl Pickers {
             space_owner,
             device_owner,
             target_generation: 0,
+            menu_geometry: HashMap::new(),
             config: DraftConfig::default(),
             defaults,
             data_dir,
@@ -708,7 +711,6 @@ impl Pickers {
             setting_active: 0,
             setting_on_left: false,
             setting_hover: popover::HoverIntent::default(),
-            model_space_below: None,
             setting_bounds: None,
             setting_scroll: gpui::ScrollHandle::new(),
             harnesses: Loadable::Idle,
@@ -2121,12 +2123,13 @@ impl Pickers {
         } else {
             popover::menu_scroll_host("device-list-host")
                 .on_hover(cx.listener(Self::on_menu_list_hover))
-                .child(
+                .child(popover::faded_menu_list(
+                    &self.menu_scroll,
                     popover::menu_scroll_list("device-list", &self.menu_scroll)
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .max_h(px(224.0))
+                        .max_h(px(self.list_budget(64.0)))
                         .children(rows.into_iter().zip(online).enumerate().map(
                             |(ix, (device, online))| {
                                 let is_local = local.as_deref() == Some(device.id.as_str());
@@ -2166,7 +2169,7 @@ impl Pickers {
                                 })
                             },
                         )),
-                )
+                ))
                 .children(scrollbar)
                 .into_any_element()
         };
@@ -2210,12 +2213,13 @@ impl Pickers {
         } else {
             popover::menu_scroll_host("space-list-host")
                 .on_hover(cx.listener(Self::on_menu_list_hover))
-                .child(
+                .child(popover::faded_menu_list(
+                    &self.menu_scroll,
                     popover::menu_scroll_list("space-list", &self.menu_scroll)
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .max_h(px(224.0))
+                        .max_h(px(self.list_budget(152.0)))
                         .children(rows.into_iter().enumerate().map(|(ix, space)| {
                             let label: SharedString = space.display_name().to_string().into();
                             let is_selected = selected.as_deref() == Some(space.id.as_str());
@@ -2232,7 +2236,7 @@ impl Pickers {
                             }))
                             .child(div().flex_1().min_w_0().truncate().child(label))
                         })),
-                )
+                ))
                 .children(scrollbar)
                 .into_any_element()
         };
@@ -2438,6 +2442,53 @@ impl Pickers {
         }
     }
 
+    fn menu_geometry(&self) -> popover::MenuGeometry {
+        self.mounted_kind()
+            .and_then(|kind| self.menu_geometry.get(&kind).copied())
+            .unwrap_or(popover::MenuGeometry {
+                height: 320.0,
+                below: false,
+            })
+    }
+
+    fn list_budget(&self, chrome: f32) -> f32 {
+        (self.menu_geometry().height - chrome).clamp(0.0, 224.0)
+    }
+
+    fn measure_trigger(&self, kind: PickerKind, cx: &Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        // The new-thread workspace row opens down, matching main's layout.
+        let below = self.state.read(cx).selected_chat.is_none()
+            && matches!(kind, PickerKind::Branch | PickerKind::Checkout);
+        gpui::canvas(
+            move |bounds, window, cx| {
+                let mut geometry = popover::menu_geometry(
+                    f32::from(bounds.top()),
+                    f32::from(bounds.bottom()),
+                    f32::from(window.viewport_size().height),
+                );
+                if below {
+                    geometry = popover::MenuGeometry {
+                        height: (f32::from(window.viewport_size().height - bounds.bottom()) - 14.0)
+                            .clamp(0.0, 640.0),
+                        below: true,
+                    };
+                }
+                entity
+                    .update(cx, |this, cx| {
+                        if this.menu_geometry.get(&kind) != Some(&geometry) {
+                            this.menu_geometry.insert(kind, geometry);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
     // ---- render ----
 
     #[allow(clippy::too_many_arguments)]
@@ -2469,6 +2520,8 @@ impl Pickers {
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
         div()
+            .relative()
+            .child(self.measure_trigger(kind, cx))
             .id(id)
             .h(px(32.0))
             .max_w(px(248.0))
@@ -2564,6 +2617,8 @@ impl Pickers {
     ) -> gpui::Stateful<gpui::Div> {
         let open = self.open_kind() == Some(kind);
         div()
+            .relative()
+            .child(self.measure_trigger(kind, cx))
             .id(id)
             .h(px(20.0))
             .max_w(px(280.0))
@@ -2640,7 +2695,7 @@ impl Pickers {
     /// original chip-only cluster floating above the composer's trailing edge.
     pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let closing = self.open.closing_since();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Space) => {
                 let content = self.render_space_popover(cx);
@@ -2695,7 +2750,7 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .child(attach_overlay(
+            .child(attach_overlay_end(
                 device_chip,
                 &mut overlay,
                 PickerKind::Device,
@@ -2728,7 +2783,7 @@ impl Pickers {
         }
         self.ensure_refs(false, cx);
         let theme = Theme::of(cx).clone();
-        let closing = self.open.closing_since();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
@@ -2881,7 +2936,7 @@ impl Pickers {
         }
         // Refs feed the draft labels — eager + idempotent.
         self.ensure_refs(false, cx);
-        let closing = self.open.closing_since();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             Some(PickerKind::Branch) => {
                 let content = self.render_branch_popover(cx);
@@ -2950,7 +3005,7 @@ impl Pickers {
         popover::popover_card(&theme)
             .w(px(width))
             // zeron caps its tallest picker at min(640px, 75vh).
-            .max_h(px(640.0))
+            .max_h(px(self.menu_geometry().height))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
@@ -2996,6 +3051,7 @@ impl Pickers {
         let theme = Theme::of(cx).for_popup();
         popover::popover_card_flush(&theme)
             .w(px(width))
+            .max_h(px(self.menu_geometry().height))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
@@ -3149,12 +3205,13 @@ impl Pickers {
                 let selected = session_branch.or_else(|| self.config.branch.clone());
                 popover::menu_scroll_host("branch-list-host")
                     .on_hover(cx.listener(Self::on_menu_list_hover))
-                    .child(
+                    .child(popover::faded_menu_list(
+                        &self.menu_scroll,
                         popover::menu_scroll_list("branch-list", &self.menu_scroll)
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .max_h(px(224.0))
+                            .max_h(px(self.list_budget(144.0)))
                             .children(rows.into_iter().take(MAX_REF_ROWS).enumerate().map(
                                 |(ix, row)| {
                                     let label: SharedString = row.name.clone().into();
@@ -3206,7 +3263,7 @@ impl Pickers {
                                     )
                                 },
                             )),
-                    )
+                    ))
                     .children(scrollbar)
                     .into_any_element()
             }
@@ -3320,21 +3377,8 @@ impl Pickers {
     /// with a ⌘N jump chip and a star toggle trailing. Searching hides the
     /// rail and spans every harness.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // Compact tabbed layout (user request, modeled on the referenced
-        // picker): the model LIST gets a fixed band of roughly seven compact
-        // rows; the pinned traits tray below sizes to its sections.
-        let list_height = if self.state.read(cx).selected_chat.is_none() {
-            // Keep the settings tray visible while the model list scrolls
-            // within the room below the new-chat composer.
-            let tray_height = if self.setting_groups(cx).is_empty() {
-                0.0
-            } else {
-                self.setting_groups(cx).len() as f32 * 32.0 + 7.0
-            };
-            (self.model_space_below.unwrap_or(640.0) - 82.0 - tray_height).clamp(30.0, 216.0)
-        } else {
-            216.0
-        };
+        let (list_height, tray_height) =
+            model_menu_budgets(self.menu_geometry().height, self.setting_groups(cx).len());
 
         let theme = Theme::of(cx).for_popup();
 
@@ -3619,7 +3663,9 @@ impl Pickers {
             .bg(crate::theme::ink(0.02))
             .on_hover(cx.listener(Self::on_menu_list_hover))
             .child(match model_list {
-                Some(list) => list,
+                Some(list) => {
+                    popover::faded_menu_list(&self.model_scroll_base(), list).into_any_element()
+                }
                 // Empty/loading/error notes: a plain static stack.
                 None => div()
                     .id("model-menu-scroll")
@@ -3651,7 +3697,7 @@ impl Pickers {
                 .border_color(crate::theme::hairline(0.08))
                 // Long option stacks scroll inside the tray rather than
                 // growing the card past the viewport.
-                .max_h(px(236.0))
+                .max_h(px(tray_height))
                 .overflow_y_scroll()
                 .px(px(popover::CARD_INSET))
                 .child(sections)
@@ -4554,18 +4600,35 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
         .collect()
 }
 
+// Tabs and search consume 80px, with 2px reserved for the card border.
+// Keep one model row where possible; long option stacks scroll in the tray.
+fn model_menu_budgets(height: f32, setting_count: usize) -> (f32, f32) {
+    let body = (height - 82.0).max(0.0);
+    let desired_tray = if setting_count == 0 {
+        0.0
+    } else {
+        (setting_count as f32 * 32.0 + 7.0).min(236.0)
+    };
+    let tray = desired_tray.min((body - 30.0).max(0.0));
+    ((body - tray).min(216.0), tray)
+}
+
 /// Attach the (single) open popover above a selector trigger.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: (Option<std::time::Instant>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
     {
-        return chip.child(popover::anchored_menu_above(id, element, closing));
+        return chip.child(if closing.1 {
+            popover::anchored_menu_below(id, element, closing.0)
+        } else {
+            popover::anchored_menu_above(id, element, closing.0)
+        });
     }
     chip
 }
@@ -4576,12 +4639,12 @@ fn attach_overlay_below(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: (Option<std::time::Instant>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
     {
-        return chip.child(popover::anchored_menu_below(id, element, closing));
+        return chip.child(popover::anchored_menu_below(id, element, closing.0));
     }
     chip
 }
@@ -4593,14 +4656,16 @@ fn attach_overlay_end(
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: (Option<std::time::Instant>, bool),
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
     {
-        return chip
-            .relative()
-            .child(popover::anchored_menu_above_end(id, element, closing));
+        return chip.relative().child(if closing.1 {
+            popover::anchored_menu_below_end(id, element, closing.0)
+        } else {
+            popover::anchored_menu_above_end(id, element, closing.0)
+        });
     }
     chip
 }
@@ -4724,7 +4789,7 @@ impl Render for Pickers {
         // Render the open popover's body first (mutable borrow), then the
         // chips. Branch/Checkout render in the composer FOOTER row (see
         // `render_footer`), not here.
-        let closing = self.open.closing_since();
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
             // Footer-row pickers — their popovers mount down there.
             Some(PickerKind::Branch)
@@ -4756,63 +4821,47 @@ impl Render for Pickers {
                 traits_active.then(|| theme.text.opacity(0.85)),
             )
         });
-        let model_chip = self.trigger_chip(
-            PickerKind::HarnessModel,
-            model_label,
-            true,
-            Some(harness_icon),
-            chip_icon_loading,
-            chip_label_loading,
-            chip_suffix,
-            &theme,
-            cx,
-        );
-        let new_chat = self.state.read(cx).selected_chat.is_none();
-        let entity = cx.entity().downgrade();
-        let model_chip = model_chip.relative().child(
-            gpui::canvas(
-                move |bounds, window, cx| {
-                    let available = (f32::from(window.viewport_size().height - bounds.bottom())
-                        - 14.0)
-                        .max(0.0);
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.model_space_below != Some(available) {
-                            this.model_space_below = Some(available);
-                            if new_chat && this.open_kind() == Some(PickerKind::HarnessModel) {
-                                cx.notify();
-                                window.request_animation_frame();
-                            }
-                        }
-                    });
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0(),
-        );
-        let model_chip = if new_chat {
-            if overlay
-                .as_ref()
-                .is_some_and(|(kind, _)| *kind == PickerKind::HarnessModel)
-                && let Some((_, content)) = overlay.take()
-            {
-                model_chip.child(popover::anchored_menu_below_end(
-                    "model-popover",
-                    content,
-                    closing,
-                ))
-            } else {
-                model_chip
-            }
-        } else {
-            attach_overlay_end(
-                model_chip,
-                &mut overlay,
+        let fast = self.selected_model(cx).is_some_and(|model| {
+            model.options.iter().any(|option| {
+                option.id == "serviceTier"
+                    && self
+                        .resolved(cx)
+                        .model_options
+                        .get(&option.id)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&option.default_choice)
+                        == "fast"
+            })
+        });
+        let model_chip = self
+            .trigger_chip(
                 PickerKind::HarnessModel,
-                "model-popover",
-                closing,
+                model_label,
+                true,
+                Some(harness_icon),
+                chip_icon_loading,
+                chip_label_loading,
+                chip_suffix,
+                &theme,
+                cx,
             )
-        };
+            .when(fast, |chip| {
+                chip.child(motion::fast_tier(
+                    "composer-fast-tier",
+                    div().flex_none().child(
+                        crate::icons::icon(crate::icons::FAST_TIER)
+                            .size(px(13.0))
+                            .text_color(theme.accent),
+                    ),
+                ))
+            });
+        let model_chip = attach_overlay_end(
+            model_chip,
+            &mut overlay,
+            PickerKind::HarnessModel,
+            "model-popover",
+            closing,
+        );
         div()
             .flex()
             .flex_row()
@@ -5126,6 +5175,28 @@ mod tests {
                 .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn model_menu_height_tracks_both_sides_and_long_settings() {
+        for (top, bottom, viewport, below) in [
+            (80.0, 112.0, 500.0, true),
+            (430.0, 462.0, 500.0, false),
+            (190.0, 222.0, 360.0, false),
+        ] {
+            let geometry = popover::menu_geometry(top, bottom, viewport);
+            assert_eq!(geometry.below, below);
+            for settings in [0, 1, 3, 20] {
+                let (list, tray) = model_menu_budgets(geometry.height, settings);
+                assert!(list + tray + 82.0 <= geometry.height);
+                assert!((0.0..=216.0).contains(&list));
+                assert!((0.0..=236.0).contains(&tray));
+                if settings == 0 {
+                    assert_eq!(tray, 0.0);
+                }
+            }
+        }
+        assert!(model_menu_budgets(180.0, 2).0 < model_menu_budgets(400.0, 2).0);
     }
 
     #[gpui::test]
@@ -6008,6 +6079,47 @@ mod tests {
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["opus", "claude-fable-5", "sonnet", "haiku", "claude-nova-1"]
+        );
+    }
+
+    #[test]
+    fn standard_tier_is_hidden_but_other_defaults_remain() {
+        let mut model = bare_model("test", "Test");
+        model.options = vec![zeron_proto::ModelOption {
+            id: "serviceTier".into(),
+            label: "Service Tier".into(),
+            default_choice: "default".into(),
+            choices: vec![
+                zeron_proto::ModelOptionChoice {
+                    id: "default".into(),
+                    label: "Standard".into(),
+                },
+                zeron_proto::ModelOptionChoice {
+                    id: "fast".into(),
+                    label: "Fast".into(),
+                },
+            ],
+        }];
+        assert_eq!(
+            traits_summary(
+                Some(&model),
+                Some(ReasoningLevel::High),
+                &serde_json::Map::new()
+            ),
+            Some("High".into())
+        );
+        let mut picks = serde_json::Map::new();
+        picks.insert("serviceTier".into(), "default".into());
+        assert_eq!(traits_summary(Some(&model), None, &picks), None);
+        picks.insert("serviceTier".into(), "fast".into());
+        assert_eq!(
+            traits_summary(Some(&model), None, &picks),
+            Some("Fast".into())
+        );
+        model.options[0].id = "context".into();
+        assert_eq!(
+            traits_summary(Some(&model), None, &serde_json::Map::new()),
+            Some("Standard".into())
         );
     }
 

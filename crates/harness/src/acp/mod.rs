@@ -540,11 +540,10 @@ pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
     Ok(())
 }
 
-/// the user-global skill folders the server loads (`resolve_skills_paths`).
-/// its project-level `.gemini/skills` and `.agents/skills` depend on a session
-/// cwd the command listing doesn't have, so those still reach the agent when
-/// typed but aren't listed.
-fn antigravity_skill_dirs() -> Vec<PathBuf> {
+/// User-global skill folders the server loads (`resolve_skills_paths`).
+/// Shared discovery adds project `.gemini/skills` and `.agents/skills` using
+/// the selected session's cwd.
+pub(crate) fn antigravity_skill_dirs() -> Vec<PathBuf> {
     antigravity_paths::home()
         .map(|home| {
             vec![
@@ -1314,8 +1313,13 @@ impl AcpHarness {
     /// briefly for `available_commands_update`. Best-effort — an agent that
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (_scratch, mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+    async fn discover_commands(
+        &self,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        let (_scratch, mut child, _stderr) = self
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[])
+            .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1328,8 +1332,10 @@ impl AcpHarness {
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
             let mut commands = scan_available_commands(&init);
-            if commands.is_empty() {
-                let cwd = crate::executable::home_or_current_dir();
+            {
+                let cwd = cwd
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::executable::home_or_current_dir);
                 let session = client
                     .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
                     .await;
@@ -1798,15 +1804,39 @@ impl Harness for AcpHarness {
         }
     }
 
-    /// the agent's advertised commands minus the spec's hidden ones, then its
-    /// skills. Skills are read fresh on every call so a newly added one shows
-    /// up, and they still list when discovery fails (a signed-out agent).
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        let mut skills = crate::skills::discover(self.id(), cwd).await?;
+        let commands = self.discover_commands(Some(cwd)).await?;
+        crate::skills::attach_advertised_commands(self.id(), &mut skills, &commands);
+        Ok(Some(skills))
+    }
+
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         let discovered = self
             .commands
-            .get_or_try_init(|| self.discover_commands())
+            .get_or_try_init(|| self.discover_commands(None))
             .await
             .cloned();
+        let skills = skill_commands(&(self.spec.skill_dirs)());
+        let mut commands = match discovered {
+            Ok(commands) => commands,
+            Err(_) if !skills.is_empty() => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        commands.retain(|command| !self.spec.hidden_commands.contains(&command.name.as_str()));
+        for skill in skills {
+            if !commands.iter().any(|command| command.name == skill.name) {
+                commands.push(skill);
+            }
+        }
+        Ok(commands)
+    }
+
+    async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
+        let discovered = self.discover_commands(Some(cwd)).await;
         let skills = skill_commands(&(self.spec.skill_dirs)());
         let mut commands = match discovered {
             Ok(commands) => commands,
