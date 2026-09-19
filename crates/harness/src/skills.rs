@@ -211,7 +211,16 @@ fn scan_root(
             {
                 continue;
             }
-            if let Some(mut skill) = read_skill(&path)? {
+            // One stale symlink or unreadable file must not discard the rest
+            // of the global and project catalog.
+            let skill = match read_skill(&path) {
+                Ok(skill) => skill,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "skipping unreadable skill");
+                    continue;
+                }
+            };
+            if let Some(mut skill) = skill {
                 if legacy_commands {
                     let relative = path.strip_prefix(root).unwrap().with_extension("");
                     skill.name = relative.to_string_lossy().replace(['/', '\\'], ":");
@@ -592,6 +601,49 @@ mod tests {
         assert!(skills.iter().any(|skill| skill.name == "root"));
         assert!(skills.iter().any(|skill| skill.name == "team:review"));
         assert!(!skills.iter().any(|skill| skill.name == "outside"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_skill_files_do_not_hide_global_or_project_skills() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            &home,
+            ".agents/skills/global/SKILL.md",
+            "Global instructions",
+        );
+        write(
+            &repo,
+            ".agents/skills/project/SKILL.md",
+            "Project instructions",
+        );
+
+        let missing = home.join(".agents/skills/missing");
+        std::fs::create_dir_all(&missing).unwrap();
+        symlink(temp.path().join("gone.md"), missing.join("SKILL.md")).unwrap();
+        let cycle = repo.join(".agents/skills/cycle");
+        std::fs::create_dir_all(&cycle).unwrap();
+        symlink("SKILL.md", cycle.join("SKILL.md")).unwrap();
+
+        let denied = write(&repo, ".agents/skills/denied/SKILL.md", "Private");
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+        // Root can read mode-000 files; missing and cyclic links still exercise
+        // per-file I/O failures on privileged test runners.
+        let denied_is_readable = std::fs::File::open(&denied).is_ok();
+        let result = discover_at(HarnessId::Cursor, &repo, &home);
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let skills = result.unwrap();
+        let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"global"));
+        assert!(names.contains(&"project"));
+        assert!(!names.contains(&"missing"));
+        assert!(!names.contains(&"cycle"));
+        assert_eq!(names.contains(&"denied"), denied_is_readable);
     }
 
     #[cfg(unix)]

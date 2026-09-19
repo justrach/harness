@@ -335,6 +335,63 @@ async fn ask_user_question_round_trips_through_the_control_channel() {
 }
 
 #[tokio::test]
+async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
+    use zeron_proto::ReasoningLevel;
+    use zeron_proto::invocation::{Invocation, SkillCommand, harness_prompt};
+
+    let invocations = [
+        Invocation::Command {
+            name: "review".into(),
+        },
+        Invocation::Skill {
+            name: "review".into(),
+            path: "/repo/.claude/skills/review/SKILL.md".into(),
+            command: Some(SkillCommand {
+                name: "review".into(),
+                harness: HarnessId::ClaudeCode,
+            }),
+        },
+    ];
+    for invocation in invocations {
+        for prefix in ["", " ", "   ", "\n", "\r\n  "] {
+            let prompt = harness_prompt(
+                &format!("{prefix}{} scenario:command-echo", invocation.link()),
+                HarnessId::ClaudeCode,
+            );
+            let expected = format!("{prefix}/review scenario:command-echo");
+            let (initial_controls, _steer, _token) = controls("A");
+            let mut initial = request(&prompt);
+            initial.reasoning = Some(ReasoningLevel::Ultrathink);
+            let events = run_to_end(&harness(), initial, initial_controls).await;
+            assert!(
+                events.contains(&AgentEvent::TextDelta {
+                    text: expected.clone()
+                }),
+                "{events:?}"
+            );
+
+            let (steer_controls, steer, _token) = controls("A");
+            steer
+                .send(SteerMessage {
+                    prompt,
+                    message_id: None,
+                })
+                .await
+                .unwrap();
+            let mut initial = request("scenario:steer");
+            initial.reasoning = Some(ReasoningLevel::Ultrathink);
+            let events = run_to_end(&harness(), initial, steer_controls).await;
+            assert!(
+                events.contains(&AgentEvent::TextDelta {
+                    text: format!("steered:{expected}")
+                }),
+                "{events:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn steering_lines_are_written_to_stdin_mid_run() {
     let (controls, steer, _token) = controls("A");
     steer
