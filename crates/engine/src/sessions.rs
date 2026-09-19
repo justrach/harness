@@ -1423,6 +1423,10 @@ fn cursor_unstarted_history(
     prompt: &str,
     has_session: bool,
 ) -> Result<String, DocError> {
+    // Convert each message before JSON encoding. Rewriting canonical chips in
+    // the encoded envelope can introduce unescaped quotes or newlines and can
+    // cause Cursor's current message to be converted twice.
+    let prompt = zeron_proto::invocation::harness_prompt(prompt, HarnessId::Cursor);
     let entries = doc.read_entries()?;
     let preceding: Vec<_> = entries
         .iter()
@@ -1464,9 +1468,10 @@ fn cursor_unstarted_history(
                 .join("\n")
         })
         .filter(|text| !text.is_empty())
+        .map(|text| zeron_proto::invocation::harness_prompt(&text, HarnessId::Cursor))
         .collect();
     if previous.is_empty() {
-        return Ok(prompt.to_owned());
+        return Ok(prompt);
     }
     Ok(format!(
         "The preceding user messages may not have reached a Cursor checkpoint before startup stopped. Retain this JSON as conversation history; do not rerun prior tools or side effects. Respond to the current message.\n{}",
@@ -1520,9 +1525,12 @@ async fn drive_run(
     let started = match prepared {
         Ok(()) => {
             let mut wire_request = request;
-            wire_request.prompt = zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+            if harness_id != HarnessId::Cursor {
+                wire_request.prompt =
+                    zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+            }
             harness.run(wire_request, controls).await
-        },
+        }
         Err(error) => Err(error),
     };
     let mut stream = match started {
@@ -2464,6 +2472,43 @@ async fn drive_run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_recovery_converts_rich_messages_before_json_encoding() {
+        let doc = zeron_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
+        let skill = zeron_proto::invocation::Invocation::Skill {
+            name: "review \"quoted\"".into(),
+            path: "/repo/quoted \"path\"/SKILL.md".into(),
+            command: None,
+        }
+        .link();
+        let previous = format!("Previous {skill}\nSecond line with \\ and \"quotes\"");
+        doc.push_message(&zeron_doc::SessionMessageEntry {
+            id: "u1".into(),
+            role: zeron_doc::MessageRole::User,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: "u1-text".into(),
+                text: previous.clone(),
+            }],
+            created_at: 0,
+            device_id: "test".into(),
+            status: None,
+            continuation_of: None,
+        })
+        .unwrap();
+        let current = format!("Current {skill}\nKeep **Markdown**");
+        let delivered = super::cursor_unstarted_history(&doc, "u2", &current, false).unwrap();
+        let (_, json) = delivered.split_once('\n').unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed["currentUserMessage"],
+            zeron_proto::invocation::harness_prompt(&current, zeron_proto::HarnessId::Cursor)
+        );
+        assert_eq!(
+            parsed["previousUserMessages"][0],
+            zeron_proto::invocation::harness_prompt(&previous, zeron_proto::HarnessId::Cursor)
+        );
+    }
+
     #[test]
     fn cursor_without_a_session_id_retains_only_preceding_user_messages() {
         let doc = zeron_doc::SessionDoc::init("cursor-unstarted").unwrap();
