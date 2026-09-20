@@ -3816,6 +3816,11 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        if section == SettingsSection::Shortcuts
+            && let Some(page) = &self.shortcuts_page
+        {
+            page.update(cx, |page, cx| page.load_completion_harnesses(cx));
+        }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
         self.close_user_menu(cx);
@@ -3859,6 +3864,11 @@ impl Shell {
                 }
             }
             NavEntry::Settings(section) => {
+                if section == SettingsSection::Shortcuts
+                    && let Some(page) = &self.shortcuts_page
+                {
+                    page.update(cx, |page, cx| page.load_completion_harnesses(cx));
+                }
                 self.route = Route::Settings(section);
             }
         }

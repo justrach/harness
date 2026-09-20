@@ -8,7 +8,7 @@ use zeron_ui::*;
 
 struct Fixture {
     composer: Entity<composer::Composer>,
-    agents: Entity<settings::harnesses::HarnessesPage>,
+    agents: Entity<settings::shortcuts::ShortcutsPage>,
     settings: bool,
     title: &'static str,
 }
@@ -27,10 +27,10 @@ impl Render for Fixture {
                 div()
                     .flex()
                     .flex_col()
-                    .child(settings::widgets::page_header(&theme, "Agents", None))
+                    .child(settings::widgets::page_header(&theme, "Shortcuts", None))
                     .child(
                         self.agents
-                            .update(cx, |page, cx| page.fixture_completion(cx)),
+                            .update(cx, |page, cx| page.fixture_completion(serde_json::from_value(serde_json::json!([{ "id": "codex", "name": "Codex", "supportsSteering": false, "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": true, "enabled": true }])).unwrap(), cx)),
                     )
                     .into_any_element()
             } else {
@@ -203,7 +203,7 @@ fn main() -> anyhow::Result<()> {
         composer::init(cx, prefs.composer_send_behavior);
         let state = cx.new(|_| state::AppState::new());
         let composer = cx.new(|cx| composer::Composer::new(state.clone(), cx));
-        let agents = cx.new(|cx| settings::harnesses::HarnessesPage::new(state.clone(), cx));
+        let agents = cx.new(|cx| settings::shortcuts::ShortcutsPage::new(state.clone(), prefs.keymap.clone(), prefs.escape_stops_active_agent, prefs.composer_send_behavior, prefs.appshots_enabled, prefs.appshot_sound_enabled, prefs.appshot_destination, cx));
         let skill = zeron_proto::invocation::Invocation::Skill { name: "review-changes".into(), path: "/project/.agents/skills/review-changes/SKILL.md".into(), command: None }.link();
         let file = zeron_proto::file_mentions::local_file_link("src/composer.rs", false);
         let long_file = zeron_proto::file_mentions::local_file_link("src/components/very-long-internationalized-component-name.test.tsx", false);
