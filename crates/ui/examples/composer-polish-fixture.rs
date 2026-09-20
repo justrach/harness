@@ -207,7 +207,8 @@ fn main() -> anyhow::Result<()> {
         let skill = zeron_proto::invocation::Invocation::Skill { name: "review-changes".into(), path: "/project/.agents/skills/review-changes/SKILL.md".into(), command: None }.link();
         let file = zeron_proto::file_mentions::local_file_link("src/composer.rs", false);
         let long_file = zeron_proto::file_mentions::local_file_link("src/components/very-long-internationalized-component-name.test.tsx", false);
-        let draft = format!("Review {file} with {skill}\nAlso check {long_file}\n**Keep the layout calm** and _easy to edit_.\n- Preserve keyboard navigation\n- Check café and 日本語\n```rust\nlet chips = render(&draft);\n```\nContinue here");
+        let command = zeron_proto::invocation::Invocation::Command { name: "review".into() }.link();
+        let draft = format!("Review {file} with {skill}\nThen run {command}\nAlso check {long_file}\n**Keep the layout calm** and _easy to edit_.\n- Preserve keyboard navigation\n- Check café and 日本語\n```rust\nlet chips = render(&draft);\n```\nContinue here");
         composer.update(cx, |view, cx| view.fixture_rich_draft(&draft, cx));
         let window = cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(40.), px(40.)), size(px(840.), px(960.))))), ..Default::default() }, |_, cx| cx.new(|_| Fixture { composer, agents, settings: true, title: "Composer" })).unwrap();
         cx.activate(true);
