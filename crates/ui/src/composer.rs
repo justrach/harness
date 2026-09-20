@@ -867,11 +867,16 @@ const MENTION_SIDE_PAD: &str = "\u{00A0}";
 const COMPOSER_CHIP_PAD: &str = "\u{00A0}\u{00A0}";
 const MENTION_ICON_GLYPHS: &str = "\u{2007}\u{2007}\u{2007}\u{2007}";
 const MENTION_ICON_SLOT: &str = "\u{2007}\u{2007}\u{2007}\u{2007}\u{202F}";
-const MENTION_ICON_SIZE: f32 = 14.0;
+const MENTION_ICON_SIZE: f32 = 12.0;
 const COMPOSER_CHIP_HEIGHT: f32 = 20.0;
 const COMPOSER_CHIP_TEXT_SIZE: f32 = 12.0;
 const COMPOSER_CHIP_RADIUS: f32 = 6.0;
+// Concentric shell/well corners: the same inset on the top, left and bottom.
+const COMPOSER_CHIP_WELL_INSET: f32 = 2.0;
+const MENTION_ICON_WELL_SIZE: f32 = COMPOSER_CHIP_HEIGHT - 2.0 * COMPOSER_CHIP_WELL_INSET;
+const MENTION_ICON_WELL_RADIUS: f32 = COMPOSER_CHIP_RADIUS - COMPOSER_CHIP_WELL_INSET;
 const COMPOSER_CHIP_ICON_GAP: f32 = 4.0;
+const COMPOSER_CHIP_SIDE_PAD: f32 = 6.0;
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
 use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
@@ -1109,7 +1114,7 @@ fn compact_chip_labels(labels: &[String]) -> Vec<String> {
 /// GPUI's text wrapper permits breaks at Unicode spacer glyphs. Reference
 /// chips need stronger boundaries than ordinary prose, without changing ZUI.
 fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: Pixels) {
-    if chips.is_empty() || line.wrap_boundaries().is_empty() {
+    if chips.is_empty() {
         return;
     }
     let glyphs: Vec<_> = line
@@ -1131,14 +1136,8 @@ fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: P
             .iter()
             .any(|range| range.start < index && index < range.end)
     };
-    // Keep GPUI's original layout when none of its boundaries splits a chip.
-    if !line
-        .wrap_boundaries()
-        .iter()
-        .any(|b| inside(line.runs()[b.run_ix].glyphs[b.glyph_ix].index))
-    {
-        return;
-    }
+    // Rewrap after assigning exact chip widths, including lines which used to
+    // fit before the fixed padding was applied.
     let mut boundaries = line.wrap_boundaries.clone();
     boundaries.clear();
     let mut row = 0;
@@ -1181,6 +1180,57 @@ fn wrap_reference_chips(line: &mut WrappedLine, chips: &[Range<usize>], width: P
     *std::ops::DerefMut::deref_mut(line) = std::sync::Arc::new(layout);
 }
 
+/// Give projected spacer/label spans their actual painted widths. Updating the
+/// shaped geometry keeps wrapping, the caret, selection and hit testing on the
+/// same bounds as the shell, rather than centering inside oversized text slots.
+fn size_chip_spans(line: &mut WrappedLine, spans: &[(Range<usize>, Pixels)]) {
+    if spans.is_empty() {
+        return;
+    }
+    let old = &line.unwrapped_layout;
+    let mut shift = px(0.0);
+    let mapped: Vec<_> = spans
+        .iter()
+        .map(|(range, width)| {
+            let start = old.x_for_index(range.start);
+            let end = old.x_for_index(range.end);
+            let entry = (range.clone(), start, end, start + shift, *width);
+            shift += *width - (end - start);
+            entry
+        })
+        .collect();
+    let mut runs = old.runs.clone();
+    for glyph in runs.iter_mut().flat_map(|run| &mut run.glyphs) {
+        let ix = mapped.partition_point(|(range, ..)| range.end <= glyph.index);
+        if let Some((range, start, end, new_start, width)) = mapped.get(ix)
+            && range.contains(&glyph.index)
+        {
+            let fraction = if end > start {
+                (glyph.position.x - *start) / (*end - *start)
+            } else {
+                0.0
+            };
+            glyph.position.x = *new_start + *width * fraction;
+        } else if ix > 0 {
+            let (_, _, end, new_start, width) = &mapped[ix - 1];
+            glyph.position.x += *new_start + *width - *end;
+        }
+    }
+    let layout = gpui::LineLayout {
+        font_size: old.font_size,
+        width: old.width + shift,
+        ascent: old.ascent,
+        descent: old.descent,
+        runs,
+        len: old.len,
+    };
+    *std::ops::DerefMut::deref_mut(line) = std::sync::Arc::new(gpui::WrappedLineLayout {
+        unwrapped_layout: std::sync::Arc::new(layout),
+        wrap_boundaries: line.wrap_boundaries.clone(),
+        wrap_width: line.wrap_width,
+    });
+}
+
 impl TextProjection {
     fn new(raw: &str) -> Self {
         Self::project(raw, None, false)
@@ -1220,8 +1270,11 @@ impl TextProjection {
             .zip(labels)
             .map(|(link, label)| {
                 let label = label.replace(' ', "\u{00A0}");
-                let marker = if icons && link.prefix != '/' {
-                    MENTION_ICON_SLOT.to_owned()
+                let marker = if icons {
+                    format!(
+                        "{MENTION_ICON_SLOT}{}",
+                        if link.prefix == '/' { "/" } else { "" }
+                    )
                 } else {
                     link.prefix.to_string()
                 };
@@ -3617,7 +3670,7 @@ impl ComposerInput {
                 );
                 if chip {
                     run.font = style.font();
-                    run.font.weight = gpui::FontWeight::MEDIUM;
+                    run.font.weight = gpui::FontWeight::NORMAL;
                     // Keep the atomic source/caret geometry in the text layout;
                     // paint the smaller label separately inside that footprint.
                     run.color = gpui::transparent_black();
@@ -3736,6 +3789,28 @@ impl ComposerInput {
                     .map(|(_, r)| r.start - display_at..r.end - display_at)
                     .collect();
                 for mut line in shaped {
+                    let mut spans = Vec::new();
+                    for chip in &chips {
+                        let marker = chip.start + COMPOSER_CHIP_PAD.len();
+                        spans.push((chip.start..marker, px(COMPOSER_CHIP_WELL_INSET)));
+                        let icon_end = marker + MENTION_ICON_GLYPHS.len();
+                        let label_start = marker + MENTION_ICON_SLOT.len();
+                        spans.push((marker..icon_end, px(MENTION_ICON_WELL_SIZE)));
+                        spans.push((icon_end..label_start, px(COMPOSER_CHIP_ICON_GAP)));
+                        let label_end = chip.end - COMPOSER_CHIP_PAD.len();
+                        let label: SharedString = text[label_start..label_end].to_owned().into();
+                        let mut run = run_for(label.len(), false, false);
+                        run.font.weight = gpui::FontWeight::NORMAL;
+                        let label = window.text_system().shape_line(
+                            label,
+                            font_size * (COMPOSER_CHIP_TEXT_SIZE / INPUT_TEXT_SIZE),
+                            &[run],
+                            None,
+                        );
+                        spans.push((label_start..label_end, label.width));
+                        spans.push((label_end..chip.end, px(COMPOSER_CHIP_SIDE_PAD)));
+                    }
+                    size_chip_spans(&mut line, &spans);
                     if !self.single_line {
                         wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
                     }
@@ -4166,18 +4241,23 @@ impl gpui::Element for ComposerTextElement {
         // chip tint and inset edge without stacking another blur per reference.
         let theme = Theme::of(cx);
         let mention_color: gpui::Background = if theme.is_frost() {
-            let (top, bottom) = match theme.appearance {
-                crate::theme::Appearance::Light => (0.32, 0.08),
-                crate::theme::Appearance::Dark => (0.09, 0.025),
+            let (highlight_alpha, body_alpha) = match theme.appearance {
+                crate::theme::Appearance::Light => (0.26, 0.12),
+                crate::theme::Appearance::Dark => (0.30, 0.14),
             };
+            let mut top = theme.accent;
+            top.l += (1.0 - top.l) * 0.35;
+            top.s *= 0.8;
+            top.a = highlight_alpha;
+            let bottom = theme.accent.opacity(body_alpha);
             gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 1.0, top), 0.0),
-                gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 1.0, bottom), 1.0),
+                135.0,
+                gpui::linear_color_stop(top, 0.0),
+                gpui::linear_color_stop(bottom, 1.0),
             )
             .into()
         } else {
-            crate::theme::card_selected_bg().into()
+            theme.accent_wash.into()
         };
 
         let mut mention_quads = Vec::new();
@@ -4186,14 +4266,7 @@ impl gpui::Element for ComposerTextElement {
         let mut icon_specs = Vec::new();
         for (mention, display) in &input.projection.mentions {
             let chip_rows = input.bounds_for_display_range(display.clone());
-            let mut balanced_icon_x = None;
-            let label_start = display.start
-                + COMPOSER_CHIP_PAD.len()
-                + if mention.prefix == '/' {
-                    0
-                } else {
-                    MENTION_ICON_SLOT.len()
-                };
+            let label_start = display.start + COMPOSER_CHIP_PAD.len() + MENTION_ICON_SLOT.len();
             let label_end = display.end - COMPOSER_CHIP_PAD.len();
             // Split only when an individual chip exceeds the whole viewport.
             // The projected text still owns wrapping, selection and IME mapping.
@@ -4217,7 +4290,7 @@ impl gpui::Element for ComposerTextElement {
                 };
                 let style = window.text_style();
                 let mut font = style.font();
-                font.weight = gpui::FontWeight::MEDIUM;
+                font.weight = gpui::FontWeight::NORMAL;
                 let label: SharedString = input.projection.display[label_at..fragment_end]
                     .to_owned()
                     .into();
@@ -4235,18 +4308,7 @@ impl gpui::Element for ComposerTextElement {
                     }],
                     None,
                 );
-                let mut label_x =
-                    label_bounds.left() + (label_bounds.size.width - line.width).max(px(0.0)) / 2.0;
-                if mention.prefix != '/' && label_rows.len() == 1 && chip_rows.len() == 1 {
-                    // Center the visible icon + gap + label as one group. The
-                    // invisible text slot is wider than the smaller label, so
-                    // centering each independently leaves an oversized gap.
-                    let group_width = px(MENTION_ICON_SIZE + COMPOSER_CHIP_ICON_GAP) + line.width;
-                    let icon_x = chip_rows[0].left()
-                        + (chip_rows[0].size.width - group_width).max(px(0.0)) / 2.0;
-                    balanced_icon_x = Some(icon_x);
-                    label_x = icon_x + px(MENTION_ICON_SIZE + COMPOSER_CHIP_ICON_GAP);
-                }
+                let label_x = label_bounds.left();
                 mention_labels.push((
                     point(origin.x + label_x, origin.y + label_bounds.top()),
                     label_bounds.size.height,
@@ -4254,17 +4316,14 @@ impl gpui::Element for ComposerTextElement {
                 ));
                 label_at = fragment_end;
             }
-            if mention.prefix != '/' {
+            {
                 let slot_start = display.start + COMPOSER_CHIP_PAD.len();
                 let slot_end = slot_start + MENTION_ICON_GLYPHS.len();
                 if let Some(slot) = input.bounds_for_display_range(slot_start..slot_end).first() {
-                    let icon_size = px(MENTION_ICON_SIZE).min(slot.size.width);
+                    let icon_size = px(MENTION_ICON_WELL_SIZE).min(slot.size.width);
                     let icon_bounds = Bounds::new(
                         point(
-                            origin.x
-                                + balanced_icon_x.unwrap_or_else(|| {
-                                    slot.left() + (slot.size.width - icon_size) / 2.0
-                                }),
+                            origin.x + slot.left() + (slot.size.width - icon_size) / 2.0,
                             origin.y + slot.top() + (slot.size.height - icon_size) / 2.0,
                         ),
                         size(icon_size, icon_size),
@@ -4421,11 +4480,15 @@ impl gpui::Element for ComposerTextElement {
         let mention_icons = icon_specs
             .into_iter()
             .map(|(mention, bounds)| {
-                let mut icon = if mention.prefix == '$' {
-                    crate::icons::icon(crate::icons::WIDGET)
-                        .size(bounds.size.width)
-                        .text_color(theme.text_muted)
-                        .into_any_element()
+                let icon = if matches!(mention.prefix, '$' | '/') {
+                    crate::icons::icon(if mention.prefix == '/' {
+                        crate::icons::COMMAND
+                    } else {
+                        crate::icons::WIDGET
+                    })
+                    .size(px(MENTION_ICON_SIZE))
+                    .text_color(theme.text_muted)
+                    .into_any_element()
                 } else {
                     let identity = if mention.is_dir {
                         crate::file_icons::FileIconIdentity::directory(&mention.path, false)
@@ -4433,9 +4496,20 @@ impl gpui::Element for ComposerTextElement {
                         crate::file_icons::FileIconIdentity::file(&mention.path)
                     };
                     crate::file_icons::icon(identity, theme.appearance)
-                        .size(bounds.size.width)
+                        .size(px(MENTION_ICON_SIZE))
                         .into_any_element()
                 };
+                // Match the edit-file badge: an independently shaded well
+                // preserves each file icon's native, appearance-aware palette.
+                let mut icon = div()
+                    .size(bounds.size.width)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(MENTION_ICON_WELL_RADIUS))
+                    .bg(crate::file_icons::well_bg(&theme))
+                    .child(icon)
+                    .into_any_element();
                 icon.prepaint_as_root(
                     bounds.origin,
                     bounds.size.map(gpui::AvailableSpace::Definite),
@@ -4505,18 +4579,21 @@ impl gpui::Element for ComposerTextElement {
                 if Theme::of(cx).is_frost() {
                     // A restrained perimeter plus a directional reflection
                     // gives the transparent plate depth without a grey seat.
-                    chip_edges[0].color = chip_edges[0].color.opacity(0.65);
+                    chip_edges[0].color = match Theme::of(cx).appearance {
+                        crate::theme::Appearance::Light => Theme::of(cx).accent.opacity(0.25),
+                        crate::theme::Appearance::Dark => Theme::of(cx).accent.opacity(0.28),
+                    };
                     chip_edges.push(gpui::BoxShadow {
                         color: gpui::hsla(
                             0.0,
                             0.0,
                             1.0,
                             match Theme::of(cx).appearance {
-                                crate::theme::Appearance::Light => 0.45,
-                                crate::theme::Appearance::Dark => 0.13,
+                                crate::theme::Appearance::Light => 0.65,
+                                crate::theme::Appearance::Dark => 0.26,
                             },
                         ),
-                        offset: point(px(0.0), px(1.0)),
+                        offset: point(px(1.0), px(1.0)),
                         blur_radius: px(0.0),
                         spread_radius: px(0.0),
                         inset: true,
@@ -10196,15 +10273,28 @@ mod tests {
             assert_eq!(input.projection.mentions.len(), 3);
             for (mention, display) in &input.projection.mentions {
                 let label = &input.projection.display[display.clone()];
+                let shell = input.bounds_for_display_range(display.clone())[0];
+                let marker_start = display.start + COMPOSER_CHIP_PAD.len();
+                let content_end = display.end - COMPOSER_CHIP_PAD.len();
+                let content = input.bounds_for_display_range(marker_start..content_end)[0];
+                let leading = 2.0;
+                assert!((f32::from(content.left() - shell.left()) - leading).abs() < 0.01);
+                assert!((f32::from(shell.right() - content.right()) - 6.0).abs() < 0.01);
                 if mention.prefix == '/' {
                     assert!(label.contains("/help"));
-                } else {
+                }
+                {
                     assert!(label.starts_with(&format!("{COMPOSER_CHIP_PAD}{MENTION_ICON_SLOT}")));
                     let start = display.start + COMPOSER_CHIP_PAD.len();
                     let bounds =
                         input.bounds_for_display_range(start..start + MENTION_ICON_GLYPHS.len());
                     assert_eq!(bounds.len(), 1);
-                    assert!(bounds[0].size.width >= px(12.0));
+                    assert!((f32::from(bounds[0].size.width) - 16.0).abs() < 0.01);
+                    let label_start = marker_start + MENTION_ICON_SLOT.len();
+                    let label_bounds = input.bounds_for_display_range(label_start..content_end)[0];
+                    assert!(
+                        (f32::from(label_bounds.left() - bounds[0].right()) - 4.0).abs() < 0.01
+                    );
                     assert_eq!(input.projection.display_to_raw(start), mention.range.start);
                     assert_eq!(
                         input
