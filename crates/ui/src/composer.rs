@@ -868,6 +868,10 @@ const COMPOSER_CHIP_PAD: &str = "\u{00A0}\u{00A0}";
 const MENTION_ICON_GLYPHS: &str = "\u{2007}\u{2007}\u{2007}\u{2007}";
 const MENTION_ICON_SLOT: &str = "\u{2007}\u{2007}\u{2007}\u{2007}\u{202F}";
 const MENTION_ICON_SIZE: f32 = 14.0;
+const COMPOSER_CHIP_HEIGHT: f32 = 20.0;
+const COMPOSER_CHIP_TEXT_SIZE: f32 = 12.0;
+const COMPOSER_CHIP_RADIUS: f32 = 6.0;
+const COMPOSER_CHIP_ICON_GAP: f32 = 4.0;
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
 use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
@@ -3614,7 +3618,9 @@ impl ComposerInput {
                 if chip {
                     run.font = style.font();
                     run.font.weight = gpui::FontWeight::MEDIUM;
-                    run.color = style.color;
+                    // Keep the atomic source/caret geometry in the text layout;
+                    // paint the smaller label separately inside that footprint.
+                    run.color = gpui::transparent_black();
                 }
                 if !chip {
                     if face_depth[composer_markdown::Face::Bold as usize] > 0 {
@@ -4072,6 +4078,7 @@ struct ComposerTextPrepaint {
     cursor: Option<PaintQuad>,
     mention_quads: Vec<PaintQuad>,
     mention_icons: Vec<gpui::AnyElement>,
+    mention_labels: Vec<(Point<Pixels>, Pixels, gpui::ShapedLine)>,
     mention_hits: Vec<MentionHit>,
     selection_quads: Vec<PaintQuad>,
     /// Completion preview: window-space origin of the end-of-text caret plus
@@ -4155,13 +4162,98 @@ impl gpui::Element for ComposerTextElement {
         let origin = point(bounds.left() - px(input.scroll_left), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
         let caret_color = Theme::of(cx).caret;
-        // Reference chips are quiet controls, distinct from inline code.
-        let mention_color = crate::theme::ink(0.055);
+        // The composer already supplies backdrop blur. Use the shared glass
+        // chip tint and inset edge without stacking another blur per reference.
+        let theme = Theme::of(cx);
+        let mention_color: gpui::Background = if theme.is_frost() {
+            let (top, bottom) = match theme.appearance {
+                crate::theme::Appearance::Light => (0.32, 0.08),
+                crate::theme::Appearance::Dark => (0.09, 0.025),
+            };
+            gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 1.0, top), 0.0),
+                gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 1.0, bottom), 1.0),
+            )
+            .into()
+        } else {
+            crate::theme::card_selected_bg().into()
+        };
 
         let mut mention_quads = Vec::new();
+        let mut mention_labels = Vec::new();
         let mut mention_hits = Vec::new();
         let mut icon_specs = Vec::new();
         for (mention, display) in &input.projection.mentions {
+            let chip_rows = input.bounds_for_display_range(display.clone());
+            let mut balanced_icon_x = None;
+            let label_start = display.start
+                + COMPOSER_CHIP_PAD.len()
+                + if mention.prefix == '/' {
+                    0
+                } else {
+                    MENTION_ICON_SLOT.len()
+                };
+            let label_end = display.end - COMPOSER_CHIP_PAD.len();
+            // Split only when an individual chip exceeds the whole viewport.
+            // The projected text still owns wrapping, selection and IME mapping.
+            let label_rows = input.bounds_for_display_range(label_start..label_end);
+            let mut label_at = label_start;
+            for (row, label_bounds) in label_rows.iter().enumerate() {
+                let fragment_end = if row + 1 == label_rows.len() {
+                    label_end
+                } else {
+                    input.projection.display[label_at..label_end]
+                        .char_indices()
+                        .find_map(|(offset, ch)| {
+                            let at = label_at + offset;
+                            input
+                                .bounds_for_display_range(at..at + ch.len_utf8())
+                                .first()
+                                .filter(|bounds| bounds.top() != label_bounds.top())
+                                .map(|_| at)
+                        })
+                        .unwrap_or(label_end)
+                };
+                let style = window.text_style();
+                let mut font = style.font();
+                font.weight = gpui::FontWeight::MEDIUM;
+                let label: SharedString = input.projection.display[label_at..fragment_end]
+                    .to_owned()
+                    .into();
+                let line = window.text_system().shape_line(
+                    label.clone(),
+                    style.font_size.to_pixels(window.rem_size())
+                        * (COMPOSER_CHIP_TEXT_SIZE / INPUT_TEXT_SIZE),
+                    &[TextRun {
+                        len: label.len(),
+                        font,
+                        color: style.color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+                let mut label_x =
+                    label_bounds.left() + (label_bounds.size.width - line.width).max(px(0.0)) / 2.0;
+                if mention.prefix != '/' && label_rows.len() == 1 && chip_rows.len() == 1 {
+                    // Center the visible icon + gap + label as one group. The
+                    // invisible text slot is wider than the smaller label, so
+                    // centering each independently leaves an oversized gap.
+                    let group_width = px(MENTION_ICON_SIZE + COMPOSER_CHIP_ICON_GAP) + line.width;
+                    let icon_x = chip_rows[0].left()
+                        + (chip_rows[0].size.width - group_width).max(px(0.0)) / 2.0;
+                    balanced_icon_x = Some(icon_x);
+                    label_x = icon_x + px(MENTION_ICON_SIZE + COMPOSER_CHIP_ICON_GAP);
+                }
+                mention_labels.push((
+                    point(origin.x + label_x, origin.y + label_bounds.top()),
+                    label_bounds.size.height,
+                    line,
+                ));
+                label_at = fragment_end;
+            }
             if mention.prefix != '/' {
                 let slot_start = display.start + COMPOSER_CHIP_PAD.len();
                 let slot_end = slot_start + MENTION_ICON_GLYPHS.len();
@@ -4169,7 +4261,10 @@ impl gpui::Element for ComposerTextElement {
                     let icon_size = px(MENTION_ICON_SIZE).min(slot.size.width);
                     let icon_bounds = Bounds::new(
                         point(
-                            origin.x + slot.left() + (slot.size.width - icon_size) / 2.0,
+                            origin.x
+                                + balanced_icon_x.unwrap_or_else(|| {
+                                    slot.left() + (slot.size.width - icon_size) / 2.0
+                                }),
                             origin.y + slot.top() + (slot.size.height - icon_size) / 2.0,
                         ),
                         size(icon_size, icon_size),
@@ -4187,25 +4282,26 @@ impl gpui::Element for ComposerTextElement {
                     if mention.is_dir { "/" } else { "" }
                 )),
             };
-            for local_bounds in input.bounds_for_display_range(display.clone()) {
+            for local_bounds in chip_rows {
                 let chip_bounds = Bounds::new(
                     point(
                         origin.x + local_bounds.origin.x,
                         origin.y
                             + local_bounds.origin.y
-                            + (local_bounds.size.height - px(20.0)).max(px(0.0)) / 2.0,
+                            + (local_bounds.size.height - px(COMPOSER_CHIP_HEIGHT)).max(px(0.0))
+                                / 2.0,
                     ),
                     size(
                         local_bounds.size.width,
-                        local_bounds.size.height.min(px(20.0)),
+                        local_bounds.size.height.min(px(COMPOSER_CHIP_HEIGHT)),
                     ),
                 );
                 mention_quads.push(quad(
                     chip_bounds,
-                    px(5.0),
-                    mention_color,
-                    px(1.0),
-                    crate::theme::hairline(0.075),
+                    px(COMPOSER_CHIP_RADIUS),
+                    mention_color.clone(),
+                    px(0.0),
+                    gpui::transparent_black(),
                     BorderStyle::default(),
                 ));
                 let above_anchor = chip_bounds.top() - px(MENTION_TOOLTIP_HEIGHT) - px(1.0);
@@ -4353,6 +4449,7 @@ impl gpui::Element for ComposerTextElement {
             cursor,
             mention_quads,
             mention_icons,
+            mention_labels,
             mention_hits,
             selection_quads,
             ghost,
@@ -4404,14 +4501,44 @@ impl gpui::Element for ComposerTextElement {
                 bounds: paint_bounds,
             }),
             |window| {
+                let mut chip_edges = crate::theme::glass_selected_shadows();
+                if Theme::of(cx).is_frost() {
+                    // A restrained perimeter plus a directional reflection
+                    // gives the transparent plate depth without a grey seat.
+                    chip_edges[0].color = chip_edges[0].color.opacity(0.65);
+                    chip_edges.push(gpui::BoxShadow {
+                        color: gpui::hsla(
+                            0.0,
+                            0.0,
+                            1.0,
+                            match Theme::of(cx).appearance {
+                                crate::theme::Appearance::Light => 0.45,
+                                crate::theme::Appearance::Dark => 0.13,
+                            },
+                        ),
+                        offset: point(px(0.0), px(1.0)),
+                        blur_radius: px(0.0),
+                        spread_radius: px(0.0),
+                        inset: true,
+                    });
+                }
                 for quad in prepaint.mention_quads.drain(..) {
+                    let chip_bounds = quad.bounds;
                     window.paint_quad(quad);
+                    window.paint_inset_shadows(
+                        chip_bounds,
+                        gpui::Corners::all(px(COMPOSER_CHIP_RADIUS)),
+                        &chip_edges,
+                    );
                 }
                 for quad in prepaint.selection_quads.drain(..) {
                     window.paint_quad(quad);
                 }
                 for icon in &mut prepaint.mention_icons {
                     icon.paint(window, cx);
+                }
+                for (origin, height, label) in &prepaint.mention_labels {
+                    let _ = label.paint(*origin, *height, gpui::TextAlign::Left, None, window, cx);
                 }
                 let mut y = bounds.top() - px(scroll);
                 for (line_ix, line) in lines.iter().enumerate() {
@@ -5042,6 +5169,9 @@ struct SlashState {
     active: Option<usize>,
     /// Harness the popup is showing commands for (cache key).
     harness: Option<HarnessId>,
+    /// Shared identity for the command and skill catalogs. Switching trigger
+    /// characters should not invalidate another catalog for the same provider.
+    catalog_context: String,
     context: String,
     skill: bool,
     supported: bool,
@@ -6583,6 +6713,12 @@ impl Composer {
             crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::Codex));
         let (token, skill, include_skills, commands_allowed) =
             completion_trigger(text, cursor, preferences);
+        if token.is_none() {
+            // Leaving a token must not replace the catalog identity with the
+            // idle (commands_allowed=false) context and evict the warm cache.
+            self.reset_slash(None, cx);
+            return;
+        }
         let selected_worktree = match self.pickers.read(cx).checkout_plan() {
             crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
             _ => None,
@@ -6606,10 +6742,13 @@ impl Composer {
                 params["targetDeviceId"] = device.into();
             }
         }
-        let context = format!(
-            "{}:{preferences:?}:{include_skills}:{commands_allowed}:{}:{params}",
-            if skill { "skill" } else { "command" },
+        let catalog_context = format!(
+            "{preferences:?}:{}:{params}",
             self.completion_connection_context(cx),
+        );
+        let context = format!(
+            "{}:{include_skills}:{commands_allowed}:{catalog_context}",
+            if skill { "skill" } else { "command" },
         );
         let context_changed = self.slash.context != context;
         if !context_changed
@@ -6629,8 +6768,13 @@ impl Composer {
             self.slash.request = self.slash.request.wrapping_add(1);
             self.slash_task = None;
             self.slash.loading = false;
-            self.slash_cache.clear();
+            if self.slash.catalog_context != catalog_context {
+                self.slash_cache.clear();
+            } else if self.slash.error.is_some() || !self.slash.supported {
+                self.slash_cache.remove(&self.slash.context);
+            }
         }
+        self.slash.catalog_context = catalog_context;
         self.slash.context = context.clone();
         self.slash.harness = harness;
         self.slash.skill = skill;
@@ -6640,14 +6784,6 @@ impl Composer {
         self.slash.token = token;
         if context_changed {
             self.slash.error = None;
-        }
-        if self.slash.token.is_none() {
-            self.slash.request = self.slash.request.wrapping_add(1);
-            self.slash_task = None;
-            self.slash.loading = false;
-            self.slash.active = None;
-            self.sync_mention_controls(cx);
-            return;
         }
         if harness.is_none() && !skill && commands_allowed {
             self.slash_cache.insert(
@@ -6689,6 +6825,8 @@ impl Composer {
                         .map_err(|e| RpcError::Failed(e.to_string()))
                 };
                 let skills = async {
+                    // Even separated slash menus need this metadata to exclude
+                    // provider commands that are actually skill aliases.
                     let value = engine
                         .client()
                         .call(methods::LIST_SKILLS, params.clone())
@@ -6836,6 +6974,9 @@ impl Composer {
             request,
             dismissed,
             harness: self.slash.harness,
+            catalog_context: self.slash.catalog_context.clone(),
+            context: self.slash.context.clone(),
+            supported: self.slash.supported,
             ..SlashState::default()
         };
         self.sync_mention_controls(cx);
@@ -11161,6 +11302,54 @@ mod tests {
             assert_eq!(visible_names(composer), current_names);
             assert_eq!(composer.slash.harness, Some(HarnessId::Opencode));
         });
+
+        // Acceptance, ordinary prose and changing trigger characters must all
+        // retain catalogs scoped to this same device/harness/checkout.
+        composer.update(cx, |composer, cx| composer.update_slash("$", 1, cx));
+        cx.run_until_parked();
+        let mut skill_requests = Vec::new();
+        while let Ok(frame) = requests.try_recv() {
+            let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            if matches!(
+                frame.method.as_deref(),
+                Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
+            ) {
+                assert_eq!(frame.method.as_deref(), Some(methods::LIST_SKILLS));
+                skill_requests.push(frame);
+            }
+        }
+        assert_eq!(skill_requests.len(), 1);
+        respond(skill_requests, "current");
+        cx.run_until_parked();
+        for token in ["$", "/", "$", "/"] {
+            composer.update(cx, |composer, cx| {
+                composer.reset_slash(None, cx);
+                composer.update_slash("ordinary prose ", 15, cx);
+                composer.update_slash(token, token.len(), cx);
+                assert!(
+                    !composer.slash.loading,
+                    "warm {token} must not show a skeleton"
+                );
+                let names = visible_names(composer);
+                assert!(names.iter().any(|name| name
+                    == if token == "$" {
+                        "current-skill"
+                    } else {
+                        "current-command"
+                    }));
+            });
+            cx.run_until_parked();
+            while let Ok(frame) = requests.try_recv() {
+                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                assert!(
+                    !matches!(
+                        frame.method.as_deref(),
+                        Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
+                    ),
+                    "warm completion reissued discovery"
+                );
+            }
+        }
     }
 
     #[gpui::test]

@@ -875,6 +875,7 @@ pub struct AcpHarness {
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
     /// Retain successful catalogs per credential/binary context through outages.
     models_cache: crate::catalog::Catalog,
+    workspace_commands: crate::skills::CommandDiscovery,
     devin_models: devin_models::Catalog,
 }
 
@@ -893,6 +894,7 @@ impl AcpHarness {
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
             models_cache: crate::catalog::Catalog::default(),
+            workspace_commands: crate::skills::CommandDiscovery::default(),
             devin_models: devin_models::Catalog::default(),
         }
     }
@@ -1808,8 +1810,11 @@ impl Harness for AcpHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
-        let mut skills = crate::skills::discover(self.id(), cwd).await?;
-        let commands = self.discover_commands(Some(cwd)).await?;
+        let (mut skills, commands) = tokio::try_join!(
+            crate::skills::discover(self.id(), cwd),
+            self.workspace_commands
+                .get(cwd, self.discover_commands(Some(cwd))),
+        )?;
         crate::skills::attach_advertised_commands(self.id(), &mut skills, &commands);
         Ok(Some(skills))
     }
@@ -1836,7 +1841,10 @@ impl Harness for AcpHarness {
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
-        let discovered = self.discover_commands(Some(cwd)).await;
+        let discovered = self
+            .workspace_commands
+            .get(cwd, self.discover_commands(Some(cwd)))
+            .await;
         let skills = skill_commands(&(self.spec.skill_dirs)());
         let mut commands = match discovered {
             Ok(commands) => commands,

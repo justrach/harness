@@ -7,6 +7,37 @@ use std::{
 };
 use zeron_proto::{HarnessId, invocation::Skill};
 
+/// Commands and skill metadata both need the provider's advertised catalog.
+/// Share an overlapping probe, but refresh on a later open so provider account,
+/// plugin and workspace changes are not hidden behind a persistent host cache.
+#[derive(Default)]
+pub(crate) struct CommandDiscovery {
+    latest:
+        tokio::sync::Mutex<Option<(PathBuf, std::time::Instant, Vec<zeron_proto::SlashCommand>)>>,
+}
+
+impl CommandDiscovery {
+    pub(crate) async fn get(
+        &self,
+        cwd: &Path,
+        discover: impl std::future::Future<
+            Output = Result<Vec<zeron_proto::SlashCommand>, HarnessError>,
+        >,
+    ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+        let requested = std::time::Instant::now();
+        let mut latest = self.latest.lock().await;
+        if let Some((root, completed, commands)) = latest.as_ref()
+            && root == cwd
+            && *completed >= requested
+        {
+            return Ok(commands.clone());
+        }
+        let commands = discover.await?;
+        *latest = Some((cwd.to_owned(), std::time::Instant::now(), commands.clone()));
+        Ok(commands)
+    }
+}
+
 pub(crate) async fn discover(harness: HarnessId, cwd: &Path) -> Result<Vec<Skill>, HarnessError> {
     let cwd = cwd.to_path_buf();
     let home = crate::executable::home_or_current_dir();
@@ -327,6 +358,51 @@ fn read_skill(path: &Path) -> Result<Option<Skill>, HarnessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_discovery_shares_overlap_but_refreshes_later_and_other_roots() {
+        let discovery = CommandDiscovery::default();
+        let probes = std::cell::Cell::new(0);
+        let probe = || async {
+            probes.set(probes.get() + 1);
+            tokio::task::yield_now().await;
+            Ok(vec![zeron_proto::SlashCommand {
+                name: format!("probe-{}", probes.get()),
+                description: String::new(),
+                input_hint: None,
+            }])
+        };
+        let root = Path::new("/workspace");
+        let (commands, skills) =
+            tokio::join!(discovery.get(root, probe()), discovery.get(root, probe()),);
+        assert_eq!(commands.unwrap()[0].name, skills.unwrap()[0].name);
+        assert_eq!(
+            probes.get(),
+            1,
+            "overlapping callers share one provider process"
+        );
+        assert_eq!(
+            discovery.get(root, probe()).await.unwrap()[0].name,
+            "probe-2"
+        );
+        let (a, b) = tokio::join!(
+            discovery.get(root, probe()),
+            discovery.get(Path::new("/other-workspace"), probe()),
+        );
+        assert_ne!(a.unwrap()[0].name, b.unwrap()[0].name);
+        assert_eq!(probes.get(), 4);
+        assert!(
+            discovery
+                .get(root, async { Err(HarnessError::Protocol("retry".into())) })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            discovery.get(root, probe()).await.unwrap()[0].name,
+            "probe-5"
+        );
+    }
+
     fn write(root: &Path, relative: &str, body: &str) -> PathBuf {
         let path = root.join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

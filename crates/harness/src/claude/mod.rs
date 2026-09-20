@@ -94,6 +94,7 @@ pub struct ClaudeHarness {
     kill_grace: Duration,
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
+    workspace_commands: crate::skills::CommandDiscovery,
 }
 
 impl Default for ClaudeHarness {
@@ -104,6 +105,7 @@ impl Default for ClaudeHarness {
             kill_grace: Duration::from_secs(3),
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
+            workspace_commands: crate::skills::CommandDiscovery::default(),
         }
     }
 }
@@ -434,7 +436,8 @@ impl Harness for ClaudeHarness {
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
         let (skills, commands) = tokio::try_join!(
             crate::skills::discover(self.id(), cwd),
-            self.discover_commands(Some(cwd))
+            self.workspace_commands
+                .get(cwd, self.discover_commands(Some(cwd)))
         )?;
         // The native advertised catalog controls availability (including plugin
         // enablement and skillOverrides). Shared Agent Skills can use file delivery.
@@ -471,7 +474,9 @@ impl Harness for ClaudeHarness {
     }
 
     async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.discover_commands(Some(cwd)).await
+        self.workspace_commands
+            .get(cwd, self.discover_commands(Some(cwd)))
+            .await
     }
 
     async fn run(
