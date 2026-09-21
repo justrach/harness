@@ -18,7 +18,11 @@ for line in sys.stdin:
     frame = json.loads(line)
     method = frame.get("method")
     ident = frame.get("id")
-    if method == "initialize":
+    if method is None and ident == 900:
+        assert frame["result"]["outcome"]["outcome"] == "cancelled", frame
+        update("foreign permission rejected")
+        emit({"id": pending, "result": {"stopReason": "end_turn"}})
+    elif method == "initialize":
         emit({"id": ident, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     elif method == "session/new":
         for index in range(40):
@@ -34,6 +38,16 @@ for line in sys.stdin:
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
+        if prompt == "foreign":
+            pending = ident
+            emit({"method": "_x.ai/session/prompt_complete", "params": {"sessionId": "child", "stopReason": "end_turn"}})
+            emit({"method": "_x.ai/session_notification", "params": {"sessionId": "child", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "foreign"}}}})
+            emit({"method": "session/update", "params": {"sessionId": "child", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "foreign"}}}})
+            emit({"id": 900, "method": "session/request_permission", "params": {"sessionId": "child", "options": [
+                {"optionId": "allow", "kind": "allow_once", "name": "Allow"}]}})
+            continue
         if prompt == "frames":
             print("diagnostic noise", flush=True)
             for noise in [None, 42, [], "plain", {"unrelated": True}]:

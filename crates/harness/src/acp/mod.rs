@@ -2411,7 +2411,12 @@ fn handle_server_request_live(
     method: &str,
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
+    session_id: &str,
 ) -> Vec<AgentEvent> {
+    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != session_id) {
+        client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+        return Vec::new();
+    }
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
@@ -2656,7 +2661,13 @@ async fn request_draining(
     let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
-            handle_server_request(client, id, &method, &params);
+            if method == "session/request_permission"
+                && params.get("sessionId").and_then(Value::as_str) != requested_session.as_deref()
+            {
+                client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+            } else {
+                handle_server_request(client, id, &method, &params);
+            }
         }
         Incoming::Notification { method, params }
             if loading_session && method == "session/update"
@@ -3252,6 +3263,7 @@ async fn run_session(session: Session) {
                                 &method,
                                 &params,
                                 &request_input,
+                                &session_id,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3345,6 +3357,9 @@ async fn run_session(session: Session) {
 
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                    if params.get("sessionId").and_then(Value::as_str).is_some_and(|id| id != session_id) {
+                        continue;
+                    }
                     last_update_at = tokio::time::Instant::now();
                     // Wire traffic is a sign of life for the prompt-stall
                     // watchdog — EXCEPT session boilerplate: opencode emits
@@ -3427,6 +3442,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         &request_input,
+                        &session_id,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -3536,6 +3552,7 @@ async fn run_session(session: Session) {
                                         &method,
                                         &params,
                                         &request_input,
+                                &session_id,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;

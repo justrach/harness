@@ -1629,3 +1629,19 @@ async fn queued_updates_are_drained_before_completion_under_backpressure() {
     assert!(completed);
     assert_eq!(done, 1);
 }
+
+#[tokio::test]
+async fn foreign_notifications_and_permissions_cannot_affect_parent_turn() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("foreign");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let events = run_to_end(&robust_harness(), req, ctl).await;
+    let text: String = events.iter().filter_map(|event| match event {
+        AgentEvent::TextDelta { text } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(text, "foreign permission rejected");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
