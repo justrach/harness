@@ -34,6 +34,7 @@ struct FakeOpencode {
     /// Recorded `(path, body)` of every POST.
     posts: Arc<Mutex<Vec<(String, Value)>>>,
     providers: Arc<Mutex<Value>>,
+    statuses: Arc<Mutex<serde_json::Map<String, Value>>>,
     /// Whether an SSE subscriber existed when the FIRST prompt_async landed
     /// (the no-replay bus makes prompting before the subscription a real
     /// event-loss race — observed live on fast-failing turns).
@@ -54,6 +55,7 @@ impl FakeOpencode {
             backlog: Arc::new(Mutex::new(Vec::new())),
             posts: Arc::new(Mutex::new(Vec::new())),
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
+            statuses: Arc::default(),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
         };
@@ -73,6 +75,14 @@ impl FakeOpencode {
     /// Push one bus event (the driver accepts both the bare and the
     /// `/global/event` envelope; the fake uses the enveloped form).
     fn emit(&self, payload: Value) {
+        if payload["type"] == "session.status"
+            && let Some(id) = payload["properties"]["sessionID"].as_str()
+        {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), payload["properties"]["status"].clone());
+        }
         let framed = format!(
             "data: {}\n\n",
             json!({ "directory": "/", "payload": payload })
@@ -221,6 +231,10 @@ impl FakeOpencode {
                     ("200 OK", json!({ "id": "ses_test" }))
                 }
             }
+            ("GET", "/session/status") => (
+                "200 OK",
+                Value::Object(self.statuses.lock().unwrap().clone()),
+            ),
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
@@ -932,13 +946,14 @@ async fn models_discover_from_the_provider_catalog() {
     let models = harness.models().await.expect("models");
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "opencode/big-pickle");
+    assert!(models[0].options.is_empty(), "v1 must not advertise agents");
     // Commands were primed off the same probe.
     let commands = harness.commands().await.expect("commands");
     assert_eq!(commands[0].name, "init");
 }
 
 #[tokio::test]
-async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
+async fn models_keep_large_catalog_on_empty_response_and_recover() {
     let fake = FakeOpencode::start().await;
     let harness = harness(&fake);
     let models: serde_json::Map<String, Value> = (0..512)
@@ -952,9 +967,14 @@ async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
     assert_eq!(harness.models().await.unwrap().len(), 512);
 
     fake.set_providers(json!({"all": [], "connected": []}));
+    // An empty response without a credential-context change is a failed probe,
+    // so the last successful catalog remains available.
+    let retained = harness.models().await.unwrap();
+    assert_eq!(retained.len(), 512);
     assert!(
-        harness.models().await.is_err(),
-        "must not return the old account's catalog"
+        retained
+            .iter()
+            .all(|model| model.id.starts_with("provider/"))
     );
 
     fake.set_providers(json!({

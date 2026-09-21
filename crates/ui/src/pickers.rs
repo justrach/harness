@@ -165,6 +165,14 @@ pub fn default_model(models: &[Model]) -> Option<&Model> {
     models.first()
 }
 
+/// An explicit selection never silently becomes a different model after refresh.
+fn selected_catalog_model<'a>(models: &'a [Model], selected: Option<&str>) -> Option<&'a Model> {
+    match selected {
+        Some(id) => models.iter().find(|model| model.id == id),
+        None => default_model(models),
+    }
+}
+
 /// A model's default reasoning: X-High when the ladder offers it (zeron
 /// `DEFAULT_REASONING = "xhigh"`), else High, else the ladder's first entry.
 /// `None` only for ladder-less models (e.g. Haiku's thinking toggle instead).
@@ -428,6 +436,7 @@ struct ModelRowsKey {
     effective: Option<HarnessId>,
     locked: bool,
     catalog_rev: u64,
+    selected: Option<String>,
 }
 
 /// One row of the model list: the model plus the harness it belongs to —
@@ -438,6 +447,7 @@ struct ModelRowData {
     harness: HarnessId,
     harness_name: SharedString,
     model: Model,
+    selected_only: bool,
 }
 
 /// Which picker popover is open.
@@ -515,6 +525,7 @@ pub struct Pickers {
     setting_scroll: gpui::ScrollHandle,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    model_refresh_errors: HashMap<HarnessId, String>,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -642,6 +653,7 @@ impl Pickers {
                 // a space switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
+                this.model_refresh_errors.clear();
                 this.catalog_rev += 1;
             }
             cx.notify();
@@ -701,6 +713,7 @@ impl Pickers {
             setting_scroll: gpui::ScrollHandle::new(),
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            model_refresh_errors: HashMap::new(),
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -825,19 +838,32 @@ impl Pickers {
         clamp_reasoning(explicit, &self.trait_ladder(cx))
     }
 
-    /// The selected model — concrete from the moment the list loads: the
-    /// effective id when the list still offers it, else the harness default
-    /// (first row). Never `None` with a non-empty catalog.
+    /// Only an implicit selection follows the harness default. An explicit ID
+    /// absent from the live catalog keeps its identity and remembered chip label.
     fn selected_model<'a>(&'a self, cx: &'a App) -> Option<&'a Model> {
         let harness = self.effective_harness(cx)?;
         let models = self.models.get(&harness)?.ready()?;
-        match self.effective_model_id(cx) {
-            Some(id) => models
-                .iter()
-                .find(|m| m.id == id)
-                .or_else(|| default_model(models)),
-            None => default_model(models),
-        }
+        selected_catalog_model(models, self.effective_model_id(cx))
+    }
+
+    fn selected_model_label(&self, cx: &App) -> Option<String> {
+        self.selected_model(cx)
+            .map(|model| model.label.clone())
+            .or_else(|| {
+                let remembered = self
+                    .effective_harness(cx)
+                    .and_then(|h| self.defaults.model_for(h));
+                match self.effective_model_id(cx) {
+                    Some(id) => Some(
+                        remembered
+                            .filter(|m| m.id == id)
+                            .map(|m| m.label.clone())
+                            .or_else(|| self.defaults.label_for(id).map(str::to_owned))
+                            .unwrap_or_else(|| id.to_owned()),
+                    ),
+                    None => remembered.map(|m| m.label.clone()),
+                }
+            })
     }
 
     /// The explicit (non-default) option picks: the chat's persisted
@@ -1193,7 +1219,7 @@ impl Pickers {
             self.catalog_rev += 1;
         }
         cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({ "harness": harness });
+            let mut params = serde_json::json!({ "harness": harness, "force": force });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
                 object.insert(
                     "targetDeviceId".into(),
@@ -1245,29 +1271,50 @@ impl Pickers {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
-                if let Loadable::Ready(models) = &loaded {
-                    let fresh = pickers
-                        .defaults
-                        .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-                    if fresh {
-                        pickers.save_defaults();
-                    }
-                }
-                pickers.models.insert(harness, loaded);
-                pickers.catalog_rev += 1;
-                // A list that landed while its popover is open re-anchors the
-                // keyboard highlight onto the selected row (it sat at 0 while
-                // loading).
-                if pickers.open_kind() == Some(PickerKind::HarnessModel)
-                    && pickers.effective_harness(cx) == Some(harness)
-                {
-                    pickers.active = pickers.selected_model_index(cx);
-                }
-                cx.notify();
+                pickers.apply_model_catalog(harness, loaded, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn apply_model_catalog(
+        &mut self,
+        harness: HarnessId,
+        loaded: Loadable<Vec<Model>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Loadable::Error(error) = &loaded {
+            self.model_refresh_errors.insert(harness, error.clone());
+        } else {
+            self.model_refresh_errors.remove(&harness);
+        }
+        if let Loadable::Error(error) = &loaded
+            && matches!(self.models.get(&harness), Some(Loadable::Ready(_)))
+        {
+            tracing::warn!(%error, ?harness, "Model refresh failed; retaining visible rows");
+            cx.notify();
+            return;
+        }
+        if let Loadable::Ready(models) = &loaded {
+            let fresh = self
+                .defaults
+                .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+            if fresh {
+                self.save_defaults();
+            }
+        }
+        self.models.insert(harness, loaded);
+        self.catalog_rev += 1;
+        // A list that landed while its popover is open re-anchors the
+        // keyboard highlight onto the selected row (it sat at 0 while
+        // loading).
+        if self.open_kind() == Some(PickerKind::HarnessModel)
+            && self.effective_harness(cx) == Some(harness)
+        {
+            self.active = self.selected_model_index(cx);
+        }
+        cx.notify();
     }
 
     /// ListRefs for the selected SPACE's folder — targeted at the space's
@@ -1640,7 +1687,7 @@ impl Pickers {
         let mut descriptors = offered_harnesses(list);
         if let Some(effective) = self.effective_harness(cx)
             && !descriptors.iter().any(|d| d.id == effective)
-            && let Some(descriptor) = list.iter().find(|d| d.id == effective)
+            && let Some(descriptor) = list.iter().find(|d| d.id == effective && d.installed)
         {
             descriptors.insert(0, descriptor.clone());
         }
@@ -1664,6 +1711,7 @@ impl Pickers {
             effective: self.effective_harness(cx),
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
+            selected: self.effective_model_id(cx).map(str::to_owned),
         };
         if let Some((cached_key, rows)) = self.model_rows_cache.borrow().as_ref()
             && *cached_key == key
@@ -1690,7 +1738,7 @@ impl Pickers {
             .map(|f| (f.harness, f.model.as_str()))
             .collect();
         let query = self.search.read(cx).text().trim().to_string();
-        scoped_model_rows(
+        let mut rows = scoped_model_rows(
             &query,
             self.model_rail,
             effective,
@@ -1702,19 +1750,61 @@ impl Pickers {
                     .map(|models| models.as_slice())
             },
             |harness, model| favorites.contains(&(harness, model)),
-        )
+        );
+        // This row belongs only to the current selection. It is never merged
+        // into the fresh catalog or made available as a new choice elsewhere.
+        if self.model_rail == ModelRail::Harness
+            && let Some(harness) = effective
+            && let Some(id) = self.effective_model_id(cx)
+            && self
+                .models
+                .get(&harness)
+                .and_then(Loadable::ready)
+                .is_some_and(|models| !models.iter().any(|m| m.id == id))
+            && let Some(descriptor) = descriptors.iter().find(|d| d.id == harness)
+        {
+            let label = self
+                .selected_model_label(cx)
+                .unwrap_or_else(|| id.to_owned());
+            let query = query.to_lowercase();
+            if query.is_empty()
+                || id.to_lowercase().contains(&query)
+                || label.to_lowercase().contains(&query)
+            {
+                rows.insert(
+                    0,
+                    ModelRowData {
+                        harness,
+                        harness_name: descriptor.name.clone().into(),
+                        selected_only: true,
+                        model: Model {
+                            id: id.into(),
+                            label,
+                            description: Some(
+                                "Selected in this chat; absent from the current model list".into(),
+                            ),
+                            reasoning_levels: vec![],
+                            options: vec![],
+                        },
+                    },
+                );
+            }
+        }
+        rows
     }
 
     /// The row the keyboard-nav highlight starts on: the resolved selected
     /// model's index in the VISIBLE rows (the favorites/search views may not
     /// contain it — then 0), 0 while the list is loading.
     fn selected_model_index(&self, cx: &App) -> usize {
-        let selected = self.selected_model(cx).map(|m| m.id.clone());
+        let selected = self
+            .effective_model_id(cx)
+            .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()));
         let effective = self.effective_harness(cx);
         self.model_rows(cx)
             .iter()
             .position(|row| {
-                Some(row.harness) == effective && selected.as_deref() == Some(row.model.id.as_str())
+                Some(row.harness) == effective && selected == Some(row.model.id.as_str())
             })
             .unwrap_or(0)
     }
@@ -1744,6 +1834,9 @@ impl Pickers {
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
             return;
         };
+        if row.selected_only {
+            return;
+        }
         if self.effective_harness(cx) != Some(row.harness) {
             if self.harness_locked(cx) {
                 return;
@@ -2966,6 +3059,7 @@ impl Pickers {
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
+                            this.model_refresh_errors.clear();
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
@@ -3499,6 +3593,20 @@ impl Pickers {
             }
         };
 
+        let refresh_error = effective
+            .and_then(|harness| self.model_refresh_errors.get(&harness))
+            .filter(|_| !rows.is_empty())
+            .cloned()
+            .map(|message| {
+                self.retry_row(
+                    "model-refresh-retry",
+                    &message,
+                    PickerKind::HarnessModel,
+                    &theme,
+                    cx,
+                )
+            });
+
         let model_scrollbar = popover::rail(self, "model-scrollbar", &theme, cx);
         let list_host = div()
             .id("model-list-scroll-host")
@@ -3555,6 +3663,7 @@ impl Pickers {
             .flex_col()
             .child(tabs)
             .child(search_row)
+            .children(refresh_error)
             .child(list_host)
             .children(tray)
             .into_any_element()
@@ -3573,7 +3682,10 @@ impl Pickers {
         let theme = Theme::of(cx).for_popup();
         let effective = self.effective_harness(cx);
         let is_selected = Some(row.harness) == effective
-            && self.selected_model(cx).map(|m| m.id.as_str()) == Some(row.model.id.as_str());
+            && self
+                .effective_model_id(cx)
+                .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()))
+                == Some(row.model.id.as_str());
         let is_active = ix == self.active;
         let is_fav = self.defaults.is_favorite(row.harness, &row.model.id);
         let (icon_path, tint) = harness_brand_icon(row.harness);
@@ -4192,6 +4304,7 @@ fn scoped_model_rows<'a>(
         harness: descriptor.id,
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
+        selected_only: false,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
@@ -4570,22 +4683,7 @@ impl Render for Pickers {
         let model_label: SharedString = if no_agents {
             SharedString::from("No agents available")
         } else {
-            let loaded = self.selected_model(cx).map(|m| m.label.clone());
-            let label = loaded.or_else(|| {
-                let remembered = self
-                    .effective_harness(cx)
-                    .and_then(|h| self.defaults.model_for(h));
-                match self.effective_model_id(cx) {
-                    Some(id) => Some(
-                        remembered
-                            .filter(|m| m.id == id)
-                            .map(|m| m.label.clone())
-                            .or_else(|| self.defaults.label_for(id).map(str::to_string))
-                            .unwrap_or_else(|| id.to_string()),
-                    ),
-                    None => remembered.map(|m| m.label.clone()),
-                }
-            });
+            let label = self.selected_model_label(cx);
             label.map(SharedString::from).unwrap_or_default()
         };
         let catalog_loading = matches!(self.harnesses, Loadable::Idle | Loadable::Loading);
@@ -4776,6 +4874,155 @@ mod tests {
                 .child(div().track_focus(&self.neutral))
                 .child(self.pickers.clone())
         }
+    }
+
+    #[gpui::test]
+    fn saved_model_survives_a_fresh_catalog_without_becoming_a_new_choice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        for had_disk_catalog in [false, true] {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats.push(serde_json::from_value(serde_json::json!({
+                    "id":"saved-chat", "deviceId":"device", "archived":false, "createdAt":"2026-09-01T00:00:00Z",
+                    "config":{"harness":"codex", "model":"saved-model", "reasoning":"high", "sandbox":"workspace-write", "modelOptions":{"serviceTier":"fast"}}
+                })).unwrap());
+                state.selected_chat = Some("saved-chat".into()); state
+            });
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                pickers.defaults = ComposerDefaults::default();
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+                if had_disk_catalog {
+                    pickers.apply_model_catalog(
+                        HarnessId::Codex,
+                        Loadable::Ready(vec![bare_model("saved-model", "Remembered model")]),
+                        cx,
+                    );
+                }
+                pickers.apply_model_catalog(
+                    HarnessId::Codex,
+                    Loadable::Ready(vec![bare_model("fresh-default", "Fresh default")]),
+                    cx,
+                );
+                assert_eq!(pickers.resolved(cx).model.as_deref(), Some("saved-model"));
+                assert_eq!(pickers.resolved(cx).reasoning, Some(ReasoningLevel::High));
+                assert_eq!(pickers.resolved(cx).model_options["serviceTier"], "fast");
+                assert_eq!(
+                    pickers.selected_model_label(cx).as_deref(),
+                    Some(if had_disk_catalog {
+                        "Remembered model"
+                    } else {
+                        "saved-model"
+                    })
+                );
+                let rows = pickers.model_rows(cx);
+                assert_eq!(rows[0].model.id, "saved-model");
+                assert!(rows[0].selected_only);
+                assert_eq!(pickers.selected_model_index(cx), 0);
+                assert_eq!(pickers.models[&HarnessId::Codex].ready().unwrap().len(), 1);
+                pickers.activate_model_index(0, cx);
+                assert_eq!(pickers.resolved(cx).model.as_deref(), Some("saved-model"));
+                // Changing selection also invalidates the row cache; the
+                // unlisted ID does not remain available as a new choice.
+                pickers.config.model = Some("fresh-default".into());
+                let rows = pickers.model_rows(cx);
+                assert_eq!(rows.len(), 1);
+                assert!(!rows[0].selected_only);
+                assert_eq!(
+                    pickers.selected_model_label(cx).as_deref(),
+                    Some("Fresh default")
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn explicit_missing_model_does_not_resolve_to_the_catalog_default() {
+        let rows = vec![bare_model("first", "First")];
+        assert_eq!(selected_catalog_model(&rows, None).unwrap().id, "first");
+        assert!(selected_catalog_model(&rows, Some("saved")).is_none());
+    }
+
+    #[gpui::test]
+    fn missing_selected_harness_is_not_reintroduced_into_the_rail(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                pickers.config.harness = Some(HarnessId::Codex);
+                let mut missing = descriptor(HarnessId::Codex, "Codex");
+                missing.installed = false;
+                pickers.harnesses = Loadable::Ready(vec![missing]);
+                assert!(pickers.rail_descriptors(cx).is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn refresh_failure_keeps_rows_and_catalog_change_reanchors_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut pickers = Pickers::new(state, cx);
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.config.model = Some("chosen".into());
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers
+        });
+        handle
+            .update(cx, |pickers, window, cx| {
+                let rows = vec![bare_model("chosen", "Chosen"), bare_model("other", "Other")];
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(rows.clone()),
+                    cx,
+                );
+                pickers.open_model_menu(window, cx);
+                assert_eq!(pickers.active, 0);
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Error("refresh failed".into()),
+                    cx,
+                );
+                assert_eq!(
+                    pickers.models[&HarnessId::ClaudeCode],
+                    Loadable::Ready(rows.clone())
+                );
+                assert_eq!(
+                    pickers
+                        .model_refresh_errors
+                        .get(&HarnessId::ClaudeCode)
+                        .map(String::as_str),
+                    Some("refresh failed")
+                );
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(rows.into_iter().rev().collect()),
+                    cx,
+                );
+                assert_eq!(pickers.active, 1);
+                assert!(
+                    !pickers
+                        .model_refresh_errors
+                        .contains_key(&HarnessId::ClaudeCode)
+                );
+                pickers.apply_model_catalog(
+                    HarnessId::Codex,
+                    Loadable::Error("cold failure".into()),
+                    cx,
+                );
+                assert!(matches!(
+                    pickers.models[&HarnessId::Codex],
+                    Loadable::Error(_)
+                ));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -5569,6 +5816,7 @@ mod tests {
             id,
             name: name.into(),
             installed: true,
+            can_install: false,
             enabled: Some(true),
             reasoning_levels: Vec::new(),
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
@@ -6056,6 +6304,7 @@ mod tests {
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
+            can_install: false,
             enabled: None,
         };
         let mixed = vec![
@@ -6082,6 +6331,7 @@ mod tests {
             steering_mode: zeron_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
+            can_install: false,
             enabled,
         };
         let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
@@ -6134,6 +6384,7 @@ mod tests {
                 steering_mode: zeron_proto::SteeringMode::StepBoundary,
                 reasoning_levels: vec![],
                 installed,
+                can_install: false,
                 enabled,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed

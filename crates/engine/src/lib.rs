@@ -25,6 +25,7 @@ pub mod doc_host;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
+mod model_catalogs;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;

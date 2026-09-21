@@ -11794,6 +11794,7 @@ dependencies = [
  "zeron-rpc",
  "zeron-sync",
  "zeron-update",
+ "zip",
 ]
 
 [[package]]
@@ -11807,6 +11808,7 @@ dependencies = [
  "futures",
  "libc",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

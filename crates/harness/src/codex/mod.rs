@@ -104,6 +104,7 @@ pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessErr
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
+    models_cache: crate::catalog::Catalog,
     executable: Option<PathBuf>,
     /// Grace between `turn/interrupt` and SIGTERM.
     interrupt_grace: Duration,
@@ -117,6 +118,7 @@ pub struct CodexHarness {
 impl Default for CodexHarness {
     fn default() -> Self {
         Self {
+            models_cache: crate::catalog::Catalog::default(),
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -180,7 +182,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -233,7 +235,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -270,6 +272,9 @@ impl CodexHarness {
                     params["cursor"] = Value::String(cursor.to_owned());
                 }
                 let page = client.request("model/list", params).await?;
+                if legacy_model_page(&page) {
+                    tracing::warn!(binary_path = %exe.display(), binary_version = ?crate::executable::binary_version(&exe), "Model discovery response lacks hidden flags; CLI may be outdated");
+                }
                 let (page_models, next_cursor) = parse_model_list_page(&page);
                 for (model, is_default) in page_models {
                     if model_ids.insert(model.id.clone()) {
@@ -294,6 +299,13 @@ impl CodexHarness {
             {
                 let default_model = models.remove(index);
                 models.insert(0, default_model);
+            }
+            if models.is_empty() {
+                return Err(crate::CatalogFailure {
+                    code: crate::CatalogFailureCode::Failed,
+                    message: "Codex returned an empty model catalog".into(),
+                }
+                .into());
             }
             Ok::<Vec<Model>, HarnessError>(models)
         };
@@ -402,6 +414,14 @@ fn model_service_tier(item: &Value) -> Option<ModelOption> {
     })
 }
 
+fn legacy_model_page(page: &Value) -> bool {
+    page.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            !items.is_empty() && items.iter().all(|item| item.get("hidden").is_none())
+        })
+}
+
 /// Parse one `model/list` page. Unknown future reasoning levels are ignored
 /// independently instead of invalidating the complete catalog.
 fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>) {
@@ -437,6 +457,17 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
             .map(str::trim)
             .filter(|description| !description.is_empty())
             .map(str::to_owned);
+        let description = match item
+            .get("upgrade")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            Some(upgrade) => Some(format!(
+                "{}(upgrade: {upgrade})",
+                description.map(|d| format!("{d} ")).unwrap_or_default()
+            )),
+            None => description,
+        };
         let reasoning_levels = item
             .get("supportedReasoningEfforts")
             .and_then(Value::as_array)
@@ -548,19 +579,32 @@ impl Harness for CodexHarness {
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
-    /// discovery call is unavailable or temporarily fails; failed probes are
-    /// intentionally not cached so reopening the picker retries rollout state.
+    /// discovery call is unavailable and no last-good catalog exists. Explicit
+    /// picker refreshes bypass cooldowns while overlapping callers coalesce.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        static_models()
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with(
+                force,
+                || self.model_context().map(|c| c.unwrap().key()),
+                || self.discover_models(),
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => Ok(models),
-            Ok(_) => Ok(static_models()),
+        match self.model_catalog(false).await {
+            Ok(catalog) => Ok(catalog.models),
+            Err(error) if !crate::CatalogFailure::classify(&error).allows_stale() => Err(error),
             Err(error) => {
-                tracing::debug!(
-                    target: "zeron_harness::codex",
-                    "model/list discovery failed; using fallback catalog: {error}"
-                );
-                Ok(static_models())
+                tracing::warn!(%error, source = "static", "Model discovery failed");
+                Ok(self.fallback_models())
             }
         }
     }
@@ -628,7 +672,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -1678,6 +1722,24 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn current_schema_and_legacy_visibility_are_compatible() {
+        let page = json!({"data":[{"model":"current", "hidden":false, "isDefault":true,
+            "description":"Current model", "upgrade":"next", "upgradeInfo":{"retirementAt":"2026-12-01"},
+            "availabilityNux":{"message":"Available"}, "serviceTiers":["default","fast"],
+            "defaultServiceTier":"default", "inputModalities":["text","image"]}], "nextCursor":"next-page"});
+        let (models, next) = parse_model_list_page(&page);
+        assert_eq!(
+            models[0].0.description.as_deref(),
+            Some("Current model (upgrade: next)")
+        );
+        assert!(models[0].1);
+        assert_eq!(next.as_deref(), Some("next-page"));
+        assert!(!legacy_model_page(&page));
+        assert!(legacy_model_page(&json!({"data":[{"model":"old"}]})));
+        assert!(!legacy_model_page(&json!({"data":[]})));
+    }
 
     #[test]
     fn approval_questions_are_yes_no() {

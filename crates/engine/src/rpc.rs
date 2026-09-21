@@ -92,6 +92,8 @@ struct ChatParams {
 #[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,29 +103,11 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
-async fn update_harness_enabled<F>(
+async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
     enabled: bool,
-    sign_out: F,
-) -> Result<(), RpcError>
-where
-    F: std::future::Future<Output = Result<(), zeron_harness::HarnessError>>,
-{
-    let enabled_harnesses = registry.enabled_set();
-    let was_enabled = enabled_harnesses.contains(&harness);
-    if was_enabled && !enabled && harness == HarnessId::Antigravity {
-        if enabled_harnesses.len() == 1 {
-            return Err(RpcError::Failed(
-                "cannot disable the last enabled harness".into(),
-            ));
-        }
-        sign_out.await.map_err(|error| {
-            RpcError::Failed(format!(
-                "Antigravity sign-out failed; it remains enabled so you can retry: {error}"
-            ))
-        })?;
-    }
+) -> Result<(), RpcError> {
     registry
         .set_enabled(harness, enabled)
         .map_err(RpcError::Failed)
@@ -1003,13 +987,34 @@ fn should_invalidate_link(error: &RpcError) -> bool {
 /// (the composer's permanent "Sending…", 2026-08-18). Network-bound git and
 /// update methods get a long leash; worktree creation checks out a full tree;
 /// everything else is interactive and must fail fast.
+async fn install_harness_with<F, Fut>(
+    registry: &HarnessRegistry,
+    harness: HarnessId,
+    install: F,
+) -> Result<Vec<crate::registry::HarnessDescriptor>, RpcError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), zeron_harness::HarnessError>>,
+{
+    if !zeron_harness::acp::can_install(harness) {
+        return Err(RpcError::Failed("No archive is available for this harness on this device; set ANTIGRAVITY_ACP_EXECUTABLE for Antigravity".into()));
+    }
+    install()
+        .await
+        .map_err(|error| RpcError::Failed(error.to_string()))?;
+    Ok(registry.descriptors())
+}
+
 fn forward_deadline(method: &str) -> std::time::Duration {
     use std::time::Duration;
     match method {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
             Duration::from_secs(15 * 60)
         }
+        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Allow the adapter discovery budget plus relay and shutdown overhead.
+        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
     }
 }
@@ -1021,6 +1026,7 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::LIST_HARNESSES
+            | methods::INSTALL_HARNESS
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
             | methods::SET_HARNESS_ENABLED
@@ -1372,6 +1378,14 @@ impl RpcService for EngineRpc {
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
+            methods::INSTALL_HARNESS => {
+                let p: ListModelsParams = parse_params(params)?;
+                let descriptors = install_harness_with(&self.registry, p.harness, || {
+                    zeron_harness::acp::install_harness(p.harness)
+                })
+                .await?;
+                RpcReply::value(&descriptors)
+            }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;
@@ -1382,13 +1396,7 @@ impl RpcService for EngineRpc {
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
-                update_harness_enabled(
-                    &self.registry,
-                    p.harness,
-                    p.enabled,
-                    zeron_harness::AcpHarness::antigravity().sign_out(),
-                )
-                .await?;
+                update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
@@ -1399,8 +1407,7 @@ impl RpcService for EngineRpc {
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = harness
-                    .models()
+                let models = crate::model_catalogs::list(self.repos.data_dir(), harness, p.force)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
@@ -2713,6 +2720,117 @@ impl RpcService for EngineRpc {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn explicit_install_rpc_verifies_archive_and_refreshes_descriptors() {
+        use sha2::{Digest, Sha512};
+        use std::io::Write;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use zeron_harness::archive_install::{ArchivePin, ensure_installed, installed_entry};
+        if std::env::var_os("ZERON_INSTALL_RPC_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "rpc::tests::explicit_install_rpc_verifies_archive_and_refreshes_descriptors",
+                    "--nocapture",
+                ])
+                .env("ZERON_INSTALL_RPC_TEST", "1")
+                .env("ZERON_ADAPTERS_DIR", root.path())
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        if !zeron_harness::acp::can_install(HarnessId::Antigravity) {
+            return;
+        }
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("server", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let digest = Box::leak(format!("{:x}", Sha512::digest(&bytes)).into_boxed_str());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Box::leak(
+            format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            let mut buf = [0; 4096];
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buf).await.unwrap();
+                assert!(count > 0, "archive request closed before its headers");
+                headers.extend_from_slice(&buf[..count]);
+            }
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&bytes).await.unwrap();
+        });
+        let pin = ArchivePin {
+            name: "explicit-install-test",
+            version: "1",
+            url,
+            entry: "server",
+            sha512: digest,
+        };
+        let registry = HarnessRegistry::new();
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "id": "antigravity", "name": "Antigravity", "supportsSteering": true,
+            "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false
+        }))
+        .unwrap();
+        registry.register_lazy(
+            descriptor,
+            Box::new(move || installed_entry(&pin).is_some()),
+            Box::new(|| panic!("installation must not spawn the harness")),
+        );
+        assert!(!registry.descriptors()[0].installed);
+        let result = install_harness_with(&registry, HarnessId::Antigravity, || async {
+            ensure_installed(pin, "Test adapter").await.map(|_| ())
+        })
+        .await
+        .unwrap();
+        assert!(result[0].installed);
+        assert_eq!(result[0].enabled, Some(true));
+        assert!(result[0].can_install);
+        assert!(installed_entry(&pin).unwrap().is_file());
+        server.await.unwrap();
+        // The verified marker makes another explicit install idempotent, even
+        // after the archive server has stopped.
+        install_harness_with(&registry, HarnessId::Antigravity, || async {
+            ensure_installed(pin, "Test adapter").await.map(|_| ())
+        })
+        .await
+        .unwrap();
+        assert!(
+            install_harness_with(&registry, HarnessId::Codex, || async {
+                panic!("unsupported harness must not invoke an installer")
+            })
+            .await
+            .is_err()
+        );
+        assert!(forwardable(methods::INSTALL_HARNESS));
+        assert_eq!(
+            forward_deadline(methods::INSTALL_HARNESS),
+            std::time::Duration::from_secs(15 * 60)
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn local_opening_tail_arrives_before_full_mirror_and_keeps_all_history() {
         use crate::doc_host::{DocHost, DocHostConfig};
@@ -2796,7 +2914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn antigravity_sign_out_failure_stays_enabled_and_can_be_retried() {
+    async fn antigravity_disable_does_not_launch_the_server() {
         let registry = HarnessRegistry::new();
         let executable = std::env::current_exe().unwrap();
         registry.register(std::sync::Arc::new(
@@ -2807,29 +2925,24 @@ mod tests {
         ));
         registry.set_enabled(HarnessId::Antigravity, true).unwrap();
 
-        let error = update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
-            Err(zeron_harness::HarnessError::Protocol(
-                "logout rejected".into(),
-            ))
-        })
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(error, RpcError::Failed(ref message) if message.contains("remains enabled")),
-            "{error}"
-        );
-        assert!(registry.enabled_set().contains(&HarnessId::Antigravity));
-
-        update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
-            Ok::<(), zeron_harness::HarnessError>(())
-        })
-        .await
-        .unwrap();
+        update_harness_enabled(&registry, HarnessId::Antigravity, false)
+            .await
+            .unwrap();
         assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
     }
 
     /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
     /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
+    #[test]
+    fn list_models_force_is_optional_and_backward_compatible() {
+        let old: ListModelsParams =
+            serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap();
+        assert!(!old.force);
+        let forced: ListModelsParams =
+            serde_json::from_value(serde_json::json!({"harness":"codex","force":true})).unwrap();
+        assert!(forced.force);
+    }
+
     #[test]
     fn agent_account_params_accept_ui_shape() {
         let p: AgentAccountParams = parse_params(serde_json::json!({
@@ -2889,6 +3002,12 @@ mod tests {
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
     #[test]
     fn forward_deadlines_are_tiered_and_bounded() {
+        for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
+            assert_eq!(
+                forward_deadline(method),
+                std::time::Duration::from_secs(100)
+            );
+        }
         use std::time::Duration;
         assert_eq!(
             forward_deadline(methods::CREATE_WORKTREE),

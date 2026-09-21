@@ -35,6 +35,7 @@ pub use server::{serve_connection, serve_ws_listener};
 pub mod methods {
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
+    pub const INSTALL_HARNESS: &str = "InstallHarness";
     /// Flip a harness's enablement on the target device (Settings → Agents);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
