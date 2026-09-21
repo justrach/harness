@@ -275,6 +275,60 @@ pub(crate) fn describe_exit(status: Option<std::process::ExitStatus>) -> String 
     "unknown exit".into()
 }
 
+/// Remove recognizable credentials at the boundary where diagnostics become UI text.
+fn redact_secrets(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let markers = ["bearer ", "basic ", "sk-", "ghp_", "xox", "api_key="];
+    let mut result = String::new();
+    let mut offset = 0;
+    while let Some((start, marker)) = markers
+        .iter()
+        .filter_map(|marker| {
+            lower[offset..]
+                .find(marker)
+                .map(|at| (offset + at, *marker))
+        })
+        .min_by_key(|(at, _)| *at)
+    {
+        let credential = if marker.ends_with(' ') || marker.ends_with('=') {
+            start + marker.len()
+        } else {
+            start
+        };
+        let end = text[credential..]
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '\"' | '\'' | ',' | ';' | '&' | '<' | '>')
+            })
+            .map_or(text.len(), |at| credential + at);
+        result.push_str(&text[offset..credential]);
+        result.push_str("[REDACTED]");
+        // Empty credentials still advance past the marker.
+        offset = end.max(start + marker.len());
+    }
+    result.push_str(&text[offset..]);
+    result
+}
+
+#[cfg(test)]
+#[test]
+fn crash_diagnostics_redact_credentials_but_keep_context() {
+    let raw = "request failed: Bearer secret-one Basic secret-two sk-private ghp-private ghp_private xoxp-private api_key=private&code=401 café";
+    let clean = redact_secrets(raw);
+    assert_eq!(
+        clean,
+        "request failed: Bearer [REDACTED] Basic [REDACTED] [REDACTED] ghp-private [REDACTED] [REDACTED] api_key=[REDACTED]&code=401 café"
+    );
+    assert_eq!(
+        redact_secrets("Authorization: bEaReR token"),
+        "Authorization: bEaReR [REDACTED]"
+    );
+    let tail = StderrTail::default();
+    tail.push(raw);
+    let message = crash_message("agent", None, &tail);
+    assert!(message.ends_with(&clean));
+    assert!(!message.contains("secret-one"));
+}
+
 /// The full crash message: status plus the stderr tail when there is one.
 pub(crate) fn crash_message(
     name: &str,
@@ -283,7 +337,10 @@ pub(crate) fn crash_message(
 ) -> String {
     let status = describe_exit(status);
     match stderr.snapshot() {
-        Some(tail) => format!("{name} exited unexpectedly ({status}): {tail}"),
+        Some(tail) => format!(
+            "{name} exited unexpectedly ({status}): {}",
+            redact_secrets(&tail)
+        ),
         None => format!("{name} exited unexpectedly ({status})"),
     }
 }
