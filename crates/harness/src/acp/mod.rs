@@ -2799,8 +2799,8 @@ async fn run_session(session: Session) {
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
-        // first-class `models` state and requires `session/set_model`. Paseo
-        // follows the same split. Unlike the best-effort auxiliary options,
+        // first-class `models` state and requires `session/set_model`. Other
+        // ACP clients follow the same split. Unlike the best-effort auxiliary options,
         // an explicit model switch is strict: prompting with a different
         // model than the picker shows is worse than surfacing the RPC error.
         let requested_model: Option<String> = match request.model.as_deref() {
