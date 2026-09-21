@@ -62,6 +62,9 @@ use subagent_devin::DevinTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+// The one-file server unpacks on launch. A local cold probe took 1.903s, but
+// slower disks need substantially more headroom than the generic 10s budget.
+const ANTIGRAVITY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
     id: HarnessId,
@@ -710,11 +713,9 @@ fn antigravity_spec() -> AcpAgentSpec {
         npm_package: None,
         archive: antigravity_archive(),
         extra_paths: Vec::new,
-        cli_executable: "agy_acp_server",
-        cli_extra_paths: Vec::new,
-        install_hint: "agy_acp_server (zeron downloads Google's pinned Antigravity ACP \
-             server 1.1.1 on first use, but this platform has no published build; set \
-             ANTIGRAVITY_ACP_EXECUTABLE to a server binary to override)",
+        cli_executable: "agy",
+        cli_extra_paths: || npm_global_bins("agy"),
+        install_hint: "Install the agy CLI or set ANTIGRAVITY_ACP_EXECUTABLE to a server binary",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -747,9 +748,7 @@ fn antigravity_spec() -> AcpAgentSpec {
         // preserves any method already selected in antigravity's settings.
         auth_method: Some("oauth-personal"),
         skill_dirs: antigravity_skill_dirs,
-        // signing out belongs to the Settings toggle, which keeps enablement
-        // and the stored login in step
-        hidden_commands: &["logout"],
+        hidden_commands: &[],
     }
 }
 
@@ -905,6 +904,7 @@ impl AcpHarness {
     /// google antigravity over its acp server (`agy_acp_server`).
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
+            .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
@@ -1136,7 +1136,9 @@ impl AcpHarness {
     /// never waits on npm: it kicks the install in the background and errors
     /// out, so a picker open falls back to the static catalog instead of
     /// stalling for however long a 500MB dependency tree takes to land.
-    async fn resolve_program(
+    /// Resolve the server, optionally waiting for its managed installation.
+    #[doc(hidden)]
+    pub async fn resolve_program(
         &self,
         block_on_install: bool,
     ) -> Result<(PathBuf, Vec<String>), HarnessError> {
@@ -1226,6 +1228,9 @@ impl AcpHarness {
         }
         if self.spec.id == HarnessId::Antigravity {
             cmd.env("GEMINI_HOME", antigravity_paths::home()?);
+            // Python webbrowser accepts an executable template; never launch a browser here.
+            #[cfg(unix)]
+            cmd.env("BROWSER", "/usr/bin/true %s");
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1310,7 +1315,7 @@ impl AcpHarness {
             }
             Ok::<Vec<SlashCommand>, HarnessError>(commands)
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
         child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -1661,8 +1666,12 @@ impl Harness for AcpHarness {
         {
             return crate::executable::validate_native_override(&PathBuf::from(p)).is_ok();
         }
-        // a published server build is enough: signing in installs it
-        if self.spec.archive.is_some() {
+        if self
+            .spec
+            .archive
+            .as_ref()
+            .is_some_and(|pin| crate::archive_install::installed_entry(pin).is_some())
+        {
             return true;
         }
         find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
@@ -2417,7 +2426,7 @@ async fn new_session(
     match request_draining(client, incoming, "session/new", params).await {
         Err(error) if signs_in_from_settings && is_auth_required(&error) => {
             Err(HarnessError::Protocol(format!(
-                "{agent_name} isn't signed in. Turn it on again in Settings → Agents to sign in."
+                "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
             )))
         }
         other => other,
@@ -2723,6 +2732,11 @@ async fn run_session(session: Session) {
             load["sessionId"] = Value::String(resume.clone());
             match request_draining(&client, &mut incoming, "session/load", load).await {
                 Ok(resp) => (resume.clone(), resp),
+                Err(e) if auth_method.is_some() && is_auth_required(&e) => {
+                    return Err(HarnessError::Protocol(format!(
+                        "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
+                    )));
+                }
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
                     tracing::debug!(
@@ -3191,7 +3205,10 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                let (status, error) = stop_outcome(&res, interrupted);
+                let (status, mut error) = stop_outcome(&res, interrupted);
+                if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+                    error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+                }
                 done_current = true;
                 if interrupted {
                     done_after_interrupt = true;
@@ -3866,6 +3883,17 @@ mod tests {
         assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
         assert_eq!(pi.handshake_timeout, Duration::from_secs(120));
         assert!(pi.spec.prompt_stall.is_none());
+    }
+
+    #[test]
+    fn antigravity_discovery_budget_covers_cold_start_without_changing_handshake() {
+        let harness = AcpHarness::antigravity();
+        assert_eq!(harness.model_discovery_timeout, Duration::from_secs(90));
+        assert_eq!(harness.handshake_timeout, Duration::from_secs(120));
+        assert_eq!(
+            AcpHarness::grok().model_discovery_timeout,
+            Duration::from_secs(10)
+        );
     }
 
     fn all_antigravity_auth_methods() -> Value {

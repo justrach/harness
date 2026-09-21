@@ -414,9 +414,18 @@ async fn v2_execution_failure_and_interrupt_settle_the_turn() {
     assert_eq!(wire.done().await.0, DoneStatus::Interrupted);
 }
 
+async fn read_http_request_headers(socket: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        headers.push(socket.read_u8().await.unwrap());
+        assert!(headers.len() <= 8192, "unexpectedly large request headers");
+    }
+}
+
 #[tokio::test]
 async fn catalog_decodes_fragmented_http_without_retaining_unused_fields() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let body = json!({
@@ -426,7 +435,7 @@ async fn catalog_decodes_fragmented_http_without_retaining_unused_fields() {
     let expected: ProviderCatalog = serde_json::from_str(&body).unwrap();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        socket.read(&mut [0; 4096]).await.unwrap();
+        read_http_request_headers(&mut socket).await;
         socket
             .write_all(
                 format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
@@ -455,7 +464,7 @@ async fn cancelled_catalog_decode_releases_a_stalled_http_body() {
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        socket.read(&mut [0; 4096]).await.unwrap();
+        read_http_request_headers(&mut socket).await;
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n{")
             .await

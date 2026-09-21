@@ -101,29 +101,11 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
-async fn update_harness_enabled<F>(
+async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
     enabled: bool,
-    sign_out: F,
-) -> Result<(), RpcError>
-where
-    F: std::future::Future<Output = Result<(), zeron_harness::HarnessError>>,
-{
-    let enabled_harnesses = registry.enabled_set();
-    let was_enabled = enabled_harnesses.contains(&harness);
-    if was_enabled && !enabled && harness == HarnessId::Antigravity {
-        if enabled_harnesses.len() == 1 {
-            return Err(RpcError::Failed(
-                "cannot disable the last enabled harness".into(),
-            ));
-        }
-        sign_out.await.map_err(|error| {
-            RpcError::Failed(format!(
-                "Antigravity sign-out failed; it remains enabled so you can retry: {error}"
-            ))
-        })?;
-    }
+) -> Result<(), RpcError> {
     registry
         .set_enabled(harness, enabled)
         .map_err(RpcError::Failed)
@@ -1382,13 +1364,7 @@ impl RpcService for EngineRpc {
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
-                update_harness_enabled(
-                    &self.registry,
-                    p.harness,
-                    p.enabled,
-                    zeron_harness::AcpHarness::antigravity().sign_out(),
-                )
-                .await?;
+                update_harness_enabled(&self.registry, p.harness, p.enabled).await?;
                 // Fresh catalog in the reply: the page repaints from it in one
                 // round trip, and a refused/raced toggle self-corrects.
                 RpcReply::value(&self.registry.descriptors())
@@ -2796,7 +2772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn antigravity_sign_out_failure_stays_enabled_and_can_be_retried() {
+    async fn antigravity_disable_does_not_launch_the_server() {
         let registry = HarnessRegistry::new();
         let executable = std::env::current_exe().unwrap();
         registry.register(std::sync::Arc::new(
@@ -2807,24 +2783,9 @@ mod tests {
         ));
         registry.set_enabled(HarnessId::Antigravity, true).unwrap();
 
-        let error = update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
-            Err(zeron_harness::HarnessError::Protocol(
-                "logout rejected".into(),
-            ))
-        })
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(error, RpcError::Failed(ref message) if message.contains("remains enabled")),
-            "{error}"
-        );
-        assert!(registry.enabled_set().contains(&HarnessId::Antigravity));
-
-        update_harness_enabled(&registry, HarnessId::Antigravity, false, async {
-            Ok::<(), zeron_harness::HarnessError>(())
-        })
-        .await
-        .unwrap();
+        update_harness_enabled(&registry, HarnessId::Antigravity, false)
+            .await
+            .unwrap();
         assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
     }
 
