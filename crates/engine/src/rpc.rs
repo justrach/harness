@@ -2762,8 +2762,13 @@ mod tests {
         );
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
             let mut buf = [0; 4096];
-            socket.read(&mut buf).await.unwrap();
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buf).await.unwrap();
+                assert!(count > 0, "archive request closed before its headers");
+                headers.extend_from_slice(&buf[..count]);
+            }
             socket
                 .write_all(
                     format!(
