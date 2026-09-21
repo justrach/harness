@@ -269,6 +269,22 @@ async fn read_loop(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancel_notification_wire_has_no_id() {
+        let (writer, mut receiver) = mpsc::unbounded_channel();
+        let client = RpcClient {
+            next_id: Arc::new(AtomicI64::new(0)),
+            pending: Arc::default(),
+            writer,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        client.notify("session/cancel", Some(json!({"sessionId": "parent"})));
+        let frame: Value = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+        assert_eq!(frame, json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "parent"}}));
+        assert!(frame.get("id").is_none());
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn requests_after_eof_fail_without_entering_pending_map() {
         let (writer, mut receiver) = mpsc::unbounded_channel();
