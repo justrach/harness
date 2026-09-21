@@ -214,11 +214,11 @@ impl StderrTail {
             return None;
         }
         let mut joined = tail.iter().cloned().collect::<Vec<_>>().join("\n");
-        let mut end = joined.len().min(Self::KEEP_BYTES * 2);
-        while !joined.is_char_boundary(end) {
-            end -= 1;
+        let mut start = joined.len().saturating_sub(Self::KEEP_BYTES * 2);
+        while !joined.is_char_boundary(start) {
+            start += 1;
         }
-        joined.truncate(end);
+        joined.drain(..start);
         Some(joined)
     }
 }
@@ -313,9 +313,10 @@ pub(crate) fn send_signal(pid: &i32, signal: Signal) {
         Signal::Term => libc::SIGTERM,
         Signal::Kill => libc::SIGKILL,
     };
-    // SAFETY: plain kill(2) on a pid we spawned and have not yet reaped.
+    // SAFETY: kill(2) targets an owned child or its private process group.
+    // Negative targets include descendants after the group leader exits.
     unsafe {
-        libc::kill(*pid as libc::pid_t, sig);
+        libc::kill(*pid, sig);
     }
 }
 
@@ -344,8 +345,9 @@ mod stderr_tests {
         let tail = super::StderrTail::default();
         tail.push(&"界".repeat(700));
         tail.push(&"界".repeat(700));
+        tail.push("last stderr line");
         let snapshot = tail.snapshot().unwrap();
         assert!(snapshot.len() <= 1400);
-        assert!(!snapshot.is_empty());
+        assert!(snapshot.ends_with("last stderr line"));
     }
 }

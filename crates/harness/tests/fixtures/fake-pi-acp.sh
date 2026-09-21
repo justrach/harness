@@ -3,7 +3,7 @@ exec python3 -u -c '
 import json, os, signal, subprocess, sys, time
 
 def emit(value):
-    print(json.dumps(value), flush=True)
+    print(json.dumps(value), end="\r\n", flush=True)
 def update(text):
     emit({"method":"session/update","params":{"sessionId":"pi-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})
 loaded = False

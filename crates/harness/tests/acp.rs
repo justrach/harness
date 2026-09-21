@@ -1438,3 +1438,35 @@ async fn pi_rejected_model_config_keeps_default_and_runs_prompt() {
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
     assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
 }
+
+#[tokio::test]
+async fn pi_dropping_stream_terminates_tool_tree() {
+    let (ctl, _steer, _) = controls();
+    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut pids = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pids.len() < 2 {
+            if let AgentEvent::TextDelta { text } = stream.next().await.unwrap().unwrap()
+                && let Some(pid) = text.strip_prefix("tree:")
+            {
+                pids.push(pid.parse::<i32>().unwrap());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pids.iter().all(|pid| {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("consumer shutdown must terminate the tool tree");
+}

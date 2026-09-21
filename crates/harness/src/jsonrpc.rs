@@ -84,7 +84,17 @@ impl RpcClient {
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, HarnessError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().expect("pending lock").insert(id, tx);
+        {
+            let mut pending = self.pending.lock().expect("pending lock");
+            // Check under the same lock as EOF cleanup: a request racing the
+            // reader exit must either be rejected here or cleared by it.
+            if self.is_closed() {
+                return Err(HarnessError::Protocol(format!(
+                    "{method}: app-server exited before responding"
+                )));
+            }
+            pending.insert(id, tx);
+        }
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if self.writer.send(line.to_string()).is_err() {
             self.pending.lock().expect("pending lock").remove(&id);
@@ -258,6 +268,26 @@ async fn read_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn requests_after_eof_fail_without_entering_pending_map() {
+        let (writer, mut receiver) = mpsc::unbounded_channel();
+        let client = RpcClient {
+            next_id: Arc::new(AtomicI64::new(0)),
+            pending: Arc::default(),
+            writer,
+            closed: Arc::new(AtomicBool::new(true)),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client.request("session/prompt", json!({})),
+        )
+        .await
+        .expect("a request after EOF cannot wait for another EOF");
+        assert!(result.unwrap_err().to_string().contains("exited"));
+        assert!(client.pending.lock().unwrap().is_empty());
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn rpc_error_preserves_string_and_structured_details() {
