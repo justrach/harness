@@ -220,6 +220,100 @@ fn settings_models_keep_manifest_and_full_ladder() {
     assert_eq!(models_with_settings(&path), static_models());
 }
 
+/// Overlay only new concrete model IDs; curated metadata remains authoritative.
+pub(super) fn with_discovered_models(
+    mut models: Vec<Model>,
+    response: &serde_json::Value,
+) -> Result<Vec<Model>, crate::HarnessError> {
+    let entries = response
+        .get("response")
+        .and_then(|v| v.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .filter(|entries| !entries.is_empty())
+        .ok_or_else(|| {
+            crate::HarnessError::Protocol("Claude returned an empty model catalog".into())
+        })?;
+    let mut default = None;
+    let mut valid = false;
+    for entry in entries {
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+        };
+        let Some(id) = text("resolvedModel").or_else(|| text("value")) else {
+            continue;
+        };
+        // Bare aliases cannot become persisted selections. Prefer resolvedModel.
+        if matches!(
+            id.strip_suffix("[1m]").unwrap_or(id),
+            "default" | "opus" | "sonnet" | "haiku" | "fable"
+        ) {
+            continue;
+        }
+        valid = true;
+        if text("value") == Some("default") {
+            default = Some(id.to_owned());
+        }
+        if models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        let mut ladder = Vec::new();
+        for effort in entry
+            .get("supportedEffortLevels")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let level = match effort {
+                "low" => ReasoningLevel::Low,
+                "medium" => ReasoningLevel::Medium,
+                "high" => ReasoningLevel::High,
+                "xhigh" => ReasoningLevel::XHigh,
+                "max" => ReasoningLevel::Max,
+                _ => continue,
+            };
+            if !ladder.contains(&level) {
+                ladder.push(level);
+            }
+        }
+        if ladder.contains(&ReasoningLevel::XHigh) {
+            ladder.extend([ReasoningLevel::Ultracode, ReasoningLevel::Ultrathink]);
+        }
+        models.push(Model {
+            id: id.into(),
+            label: text("displayName").unwrap_or(id).into(),
+            description: text("description").map(str::to_owned),
+            reasoning_levels: ladder,
+            options: vec![],
+        });
+    }
+    if !valid {
+        return Err(crate::HarnessError::Protocol(
+            "Claude returned an empty model catalog".into(),
+        ));
+    }
+    if let Some(default) = default {
+        // The picker folds long-context duplicates into their curated base.
+        // Put that base immediately behind the concrete default so folding
+        // keeps the CLI's default family first without changing curated rows.
+        if let Some(base) = default.strip_suffix("[1m]")
+            && let Some(index) = models.iter().position(|m| m.id == base)
+        {
+            let model = models.remove(index);
+            models.insert(0, model);
+        }
+        if let Some(index) = models.iter().position(|m| m.id == default) {
+            let model = models.remove(index);
+            models.insert(0, model);
+        }
+    }
+    Ok(models)
+}
+
 pub fn static_models() -> Vec<Model> {
     vec![
         model(
