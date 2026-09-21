@@ -16,12 +16,16 @@ OPTIONS='[{"id":"model","name":"Model","category":"model","type":"select","curre
 AUTHED=0
 REJECT_MODEL=0
 SETS=""
+PROMPT_AUTH=0
+EMPTY=0
 while read -r line; do
   has "$line" '"id":' || continue
   id=$(rid "$line")
   if has "$line" '"method":"initialize"'; then
     emit "{\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true},\"authMethods\":[{\"id\":\"oauth-personal\",\"name\":\"Log in with Google\"}]}}"
   elif has "$line" '"method":"session/new"'; then
+    if has "$line" 'prompt-auth'; then PROMPT_AUTH=1; fi
+    if has "$line" 'empty-reply'; then EMPTY=1; fi
     if has "$line" 'reject-model'; then
       REJECT_MODEL=1
     fi
@@ -31,6 +35,8 @@ while read -r line; do
       emit "{\"id\":$id,\"result\":{\"sessionId\":\"agy-1\",\"configOptions\":$OPTIONS}}"
       emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"plan\",\"description\":\"Plan carefully\"},{\"name\":\"logout\",\"description\":\"Log out and clear stored credentials.\"}]}}}"
     fi
+  elif has "$line" '"method":"session/load"'; then
+    emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
   elif has "$line" '"method":"authenticate"'; then
     has "$line" '"methodId":"oauth-personal"' || exit 1
     printf 'Sign in here: https://accounts.google.com/o/oauth2/auth?client_id=fake\n' >&2
@@ -49,6 +55,15 @@ while read -r line; do
       emit "{\"id\":$id,\"result\":{\"configOptions\":$OPTIONS}}"
     fi
   elif has "$line" '"method":"session/prompt"'; then
+    [ "$BROWSER" = '/usr/bin/true %s' ] || exit 12
+    if [ "$PROMPT_AUTH" -eq 1 ]; then
+      emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
+      continue
+    fi
+    if [ "$EMPTY" -eq 1 ]; then
+      emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      continue
+    fi
     emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"sets:$SETS\"}}}}"
     emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
     exit 0

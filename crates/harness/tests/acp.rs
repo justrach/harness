@@ -689,11 +689,11 @@ async fn antigravity_sign_in_reports_the_browser_url_and_authenticates() {
 }
 
 #[tokio::test]
-async fn antigravity_commands_hide_logout_but_keep_the_servers_own() {
+async fn antigravity_commands_include_logout() {
     let commands = antigravity_harness().commands().await.expect("commands");
     let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
     assert!(names.contains(&"plan"), "{names:?}");
-    assert!(!names.contains(&"logout"), "{names:?}");
+    assert!(names.contains(&"logout"), "{names:?}");
 }
 
 #[tokio::test]
@@ -716,7 +716,7 @@ async fn antigravity_run_without_sign_in_points_to_settings_instead_of_a_browser
     assert_eq!(dones.len(), 1, "{events:?}");
     assert_eq!(dones[0].0, DoneStatus::Errored);
     let error = dones[0].1.as_deref().unwrap_or_default();
-    assert!(error.contains("Settings → Agents"), "{error}");
+    assert!(error.contains("Settings → Agents → Sign in"), "{error}");
 }
 
 #[test]
@@ -1282,4 +1282,87 @@ async fn antigravity_auth_path_subprocess() {
     .await
     .expect("sign-in timed out")
     .expect("configured business sign-in");
+}
+
+#[tokio::test]
+async fn antigravity_wedge_emits_one_interrupted_done() {
+    let (controls, _steer, token) = controls();
+    let harness = AcpHarness::antigravity().with_executable(fixture_path());
+    let stream = harness
+        .run(request("scenario:wedge"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(6), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "working") {
+                token.cancel();
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("escalation reaped the child in time");
+    let dones = dones(&events);
+    assert_eq!(dones.len(), 1, "{events:?}");
+    assert_eq!(dones[0].0, DoneStatus::Interrupted);
+}
+
+#[tokio::test]
+async fn antigravity_load_and_prompt_auth_expiry_point_to_sign_in() {
+    for resume in [false, true] {
+        let workspace = tempfile::Builder::new()
+            .prefix("prompt-auth")
+            .tempdir()
+            .unwrap();
+        let mut req = request("hi");
+        req.model = None;
+        req.cwd = workspace.path().display().to_string();
+        req.resume = resume.then(|| "expired-session".into());
+        let (controls, _, _) = controls();
+        let events = run_to_end(&antigravity_harness(), req, controls).await;
+        let done = dones(&events);
+        assert_eq!(done.len(), 1, "{events:?}");
+        assert_eq!(done[0].0, DoneStatus::Errored);
+        assert!(
+            done[0]
+                .1
+                .as_deref()
+                .unwrap()
+                .contains("Settings → Agents → Sign in"),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn antigravity_empty_reply_completes_once() {
+    let workspace = tempfile::Builder::new()
+        .prefix("empty-reply")
+        .tempdir()
+        .unwrap();
+    let mut req = request("hi");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _, _) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn antigravity_unknown_saved_model_fails_clearly() {
+    let events = antigravity_config_sets("unknown-saved-model", None).await;
+    let done = dones(&events);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].0, DoneStatus::Errored);
+    assert!(
+        done[0]
+            .1
+            .as_deref()
+            .unwrap()
+            .contains("unknown-saved-model")
+    );
 }
