@@ -54,6 +54,14 @@ impl RpcClient {
     /// Spawn the writer + reader tasks over the child's stdio; returns the
     /// client and the incoming (notification/request) channel.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::with_stdout_observer(stdin, stdout, None)
+    }
+
+    pub(crate) fn with_stdout_observer(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        observer: Option<Box<dyn Fn(&str) + Send>>,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(write_loop(stdin, writer_rx));
         let pending: Pending = Arc::default();
@@ -64,6 +72,7 @@ impl RpcClient {
             Arc::clone(&pending),
             incoming_tx,
             closed.clone(),
+            observer,
         ));
         (
             Self {
@@ -198,12 +207,19 @@ async fn read_loop(
     pending: Pending,
     tx: mpsc::Sender<Incoming>,
     closed: Arc<AtomicBool>,
+    observer: Option<Box<dyn Fn(&str) + Send>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     // A read error ends the loop like EOF: either way the child's stdout is
     // unusable, pending requests must fail, and the session loop must know.
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
+        if let Some(url) = line.strip_prefix("Open the following link to authenticate the ACP server: ") {
+            if let Some(observer) = &observer {
+                observer(url);
+            }
+            continue;
+        }
         if line.is_empty() {
             continue;
         }

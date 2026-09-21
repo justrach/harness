@@ -972,6 +972,7 @@ impl AcpHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(home) = std::env::var_os("HOME") {
             cmd.current_dir(home);
         }
@@ -997,22 +998,28 @@ impl AcpHarness {
             }
         })?;
         let on_progress = std::sync::Arc::new(on_progress);
+        let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(stderr) = child.stderr.take() {
             let on_progress = on_progress.clone();
+            let announced = announced.clone();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
-                let mut announced = false;
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
-                    if !announced && let Some(url) = sign_in_url(&line) {
-                        announced = true;
+                    if let Some(url) = sign_in_url(&line)
+                        && !announced.swap(true, std::sync::atomic::Ordering::AcqRel) {
                         on_progress(SignInProgress::OpenBrowser(url));
                     }
                 }
             });
         }
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
-            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            (Some(stdin), Some(stdout)) => RpcClient::with_stdout_observer(stdin, stdout, Some(Box::new(move |line| {
+                if let Some(url) = sign_in_url(line)
+                    && !announced.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    on_progress(SignInProgress::OpenBrowser(url));
+                }
+            }))),
             _ => {
                 shutdown_child(&mut child, self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
@@ -1216,6 +1223,18 @@ impl AcpHarness {
         }
     }
 
+    fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {
+        if self.spec.id == HarnessId::Antigravity
+            && let Some(parent) = executable.parent()
+        {
+            let sibling = parent.join("localharness_external");
+            if sibling.is_file() {
+                cmd.env("ANTIGRAVITY_HARNESS_PATH", sibling);
+                cmd.env("PYTHONUNBUFFERED", "1");
+            }
+        }
+    }
+
     fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
         Ok(matches!(self.resolve_launch()?, Launch::Archive { .. })
             .then(|| ScratchDir::new(self.spec.executable))
@@ -1234,6 +1253,7 @@ impl AcpHarness {
         cmd.args(extra_args);
         child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
+        self.configure_adapter_environment(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
         }

@@ -1700,3 +1700,41 @@ async fn dropping_idle_stream_reaps_warm_adapter() {
         while path.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
     }).await.expect("dropped consumer reaps the idle child");
 }
+
+#[tokio::test]
+async fn antigravity_stdout_sign_in_and_sibling_environment_on_every_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let server = dir.path().join("server");
+    let sibling = dir.path().join("localharness_external");
+    std::fs::write(&sibling, "fixture").unwrap();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-antigravity-acp.sh");
+    let original = std::fs::read_to_string(fixture).unwrap();
+    let modified = original.replace(
+        "printf 'Sign in here: https://accounts.google.com/o/oauth2/auth?client_id=fake\\n' >&2",
+        "printf 'Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/auth?client_id=fake\\n'",
+    );
+    assert_ne!(original, modified);
+    let checks = format!(
+        "[ \"$ANTIGRAVITY_HARNESS_PATH\" = '{}' ] || exit 3\n[ \"$PYTHONUNBUFFERED\" = 1 ] || exit 4\n",
+        sibling.display(),
+    );
+    std::fs::write(&server, modified.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{checks}"), 1)).unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let harness = AcpHarness::antigravity().with_executable(&server);
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<SignInProgress>>> = Default::default();
+    let recorder = seen.clone();
+    harness.sign_in(None, move |p| recorder.lock().unwrap().push(p)).await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![SignInProgress::OpenBrowser(
+        "https://accounts.google.com/o/oauth2/auth?client_id=fake".into(),
+    )]);
+    harness.sign_out().await.unwrap();
+    assert!(!harness.models().await.unwrap().is_empty());
+    assert!(!harness.commands().await.unwrap().is_empty());
+    let (ctl, _steer, _) = controls();
+    let mut req = request("hello");
+    req.model = None;
+    req.cwd = dir.path().display().to_string();
+    assert_eq!(dones(&run_to_end(&harness, req, ctl).await), vec![(DoneStatus::Completed, None)]);
+}
