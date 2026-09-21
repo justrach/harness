@@ -38,6 +38,7 @@ async fn main() {
         .ok()
         .map(|s| s.parse::<u64>().expect("interrupt milliseconds"));
     let expect_interrupt = interrupt_after.is_some();
+    let answer_yes = std::env::var_os("OPENCODE_PROBE_ANSWER_YES").is_some();
     let interrupt = CancellationToken::new();
     let (_steer_tx, steering) = mpsc::channel(8);
     let request = RunRequest {
@@ -48,7 +49,7 @@ async fn main() {
         model_options,
         cwd,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
+        auto_approve: !answer_yes,
         attachments: Vec::new(),
         resume: None,
         worktree: None,
@@ -61,7 +62,25 @@ async fn main() {
         .run(
             request,
             RunControls {
-                request_input: Box::new(|_| panic!("probe must not ask for input")),
+                request_input: Box::new(move |questions| {
+                    assert!(
+                        answer_yes,
+                        "set OPENCODE_PROBE_ANSWER_YES to answer permission prompts"
+                    );
+                    let answers = questions
+                        .into_iter()
+                        .map(|question| {
+                            eprintln!("PERMISSION Yes (once): {}", question.question);
+                            zeron_proto::UserInputAnswer {
+                                question_id: question.id,
+                                labels: vec!["Yes".into()],
+                            }
+                        })
+                        .collect();
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = tx.send(answers);
+                    rx
+                }),
                 steering,
                 interrupt: interrupt.clone(),
             },
