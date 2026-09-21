@@ -68,7 +68,7 @@ const HEALTH_POLL: Duration = Duration::from_millis(150);
 /// Bound on ordinary (non-SSE) HTTP calls: everything is loopback and the
 /// only slow route is a cold /provider catalog. The synchronous per-turn
 /// command endpoint deliberately bypasses this (its response can take the
-/// whole turn and is ignored anyway).
+/// whole turn; failures are delivered to the session loop).
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bus reconnect: the server is our own child on loopback, so a dropped
@@ -1160,6 +1160,7 @@ enum BusMsg {
     /// re-syncs from `GET /session/status`.
     Connected,
     Event(Value),
+    CommandFailed(String),
     /// The stream is gone past the reconnect budget (or the reader saw the
     /// consumer close).
     Disconnected,
@@ -1403,7 +1404,7 @@ async fn run_session(session: Session) {
         server.base.clone(),
         server.auth.clone(),
         server.protocol().await,
-        bus_tx,
+        bus_tx.clone(),
     ));
 
     // ---- first prompt -----------------------------------------------------
@@ -1430,6 +1431,7 @@ async fn run_session(session: Session) {
     let stall = stall_bound();
     if let Err(e) = post_prompt(
         &server,
+        &bus_tx,
         &session_id,
         dir,
         &commands,
@@ -1518,6 +1520,7 @@ async fn run_session(session: Session) {
                 }
                 match post_prompt(
                     &server,
+                    &bus_tx,
                     &session_id,
                     dir,
                     &commands,
@@ -1638,6 +1641,7 @@ async fn run_session(session: Session) {
                             }).await;
                             if post_prompt(
                                 &server,
+                                &bus_tx,
                                 &session_id,
                                 dir,
                                 &commands,
@@ -1692,6 +1696,14 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
+                    BusMsg::CommandFailed(message) => {
+                        let _ = send(&event_tx, AgentEvent::Done {
+                            status: DoneStatus::Errored, result: None,
+                            error: Some(message), session_id: Some(session_id.clone()),
+                        }).await;
+                        done_sent = true;
+                        break 'main;
+                    }
                     BusMsg::Connected => {
                         // A RECONNECT mid-turn may have swallowed our idle
                         // (no replay): re-sync from the server's own status
@@ -1969,8 +1981,29 @@ struct TurnSpec<'a> {
 /// Both are fire-and-forget for the loop: the command endpoint is
 /// synchronous on the wire, so it rides a detached task and the bus
 /// delivers the actual turn.
+fn command_body_v2(
+    version: Option<&ServerVersion>,
+    name: &str,
+    text: &str,
+    attachments: &[String],
+) -> Value {
+    if version
+        .and_then(|v| v.number)
+        .is_some_and(|v| v >= (2, 0, 4))
+    {
+        let mut body = json!({"name": name, "text": text});
+        if !attachments.is_empty() {
+            body["files"] = prompt_body_v2(text, attachments)["files"].clone();
+        }
+        body
+    } else {
+        json!({"command": name, "text": text})
+    }
+}
+
 async fn post_prompt(
     server: &Server,
+    bus_tx: &mpsc::Sender<BusMsg>,
     session_id: &str,
     dir: Option<&str>,
     commands: &[SlashCommand],
@@ -1996,9 +2029,10 @@ async fn post_prompt(
                 ),
                 Protocol::V2 => (
                     format!("/api/session/{session_id}/command"),
-                    json!({ "command": name, "text": arguments }),
+                    command_body_v2(server.version.get(), name, &arguments, attachments),
                 ),
             };
+            let bus_tx = bus_tx.clone();
             let server_base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
@@ -2015,17 +2049,23 @@ async fn post_prompt(
                     version: tokio::sync::OnceCell::new(),
                 };
                 // The command endpoint blocks for the whole turn; the bus
-                // carries the real events, so this response is ignored —
-                // but it must not be cut off mid-turn by CALL_TIMEOUT.
+                // carries completion; HTTP failures also reach the loop.
+                // Do not cut the request off mid-turn with CALL_TIMEOUT.
                 let mut req = server
                     .request(reqwest::Method::POST, &path_owned)
                     .json(&cmd_body);
                 req = server.scoped(req, dir_owned.as_deref()).await;
-                if let Err(e) = req.send().await {
-                    tracing::debug!(
-                        target: "zeron_harness::opencode",
-                        "command turn failed: {e}"
-                    );
+                let error = match req.send().await {
+                    Ok(resp) if resp.status().is_success() => None,
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        Some(post_error_message(&path_owned, status, &text))
+                    }
+                    Err(error) => Some(format!("opencode command turn failed: {error}")),
+                };
+                if let Some(error) = error {
+                    let _ = bus_tx.send(BusMsg::CommandFailed(error)).await;
                 }
             });
             return Ok(());

@@ -37,6 +37,18 @@ impl TurnWire {
         auto_approve: bool,
         answer: Option<bool>,
     ) -> Self {
+        Self::start_config(queued, v2, auto_approve, answer, "2.0.3", json!({}), false).await
+    }
+
+    async fn start_config(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        version: &'static str,
+        overrides: Value,
+        command_failure: bool,
+    ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -84,9 +96,14 @@ impl TurnWire {
                         }
                         return;
                     }
+                    if command_failure && is_post && path.ends_with("/command") {
+                        socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad command!").await.unwrap();
+                        return;
+                    }
+                    let health = json!({"version": version}).to_string();
                     let body = if v2 {
                         match path.as_str() {
-                            "/api/health" => r#"{"healthy":true,"version":"2.0.3"}"#,
+                            "/api/health" => &health,
                             "/api/session" => r#"{"data":{"id":"fixture"}}"#,
                             "/api/command" => r#"{"data":[]}"#,
                             // Non-empty: the catalog-sync retry loop must not stall tests.
@@ -126,6 +143,11 @@ impl TurnWire {
         }
         drop(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
+        let mut request = json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
         let run = tokio::spawn(run_session(Session {
             server: Server::attached(base),
             event_tx,
@@ -133,21 +155,28 @@ impl TurnWire {
                 request_input: Box::new(move |questions| {
                     let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = tx.send(questions.into_iter().map(|q| UserInputAnswer {
-                        question_id: q.id, labels: vec![if answer { "Yes" } else { "No" }.into()],
-                    }).collect());
+                    let _ = tx.send(
+                        questions
+                            .into_iter()
+                            .map(|q| UserInputAnswer {
+                                question_id: q.id,
+                                labels: vec![if answer { "Yes" } else { "No" }.into()],
+                            })
+                            .collect(),
+                    );
                     rx
                 }),
                 steering,
                 interrupt: interrupt.clone(),
             },
-            request: serde_json::from_value(
-                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
-            )
-            .unwrap(),
+            request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
-            known_commands: Some(vec![]),
+            known_commands: Some(vec![SlashCommand {
+                name: "test".into(),
+                description: String::new(),
+                input_hint: None,
+            }]),
         }));
         Self {
             bus,
@@ -1472,5 +1501,64 @@ async fn detection_routes_and_authentication() {
         let seen = seen.lock().unwrap();
         let order = ["/api/info", "/api/status", "/api/health", "/global/health"];
         assert_eq!(*seen, order[..seen.len()]);
+    }
+}
+
+#[test]
+fn v2_command_bodies_follow_server_version() {
+    for version in ["2.0.2", "2.0.3", "unknown"] {
+        assert_eq!(
+            command_body_v2(Some(&ServerVersion::parse(version)), "test", "args", &[]),
+            json!({"command":"test","text":"args"})
+        );
+    }
+    for version in ["2.0.4", "v2.0.11", "3.0.0"] {
+        let version = ServerVersion::parse(version);
+        assert_eq!(
+            command_body_v2(Some(&version), "test", "args", &[]),
+            json!({"name":"test","text":"args"})
+        );
+        let attachments = vec!["/workspace/image.png".into()];
+        assert_eq!(
+            command_body_v2(Some(&version), "test", "args", &attachments)["files"],
+            prompt_body_v2("args", &attachments)["files"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn command_http_failure_errors_turn_without_watchdog() {
+    for (v2, version, key) in [
+        (false, "1.18.21", "command"),
+        (true, "2.0.3", "command"),
+        (true, "2.0.11", "name"),
+    ] {
+        let mut wire = TurnWire::start_config(
+            false,
+            v2,
+            true,
+            None,
+            version,
+            json!({"prompt":"/test args"}),
+            true,
+        )
+        .await;
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = wire.events.recv().await {
+                if let AgentEvent::Done { status, error, .. } = event.unwrap() {
+                    assert_eq!(status, DoneStatus::Errored);
+                    return error.unwrap();
+                }
+            }
+            panic!("missing Done");
+        })
+        .await
+        .unwrap();
+        assert!(error.contains("400"), "{error}");
+        assert!(error.contains("bad command!"), "{error}");
+        let posts = wire.posts.lock().unwrap();
+        let (_, body) = posts.iter().find(|(p, _)| p.ends_with("/command")).unwrap();
+        assert_eq!(body[key], "test");
+        assert_eq!(body[if v2 { "text" } else { "arguments" }], "args");
     }
 }
