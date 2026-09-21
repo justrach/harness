@@ -150,6 +150,76 @@ fn model(
 /// `pub`: besides the discovery-side enrichment here, the UI's display-side
 /// normalization borrows these labels so alias rows served by older engines
 /// still read with their version numbers ("Opus 5", not "Opus").
+pub(crate) fn configured_models() -> Vec<Model> {
+    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"));
+    models_with_settings(&root.join("settings.json"))
+}
+
+fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
+    let mut models = static_models();
+    let settings = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+    let ids = std::iter::once(settings.get("model")).chain(
+        [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ]
+        .into_iter()
+        .map(|key| settings.get("env").and_then(|env| env.get(key))),
+    );
+    for id in ids
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if !models.iter().any(|m| m.id == id) {
+            models.push(Model {
+                id: id.into(),
+                label: id.into(),
+                description: None,
+                reasoning_levels: FULL_LADDER.to_vec(),
+                options: vec![],
+            });
+        }
+    }
+    models
+}
+
+#[cfg(test)]
+#[test]
+fn settings_models_keep_manifest_and_full_ladder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({"model":"gateway/model", "env": {
+            "ANTHROPIC_MODEL":"gateway/model", "ANTHROPIC_SMALL_FAST_MODEL":"fast",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":"opus", "ANTHROPIC_DEFAULT_SONNET_MODEL":"sonnet",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL":"haiku"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let models = models_with_settings(&path);
+    assert_eq!(&models[..static_models().len()], static_models());
+    assert_eq!(models.len(), static_models().len() + 5);
+    for model in &models[static_models().len()..] {
+        assert_eq!(model.label, model.id);
+        assert_eq!(model.reasoning_levels, FULL_LADDER);
+    }
+    std::fs::write(&path, "invalid").unwrap();
+    assert_eq!(models_with_settings(&path), static_models());
+}
+
 pub fn static_models() -> Vec<Model> {
     vec![
         model(

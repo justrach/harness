@@ -375,7 +375,7 @@ impl Harness for ClaudeHarness {
     /// like the discovery call would.
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
-        Ok(static_models())
+        Ok(catalog::configured_models())
     }
 
     /// Slash commands from the CLI's `initialize` control-request handshake —

@@ -11807,6 +11807,7 @@ dependencies = [
  "futures",
  "libc",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

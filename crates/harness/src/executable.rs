@@ -79,13 +79,144 @@ fn validate_native_override_with(
 }
 
 pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
-    find_on_paths_with(
+    let mut candidates = Vec::new();
+    find_on_paths_matching_with(
         exe,
         extra,
         &|key| std::env::var_os(key),
         crate::shell_env::login_shell_path().map(OsString::from),
         Platform::current(),
-    )
+        |path| {
+            if runnable(path) {
+                candidates.push(path.to_path_buf());
+            }
+            false
+        },
+    );
+    newest_candidate(candidates)
+}
+
+fn runnable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())))
+        .collect();
+    let mut best = candidates.first()?.clone();
+    if candidates.len() > 1 {
+        let mut version = binary_version(&best);
+        for path in candidates.iter().skip(1) {
+            let next = binary_version(path);
+            if next > version {
+                best = path.clone();
+                version = next;
+            }
+        }
+    }
+    Some(best)
+}
+
+/// Probe once per executable identity. Failures are cached too, including timeout.
+/// Keep the lock during the short probe so concurrent descriptor requests coalesce.
+pub fn binary_version(path: &Path) -> Option<semver::Version> {
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+        time::{Duration, Instant, SystemTime},
+    };
+    type Key = (PathBuf, Option<SystemTime>, u64);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Option<semver::Version>>>> = OnceLock::new();
+    let canonical = path.canonicalize().ok()?;
+    let metadata = canonical.metadata().ok()?;
+    let key = (canonical, metadata.modified().ok(), metadata.len());
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(version) = cache.get(&key) {
+        return version.clone();
+    }
+    let probe = || -> Option<semver::Version> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut command = Command::new(path);
+        command
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stdout.take(65536).read_to_end(&mut bytes);
+            bytes
+        });
+        let start = Instant::now();
+        let success = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) if start.elapsed() < Duration::from_secs(2) => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break false;
+                }
+            }
+        };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        if !success {
+            return None;
+        }
+        // A descendant may inherit stdout on platforms without process groups.
+        let bytes = if reader.is_finished() {
+            reader.join().ok()?
+        } else {
+            while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !reader.is_finished() {
+                return None;
+            }
+            reader.join().ok()?
+        };
+        String::from_utf8_lossy(&bytes)
+            .split_whitespace()
+            .find_map(|word| {
+                semver::Version::parse(
+                    word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
+                        .trim_start_matches('v'),
+                )
+                .ok()
+            })
+    };
+    let version = probe();
+    cache.retain(|(p, _, _), _| p != &key.0);
+    cache.insert(key, version.clone());
+    version
 }
 
 fn home_dir_with(env: &impl Fn(&str) -> Option<OsString>, platform: Platform) -> Option<PathBuf> {
@@ -337,6 +468,64 @@ pub(crate) fn find_on_paths_matching_with(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[cfg(unix)]
+    #[test]
+    fn newest_binary_deduplicates_caches_and_invalidates() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("one/codex");
+        let second = dir.path().join("two/codex");
+        let script = |path: &Path, version: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!(
+                    "#!/bin/sh\necho codex-cli {version}\necho x >> '{}.calls'\n",
+                    path.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        script(&first, "0.99.0");
+        script(&second, "0.110.0");
+        let alias = dir.path().join("alias");
+        symlink(&second, &alias).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                newest_candidate(vec![first.clone(), second.clone(), alias.clone()]),
+                Some(second.clone())
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(second.with_file_name("codex.calls")).unwrap(),
+            "x\n"
+        );
+        script(&first, "1.200.0");
+        assert_eq!(
+            newest_candidate(vec![first.clone(), second.clone()]),
+            Some(first.clone())
+        );
+        script(&second, "1.200.0");
+        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_bounds_hangs_and_rejects_nonzero() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [("failed", "echo 9.0.0; exit 1"), ("hung", "sleep 30")] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(binary_version(&path), None);
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
+        }
+    }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {
         let values: HashMap<String, OsString> = values

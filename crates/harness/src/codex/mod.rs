@@ -270,6 +270,9 @@ impl CodexHarness {
                     params["cursor"] = Value::String(cursor.to_owned());
                 }
                 let page = client.request("model/list", params).await?;
+                if legacy_model_page(&page) {
+                    tracing::warn!(binary_path = %exe.display(), binary_version = ?crate::executable::binary_version(&exe), "Model discovery response lacks hidden flags; CLI may be outdated");
+                }
                 let (page_models, next_cursor) = parse_model_list_page(&page);
                 for (model, is_default) in page_models {
                     if model_ids.insert(model.id.clone()) {
@@ -402,6 +405,14 @@ fn model_service_tier(item: &Value) -> Option<ModelOption> {
     })
 }
 
+fn legacy_model_page(page: &Value) -> bool {
+    page.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            !items.is_empty() && items.iter().all(|item| item.get("hidden").is_none())
+        })
+}
+
 /// Parse one `model/list` page. Unknown future reasoning levels are ignored
 /// independently instead of invalidating the complete catalog.
 fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>) {
@@ -437,6 +448,17 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
             .map(str::trim)
             .filter(|description| !description.is_empty())
             .map(str::to_owned);
+        let description = match item
+            .get("upgrade")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            Some(upgrade) => Some(format!(
+                "{}(upgrade: {upgrade})",
+                description.map(|d| format!("{d} ")).unwrap_or_default()
+            )),
+            None => description,
+        };
         let reasoning_levels = item
             .get("supportedReasoningEfforts")
             .and_then(Value::as_array)
@@ -1678,6 +1700,24 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn current_schema_and_legacy_visibility_are_compatible() {
+        let page = json!({"data":[{"model":"current", "hidden":false, "isDefault":true,
+            "description":"Current model", "upgrade":"next", "upgradeInfo":{"retirementAt":"2026-12-01"},
+            "availabilityNux":{"message":"Available"}, "serviceTiers":["default","fast"],
+            "defaultServiceTier":"default", "inputModalities":["text","image"]}], "nextCursor":"next-page"});
+        let (models, next) = parse_model_list_page(&page);
+        assert_eq!(
+            models[0].0.description.as_deref(),
+            Some("Current model (upgrade: next)")
+        );
+        assert!(models[0].1);
+        assert_eq!(next.as_deref(), Some("next-page"));
+        assert!(!legacy_model_page(&page));
+        assert!(legacy_model_page(&json!({"data":[{"model":"old"}]})));
+        assert!(!legacy_model_page(&json!({"data":[]})));
+    }
 
     #[test]
     fn approval_questions_are_yes_no() {
