@@ -248,19 +248,6 @@ impl ShortcutsPage {
     }
 }
 
-#[cfg(feature = "appshots-fixture")]
-impl ShortcutsPage {
-    pub fn fixture_completion(
-        &mut self,
-        agents: Vec<HarnessDescriptor>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.completion_harnesses = Loadable::Ready(agents);
-        let theme = Theme::of(cx).clone();
-        self.render_completion(&theme, cx)
-    }
-}
-
 #[cfg(test)]
 mod completion_tests {
     use super::*;

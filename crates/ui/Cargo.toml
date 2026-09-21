@@ -41,10 +41,6 @@ required-features = ["project-palette-fixture"]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
-[[example]]
-name = "composer-polish-fixture"
-required-features = ["appshots-fixture"]
-
 [dependencies]
 url = "2"
 zeron-proto.workspace = true

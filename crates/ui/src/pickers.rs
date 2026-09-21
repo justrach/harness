@@ -621,6 +621,7 @@ impl Pickers {
             // Pasted images/files don't apply to a search box.
             ComposerInputEvent::PastedImages(_)
             | ComposerInputEvent::PastedPaths(_)
+            | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -2566,7 +2567,14 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .px(px(10.0))
+            // The model trigger sits immediately beside the attachment.
+            // Its own padding participates in that visible gap; footer and
+            // destination triggers keep their wider independent hit areas.
+            .px(px(if kind == PickerKind::HarnessModel {
+                6.0
+            } else {
+                10.0
+            }))
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
