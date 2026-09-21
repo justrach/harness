@@ -1738,7 +1738,7 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
         serde_json::to_value(&first).unwrap(),
         serde_json::to_value(overlapping.unwrap()).unwrap()
     );
-    for model in first {
+    for model in &first {
         assert_eq!(model.options.len(), 1);
         assert_eq!(model.options[0].id, "agent");
         assert_eq!(model.options[0].choices[1].id, "agent-id");
@@ -1775,6 +1775,13 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
         "later discovery refreshes agents too"
     );
     task.abort();
+    let _ = task.await;
+    let retained = harness.model_catalog(true).await.unwrap();
+    assert_eq!(retained.source, "cache");
+    assert_eq!(
+        retained.models, first,
+        "offline refresh retains models and agent options"
+    );
 }
 
 #[tokio::test]

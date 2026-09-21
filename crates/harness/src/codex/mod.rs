@@ -104,6 +104,7 @@ pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessErr
 /// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
 /// fake app server with [`CodexHarness::with_executable`].
 pub struct CodexHarness {
+    models_cache: crate::catalog::Catalog,
     executable: Option<PathBuf>,
     /// Grace between `turn/interrupt` and SIGTERM.
     interrupt_grace: Duration,
@@ -117,6 +118,7 @@ pub struct CodexHarness {
 impl Default for CodexHarness {
     fn default() -> Self {
         Self {
+            models_cache: crate::catalog::Catalog::default(),
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
@@ -180,7 +182,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -233,7 +235,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -570,19 +572,31 @@ impl Harness for CodexHarness {
 
     /// The signed-in account's visible `model/list` is authoritative. A
     /// curated snapshot keeps the picker operational when the experimental
-    /// discovery call is unavailable or temporarily fails; failed probes are
-    /// intentionally not cached so reopening the picker retries rollout state.
+    /// discovery call is unavailable and no last-good catalog exists. Explicit
+    /// picker refreshes bypass cooldowns while overlapping callers coalesce.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        static_models()
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with(
+                force,
+                || self.model_context().map(|c| c.unwrap().key()),
+                || self.discover_models(),
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => Ok(models),
-            Ok(_) => Ok(static_models()),
+        match self.model_catalog(false).await {
+            Ok(catalog) => Ok(catalog.models),
             Err(error) => {
-                tracing::debug!(
-                    target: "zeron_harness::codex",
-                    "model/list discovery failed; using fallback catalog: {error}"
-                );
-                Ok(static_models())
+                tracing::warn!(%error, source = "static", "Model discovery failed");
+                Ok(self.fallback_models())
             }
         }
     }
@@ -650,7 +664,7 @@ impl CodexHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }

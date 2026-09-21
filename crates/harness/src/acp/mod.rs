@@ -36,7 +36,7 @@ mod subagent_devin;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -855,9 +855,8 @@ pub struct AcpHarness {
     model_discovery_timeout: Duration,
     /// Discovery result cache: the advertised commands survive across calls.
     commands: tokio::sync::OnceCell<Vec<SlashCommand>>,
-    /// Share successful catalogs only with overlapping requests. Later picker
-    /// opens must see account changes and newly available models.
-    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
+    /// Retain successful catalogs per credential/binary context through outages.
+    models_cache: crate::catalog::Catalog,
     devin_models: devin_models::Catalog,
 }
 
@@ -875,7 +874,7 @@ impl AcpHarness {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
-            models_cache: tokio::sync::Mutex::new(None),
+            models_cache: crate::catalog::Catalog::default(),
             devin_models: devin_models::Catalog::default(),
         }
     }
@@ -986,7 +985,7 @@ impl AcpHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -1238,7 +1237,7 @@ impl AcpHarness {
             .kill_on_drop(true);
         let child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -1680,31 +1679,61 @@ impl Harness for AcpHarness {
     /// Devin refreshes through its native catalog command on each request.
     /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        let binary = match self.resolve_launch()? {
+            Launch::Program(path, _) => path,
+            Launch::Managed { pin, bin_name, .. } => {
+                crate::adapter_install::installed_entry(&pin, bin_name)
+                    .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version)))
+            }
+            Launch::Archive { pin, .. } => crate::archive_install::installed_entry(&pin)
+                .unwrap_or_else(|| PathBuf::from(format!("{}@{}", pin.name, pin.version))),
+        };
+        let extra = if self.id() == HarnessId::Antigravity {
+            let root = antigravity_paths::home()?.join("antigravity-acp");
+            vec![
+                root.join("settings.json"),
+                root.join("oauth_creds.json"),
+                root.join("google_accounts.json"),
+                root.join("credentials.json"),
+                root.join("auth.json"),
+            ]
+        } else {
+            vec![]
+        };
+        crate::model_context::context(self.id(), &binary, &extra).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        (self.spec.models)()
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with_timeout(
+                force,
+                self.model_discovery_timeout * 3 + Duration::from_secs(1),
+                || self.model_context().map(|c| c.unwrap().key()),
+                || async {
+                    if self.id() == HarnessId::Devin {
+                        let (exe, _) = self.resolve_program(false).await?;
+                        self.devin_models
+                            .refresh(&exe, self.model_discovery_timeout)
+                            .await
+                    } else {
+                        self.discover_models().await
+                    }
+                },
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_launch()?;
-        if self.spec.id == HarnessId::Devin {
-            let (exe, _) = self.resolve_program(false).await?;
-            return self
-                .devin_models
-                .refresh(&exe, self.model_discovery_timeout)
-                .await;
-        }
-        let requested_at = Instant::now();
-        let mut latest = self.models_cache.lock().await;
-        if let Some((completed_at, models)) = &*latest
-            && *completed_at >= requested_at
-        {
-            return Ok(models.clone());
-        }
-        match self.discover_models().await {
-            Ok(models) if !models.is_empty() => {
-                *latest = Some((Instant::now(), models.clone()));
-                Ok(models)
-            }
-            Ok(_) => Ok((self.spec.models)()),
+        match self.model_catalog(true).await {
+            Ok(catalog) => Ok(catalog.models),
+            Err(error) if self.id() == HarnessId::Devin => Err(error),
             Err(error) => {
-                tracing::warn!(harness = %self.spec.display_name, %error, "Model discovery failed; using fallback");
-                Ok((self.spec.models)())
+                tracing::warn!(%error, source = "static", "Model discovery failed");
+                Ok(self.fallback_models())
             }
         }
     }

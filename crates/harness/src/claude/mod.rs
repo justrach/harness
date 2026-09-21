@@ -53,7 +53,7 @@ use zeron_proto::{
 
 use crate::process::{Child, ChildStdin, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
-use catalog::{apply_ultrathink, static_models, to_effort};
+use catalog::{apply_ultrathink, to_effort};
 use normalize::Normalizer;
 use wire::{ControlRequestFrame, Frame, allow_response, control_response_line};
 
@@ -248,7 +248,7 @@ impl ClaudeHarness {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }
@@ -373,6 +373,19 @@ impl Harness for ClaudeHarness {
     /// The curated static catalog (see [`catalog`]); requires an installed CLI
     /// so an absent binary surfaces as [`HarnessError::NotInstalled`] here,
     /// like the discovery call would.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        catalog::configured_models()
+    }
+    async fn model_catalog(&self, _force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        Ok(crate::ModelCatalog {
+            models: catalog::configured_models(),
+            source: "static",
+        })
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         self.resolve_executable()?;
         Ok(catalog::configured_models())
@@ -436,7 +449,7 @@ impl ClaudeHarness {
         }
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(&exe))
             } else {
                 HarnessError::Io(e)
             }

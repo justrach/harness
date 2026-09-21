@@ -50,7 +50,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -223,7 +223,7 @@ pub struct OpencodeHarness {
     interrupt_grace: Duration,
     kill_grace: Duration,
     startup_timeout: Duration,
-    models_cache: tokio::sync::Mutex<Option<(Instant, Vec<Model>)>>,
+    models_cache: crate::catalog::Catalog,
     commands_cache: tokio::sync::OnceCell<Vec<SlashCommand>>,
     /// Coalesce concurrent picker/title probes: several cold opencode boots
     /// at once are slower than one.
@@ -238,7 +238,7 @@ impl Default for OpencodeHarness {
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
             startup_timeout: startup_timeout(),
-            models_cache: tokio::sync::Mutex::new(None),
+            models_cache: crate::catalog::Catalog::default(),
             commands_cache: tokio::sync::OnceCell::new(),
             probe_lock: tokio::sync::Mutex::new(()),
         }
@@ -363,22 +363,29 @@ impl Harness for OpencodeHarness {
     }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
-    /// picker from). Only overlapping calls share a result, so provider/auth
-    /// changes are visible on the next request. Failures remain retryable.
+    /// picker from). Account/config changes invalidate the last-good catalog;
+    /// explicit refreshes bypass cooldown while overlapping probes coalesce.
+    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        let binary = if let Some(base) = &self.base_url {
+            PathBuf::from(base)
+        } else {
+            self.resolve_executable()?
+        };
+        crate::model_context::context(self.id(), &binary, &[]).map(Some)
+    }
+    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        self.model_context()?.unwrap().log();
+        self.models_cache
+            .get_with_timeout(
+                force,
+                self.startup_timeout * 3 + Duration::from_secs(1),
+                || self.model_context().map(|c| c.unwrap().key()),
+                || self.probe_models(),
+            )
+            .await
+    }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        if self.base_url.is_none() {
-            self.resolve_executable()?;
-        }
-        let requested_at = Instant::now();
-        let mut latest = self.models_cache.lock().await;
-        if let Some((completed_at, models)) = &*latest
-            && *completed_at >= requested_at
-        {
-            return Ok(models.clone());
-        }
-        let models = self.probe_models().await?;
-        *latest = Some((Instant::now(), models.clone()));
-        Ok(models)
+        self.model_catalog(true).await.map(|c| c.models)
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -562,7 +569,7 @@ impl Server {
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::NotInstalled(exe.display().to_string())
+                HarnessError::NotInstalled(crate::executable::binary_hint(exe))
             } else {
                 HarnessError::Io(e)
             }

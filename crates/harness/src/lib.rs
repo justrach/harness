@@ -58,6 +58,20 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
 }
 
+/// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
+#[derive(Clone, Debug)]
+pub struct ModelCatalog {
+    pub models: Vec<Model>,
+    pub source: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelContext {
+    pub hash: String,
+    pub binary_path: std::path::PathBuf,
+    pub binary_version: Option<String>,
+}
+
 #[async_trait]
 pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
@@ -66,7 +80,7 @@ pub trait Harness: Send + Sync {
     fn steering_mode(&self) -> SteeringMode;
     fn reasoning_levels(&self) -> &[ReasoningLevel];
     /// Whether the agent's own CLI is present on this device — the settings
-    /// gate for enabling the harness. A filesystem probe, never a spawn.
+    /// gate for enabling the harness. Version probes are cached by executable identity.
     /// Defaults to true for harnesses without a CLI to check (mock).
     fn installed(&self) -> bool {
         true
@@ -86,6 +100,18 @@ pub trait Harness: Send + Sync {
         self.deterministic_turn_end()
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError>;
+    fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
+        Ok(None)
+    }
+    fn fallback_models(&self) -> Vec<Model> {
+        Vec::new()
+    }
+    async fn model_catalog(&self, _force: bool) -> Result<ModelCatalog, HarnessError> {
+        self.models().await.map(|models| ModelCatalog {
+            models,
+            source: "live",
+        })
+    }
     /// Slash commands the agent advertises (ACP `availableCommands`); empty
     /// for harnesses without them. May spawn a short-lived discovery process.
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -114,12 +140,14 @@ pub trait Harness: Send + Sync {
 pub mod acp;
 pub(crate) mod adapter_install;
 pub(crate) mod archive_install;
+mod catalog;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
 pub(crate) mod jsonrpc;
 pub mod mock;
+mod model_context;
 pub mod opencode;
 pub mod process;
 pub mod shell_env;
