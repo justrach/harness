@@ -348,14 +348,12 @@ impl Shell {
                             .items_center()
                             .justify_end()
                             .gap(px(PANEL_TOGGLE_GAP))
-                            // The shared header carries the same hairline as
-                            // the columns below it, so the pane reads as one
-                            // surface split at the explorer. Only drawn while
-                            // the slot's left edge sits exactly on that seam.
-                            .when(
-                                right_pane_open && files_width >= right_pad + PANEL_TOGGLE_SLOTS,
-                                |slot| slot.border_l_1().border_color(theme.border),
-                            )
+                            // No hairline here: the explorer column below is
+                            // padded down by the titlebar height and its left
+                            // border already runs through this band, so a
+                            // second one on the slot stacked on the same
+                            // pixels and read lighter than the seam beneath
+                            // it (user report).
                             .child(
                                 header_icon_button(
                                     "toggle-files-panel",
