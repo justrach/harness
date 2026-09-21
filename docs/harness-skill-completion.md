@@ -45,8 +45,9 @@ Zeron action are not advertised as executable commands.
 
 ## Skill preferences
 
-Settings → Agents has two independent controls for each production
-harness: Codex, Claude Code, Cursor, OpenCode, Devin, Grok, Hermes, Pi, and Antigravity.
+Settings → Shortcuts → Composer completion has two independent controls for
+each installed, enabled agent on this device. Agents that are disabled or not
+installed do not appear in this section.
 
 - **$ for skills** enables the skill picker after `$`.
 - **Separate / commands** removes skills from the `/` picker.
