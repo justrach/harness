@@ -9,12 +9,23 @@
 //! subagent traffic and thinking never reaches the ACP wire usefully. The
 //! desktop app doesn't use ACP; neither do we.
 //!
-//! Two server generations are spoken, detected at boot from the health
+//! Two server generations are spoken, detected at boot from version-bearing
 //! endpoints ([`Protocol`]): the 1.18 "v1" wire (verified against 1.18.31)
-//! and the 2.x `/api/*` wire (verified against 2.0.3):
+//! and the 2.x `/api/*` wire (2.0.3 turns; 2.0.11 discovery and schema,
+//! with scripted coverage for the 2.0.4+ command and agent routes):
 //! - spawn `opencode serve --port <free> --hostname 127.0.0.1` with
 //!   `OPENCODE_SERVER_PASSWORD=<uuid>` (HTTP Basic, username `opencode`);
-//!   readiness + protocol = `GET /api/health` vs `GET /global/health`.
+//!   readiness probes `/api/info`, `/api/status`, `/api/health` (2.x),
+//!   then `/global/health` (1.x), accepting version-bearing JSON.
+//! - 2.x discovery uses `GET /api/model` (with a plugin-settle poll),
+//!   `/api/agent` (Agent model option), and `/api/command`.
+//! - 2.x creates via `POST /api/session` with `location.directory` and
+//!   optional `agent`; resumed selection uses `/api/session/{id}/agent`.
+//!   Session model selection uses `/api/session/{id}/model`; cancellation
+//!   uses `/api/session/{id}/interrupt`; recovery uses `GET /api/session/active`.
+//! - slash commands use `POST /api/session/{id}/command`: `command` through
+//!   2.0.3, `name` from 2.0.4, with `text` arguments. 2.x directory scoping
+//!   uses the `x-opencode-directory` header.
 //! - one global SSE bus (`GET /api/event` on 2.x, `GET /global/event` on
 //!   1.x) carries every session's traffic, child (subagent) sessions
 //!   included, token-level. 2.x frames are rewritten into the 1.x payload
@@ -2045,12 +2056,6 @@ struct TurnSpec<'a> {
     attachments: &'a [String],
 }
 
-/// Send a turn: a leading `/command` known to the agent routes through the
-/// command endpoint (the desktop parity — the server does NOT parse slash
-/// text out of an ordinary prompt); everything else is a prompt.
-/// Both are fire-and-forget for the loop: the command endpoint is
-/// synchronous on the wire, so it rides a detached task and the bus
-/// delivers the actual turn.
 fn command_body_v2(
     version: Option<&ServerVersion>,
     name: &str,
@@ -2071,6 +2076,12 @@ fn command_body_v2(
     }
 }
 
+/// Send a turn: a leading `/command` known to the agent routes through the
+/// command endpoint (the desktop parity — the server does NOT parse slash
+/// text out of an ordinary prompt); everything else is a prompt.
+/// Both are fire-and-forget for the loop: the command endpoint is
+/// synchronous on the wire, so it rides a detached task and the bus
+/// delivers the actual turn.
 async fn post_prompt(
     server: &Server,
     bus_tx: &mpsc::Sender<BusMsg>,
