@@ -939,7 +939,7 @@ async fn models_discover_from_the_provider_catalog() {
 }
 
 #[tokio::test]
-async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
+async fn models_keep_large_catalog_on_empty_response_and_recover() {
     let fake = FakeOpencode::start().await;
     let harness = harness(&fake);
     let models: serde_json::Map<String, Value> = (0..512)
@@ -953,9 +953,14 @@ async fn models_refresh_large_provider_catalogs_and_recover_after_disconnect() {
     assert_eq!(harness.models().await.unwrap().len(), 512);
 
     fake.set_providers(json!({"all": [], "connected": []}));
+    // An empty response without a credential-context change is a failed probe,
+    // so the last successful catalog remains available.
+    let retained = harness.models().await.unwrap();
+    assert_eq!(retained.len(), 512);
     assert!(
-        harness.models().await.is_err(),
-        "must not return the old account's catalog"
+        retained
+            .iter()
+            .all(|model| model.id.starts_with("provider/"))
     );
 
     fake.set_providers(json!({
