@@ -2653,21 +2653,20 @@ async fn request_draining(
         .get("sessionId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut config_updates = std::collections::HashMap::new();
+    let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
             handle_server_request(client, id, &method, &params);
         }
         Incoming::Notification { method, params }
-            if loading_session
-                && method == "session/update"
-                && params["update"]["sessionUpdate"] == "config_option_update" =>
+            if loading_session && method == "session/update"
+                && matches!(params["update"]["sessionUpdate"].as_str(),
+                    Some("config_option_update" | "available_commands_update" | "current_mode_update")) =>
         {
-            if let Some(id) = params.get("sessionId").and_then(Value::as_str)
-                && params["update"]["configOptions"].is_array()
-            {
-                config_updates.insert(id.to_owned(), params["update"]["configOptions"].clone());
+            if metadata.len() == 32 {
+                metadata.pop_front();
             }
+            metadata.push_back(params);
         }
         _ => {}
     };
@@ -2699,8 +2698,27 @@ async fn request_draining(
             .get("sessionId")
             .and_then(Value::as_str)
             .or(requested_session.as_deref());
-        if let Some(options) = id.and_then(|id| config_updates.remove(id)) {
-            response["configOptions"] = options;
+        let id = id.map(str::to_owned);
+        for params in metadata {
+            if params["sessionId"].as_str() != id.as_deref() {
+                continue;
+            }
+            let update = &params["update"];
+            match update["sessionUpdate"].as_str() {
+                Some("config_option_update") if update["configOptions"].is_array() => {
+                    response["configOptions"] = update["configOptions"].clone();
+                }
+                Some("available_commands_update") if update["availableCommands"].is_array() => {
+                    response["availableCommands"] = update["availableCommands"].clone();
+                }
+                Some("current_mode_update") if update["currentModeId"].is_string() => {
+                    if !response["modes"].is_object() {
+                        response["modes"] = json!({});
+                    }
+                    response["modes"]["currentModeId"] = update["currentModeId"].clone();
+                }
+                _ => {}
+            }
         }
         response
     })
@@ -2899,6 +2917,8 @@ async fn run_session(session: Session) {
         // traits: a rejected auxiliary set is logged and the agent default
         // runs.
         let efforts = effort_values(request.reasoning, request.model.as_deref());
+        let session_commands = scan_available_commands(&session_response);
+        let init_commands = if session_commands.is_empty() { init_commands } else { session_commands };
         let options_snapshot = session_response;
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
@@ -4884,4 +4904,20 @@ mod tests {
         assert_eq!(commands[0].name, "compact");
         assert!(scan_available_commands(&json!({ "protocolVersion": 1 })).is_empty());
     }
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn setup_retains_bounded_session_metadata_before_response() {
+    let mut child = Command::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    ).stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+    let (client, mut incoming) = RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(5), request_draining(
+        &client, &mut incoming, "session/new", json!({}),
+    )).await.unwrap().unwrap();
+    assert_eq!(result["availableCommands"][0]["name"], "early");
+    assert_eq!(result["configOptions"], json!([]));
+    assert_eq!(result["modes"]["currentModeId"], "plan");
+    child.kill().await.unwrap();
 }

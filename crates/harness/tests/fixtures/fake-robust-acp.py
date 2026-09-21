@@ -21,6 +21,16 @@ for line in sys.stdin:
     if method == "initialize":
         emit({"id": ident, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     elif method == "session/new":
+        for index in range(40):
+            emit({"method": "session/update", "params": {"sessionId": f"foreign-{index}", "update": {
+                "sessionUpdate": "current_mode_update", "currentModeId": "wrong"}}})
+        for kind, key, value in [
+            ("available_commands_update", "availableCommands", [{"name": "early", "description": "Early command"}]),
+            ("config_option_update", "configOptions", []),
+            ("current_mode_update", "currentModeId", "plan"),
+        ]:
+            emit({"method": "session/update", "params": {"sessionId": "parent", "update": {
+                "sessionUpdate": kind, key: value}}})
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
