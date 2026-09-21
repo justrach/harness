@@ -1,5 +1,4 @@
-//! Settings → Agents: enable/disable harnesses (the t3code models-page
-//! arrangement — one card row per agent with a trailing toggle).
+//! Settings → Agents: install and enable harnesses, one card row per agent.
 //!
 //! The state is PER-DEVICE and lives on the engine (`harness-prefs.json` in
 //! its data dir): CLI installs are per-device, so enablement is too. The
@@ -38,8 +37,7 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-/// One-line blurb per agent (the t3code models page pairs every toggle row
-/// with a description; the catalog descriptor doesn't carry one).
+/// One-line blurb per agent; the catalog descriptor does not carry one.
 pub fn blurb(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::ClaudeCode => "Anthropic's coding agent, driven through the Claude Code CLI.",
@@ -60,7 +58,7 @@ fn offers_sign_in(harness: HarnessId, installed: bool) -> bool {
 }
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
-    harness == HarnessId::Antigravity && !installed && can_install
+    harness != HarnessId::Mock && !installed && can_install
 }
 
 fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
@@ -72,6 +70,9 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
         }
         .into();
     }
+    if !can_install && let Some(command) = zeron_harness::install::manual_command(harness) {
+        return format!("Install with `{command}`");
+    }
     if enabled {
         format!(
             "{} CLI not installed — turn it off or install it",
@@ -80,6 +81,14 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
     }
+}
+
+fn install_label(name: &str) -> String {
+    format!("Installing {name}…")
+}
+
+fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Value {
+    serde_json::json!({"harness": harness, "targetDeviceId": target})
 }
 
 /// The CLI named in the not-installed hint.
@@ -210,6 +219,7 @@ impl HarnessesPage {
             return;
         }
         self.cancel_sign_in(cx);
+        self.cancel_install(cx);
         self.title_task = None;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
@@ -633,6 +643,29 @@ impl HarnessesPage {
         cx.notify();
     }
 
+    fn cancel_install(&mut self, cx: &mut Context<Self>) {
+        let Some(harness) = self.installing else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let target = self.target_device.clone();
+        let params = install_params(harness, &target);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = engine.client().call(methods::CANCEL_INSTALL, params).await {
+                this.update(cx, |page, cx| {
+                    if page.target_device == target && page.installing == Some(harness) {
+                        page.error = Some(format!("Cancellation failed — {error}"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn install(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -640,7 +673,7 @@ impl HarnessesPage {
         if self.installing.is_some() {
             return;
         }
-        let params = self.with_target(serde_json::json!({"harness": harness}));
+        let params = install_params(harness, &self.target_device);
         let target = self.target_device.clone();
         self.installing = Some(harness);
         self.error = None;
@@ -937,6 +970,23 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                if self.installing == Some(harness) {
+                    meta.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(crate::loaders::mini_mono_spinner(
+                                format!("harness-install-spinner-{harness:?}"),
+                                1.5,
+                                theme.text_muted,
+                                cx.entity_id(),
+                                cx,
+                            ))
+                            .child(SharedString::from(install_label(&descriptor.name)))
+                            .into_any_element(),
+                    );
+                }
                 if !installed {
                     meta.push(
                         div()
@@ -981,7 +1031,8 @@ impl HarnessesPage {
                             .child(widgets::meta_line(&theme, meta)),
                     )
                     .when(
-                        offers_install(harness, installed, descriptor.can_install),
+                        offers_install(harness, installed, descriptor.can_install)
+                            && self.installing != Some(harness),
                         |el| {
                             el.child(
                                 widgets::ghost_action(&theme)
@@ -993,14 +1044,19 @@ impl HarnessesPage {
                                             }),
                                         )
                                     })
-                                    .child(if self.installing == Some(harness) {
-                                        "Installing Antigravity…"
-                                    } else {
-                                        "Install"
-                                    }),
+                                    .child("Install"),
                             )
                         },
                     )
+                    .when(self.installing == Some(harness), |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("harness-cancel-install", ix))
+                                .hover(|s| widgets::ghost_hover(&theme, s))
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_install(cx)))
+                                .child("Cancel"),
+                        )
+                    })
                     .when(
                         offers_sign_in(harness, installed)
                             && signing_in.is_none()
@@ -1142,9 +1198,9 @@ impl Render for HarnessesPage {
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Choose which coding agents the composer offers. The setting is per \
-                                     device — switch devices in the header. Agents whose CLI isn't \
-                                     installed on a device can't be enabled there.",
+                                    "Install coding agents and choose which ones the composer offers. \
+                                     Installations and settings apply to the selected device. \
+                                     Downloads start only when you choose Install.",
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),
@@ -1190,17 +1246,24 @@ mod tests {
 
 #[cfg(test)]
 #[test]
-fn antigravity_install_visibility_and_hint_follow_target_capabilities() {
+fn install_visibility_and_hint_follow_target_capabilities() {
     for id in [
         HarnessId::Antigravity,
         HarnessId::Codex,
         HarnessId::Opencode,
+        HarnessId::ClaudeCode,
+        HarnessId::Cursor,
+        HarnessId::Pi,
+        HarnessId::Grok,
+        HarnessId::Hermes,
+        HarnessId::Devin,
+        HarnessId::Mock,
     ] {
         for installed in [false, true] {
             for available in [false, true] {
                 assert_eq!(
                     offers_install(id, installed, available),
-                    id == HarnessId::Antigravity && !installed && available
+                    id != HarnessId::Mock && !installed && available
                 );
                 assert_eq!(
                     offers_sign_in(id, installed),
@@ -1216,5 +1279,24 @@ fn antigravity_install_visibility_and_hint_follow_target_capabilities() {
     );
     assert!(
         install_hint(HarnessId::Antigravity, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn install_phase_copy_and_cancel_target_match_install() {
+    assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
+    assert_eq!(install_label("Pi"), "Installing Pi…");
+    for target in [None, Some("remote-device".to_string())] {
+        let params = install_params(HarnessId::Pi, &target);
+        assert_eq!(params["harness"], "pi");
+        assert_eq!(
+            params["targetDeviceId"],
+            serde_json::to_value(&target).unwrap()
+        );
+    }
+    assert_eq!(
+        install_hint(HarnessId::Codex, false, false),
+        "Install with `npm install -g @openai/codex`"
     );
 }
