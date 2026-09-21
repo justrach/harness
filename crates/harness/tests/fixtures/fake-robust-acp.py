@@ -4,6 +4,8 @@ import json
 import sys
 import signal
 import os
+import threading
+import time
 
 
 def emit(frame):
@@ -40,6 +42,15 @@ for line in sys.stdin:
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
+        if prompt == "steer-live":
+            update("first")
+            def finish_first(prompt_id=ident):
+                time.sleep(0.2)
+                emit({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            threading.Thread(target=finish_first).start()
+            continue
+        if prompt in ("steer-idle", "second"):
+            update(prompt)
         if prompt == "idle-pid":
             update(str(os.getpid()))
         if prompt in ("wedge", "late-settle"):

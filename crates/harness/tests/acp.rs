@@ -1738,3 +1738,42 @@ async fn antigravity_stdout_sign_in_and_sibling_environment_on_every_spawn() {
     req.cwd = dir.path().display().to_string();
     assert_eq!(dones(&run_to_end(&harness, req, ctl).await), vec![(DoneStatus::Completed, None)]);
 }
+
+async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
+    let adapter = AcpHarness::pi().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    );
+    let (ctl, steer, _) = controls();
+    let mut steer = Some(steer);
+    let mut req = request(scenario);
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let mut stream = adapter.run(req, ctl).await.unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            let trigger = if trigger_on_done { matches!(event, AgentEvent::Done { .. }) }
+                else { matches!(&event, AgentEvent::TextDelta { text } if text == "first") };
+            if trigger && let Some(sender) = steer.take() {
+                sender.send(zeron_harness::SteerMessage { prompt: "second".into(), message_id: None }).await.unwrap();
+            }
+            events.push(event);
+        }
+    }).await.unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None); 2]);
+    assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second")).count(), 1);
+    let first_done = events.iter().position(|e| matches!(e, AgentEvent::Done { .. })).unwrap();
+    let second_text = events.iter().position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second")).unwrap();
+    assert!(first_done < second_text);
+}
+
+#[tokio::test]
+async fn pi_without_steering_extension_queues_live_steer_once() {
+    pi_boundary_steer("steer-live", false).await;
+}
+
+#[tokio::test]
+async fn pi_without_steering_extension_dispatches_idle_steer_immediately() {
+    pi_boundary_steer("steer-idle", true).await;
+}
