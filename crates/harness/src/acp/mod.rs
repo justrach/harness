@@ -915,7 +915,7 @@ impl AcpHarness {
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -926,7 +926,7 @@ impl AcpHarness {
             request_draining(&client, &mut incoming, "logout", json!({})).await
         };
         let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(outcome) => outcome.map(|_| ()),
             Err(_) => Err(HarnessError::Protocol(format!(
@@ -1264,7 +1264,7 @@ impl AcpHarness {
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -1311,7 +1311,7 @@ impl AcpHarness {
             Ok::<Vec<SlashCommand>, HarnessError>(commands)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
             Err(_) => Err(HarnessError::Protocol("command discovery timed out".into())),
@@ -1328,7 +1328,7 @@ impl AcpHarness {
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
-                shutdown_child(&mut child, self.kill_grace).await;
+                child.shutdown(self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
             }
         };
@@ -1358,7 +1358,7 @@ impl AcpHarness {
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
+        child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
             Err(_) => {
@@ -2917,7 +2917,7 @@ async fn run_session(session: Session) {
                             session_id: None,
                         }))
                         .await;
-                    shutdown_child(&mut child, kill_grace).await;
+                    child.shutdown(kill_grace).await;
                     return;
                 }
             }
@@ -2931,7 +2931,7 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
-            shutdown_child(&mut child, kill_grace).await;
+            child.shutdown(kill_grace).await;
             return;
         }
     };
@@ -2950,7 +2950,7 @@ async fn run_session(session: Session) {
     )
     .await
     {
-        shutdown_child(&mut child, kill_grace).await;
+        child.shutdown(kill_grace).await;
         return;
     }
     if !init_commands.is_empty()
@@ -2962,7 +2962,7 @@ async fn run_session(session: Session) {
         )
         .await
     {
-        shutdown_child(&mut child, kill_grace).await;
+        child.shutdown(kill_grace).await;
         return;
     }
 
@@ -3065,7 +3065,7 @@ async fn run_session(session: Session) {
             status = child.wait(), if child_exit.is_none() => {
                 escalation_deadline = None;
                 child_exit = Some(status.ok());
-                child.terminate_group();
+                child.request_group_shutdown();
                 // Descendants can hold stdout open after an adapter crash.
                 // Drain already-written frames, but never wait on them forever.
                 exit_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
@@ -3840,7 +3840,7 @@ async fn run_session(session: Session) {
                     .ok()
                     .and_then(Result::ok),
             };
-            child.terminate_group();
+            child.request_group_shutdown();
             stderr_tail.wait_closed().await;
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
@@ -3853,7 +3853,7 @@ async fn run_session(session: Session) {
         }
     }
 
-    shutdown_child(&mut child, kill_grace).await;
+    child.shutdown(kill_grace).await;
 }
 
 #[cfg(test)]

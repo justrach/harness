@@ -581,6 +581,35 @@ mod tests {
     }
 
     #[test]
+    fn unix_pi_discovery_finds_node_manager_defaults_without_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let lookup = env(&[("HOME", home.as_os_str().to_owned())]);
+        for relative in [
+            ".volta/bin",
+            ".bun/bin",
+            ".local/share/pnpm",
+            "Library/pnpm",
+            ".nvm/versions/node/v22/bin",
+            ".fnm/aliases/default/bin",
+            ".local/share/fnm/aliases/default/bin",
+            ".local/bin",
+        ] {
+            let bin = home.join(relative);
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pi"), "fixture").unwrap();
+            // Pi supplies ~/.local/bin as an explicit npm fallback.
+            let extra = vec![home.join(".local/bin/pi")];
+            assert_eq!(
+                find_on_paths_with("pi", extra, &lookup, None, Platform::Unix),
+                Some(bin.join("pi")),
+                "{relative}"
+            );
+            std::fs::remove_file(bin.join("pi")).unwrap();
+        }
+    }
+
+    #[test]
     fn unix_discovery_preserves_exact_name_and_source_order() {
         let temp = tempfile::tempdir().unwrap();
         let path_dir = temp.path().join("path");

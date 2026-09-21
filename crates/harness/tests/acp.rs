@@ -1399,7 +1399,7 @@ async fn pi_interrupt_error_and_duplicate_terminal_settle_once() {
 async fn pi_interrupt_kills_tool_process_group() {
     let (ctl, _steer, token) = controls();
     let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
-    let mut tree_pid = None;
+    let mut tree_pids = Vec::new();
     let events = tokio::time::timeout(Duration::from_secs(5), async {
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
@@ -1407,7 +1407,7 @@ async fn pi_interrupt_kills_tool_process_group() {
             if let AgentEvent::TextDelta { text } = &event
                 && let Some(pid) = text.strip_prefix("tree:")
             {
-                tree_pid = Some(pid.parse::<i32>().unwrap());
+                tree_pids.push(pid.parse::<i32>().unwrap());
                 token.cancel();
             }
             events.push(event);
@@ -1417,11 +1417,24 @@ async fn pi_interrupt_kills_tool_process_group() {
     .await
     .unwrap();
     assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
-    let pid = tree_pid.unwrap();
-    // A zombie awaiting the host reaper is dead; no tool may remain running.
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    assert!(
-        stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"),
-        "{stat}"
-    );
+    assert_eq!(tree_pids.len(), 2);
+    for pid in tree_pids {
+        // A zombie awaiting the host reaper is dead; no tool may remain running.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        assert!(
+            stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"),
+            "{stat}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pi_rejected_model_config_keeps_default_and_runs_prompt() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("config-rejected");
+    req.model = Some("mock/reject".into());
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
 }

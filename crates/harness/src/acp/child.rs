@@ -31,6 +31,36 @@ impl Child {
         }
     }
 
+    pub(super) async fn shutdown(&mut self, grace: std::time::Duration) {
+        #[cfg(unix)]
+        if let Some(group) = self.group.take() {
+            crate::send_signal(&group, crate::Signal::Term);
+            // Pi uses detached bash groups and cleans them in its TERM handler.
+            // Give descendants their grace even when the adapter exited first.
+            let deadline = tokio::time::Instant::now() + grace;
+            loop {
+                let _ = self.inner.try_wait();
+                // SAFETY: signal 0 only checks the private process group.
+                if unsafe { libc::kill(group, 0) } != 0 {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    crate::send_signal(&group, crate::Signal::Kill);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        crate::shutdown_child(&mut self.inner, grace).await;
+    }
+
+    pub(super) fn request_group_shutdown(&self) {
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            crate::send_signal(&group, crate::Signal::Term);
+        }
+    }
+
     pub(super) fn terminate_group(&mut self) {
         #[cfg(unix)]
         if let Some(group) = self.group.take() {
