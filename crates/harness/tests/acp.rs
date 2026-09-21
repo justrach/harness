@@ -1366,3 +1366,16 @@ async fn antigravity_unknown_saved_model_fails_clearly() {
             .contains("unknown-saved-model")
     );
 }
+
+#[tokio::test]
+async fn antigravity_spawn_failure_returns_an_error_for_the_engine_to_surface() {
+    let workspace = tempfile::tempdir().unwrap();
+    let missing = workspace.path().join("missing-acp-server");
+    let harness = AcpHarness::antigravity().with_executable(&missing);
+    let (controls, _, _) = controls();
+    let result = harness.run(request("hi"), controls).await;
+    let Err(error) = result else {
+        panic!("spawn failure must reach the engine");
+    };
+    assert!(error.to_string().contains("missing-acp-server"), "{error}");
+}
