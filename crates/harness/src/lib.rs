@@ -295,6 +295,10 @@ fn redact_secrets(text: &str) -> String {
         } else {
             start
         };
+        let credential = credential + text[credential..].len()
+            - text[credential..]
+                .trim_start_matches(|c: char| c.is_whitespace() || c == '\"' || c == '\'')
+                .len();
         let end = text[credential..]
             .find(|c: char| {
                 c.is_whitespace() || matches!(c, '\"' | '\'' | ',' | ';' | '&' | '<' | '>')
@@ -321,6 +325,10 @@ fn crash_diagnostics_redact_credentials_but_keep_context() {
     assert_eq!(
         redact_secrets("Authorization: bEaReR token"),
         "Authorization: bEaReR [REDACTED]"
+    );
+    assert_eq!(
+        redact_secrets("Bearer   hidden api_key=\"secret\""),
+        "Bearer   [REDACTED] api_key=\"[REDACTED]\""
     );
     let tail = StderrTail::default();
     tail.push(raw);
