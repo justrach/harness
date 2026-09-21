@@ -300,6 +300,13 @@ impl CodexHarness {
                 let default_model = models.remove(index);
                 models.insert(0, default_model);
             }
+            if models.is_empty() {
+                return Err(crate::CatalogFailure {
+                    code: crate::CatalogFailureCode::Failed,
+                    message: "Codex returned an empty model catalog".into(),
+                }
+                .into());
+            }
             Ok::<Vec<Model>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;

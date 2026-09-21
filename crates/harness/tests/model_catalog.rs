@@ -16,12 +16,13 @@ fn binary(root: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = root.join("agent");
     std::fs::write(&path, r#"#!/usr/bin/python3
-import json, pathlib, sys
+import json, pathlib, sys, os
 root = pathlib.Path(__file__).parent
 if '--version' in sys.argv:
     print('agent 1.2.3')
     sys.exit(0)
 state = json.loads((root / 'state.json').read_text())
+with (root / 'pids').open('a') as pids: pids.write(str(os.getpid()) + '\n')
 if 'list' in sys.argv:
     if state['fail']:
         print(state.get('error', 'rate limit'), file=sys.stderr)
@@ -36,7 +37,7 @@ for line in sys.stdin:
         response = {'error':{'code':429,'message':state.get('error', 'rate limit')}}
     else:
         result = {}
-        if method == 'model/list': result = {'data':[{'model':state['id'],'hidden':False,'isDefault':True}], 'nextCursor':None}
+        if method == 'model/list': result = {'data':[] if state.get('empty') else [{'model':state['id'],'hidden':False,'isDefault':True}], 'nextCursor':None}
         if method == 'session/new': result = {'sessionId':'fixture','models':{'availableModels':[{'modelId':state['id'],'name':state['id']}]}}
         response = {'result':result}
     response.update({'jsonrpc':'2.0','id':request['id']})
@@ -84,6 +85,49 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
             harness.id()
         );
     }
+}
+
+#[tokio::test]
+async fn codex_empty_catalogs_retire_children_and_next_request_spawns_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = binary(dir.path());
+    let harness = CodexHarness::new().with_executable(binary);
+    let state = dir.path().join("state.json");
+    std::fs::write(&state, r#"{"fail":false,"empty":true,"id":"ignored"}"#).unwrap();
+    let error = harness.model_catalog(true).await.unwrap_err();
+    assert_eq!(
+        zeron_harness::CatalogFailure::classify(&error),
+        zeron_harness::CatalogFailureCode::Failed
+    );
+    let reaped = |expected: usize| {
+        let ids: Vec<i32> = std::fs::read_to_string(dir.path().join("pids"))
+            .unwrap()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+        assert_eq!(ids.len(), expected);
+        for pid in ids {
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "discovery child {pid} still exists"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    };
+    reaped(3);
+    std::fs::write(&state, r#"{"fail":false,"id":"good"}"#).unwrap();
+    let good = harness.model_catalog(true).await.unwrap();
+    assert_eq!(good.models[0].id, "good");
+    reaped(4);
+    std::fs::write(&state, r#"{"fail":false,"empty":true,"id":"ignored"}"#).unwrap();
+    let retained = harness.model_catalog(true).await.unwrap();
+    assert_eq!(retained.source, "cache");
+    assert_eq!(retained.models, good.models);
+    reaped(7);
 }
 
 #[test]

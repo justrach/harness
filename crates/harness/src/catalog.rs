@@ -201,6 +201,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_catalogs_are_failed_and_cannot_replace_last_good() {
+        let cache = Catalog::default();
+        let cold = cache
+            .get(|| Ok([1; 32]), || async { Ok(vec![]) })
+            .await
+            .unwrap_err();
+        assert_eq!(CatalogFailure::classify(&cold), CatalogFailureCode::Failed);
+        cache
+            .get_with(true, || Ok([1; 32]), || async { Ok(models("good")) })
+            .await
+            .unwrap();
+        let stale = cache
+            .get_with(true, || Ok([1; 32]), || async { Ok(vec![]) })
+            .await
+            .unwrap();
+        assert_eq!(stale.source, "cache");
+        assert_eq!(stale.models, models("good"));
+        assert_eq!(
+            cache.state.lock().await.error.as_ref().unwrap().code,
+            CatalogFailureCode::Failed
+        );
+    }
+
+    #[tokio::test]
     async fn stale_catalog_is_only_served_for_transient_failure_codes() {
         for (message, code) in [
             ("timed out", CatalogFailureCode::Timeout),
