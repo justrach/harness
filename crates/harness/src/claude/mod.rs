@@ -445,21 +445,17 @@ impl Harness for ClaudeHarness {
             skills
                 .into_iter()
                 .filter_map(|mut skill| {
-                    if zeron_proto::invocation::valid_skill_command_name(&skill.name)
+                    if crate::skills::is_shared_skill(&skill.path) {
+                        // Shared files are not Claude command definitions. A
+                        // same-named built-in must not replace their identity.
+                        Some(skill)
+                    } else if zeron_proto::invocation::valid_skill_command_name(&skill.name)
                         && commands.iter().any(|command| command.name == skill.name)
                     {
                         skill.command = Some(zeron_proto::invocation::SkillCommand {
                             name: skill.name.clone(),
                             harness: self.id(),
                         });
-                        Some(skill)
-                    } else if std::path::Path::new(&skill.path).ancestors().any(|dir| {
-                        dir.file_name().is_some_and(|name| name == "skills")
-                            && dir
-                                .parent()
-                                .and_then(std::path::Path::file_name)
-                                .is_some_and(|name| name == ".agents")
-                    }) {
                         Some(skill)
                     } else {
                         None

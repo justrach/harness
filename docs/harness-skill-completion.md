@@ -69,6 +69,10 @@ directories, including shared `.agents/skills` directories. Claude checks native
 command availability; OpenCode adds skills from its server command catalog.
 ACP adapters bind discovered skills to advertised commands, and Pi also exposes
 advertised `/skill:name` entries without a local file.
+Shared `.agents/skills` files use explicit file delivery in Claude and generic ACP
+catalogs: a matching built-in command name does not establish skill identity.
+Pi's `skill:` namespace and OpenCode's skill source metadata identify native skills
+explicitly and remain eligible for native delivery.
 
 At delivery, Codex receives typed skill inputs. A leading skill selection with a
 native command for the current harness becomes that command, preserving its

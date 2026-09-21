@@ -1974,7 +1974,7 @@ async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
 }
 
 #[tokio::test]
-async fn all_acp_harnesses_bind_selected_skills_to_native_commands() {
+async fn shared_acp_skills_require_explicit_native_command_classification() {
     use zeron_proto::invocation::{Invocation, harness_prompt};
     for h in [
         AcpHarness::devin(),
@@ -2003,6 +2003,7 @@ async fn all_acp_harnesses_bind_selected_skills_to_native_commands() {
             .into_iter()
             .find(|s| s.name == "zeron-fixture-review")
             .unwrap();
+        assert_eq!(skill.command.is_some(), h.id() == HarnessId::Pi);
         let invocation = Invocation::Skill {
             name: skill.name,
             path: skill.path,
@@ -2010,7 +2011,11 @@ async fn all_acp_harnesses_bind_selected_skills_to_native_commands() {
         };
         assert_eq!(
             harness_prompt(&format!("{} inspect tests", invocation.link()), h.id()),
-            format!("/{command_name} inspect tests")
+            if h.id() == HarnessId::Pi {
+                format!("/{command_name} inspect tests")
+            } else {
+                format!("Use the skill {} inspect tests", invocation.prompt_text())
+            }
         );
     }
 }

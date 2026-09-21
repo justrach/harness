@@ -2484,10 +2484,15 @@ impl Pickers {
                     f32::from(bounds.bottom()),
                     f32::from(window.viewport_size().height),
                 );
-                if below {
+                let space_below = (f32::from(window.viewport_size().height - bounds.bottom())
+                    - 14.0)
+                    .clamp(0.0, 640.0);
+                // Prefer below on the new-chat canvas only when it can fit
+                // useful content. Tall drafts/attachments can put the trigger
+                // near the window bottom; retain adaptive placement there.
+                if below && space_below >= 180.0 {
                     geometry = popover::MenuGeometry {
-                        height: (f32::from(window.viewport_size().height - bounds.bottom()) - 14.0)
-                            .clamp(0.0, 640.0),
+                        height: space_below,
                         below: true,
                     };
                 }
@@ -5227,14 +5232,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn centered_new_thread_model_menu_opens_below(cx: &mut gpui::TestAppContext) {
-        struct Fixture(Entity<Pickers>);
+    fn new_thread_model_menu_prefers_below_but_retains_room_for_choices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture(Entity<Pickers>, bool);
         impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let top = if self.1 {
+                    window.viewport_size().height - px(50.0)
+                } else {
+                    px(300.0)
+                };
                 div().size_full().relative().child(
                     div()
                         .absolute()
-                        .top(px(300.0))
+                        .top(top)
                         .left(px(200.0))
                         .child(self.0.clone()),
                 )
@@ -5243,11 +5255,14 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
-            Fixture(cx.new(|cx| Pickers::new(state, cx)))
+            Fixture(cx.new(|cx| Pickers::new(state, cx)), false)
         });
-        for new_thread in [true, false] {
+        for (new_thread, near_bottom) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
             handle
                 .update(cx, |fixture, _, cx| {
+                    fixture.1 = near_bottom;
                     fixture.0.update(cx, |picker, cx| {
                         picker.state.update(cx, |state, cx| {
                             state.selected_chat = (!new_thread).then(|| "thread".into());
@@ -5264,8 +5279,11 @@ mod tests {
                 .read_with(cx, |fixture, cx| {
                     let picker = fixture.0.read(cx);
                     let geometry = picker.menu_geometry[&PickerKind::HarnessModel];
-                    assert_eq!(geometry.below, new_thread);
+                    assert_eq!(geometry.below, new_thread && !near_bottom);
                     assert!(geometry.height > 180.0);
+                    assert!(
+                        model_menu_budgets(geometry.height.min(model_menu_height(2)), 2).0 >= 30.0
+                    );
                 })
                 .unwrap();
         }

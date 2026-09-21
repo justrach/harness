@@ -46,6 +46,17 @@ pub(crate) async fn discover(harness: HarnessId, cwd: &Path) -> Result<Vec<Skill
         .map_err(|error| HarnessError::Protocol(error.to_string()))?
 }
 
+/// Shared Agent Skills do not establish a provider-native command identity.
+pub(crate) fn is_shared_skill(path: &str) -> bool {
+    Path::new(path).ancestors().any(|dir| {
+        dir.file_name().is_some_and(|name| name == "skills")
+            && dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".agents")
+    })
+}
+
 /// ACP has no standard skill catalog. Pi labels its skill commands explicitly;
 /// other agents can bind a discovered skill only to a command they advertised.
 pub(crate) fn attach_advertised_commands(
@@ -67,6 +78,12 @@ pub(crate) fn attach_advertised_commands(
             command.name.as_str()
         };
         if let Some(skill) = skills.iter_mut().find(|skill| skill.name == name) {
+            // A shared skill named `compact` is not evidence that the
+            // provider's built-in /compact invokes that file. Pi's explicit
+            // skill: namespace supplies the classification other ACP catalogs lack.
+            if harness != HarnessId::Pi && is_shared_skill(&skill.path) {
+                continue;
+            }
             skill.command = Some(SkillCommand {
                 name: command.name.clone(),
                 harness,
@@ -455,6 +472,36 @@ mod tests {
             };
             attach_advertised_commands(harness, &mut skills, &[command]);
             assert_eq!(skills[0].command.as_ref().unwrap().harness, harness);
+        }
+    }
+
+    #[test]
+    fn shared_acp_skills_do_not_alias_builtin_commands() {
+        for harness in [
+            HarnessId::Devin,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Antigravity,
+            HarnessId::Pi,
+        ] {
+            let mut skills = vec![Skill {
+                name: "compact".into(),
+                path: "/repo/.agents/skills/compact/SKILL.md".into(),
+                description: "Compact JSON fixtures".into(),
+                enabled: true,
+                command: None,
+            }];
+            let command = |name: &str| zeron_proto::SlashCommand {
+                name: name.into(),
+                description: String::new(),
+                input_hint: None,
+            };
+            attach_advertised_commands(harness, &mut skills, &[command("compact")]);
+            assert!(skills[0].command.is_none(), "{harness:?}");
+            if harness == HarnessId::Pi {
+                attach_advertised_commands(harness, &mut skills, &[command("skill:compact")]);
+                assert_eq!(skills[0].command.as_ref().unwrap().name, "skill:compact");
+            }
         }
     }
 

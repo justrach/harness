@@ -272,6 +272,7 @@ mod completion_tests {
             steering_mode: zeron_proto::SteeringMode::TurnBoundary,
             reasoning_levels: Vec::new(),
             installed,
+            can_install: false,
             enabled,
         }
     }

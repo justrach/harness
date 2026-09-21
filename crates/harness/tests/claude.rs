@@ -768,6 +768,42 @@ async fn command_discovery_tracks_project_changes() {
 }
 
 #[tokio::test]
+async fn shared_skill_colliding_with_builtin_keeps_file_delivery() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cwd.path().join(".git")).unwrap();
+    let directory = cwd.path().join(".agents/skills/compact");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("SKILL.md");
+    std::fs::write(&path, "---\nname: compact\n---\nCompact JSON fixtures.").unwrap();
+
+    let harness = harness();
+    let commands = harness.commands_for(cwd.path()).await.unwrap();
+    assert!(commands.iter().any(|command| command.name == "compact"));
+    let skill = harness
+        .skills(cwd.path())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .find(|skill| skill.path == path.to_string_lossy())
+        .unwrap();
+    assert!(skill.command.is_none());
+    let invocation = Invocation::Skill {
+        name: skill.name,
+        path: skill.path,
+        command: skill.command,
+    };
+    assert_eq!(
+        harness_prompt(
+            &format!("{} data.json", invocation.link()),
+            HarnessId::ClaudeCode
+        ),
+        format!("Use the skill {} data.json", invocation.prompt_text())
+    );
+}
+
+#[tokio::test]
 async fn claude_skills_follow_native_availability_and_dollar_selection_keeps_arguments() {
     use zeron_proto::{
         HarnessId,
