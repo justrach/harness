@@ -2831,7 +2831,10 @@ fn mark_content(turn: &mut TurnState, events: &[AgentEvent]) {
 /// A completed/errored `task` part → (child session id, failed).
 fn task_completion(part: &Value) -> Option<(String, bool)> {
     if part.get("type").and_then(Value::as_str) != Some("tool")
-        || part.get("tool").and_then(Value::as_str) != Some("task")
+        || !matches!(
+            part.get("tool").and_then(Value::as_str),
+            Some("task" | "subagent")
+        )
     {
         return None;
     }
@@ -3014,7 +3017,7 @@ fn part_snapshot_events(
                 .unwrap_or(Value::Null);
             // The task chip's stable id is the PART id (the completion and
             // the child settle key on it); ordinary tools key on callID.
-            let call_id = if tool == "task" && is_main {
+            let call_id = if matches!(tool, "task" | "subagent") && is_main {
                 part_id.to_owned()
             } else {
                 part.get("callID")
@@ -3040,7 +3043,7 @@ fn part_snapshot_events(
                 });
                 // A task spawn on the MAIN feed registers a pending chip so
                 // the child's session.created (or its metadata) can bind.
-                if tool == "task"
+                if matches!(tool, "task" | "subagent")
                     && is_main
                     && let Some((children, pending, unbound)) = spawn_ctx
                 {
@@ -3291,7 +3294,7 @@ fn oc_tool_call(name: &str, input: &Value) -> ToolCall {
                 .collect(),
         },
         // The genus-gated spawn naming every driver shares.
-        "task" => ToolCall::Unknown {
+        "task" | "subagent" => ToolCall::Unknown {
             name: s(&["description"])
                 .map(|d| format!("Agent: {d}"))
                 .unwrap_or_else(|| "Agent".into()),

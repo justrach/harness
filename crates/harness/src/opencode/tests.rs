@@ -806,48 +806,50 @@ fn tool_parts_open_and_resolve_once() {
 
 #[test]
 fn task_spawn_registers_child_by_metadata_and_completion_settles() {
-    let mut feed = feed_with_assistant("msg_a");
-    let mut children = HashMap::new();
-    let mut pending = VecDeque::new();
-    let mut unbound = HashMap::new();
-    let running = json!({
-        "id": "prt_task", "messageID": "msg_a", "sessionID": "ses_parent",
-        "type": "tool", "tool": "task",
-        "state": {
-            "status": "running",
-            "input": {"description": "Scan crates", "prompt": "scan", "subagent_type": "general"},
-            "metadata": {"sessionId": "ses_child", "parentSessionId": "ses_parent"},
-        },
-    });
-    let events = part_snapshot_events(
-        &mut feed,
-        &running,
-        true,
-        Some((&mut children, &mut pending, &mut unbound)),
-    );
-    // Genus-gated spawn naming, keyed by the PART id.
-    assert!(matches!(
-        events.as_slice(),
-        [AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }]
-            if id == "prt_task" && name == "Agent: Scan crates"
-    ));
-    let child = children.get("ses_child").expect("bound child");
-    assert_eq!(child.parent_tool_use_id, "prt_task");
+    for name in ["task", "subagent"] {
+        let mut feed = feed_with_assistant("msg_a");
+        let mut children = HashMap::new();
+        let mut pending = VecDeque::new();
+        let mut unbound = HashMap::new();
+        let running = json!({
+            "id": "prt_task", "messageID": "msg_a", "sessionID": "ses_parent",
+            "type": "tool", "tool": name,
+            "state": {
+                "status": "running",
+                "input": {"description": "Scan crates", "prompt": "scan", "subagent_type": "general"},
+                "metadata": {"sessionId": "ses_child", "parentSessionId": "ses_parent"},
+            },
+        });
+        let events = part_snapshot_events(
+            &mut feed,
+            &running,
+            true,
+            Some((&mut children, &mut pending, &mut unbound)),
+        );
+        // Genus-gated spawn naming, keyed by the PART id.
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }]
+                if id == "prt_task" && name == "Agent: Scan crates"
+        ));
+        let child = children.get("ses_child").expect("bound child");
+        assert_eq!(child.parent_tool_use_id, "prt_task");
 
-    let completed = json!({
-        "id": "prt_task", "messageID": "msg_a", "sessionID": "ses_parent",
-        "type": "tool", "tool": "task",
-        "state": {
-            "status": "completed",
-            "input": {"description": "Scan crates"},
-            "output": "<task_result>done</task_result>",
-            "metadata": {"sessionId": "ses_child"},
-        },
-    });
-    assert_eq!(
-        task_completion(&completed),
-        Some(("ses_child".to_owned(), false))
-    );
+        let completed = json!({
+            "id": "prt_task", "messageID": "msg_a", "sessionID": "ses_parent",
+            "type": "tool", "tool": name,
+            "state": {
+                "status": "completed",
+                "input": {"description": "Scan crates"},
+                "output": "<task_result>done</task_result>",
+                "metadata": {"sessionId": "ses_child"},
+            },
+        });
+        assert_eq!(
+            task_completion(&completed),
+            Some(("ses_child".to_owned(), false))
+        );
+    }
 }
 
 #[test]
@@ -1919,4 +1921,59 @@ async fn idle_without_busy_resolves_through_status_poll() {
     wire.idle();
     assert_eq!(wire.done().await.0, DoneStatus::Completed);
     assert_eq!(wire.polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn v2_spawn_names_bind_child_traffic_to_the_parent_chip() {
+    for name in ["task", "subagent"] {
+        let mut wire = TurnWire::start_proto(false, true).await;
+        wire.request("/api/model").await;
+        wire.request("/prompt").await;
+        wire.v2("session.execution.started", json!({"sessionID":"fixture"}));
+        wire.v2(
+            "session.step.started",
+            json!({"sessionID":"fixture","assistantMessageID":"parent-message"}),
+        );
+        wire.v2("session.tool.input.started", json!({"sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn","name":name}));
+        wire.v2("session.tool.called", json!({"sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn","input":{"description":"Inspect project","prompt":"inspect"}}));
+        wire.v2(
+            "session.created",
+            json!({"sessionID":"child","parentID":"fixture","title":"Inspect project"}),
+        );
+        wire.v2(
+            "session.step.started",
+            json!({"sessionID":"child","assistantMessageID":"child-message"}),
+        );
+        wire.v2("session.text.delta", json!({"sessionID":"child","assistantMessageID":"child-message","ordinal":0,"delta":"child answer"}));
+        wire.v2("session.execution.succeeded", json!({"sessionID":"child"}));
+        wire.v2("session.tool.success", json!({"sessionID":"fixture","assistantMessageID":"parent-message","id":"spawn","content":[]}));
+        wire.v2(
+            "session.execution.succeeded",
+            json!({"sessionID":"fixture"}),
+        );
+        let mut calls = Vec::new();
+        let mut child_events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = wire.events.recv().await {
+                match event.unwrap() {
+                    AgentEvent::ToolCall { id, call } => calls.push((id, call)),
+                    AgentEvent::Subagent {
+                        parent_tool_use_id,
+                        event,
+                    } => child_events.push((parent_tool_use_id, event)),
+                    AgentEvent::Done { status, .. } => {
+                        assert_eq!(status, DoneStatus::Completed);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(&calls[0].1, ToolCall::Unknown { name, .. } if name == "Agent: Inspect project")
+        );
+        assert!(child_events.iter().any(|(id, event)| id == &calls[0].0 && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "child answer")), "{name}: {child_events:?}");
+    }
 }
