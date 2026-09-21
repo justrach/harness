@@ -78,6 +78,8 @@ for line in sys.stdin:
             print("diagnostic noise", flush=True)
             for noise in [None, 42, [], "plain", {"unrelated": True}]:
                 emit(noise)
+            emit({"id": ident, "diagnostic": "not a response"})
+            emit({"jsonrpc": "other", "id": ident, "result": {}})
             update("x" * (2 * 1024 * 1024))
         elif prompt == "burst":
             for index in range(300):

@@ -229,11 +229,17 @@ async fn read_loop(
             tracing::debug!(target: "zeron_harness::rpc", "non-JSON stdout line (skipped)");
             continue;
         };
+        if !msg.is_object() || msg.get("jsonrpc").is_some_and(|version| version != "2.0") {
+            continue;
+        }
         let method = msg.get("method").and_then(Value::as_str);
         let id = msg.get("id");
         match (method, id) {
             // Response: resolve the awaiting request.
             (None, Some(id)) => {
+                if msg.get("result").is_none() && msg.get("error").is_none() {
+                    continue;
+                }
                 let Some(id) = response_id(id) else { continue };
                 let Some(sender) = pending.lock().expect("pending lock").remove(&id) else {
                     continue;
