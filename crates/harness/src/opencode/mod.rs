@@ -3292,6 +3292,28 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
         });
     }
     match kind {
+        "session.status" => vec![json!({"type": "session.status", "properties": data})],
+        "session.retry.scheduled" => vec![json!({
+            "type": "session.status",
+            "properties": {"sessionID": session(), "status": {
+                "type": "retry", "attempt": data.get("attempt"), "next": data.get("at"),
+                "message": data.pointer("/error/message").and_then(Value::as_str).filter(|s| !s.is_empty())
+                    .or_else(|| data.pointer("/error/type").and_then(Value::as_str)).unwrap_or("provider retry"),
+            }}
+        })],
+        "session.tool.progress" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = tool_names
+                .get(&tool_key())
+                .map(String::as_str)
+                .unwrap_or_default();
+            vec![v2_tool_part(
+                &data,
+                id,
+                name,
+                &json!({"status": "running", "metadata": data.get("metadata")}),
+            )]
+        }
         "session.execution.started" => vec![json!({
             "type": "session.status",
             "properties": { "sessionID": session(), "status": { "type": "busy" } }

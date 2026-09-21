@@ -1637,6 +1637,50 @@ async fn agent_selection_on_create_and_resume() {
     }
 }
 
+#[test]
+fn v2_status_retry_and_progress_vocabulary() {
+    let mut names = HashMap::new();
+    for status in [
+        json!({"type":"busy"}),
+        json!({"type":"idle"}),
+        json!({"type":"retry","attempt":3,"message":"overloaded","next":123}),
+    ] {
+        let data = json!({"sessionID":"s", "status":status});
+        assert_eq!(
+            normalize_v2_frame(json!({"type":"session.status", "data":data}), &mut names),
+            vec![json!({"type":"session.status","properties":data})]
+        );
+    }
+    let retry = normalize_v2_frame(
+        json!({"type":"session.retry.scheduled","data":{"sessionID":"s","assistantMessageID":"m","attempt":3,"at":123,"error":{"type":"provider.api","message":"overloaded"}}}),
+        &mut names,
+    );
+    assert_eq!(
+        retry[0],
+        json!({"type":"session.status","properties":{"sessionID":"s","status":{"type":"retry","attempt":3,"next":123,"message":"overloaded"}}})
+    );
+    normalize_v2_frame(
+        json!({"type":"session.tool.input.started","data":{"sessionID":"s","assistantMessageID":"m","id":"tool","name":"task"}}),
+        &mut names,
+    );
+    let progress = normalize_v2_frame(
+        json!({"type":"session.tool.progress","data":{"sessionID":"s","assistantMessageID":"m","id":"tool","metadata":{"sessionId":"child"}}}),
+        &mut names,
+    );
+    assert_eq!(
+        progress[0]["properties"]["part"]["state"],
+        json!({"status":"running","metadata":{"sessionId":"child"}})
+    );
+    assert_eq!(progress[0]["properties"]["part"]["tool"], "task");
+    assert!(
+        normalize_v2_frame(
+            json!({"type":"session.future.event","data":{"sessionID":"s"}}),
+            &mut names
+        )
+        .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1722,4 +1766,18 @@ async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
         "later discovery refreshes agents too"
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn v2_scheduled_retries_reach_existing_retry_abort() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.retry.scheduled", json!({"sessionID":"fixture","assistantMessageID":"m","attempt":RETRY_ABORT_ATTEMPT,"at":123,"error":{"type":"provider.api","message":"overloaded"}}));
+    wire.request("/interrupt").await;
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID":"fixture"}),
+    );
+    assert_eq!(wire.done().await.0, DoneStatus::Errored);
 }
