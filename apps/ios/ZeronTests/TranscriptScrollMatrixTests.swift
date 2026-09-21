@@ -278,6 +278,23 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         return "offset=\(table.contentOffset.y) content=\(table.contentSize.height)\n" + lines.joined(separator: "\n")
     }
 
+    private func anchorRowID() -> String? {
+        let rows = harness.store.transcriptCache.rows(revision: harness.store.revision,
+            entries: harness.store.entries, pendingSends: harness.store.pendingSends)
+        let top = table.contentOffset.y + table.contentInset.top
+        return (table.indexPathsForVisibleRows ?? []).sorted()
+            .first { table.rectForRow(at: $0).maxY > top && $0.row < rows.count }
+            .map { rows[$0.row].id }
+    }
+
+    /// Window-space top of the row, or .nan when it no longer exists.
+    private func rowTop(_ id: String) -> CGFloat {
+        let rows = harness.store.transcriptCache.rows(revision: harness.store.revision,
+            entries: harness.store.entries, pendingSends: harness.store.pendingSends)
+        guard let row = rows.firstIndex(where: { $0.id == id }) else { return .nan }
+        return table.convert(table.rectForRow(at: IndexPath(row: row, section: 0)), to: window).minY
+    }
+
     private func anchorCell() -> UITableViewCell? {
         let top = table.superview!.convert(table.superview!.bounds, to: window).minY
         return table.visibleCells.first {
@@ -372,6 +389,44 @@ final class TranscriptScrollMatrixTests: XCTestCase {
             await settle()
             assertTailVisible(context + "/after-jump")
         }
+    }
+
+    /// A structural (non-append) row change while reading history must not
+    /// pass through an estimated-height content size. UITableView resets
+    /// every height on `reloadData`; a 300-turn transcript collapsed toward
+    /// rows × 140 and re-expanded as rows realized — the jump felt under a
+    /// finger in the real app.
+    func testStructuralUpdateWhileReadingHistoryKeepsMeasuredContentSize() async {
+        let corpus = Self.corpora.first { $0.name == "mixed-report" }!
+        await mount(corpus)
+        applyChunk(corpus, index: Self.chunkCount - 1)
+        await settle(200)
+        await drag(by: -1400)
+        await settle(200)
+        guard let anchorID = anchorRowID() else { XCTFail("no anchor row"); return }
+        let start = rowTop(anchorID)
+        let before = table.contentSize.height
+        var minObserved = before
+        let observation = table.observe(\.contentSize, options: [.new]) { _, change in
+            if let height = change.newValue?.height { minObserved = min(minObserved, height) }
+        }
+        defer { observation.invalidate() }
+        for step in 0..<3 {
+            var entries = harness.store.entries
+            entries.insert(MessageEntry(id: "late-\(step)", role: .assistant,
+                parts: [.text(id: "t0", text: "Late row \(step) arrived from another device.")],
+                createdAt: nowMs(), deviceId: "other", status: .complete, continuationOf: nil),
+                at: entries.count - 2)
+            harness.store.setEntries(entries)
+            for _ in 0..<4 {
+                try? await Task.sleep(for: .milliseconds(16))
+                XCTAssertLessThan(abs(rowTop(anchorID) - start), 4,
+                    "anchor \(anchorID) moved on structural update \(step)\n\(visibleLayout())")
+            }
+            XCTAssertFalse(harness.scroll.pinned, "structural update must not re-pin a reader")
+        }
+        XCTAssertGreaterThan(minObserved, before - 64,
+            "content size collapsed to estimates during update: \(minObserved) < \(before)")
     }
 
     // MARK: Scenario 3 — keyboard show/hide during streaming (10 scenarios)

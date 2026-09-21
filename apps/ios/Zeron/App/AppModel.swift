@@ -6,7 +6,44 @@ import Foundation
 import Network
 import Observation
 import SwiftUI
+import UIKit
 import os
+
+private final class BackgroundFlushState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identifier: UIBackgroundTaskIdentifier = .invalid
+    private var cancelled = false
+
+    func setIdentifier(_ identifier: UIBackgroundTaskIdentifier) {
+        lock.lock()
+        self.identifier = identifier
+        lock.unlock()
+    }
+
+    func cancel() -> UIBackgroundTaskIdentifier {
+        lock.lock()
+        cancelled = true
+        let identifier = self.identifier
+        self.identifier = .invalid
+        lock.unlock()
+        return identifier
+    }
+
+    func finish() -> UIBackgroundTaskIdentifier {
+        lock.lock()
+        let identifier = self.identifier
+        self.identifier = .invalid
+        lock.unlock()
+        return identifier
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        let cancelled = self.cancelled
+        lock.unlock()
+        return cancelled
+    }
+}
 
 @MainActor
 @Observable
@@ -25,6 +62,9 @@ final class AppModel {
     /// from (home pill, composer notice, Queued/Failed badges).
     let connectivity = ConnectivityCenter()
     private var sessionStores: [String: SessionStore] = [:]
+    @ObservationIgnored private var storeLastUsed: [String: UInt64] = [:]
+    @ObservationIgnored private var usageClock: UInt64 = 0
+    @ObservationIgnored private var memoryWarningObserver: NSObjectProtocol?
     private var config: AppConfig?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathKey: String?
@@ -35,6 +75,24 @@ final class AppModel {
     @ObservationIgnored @AppStorage("userId") var storedUserId = ""
     @ObservationIgnored @AppStorage("orgId") var storedOrgId = ""
     @ObservationIgnored @AppStorage("deviceId") var storedDeviceId = ""
+
+    init() {
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.evictForMemoryWarning()
+            }
+        }
+    }
+
+    deinit {
+        if let memoryWarningObserver {
+            NotificationCenter.default.removeObserver(memoryWarningObserver)
+        }
+    }
 
     var deviceId: String {
         if storedDeviceId.isEmpty {
@@ -131,9 +189,9 @@ final class AppModel {
                     if args.contains("-stream"), let demo {
                         // Screenshot rig: kick off the scripted streaming reply.
                         let store = demo.sessionStore(for: chatId)
-                        Task { @MainActor in
+                        Task { @MainActor [weak store] in
                             try? await Task.sleep(nanoseconds: 2_000_000_000)
-                            store.demoResponder?("Show me the streamed reply path.")
+                            store?.demoResponder?("Show me the streamed reply path.")
                         }
                     }
                 } else if spec.hasPrefix("space:") {
@@ -151,9 +209,9 @@ final class AppModel {
                 let store = demo.sessionStore(for: lateId)
                 let full = store.entries
                 store.setEntries([])
-                Task { @MainActor in
+                Task { @MainActor [weak store] in
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    store.setEntries(full)
+                    store?.setEntries(full)
                 }
             }
             // Animation rig: "-archive-after chatId:secs" / "-unarchive-after
@@ -247,6 +305,7 @@ final class AppModel {
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
         sessionStores.removeAll()
+        storeLastUsed.removeAll()
         config = nil
         demo = nil
         demoPinnedSessionIds = []
@@ -282,10 +341,14 @@ final class AppModel {
             guard let self, self.demo == nil, let workspace = self.workspace else { return true }
             return workspace.connected
         }
+        connectivity.registryRetryAt = { [weak self] in
+            self?.workspace?.retryAt
+        }
         connectivity.chatRooms = { [weak self] in
             guard let self else { return [] }
             return self.sessionStores.compactMap { id, store in
-                store.roomActive ? (id: id, connected: store.connected) : nil
+                store.roomActive ? (id: id, connected: store.connected,
+                                    retryAt: store.retryAt) : nil
             }
         }
         connectivity.hasPendingSends = { [weak self] in
@@ -386,7 +449,15 @@ final class AppModel {
         }
         if let live = await workspace?.listModels(deviceId: deviceId, harness: harness),
            !live.isEmpty {
-            return HarnessCatalog.normalize(harness: harness, models: live)
+            let normalized = HarnessCatalog.normalize(harness: harness, models: live)
+            if !normalized.isEmpty {
+                _ = DocDisk.saveModels(normalized, deviceId: deviceId, harness: harness)
+                return normalized
+            }
+        }
+        if let cached = DocDisk.loadModels(deviceId: deviceId, harness: harness),
+           !cached.isEmpty {
+            return cached
         }
         return HarnessCatalog.models(for: harness)
     }
@@ -588,7 +659,30 @@ final class AppModel {
     /// Persist every open doc now (app backgrounding).
     func flushDocs() {
         workspace?.flushToDisk()
-        sessionStores.values.forEach { $0.flushToDisk() }
+        let orderedIDs = Array(Self.evictionOrder(lastUsed: storeLastUsed) { _ in false }.reversed())
+        let knownIDs = Set(orderedIDs)
+        let missingIDs = sessionStores.keys.filter { !knownIDs.contains($0) }
+        let stores = (orderedIDs + missingIDs).compactMap { sessionStores[$0] }
+        guard !stores.isEmpty else { return }
+
+        let state = BackgroundFlushState()
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: "zeron.flushDocs") {
+            let identifier = state.cancel()
+            if identifier != .invalid {
+                UIApplication.shared.endBackgroundTask(identifier)
+            }
+        }
+        state.setIdentifier(identifier)
+        stores.forEach { $0.retireSaverTimers() }
+        Task { @MainActor [stores, state] in
+            for store in stores where !state.isCancelled && !store.stopped {
+                await store.flushToDiskAsync()
+            }
+            let identifier = state.finish()
+            if identifier != .invalid {
+                UIApplication.shared.endBackgroundTask(identifier)
+            }
+        }
     }
 
     /// Foreground hook: kick every room NOW (see ChatRoomClient.kick) — after
@@ -633,20 +727,23 @@ final class AppModel {
             // Dial-held stores stay held: a kick force-dials, and sweeping 46
             // of them on every foreground/path flap is the stampede the warm
             // cap exists to prevent. Held chats reconnect on open.
-            guard let store = sessionStores[chat.id], !store.isDialHeld else { continue }
+            guard let store = sessionStores[chat.id],
+                  !store.isDialHeld || !store.outbox.isEmpty else { continue }
             kicked.insert(chat.id)
-            scheduleKick(store, afterNs: delay)
+            scheduleKick(chatId: chat.id, afterNs: delay)
             delay += 200_000_000
         }
-        for (id, store) in sessionStores where !kicked.contains(id) && !store.isDialHeld {
-            scheduleKick(store, afterNs: delay)
+        for (id, store) in sessionStores
+            where !kicked.contains(id) && (!store.isDialHeld || !store.outbox.isEmpty) {
+            scheduleKick(chatId: id, afterNs: delay)
             delay += 200_000_000
         }
     }
 
-    private func scheduleKick(_ store: SessionStore, afterNs delay: UInt64) {
-        Task { @MainActor in
+    private func scheduleKick(chatId: String, afterNs delay: UInt64) {
+        Task { @MainActor [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            guard let self, let store = self.sessionStores[chatId] else { return }
             store.kickRoom()
         }
     }
@@ -702,14 +799,20 @@ final class AppModel {
         if let demo { return demo.sessionStore(for: chat.id) }
         guard let config else { return nil }
         if let existing = sessionStores[chat.id] {
-            existing.hostDeviceId = chat.deviceId
-            // The registry flip to chat2 can land while the store is open —
-            // views re-derive `chat` from the registry on every change, so
-            // this accessor is the flip's delivery path.
-            existing.updateRoomGen(chat.roomGen)
-            // An open view wants live sync NOW — any preload dial-hold ends.
-            existing.releaseDial()
-            return existing
+            if existing.stopped {
+                sessionStores.removeValue(forKey: chat.id)
+                storeLastUsed.removeValue(forKey: chat.id)
+            } else {
+                touchStore(chat.id)
+                existing.hostDeviceId = chat.deviceId
+                // The registry flip to chat2 can land while the store is open —
+                // views re-derive `chat` from the registry on every change, so
+                // this accessor is the flip's delivery path.
+                existing.updateRoomGen(chat.roomGen)
+                // An open view wants live sync NOW — any preload dial-hold ends.
+                existing.releaseDial()
+                return existing
+            }
         }
         let store = SessionStore(chatId: chat.id, config: config)
         store.hostDeviceId = chat.deviceId
@@ -717,6 +820,7 @@ final class AppModel {
             self?.workspace?.peerLiveness(deviceId) ?? .unknown
         }
         sessionStores[chat.id] = store
+        touchStore(chat.id)
         store.start()
         store.updateRoomGen(chat.roomGen)
         return store
@@ -792,7 +896,9 @@ final class AppModel {
     }
 
     func releaseSessionStore(chatId: String) {
-        // Preloaded stores stay warm — nothing to evict on navigation.
+        guard sessionStores[chatId] != nil else { return }
+        touchStore(chatId)
+        evictColdStores()
     }
 
     /// Warm every non-archived session: stores hydrate from disk instantly
@@ -810,24 +916,136 @@ final class AppModel {
     /// an undialed chat's row stays live regardless, and opening it releases
     /// its dial instantly.
     static let warmDialCap = 8
+    static let warmStoreCap = 12
+
+    nonisolated static func warmPreloadIDs(
+        chats: [Chat],
+        hasPendingOutbox: (String) -> Bool,
+        cap: Int
+    ) -> [String] {
+        let limit = max(0, cap)
+        var ids: [String] = []
+        var selected = Set<String>()
+        for chat in chats.prefix(limit) where selected.insert(chat.id).inserted {
+            ids.append(chat.id)
+        }
+        for chat in chats.dropFirst(limit)
+            where hasPendingOutbox(chat.id) && selected.insert(chat.id).inserted {
+            ids.append(chat.id)
+        }
+        return ids
+    }
+
+    nonisolated static func warmDialIDs(
+        ids: [String],
+        hasPendingOutbox: (String) -> Bool,
+        cap: Int
+    ) -> [String] {
+        let limit = max(0, cap)
+        var released: [String] = []
+        var selected = Set<String>()
+        for id in ids.prefix(limit) where selected.insert(id).inserted {
+            released.append(id)
+        }
+        for id in ids.dropFirst(limit)
+            where hasPendingOutbox(id) && selected.insert(id).inserted {
+            released.append(id)
+        }
+        return released
+    }
+
+    nonisolated static func evictionOrder(
+        lastUsed: [String: UInt64],
+        protected: (String) -> Bool
+    ) -> [String] {
+        lastUsed.keys
+            .filter { !protected($0) }
+            .sorted {
+                let lhs = lastUsed[$0] ?? 0
+                let rhs = lastUsed[$1] ?? 0
+                return lhs == rhs ? $0 < $1 : lhs < rhs
+            }
+    }
+
+    private func touchStore(_ id: String) {
+        usageClock &+= 1
+        storeLastUsed[id] = usageClock
+    }
+
+    private func storeIsProtected(_ store: SessionStore) -> Bool {
+        !store.pendingSends.isEmpty
+            || !store.outbox.isEmpty
+            || store.entries.last?.status == .streaming
+    }
+
+    private func evictColdStores() {
+        guard sessionStores.count > Self.warmStoreCap else { return }
+        let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in
+            guard let self, let store = self.sessionStores[id] else { return false }
+            return self.storeIsProtected(store)
+        }
+        var removed = 0
+        for id in order where sessionStores.count > Self.warmStoreCap {
+            guard let store = sessionStores.removeValue(forKey: id) else { continue }
+            store.stop()
+            storeLastUsed.removeValue(forKey: id)
+            removed += 1
+        }
+        if removed > 0 {
+            roomLog.info("session store eviction removed \(removed, privacy: .public) cold store(s)")
+        }
+    }
+
+    private func evictForMemoryWarning() {
+        let newest = storeLastUsed.max { $0.value < $1.value }?.key
+        let before = sessionStores.count
+        let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in
+            guard let self, let store = self.sessionStores[id] else { return true }
+            return id == newest || self.storeIsProtected(store)
+        }
+        for id in order {
+            guard let store = sessionStores.removeValue(forKey: id) else { continue }
+            store.stop()
+            storeLastUsed.removeValue(forKey: id)
+        }
+        roomLog.info("memory warning evicted \(before - self.sessionStores.count, privacy: .public) of \(before, privacy: .public) session store(s)")
+    }
 
     func preloadSessions() {
         guard demo == nil, let config else { return }
         var stagger: UInt64 = 0
-        var released = 0
-        for chat in overviewChats where sessionStores[chat.id] == nil {
+        let preloadIDs = Self.warmPreloadIDs(
+            chats: overviewChats,
+            hasPendingOutbox: { DocDisk.chat2HasPendingOutbox(id: $0) },
+            cap: Self.warmStoreCap
+        )
+        for chat in overviewChats where preloadIDs.contains(chat.id) {
+            if sessionStores[chat.id]?.stopped == true {
+                sessionStores.removeValue(forKey: chat.id)
+                storeLastUsed.removeValue(forKey: chat.id)
+            }
+            guard sessionStores[chat.id] == nil else { continue }
             let store = SessionStore(chatId: chat.id, config: config)
             store.hostDeviceId = chat.deviceId
             store.hostLiveness = { [weak self] deviceId in
                 self?.workspace?.peerLiveness(deviceId) ?? .unknown
             }
             sessionStores[chat.id] = store
+            touchStore(chat.id)
             store.start(holdDial: true)
             store.updateRoomGen(chat.roomGen)
-            guard released < Self.warmDialCap else { continue }
-            released += 1
+        }
+        let warmDialIDs = Self.warmDialIDs(
+            ids: preloadIDs,
+            hasPendingOutbox: { sessionStores[$0]?.outbox.isEmpty == false },
+            cap: Self.warmDialCap
+        )
+        for id in warmDialIDs {
+            guard let chat = overviewChats.first(where: { $0.id == id }),
+                  let store = sessionStores[id], store.isDialHeld else { continue }
             let delay = stagger
-            Task { @MainActor in
+            Task { @MainActor [weak self, weak store] in
+                guard let self else { return }
                 // The registry (the sidebar the user is looking at) gets the
                 // pipe to itself first: on a 240kbps link, warm chat dials
                 // racing the registry's own handshake+state pushed the
@@ -839,6 +1057,7 @@ final class AppModel {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                 }
                 if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+                guard let store, self.sessionStores[chat.id] === store else { return }
                 store.releaseDial()
             }
             stagger += 300_000_000

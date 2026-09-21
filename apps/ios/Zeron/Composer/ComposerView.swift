@@ -102,6 +102,7 @@ struct ComposerShell<Chips: View>: View {
                 .padding(.vertical, expanded ? 4 : 5)
                 .frame(minWidth: compact ? 140 : nil,
                        minHeight: expanded && !compact ? 64 : nil, alignment: .topLeading)
+                .fixedSize(horizontal: false, vertical: true)
             if expanded {
                 HStack(spacing: 8) {
                     if onAttach != nil {
@@ -114,6 +115,14 @@ struct ComposerShell<Chips: View>: View {
                         }
                     }
                     .scrollClipDisabled(false)
+                    .mask {
+                        HStack(spacing: 0) {
+                            Rectangle()
+                            LinearGradient(colors: [.black, .clear],
+                                           startPoint: .leading, endPoint: .trailing)
+                                .frame(width: 24)
+                        }
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     actionButton
                 }

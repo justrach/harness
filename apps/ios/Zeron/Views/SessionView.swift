@@ -120,7 +120,7 @@ struct SessionView: View {
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
             VStack(spacing: 0) {
                 if verticalSizeClass != .compact || status == .working || status == .errored
-                    || model.sendState(for: chat) != nil {
+                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat) == .failed)
                 }
@@ -221,13 +221,30 @@ struct SessionView: View {
                             .foregroundStyle(Theme.textMuted)
                     }
                 case nil:
-                    normalStatus(chat: chat, status: status)
+                    switch model.connectivity.state {
+                    case .offline:
+                        Circle().fill(Theme.warning).frame(width: 5, height: 5)
+                        Text("Offline — sends are saved")
+                            .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
+                    case .reconnecting:
+                        ProgressView().controlSize(.mini).tint(Theme.textMuted)
+                        Text(reconnectingLabel)
+                            .font(Theme.sans(11)).foregroundStyle(Theme.textFaint).monospacedDigit()
+                    case .connected:
+                        normalStatus(chat: chat, status: status)
+                    }
                 }
             }
             .frame(height: 24)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 26)  // aligns with the composer's text start
         }
+    }
+
+    private var reconnectingLabel: String {
+        guard let retryAt = model.connectivity.retryAt else { return "Reconnecting…" }
+        let secs = Int(retryAt.timeIntervalSinceNow.rounded(.up))
+        return secs > 1 ? "Reconnecting in \(secs)s…" : "Reconnecting…"
     }
 
     @ViewBuilder
