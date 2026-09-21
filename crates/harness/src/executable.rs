@@ -143,24 +143,41 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     Some(best)
 }
 
+type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
+type VersionEntry = (Option<semver::Version>, std::collections::HashSet<String>);
+static VERSION_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<VersionKey, VersionEntry>>,
+> = std::sync::OnceLock::new();
+
+/// An explicit install may replace wrappers without changing their metadata.
+/// Clear all candidates, including canonical paths behind vendor symlinks.
+pub(crate) fn invalidate_versions(names: &[&str]) {
+    if let Some(cache) = VERSION_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, aliases)| !names.iter().any(|name| aliases.contains(*name)));
+    }
+}
+
 /// Probe once per executable identity. Failures are cached too, including timeout.
 /// Keep the lock during the short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
-    use std::{
-        collections::HashMap,
-        sync::{Mutex, OnceLock},
-        time::{Duration, SystemTime},
-    };
-    type Key = (PathBuf, Option<SystemTime>, u64);
-    static CACHE: OnceLock<Mutex<HashMap<Key, Option<semver::Version>>>> = OnceLock::new();
+    use std::time::Duration;
     let canonical = path.canonicalize().ok()?;
     let metadata = canonical.metadata().ok()?;
     let key = (canonical, metadata.modified().ok(), metadata.len());
-    let mut cache = CACHE
+    let mut cache = VERSION_CACHE
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(version) = cache.get(&key) {
+    let alias = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if let Some((version, aliases)) = cache.get_mut(&key) {
+        aliases.insert(alias);
         return version.clone();
     }
     #[cfg(not(windows))]
@@ -255,7 +272,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
     };
     let version = probe();
     cache.retain(|(p, _, _), _| p != &key.0);
-    cache.insert(key, version.clone());
+    cache.insert(key, (version.clone(), [alias].into_iter().collect()));
     version
 }
 
@@ -541,6 +558,29 @@ mod tests {
         std::fs::write(&first, "@echo off\r\necho codex-cli 1.0.0\r\n").unwrap();
         std::fs::write(&second, "@echo off\r\necho codex-cli 2.0.0\r\n").unwrap();
         assert_eq!(newest_candidate(vec![first, second.clone()]), Some(second));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_install_invalidates_symlinked_wrapper_versions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("version");
+        let entry = dir.path().join("entry.js");
+        let cli = dir.path().join("install-cache-test");
+        std::fs::write(
+            &entry,
+            format!("#!/bin/sh\n/bin/cat '{}'\n", version.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&entry, &cli).unwrap();
+        std::fs::write(&version, "1.0.0").unwrap();
+        assert_eq!(binary_version(&cli).unwrap().to_string(), "1.0.0");
+        std::fs::write(&version, "2.0.0").unwrap();
+        assert_eq!(binary_version(&cli).unwrap().to_string(), "1.0.0");
+        invalidate_versions(&["install-cache-test"]);
+        assert_eq!(binary_version(&cli).unwrap().to_string(), "2.0.0");
     }
 
     #[cfg(unix)]
