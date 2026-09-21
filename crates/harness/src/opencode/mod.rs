@@ -49,8 +49,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
+    RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -281,7 +281,14 @@ impl OpencodeHarness {
         let mut server = self.server(None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
-            let models = models_from_providers(&providers);
+            let mut models = models_from_providers(&providers);
+            if server.protocol().await == Protocol::V2 {
+                let agents = server.get_json("/api/agent", None).await?;
+                let option = agent_option(&agents);
+                for model in &mut models {
+                    model.options.push(option.clone());
+                }
+            }
             if models.is_empty() {
                 return Err(HarnessError::Protocol(
                     "opencode advertised no models (`opencode auth login` to configure a provider)"
@@ -1015,6 +1022,42 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
     out
 }
 
+/// Stored with the models so overlapping discovery calls share the same probe.
+fn agent_option(agents: &Value) -> ModelOption {
+    let mut choices = vec![ModelOptionChoice {
+        id: String::new(),
+        label: "Server default".into(),
+    }];
+    for agent in agents
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if agent.get("hidden").and_then(Value::as_bool) == Some(true)
+            || agent.get("mode").and_then(Value::as_str) == Some("subagent")
+        {
+            continue;
+        }
+        if let (Some(id), Some(name)) = (
+            agent.get("id").and_then(Value::as_str),
+            agent.get("name").and_then(Value::as_str),
+        ) && !id.is_empty()
+        {
+            choices.push(ModelOptionChoice {
+                id: id.into(),
+                label: name.into(),
+            });
+        }
+    }
+    ModelOption {
+        id: "agent".into(),
+        label: "Agent".into(),
+        choices,
+        default_choice: String::new(),
+    }
+}
+
 fn commands_from_wire(commands: &Value) -> Vec<SlashCommand> {
     commands
         .as_array()
@@ -1262,27 +1305,47 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
+    let agent = request
+        .model_options
+        .get("agent")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty());
+
     // ---- session create/resume -------------------------------------------
     let setup = async {
         let session_id = match &request.resume {
             Some(resume) => {
                 // Sessions are durable server-side: resume = reuse the id.
                 match server.session_info(resume, dir).await {
-                    Ok(info) => info
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(resume)
-                        .to_owned(),
+                    Ok(info) => {
+                        let id = info
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(resume)
+                            .to_owned();
+                        if server.protocol().await == Protocol::V2
+                            && let Some(agent) = agent
+                        {
+                            server
+                                .post_json(
+                                    &format!("/api/session/{id}/agent"),
+                                    dir,
+                                    &json!({"agent": agent}),
+                                )
+                                .await?;
+                        }
+                        id
+                    }
                     Err(e) => {
                         tracing::debug!(
                             target: "zeron_harness::opencode",
                             "session resume failed (starting fresh): {e}"
                         );
-                        create_session(&server, dir).await?
+                        create_session(&server, dir, agent).await?
                     }
                 }
             }
-            None => create_session(&server, dir).await?,
+            None => create_session(&server, dir, agent).await?,
         };
 
         // Provider catalog: resolves the model's advertised reasoning
@@ -1786,16 +1849,23 @@ async fn run_session(session: Session) {
     server.shutdown(kill_grace).await;
 }
 
-async fn create_session(server: &Server, dir: Option<&str>) -> Result<String, HarnessError> {
+async fn create_session(
+    server: &Server,
+    dir: Option<&str>,
+    agent: Option<&str>,
+) -> Result<String, HarnessError> {
     if server.protocol().await == Protocol::V2 {
         // 2.x takes the run directory in the BODY (`location.directory`) —
         // the header is ignored on this route (observed live, 2.0.3) — and
         // wraps the answer in `{data}`. Its schema is stable; the 1.x-only
         // lazy-migration crash below doesn't exist there.
-        let body = match dir {
+        let mut body = match dir {
             Some(dir) => json!({ "location": { "directory": dir } }),
             None => json!({}),
         };
+        if let Some(agent) = agent {
+            body["agent"] = json!(agent);
+        }
         let created = server.post_json("/api/session", dir, &body).await?;
         return created
             .pointer("/data/id")

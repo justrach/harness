@@ -1562,3 +1562,164 @@ async fn command_http_failure_errors_turn_without_watchdog() {
         assert_eq!(body[if v2 { "text" } else { "arguments" }], "args");
     }
 }
+
+#[test]
+fn agent_model_option_filters_and_preserves_ids() {
+    let option = agent_option(&json!({"data":[
+        {"id":"build-id","name":"Build","mode":"primary","hidden":false},
+        {"id":"all-id","name":"All","mode":"all"},
+        {"id":"hidden","name":"Hidden","mode":"primary","hidden":true},
+        {"id":"sub","name":"Sub","mode":"subagent"}
+    ]}));
+    assert_eq!(option.id, "agent");
+    assert_eq!(option.label, "Agent");
+    assert_eq!(option.default_choice, "");
+    assert_eq!(
+        option
+            .choices
+            .iter()
+            .map(|c| (c.id.as_str(), c.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("", "Server default"),
+            ("build-id", "Build"),
+            ("all-id", "All")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agent_selection_on_create_and_resume() {
+    for v2 in [false, true] {
+        for resume in [false, true] {
+            for agent in [json!("build-id"), json!(""), json!(true)] {
+                let mut overrides = json!({"modelOptions":{"agent":agent}});
+                if resume {
+                    overrides["resume"] = json!("fixture");
+                }
+                let mut wire =
+                    TurnWire::start_config(false, v2, true, None, "2.0.11", overrides, false).await;
+                if v2 {
+                    wire.request("/api/model").await;
+                }
+                wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+                    .await;
+                let posts = wire.posts.lock().unwrap();
+                let selection = posts.iter().find(|(p, _)| {
+                    if resume {
+                        p.ends_with("/agent")
+                    } else {
+                        p.ends_with("/session")
+                    }
+                });
+                let expected = if v2 && agent == "build-id" {
+                    json!("build-id")
+                } else {
+                    Value::Null
+                };
+                assert_eq!(
+                    selection
+                        .map(|(_, b)| b["agent"].clone())
+                        .unwrap_or(Value::Null),
+                    expected
+                );
+                if resume && v2 && agent == "build-id" {
+                    assert_eq!(
+                        posts[0],
+                        (
+                            "/api/session/fixture/agent".into(),
+                            json!({"agent":"build-id"})
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let harness =
+        OpencodeHarness::new().with_base_url(format!("http://{}", listener.local_addr().unwrap()));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let n = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]);
+            let path = request.split_whitespace().nth(1).unwrap();
+            let body = {
+                let mut calls = recorded.lock().unwrap();
+                calls.push(path.to_owned());
+                match path {
+                    "/api/info" => json!({"version":"2.0.11"}),
+                    "/api/model" if calls.iter().filter(|p| p.as_str() == path).count() == 1 => json!({"data":[]}),
+                    "/api/model" => json!({"data":[
+                        {"providerID":"mock","id":"a","name":"A","enabled":true},
+                        {"providerID":"mock","id":"b","name":"B","enabled":true}
+                    ]}),
+                    "/api/agent" => json!({"data":[{"id":"agent-id","name":"Agent name","mode":"all","hidden":false}]}),
+                    _ => json!({"data":[]}),
+                }
+            }.to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let (first, overlapping) = tokio::join!(harness.models(), harness.models());
+    let first = first.unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&first).unwrap(),
+        serde_json::to_value(overlapping.unwrap()).unwrap()
+    );
+    for model in first {
+        assert_eq!(model.options.len(), 1);
+        assert_eq!(model.options[0].id, "agent");
+        assert_eq!(model.options[0].choices[1].id, "agent-id");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/model")
+            .count(),
+        2,
+        "empty catalog must settle"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/agent")
+            .count(),
+        1,
+        "overlapping callers share agents with models"
+    );
+    harness.models().await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/agent")
+            .count(),
+        2,
+        "later discovery refreshes agents too"
+    );
+    task.abort();
+}
