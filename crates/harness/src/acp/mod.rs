@@ -60,6 +60,9 @@ use subagent_devin::DevinTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+// The one-file server unpacks on launch. A local cold probe took 1.903s, but
+// slower disks need substantially more headroom than the generic 10s budget.
+const ANTIGRAVITY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Per-agent configuration: which binary to spawn and what to tell the picker.
 struct AcpAgentSpec {
     id: HarnessId,
@@ -899,6 +902,7 @@ impl AcpHarness {
     /// google antigravity over its acp server (`agy_acp_server`).
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
+            .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
@@ -1306,7 +1310,12 @@ impl AcpHarness {
             }
             Ok::<Vec<SlashCommand>, HarnessError>(commands)
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        let timeout = if self.spec.id == HarnessId::Antigravity {
+            self.model_discovery_timeout
+        } else {
+            DEFAULT_MODEL_DISCOVERY_TIMEOUT
+        };
+        let result = tokio::time::timeout(timeout, discovery).await;
         shutdown_child(&mut child, self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -3831,6 +3840,17 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_discovery_budget_covers_cold_start_without_changing_handshake() {
+        let harness = AcpHarness::antigravity();
+        assert_eq!(harness.model_discovery_timeout, Duration::from_secs(90));
+        assert_eq!(harness.handshake_timeout, Duration::from_secs(120));
+        assert_eq!(
+            AcpHarness::grok().model_discovery_timeout,
+            Duration::from_secs(10)
+        );
+    }
 
     fn all_antigravity_auth_methods() -> Value {
         json!({

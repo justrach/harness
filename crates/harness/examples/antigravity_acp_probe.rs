@@ -24,7 +24,7 @@ async fn main() {
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .expect("spawn server");
@@ -78,8 +78,13 @@ async fn main() {
             .unwrap_or(&Value::Null)
     );
 
+    let session_started = std::time::Instant::now();
     let session = call("session/new", json!({ "cwd": workspace, "mcpServers": [] })).await;
-    println!("session/new elapsed: {:?}", started.elapsed());
+    println!(
+        "session/new elapsed: {:?}; total: {:?}",
+        session_started.elapsed(),
+        started.elapsed()
+    );
     if let Some(error) = session.get("error") {
         println!("session/new error: {error}");
         return;
