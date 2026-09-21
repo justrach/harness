@@ -11794,6 +11794,7 @@ dependencies = [
  "zeron-rpc",
  "zeron-sync",
  "zeron-update",
+ "zip",
 ]
 
 [[package]]
