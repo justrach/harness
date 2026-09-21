@@ -12,7 +12,7 @@
 //!   the TS harness's swallowed-EPIPE behavior.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -47,6 +47,7 @@ pub(crate) struct RpcClient {
     next_id: Arc<AtomicI64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<String>,
+    closed: Arc<AtomicBool>,
 }
 
 impl RpcClient {
@@ -57,15 +58,26 @@ impl RpcClient {
         tokio::spawn(write_loop(stdin, writer_rx));
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
-        tokio::spawn(read_loop(stdout, Arc::clone(&pending), incoming_tx));
+        let closed = Arc::new(AtomicBool::new(false));
+        tokio::spawn(read_loop(
+            stdout,
+            Arc::clone(&pending),
+            incoming_tx,
+            closed.clone(),
+        ));
         (
             Self {
                 next_id: Arc::new(AtomicI64::new(0)),
                 pending,
                 writer: writer_tx,
+                closed,
             },
             incoming_rx,
         )
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Send a request and await its response (resolved by the reader task).
@@ -171,7 +183,12 @@ fn response_error(error: &Value) -> String {
 /// Parse stdout lines: responses resolve the pending map, everything else is
 /// forwarded in order. Non-JSON noise is skipped; on EOF all pending requests
 /// fail (their senders drop) and one final [`Incoming::Eof`] is delivered.
-async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incoming>) {
+async fn read_loop(
+    stdout: ChildStdout,
+    pending: Pending,
+    tx: mpsc::Sender<Incoming>,
+    closed: Arc<AtomicBool>,
+) {
     let mut lines = BufReader::new(stdout).lines();
     // A read error ends the loop like EOF: either way the child's stdout is
     // unusable, pending requests must fail, and the session loop must know.
@@ -233,6 +250,7 @@ async fn read_loop(stdout: ChildStdout, pending: Pending, tx: mpsc::Sender<Incom
         }
     }
     // EOF/read error: fail every awaiting request, then signal the loop.
+    closed.store(true, Ordering::Release);
     pending.lock().expect("pending lock").clear();
     let _ = tx.send(Incoming::Eof).await;
 }

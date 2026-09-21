@@ -1283,3 +1283,145 @@ async fn antigravity_auth_path_subprocess() {
     .expect("sign-in timed out")
     .expect("configured business sign-in");
 }
+
+fn pi_fixture() -> AcpHarness {
+    AcpHarness::pi()
+        .with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-acp.sh"),
+        )
+        .with_graces(Duration::from_millis(100), Duration::from_millis(150))
+}
+
+#[tokio::test]
+async fn pi_crash_reports_status_and_stderr_once() {
+    for (prompt, status, tail) in [
+        ("crash", "exit code 23", "last stderr context"),
+        ("signal-crash", "signal 9", "signal context"),
+        (
+            "inherited-pipe-crash",
+            "exit code 25",
+            "inherited pipe context",
+        ),
+    ] {
+        let (controls, _steer, _) = controls();
+        let events = run_to_end(&pi_fixture(), request(prompt), controls).await;
+        let done = dones(&events);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, DoneStatus::Errored);
+        let error = done[0].1.as_deref().unwrap();
+        assert!(error.contains(status) && error.contains(tail), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn pi_idle_crash_then_load_preserves_session() {
+    let (ctl, _steer, _) = controls();
+    let events = run_to_end(&pi_fixture(), request("idle-crash"), ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    let session = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Done { session_id, .. } => session_id.clone(),
+            _ => None,
+        })
+        .unwrap();
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("resumed");
+    req.resume = Some(session);
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "reply:resumed".into()
+    }));
+}
+
+#[tokio::test]
+async fn pi_failed_load_announces_lost_context() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("fresh");
+    req.resume = Some("missing".into());
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn pi_frames_and_model_effort_round_trip() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("frames");
+    req.model = Some("mock/model".into());
+    req.reasoning = Some(ReasoningLevel::Max);
+    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text.len() == 1024 * 1024 + 17))
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert_eq!(pi_fixture().models().await.unwrap()[0].id, "mock/model");
+}
+
+#[tokio::test]
+async fn pi_error_stop_reason_is_failed() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let events = run_to_end(&pi_fixture(), request("error"), ctl).await;
+    assert_eq!(dones(&events)[0].0, DoneStatus::Errored);
+}
+
+#[tokio::test]
+async fn pi_interrupt_error_and_duplicate_terminal_settle_once() {
+    let (ctl, _steer, token) = controls();
+    let mut stream = pi_fixture()
+        .run(request("interrupt-error"), ctl)
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "working") {
+                token.cancel();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+}
+
+#[tokio::test]
+async fn pi_interrupt_kills_tool_process_group() {
+    let (ctl, _steer, token) = controls();
+    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut tree_pid = None;
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if let AgentEvent::TextDelta { text } = &event
+                && let Some(pid) = text.strip_prefix("tree:")
+            {
+                tree_pid = Some(pid.parse::<i32>().unwrap());
+                token.cancel();
+            }
+            events.push(event);
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+    let pid = tree_pid.unwrap();
+    // A zombie awaiting the host reaper is dead; no tool may remain running.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    assert!(
+        stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"),
+        "{stat}"
+    );
+}

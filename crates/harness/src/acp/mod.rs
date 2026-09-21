@@ -52,7 +52,9 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
-use crate::process::{Child, Command, Stdio};
+use crate::process::{Command, Stdio};
+use child::Child;
+mod child;
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
@@ -897,7 +899,7 @@ impl AcpHarness {
     /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
     /// pi's RPC mode.
     pub fn pi() -> Self {
-        Self::with_spec(pi_spec())
+        Self::with_spec(pi_spec()).with_model_discovery_timeout(Duration::from_secs(60))
     }
 
     /// google antigravity over its acp server (`agy_acp_server`).
@@ -1217,6 +1219,7 @@ impl AcpHarness {
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         cmd.args(extra_args);
+        child::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             cmd.current_dir(cwd);
@@ -1228,13 +1231,14 @@ impl AcpHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(exe.display().to_string())
             } else {
                 HarnessError::Io(e)
             }
         })?;
+        let mut child = Child::new(child);
         let stderr_tail = crate::StderrTail::default();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
@@ -1244,6 +1248,7 @@ impl AcpHarness {
                     tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
                     tail.push(&line);
                 }
+                tail.close();
             });
         }
         Ok((child, stderr_tail))
@@ -2233,6 +2238,10 @@ fn stop_outcome(
     match res {
         Ok(resp) => match resp.get("stopReason").and_then(Value::as_str) {
             Some("cancelled") => (DoneStatus::Interrupted, None),
+            Some("error") => (
+                DoneStatus::Errored,
+                Some("The agent failed to complete the turn.".to_owned()),
+            ),
             Some("refusal") => (
                 DoneStatus::Errored,
                 Some("The agent refused to continue.".to_owned()),
@@ -2720,6 +2729,9 @@ async fn run_session(session: Session) {
                         target: "zeron_harness::acp",
                         "session/load failed (starting fresh): {e}"
                     );
+                    let _ = send(&event_tx, AgentEvent::Error {
+                        message: format!("{agent_name} could not restore session {resume}; starting a new session without the previous context: {e}"),
+                    }).await;
                     let new = new_session(
                         &client,
                         &mut incoming,
@@ -2972,8 +2984,8 @@ async fn run_session(session: Session) {
     // one prompt is outstanding at a time, identified by `current_prompt_id`;
     // settled ids are remembered so a STALE `prompt_complete` (a late replay
     // of an already-settled prompt) can never settle a newer turn.
-    let mut prompt_seq: u64 = 0;
-    let mut current_prompt_id: Option<String> = None;
+    let mut prompt_seq: u64 = 1;
+    let mut current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
     let mut completed_prompts: VecDeque<String> = VecDeque::new();
     // `ZERON_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
     let prompt_stall: Option<Duration> = match std::env::var("ZERON_ACP_PROMPT_STALL_MS")
@@ -2987,8 +2999,6 @@ async fn run_session(session: Session) {
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
-        prompt_seq += 1;
-        current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
         prompt_turn(
             client.clone(),
             session_id.clone(),
@@ -3012,7 +3022,9 @@ async fn run_session(session: Session) {
     let mut interrupt_sent = false;
     let mut done_current = false;
     let mut done_after_interrupt = false;
-    let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    let mut escalation_target = None;
+    let mut escalation_deadline = None;
+    let mut escalation_signal = Signal::Term;
     // Starved-turn recovery (2026-08-12 stuck-Working incident): a
     // `session/prompt` sent while the agent runs a SELF-CONTINUED turn (a
     // background-task re-invocation no prompt started) starves —
@@ -3046,10 +3058,26 @@ async fn run_session(session: Session) {
     const CANCEL_FLUSH: Duration = Duration::from_secs(2);
     let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
 
+    let mut child_exit = None;
+    let mut exit_drain_deadline = None;
     'main: loop {
         tokio::select! {
+            status = child.wait(), if child_exit.is_none() => {
+                escalation_deadline = None;
+                child_exit = Some(status.ok());
+                child.terminate_group();
+                // Descendants can hold stdout open after an adapter crash.
+                // Drain already-written frames, but never wait on them forever.
+                exit_drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(200));
+            },
+            _ = tokio::time::sleep_until(exit_drain_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if exit_drain_deadline.is_some() => break 'main,
+
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
+                if res.is_err() && client.is_closed() {
+                    break 'main;
+                }
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -3711,12 +3739,8 @@ async fn run_session(session: Session) {
                     // Escalate if the agent doesn't wind down (stopReason
                     // "cancelled") within the grace periods.
                     if let Some(pid) = crate::process::signal_target(&child) {
-                        escalation = Some(tokio::spawn(async move {
-                            tokio::time::sleep(interrupt_grace).await;
-                            send_signal(&pid, Signal::Term);
-                            tokio::time::sleep(kill_grace).await;
-                            send_signal(&pid, Signal::Kill);
-                        }));
+                        escalation_target = Some(pid);
+                        escalation_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
                     }
                 } else {
                     // Idle between turns: nothing to cancel — the terminal
@@ -3734,7 +3758,6 @@ async fn run_session(session: Session) {
             _ = tokio::time::sleep_until(
                 prompt_stall_deadline.unwrap_or_else(tokio::time::Instant::now),
             ), if prompt_stall_deadline.is_some() && turn.is_some() && !interrupted => {
-                prompt_stall_deadline = None;
                 let _ = send(
                     &event_tx,
                     AgentEvent::Error {
@@ -3761,6 +3784,22 @@ async fn run_session(session: Session) {
                 )
                 .await;
                 break 'main;
+            },
+
+            // Keep escalation in the owner task: it cannot outlive child.wait()
+            // or signal a pid after the child has been reaped.
+            _ = tokio::time::sleep_until(escalation_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if escalation_deadline.is_some() => {
+                if let Some(target) = &escalation_target {
+                    send_signal(target, escalation_signal);
+                }
+                escalation_deadline = match escalation_signal {
+                    Signal::Term => {
+                        escalation_signal = Signal::Kill;
+                        Some(tokio::time::Instant::now() + kill_grace)
+                    }
+                    Signal::Kill => None,
+                };
             },
 
             _ = event_tx.closed() => break 'main,
@@ -3794,7 +3833,15 @@ async fn run_session(session: Session) {
                 .await;
         } else if !interrupted && !done_current {
             // A child killed mid-turn must not read as a silent success.
-            let status = child.try_wait().ok().flatten();
+            let status = match child_exit {
+                Some(status) => status,
+                None => tokio::time::timeout(Duration::from_millis(200), child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok),
+            };
+            child.terminate_group();
+            stderr_tail.wait_closed().await;
             let _ = event_tx
                 .send(Ok(AgentEvent::Done {
                     status: DoneStatus::Errored,
@@ -3806,18 +3853,20 @@ async fn run_session(session: Session) {
         }
     }
 
-    // Escalation dies BEFORE the child is reaped: after `shutdown_child`
-    // waits the pid, a still-armed SIGTERM/SIGKILL timer would fire at a
-    // freed (reusable) pid.
-    if let Some(handle) = escalation {
-        handle.abort();
-    }
     shutdown_child(&mut child, kill_grace).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_discovery_allows_cold_extension_startup() {
+        let pi = AcpHarness::pi();
+        assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
+        assert_eq!(pi.handshake_timeout, Duration::from_secs(120));
+        assert!(pi.spec.prompt_stall.is_none());
+    }
 
     fn all_antigravity_auth_methods() -> Value {
         json!({
