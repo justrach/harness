@@ -9,12 +9,23 @@
 //! subagent traffic and thinking never reaches the ACP wire usefully. The
 //! desktop app doesn't use ACP; neither do we.
 //!
-//! Two server generations are spoken, detected at boot from the health
+//! Two server generations are spoken, detected at boot from version-bearing
 //! endpoints ([`Protocol`]): the 1.18 "v1" wire (verified against 1.18.31)
-//! and the 2.x `/api/*` wire (verified against 2.0.3):
+//! and the 2.x `/api/*` wire (2.0.3 turns; 2.0.11 discovery and schema,
+//! with scripted coverage for the 2.0.4+ command and agent routes):
 //! - spawn `opencode serve --port <free> --hostname 127.0.0.1` with
 //!   `OPENCODE_SERVER_PASSWORD=<uuid>` (HTTP Basic, username `opencode`);
-//!   readiness + protocol = `GET /api/health` vs `GET /global/health`.
+//!   readiness probes `/api/info`, `/api/status`, `/api/health` (2.x),
+//!   then `/global/health` (1.x), accepting version-bearing JSON.
+//! - 2.x discovery uses `GET /api/model` (with a plugin-settle poll),
+//!   `/api/agent` (Agent model option), and `/api/command`.
+//! - 2.x creates via `POST /api/session` with `location.directory` and
+//!   optional `agent`; resumed selection uses `/api/session/{id}/agent`.
+//!   Session model selection uses `/api/session/{id}/model`; cancellation
+//!   uses `/api/session/{id}/interrupt`; recovery uses `GET /api/session/active`.
+//! - slash commands use `POST /api/session/{id}/command`: `command` through
+//!   2.0.3, `name` from 2.0.4, with `text` arguments. 2.x directory scoping
+//!   uses the `x-opencode-directory` header.
 //! - one global SSE bus (`GET /api/event` on 2.x, `GET /global/event` on
 //!   1.x) carries every session's traffic, child (subagent) sessions
 //!   included, token-level. 2.x frames are rewritten into the 1.x payload
@@ -49,8 +60,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
-    SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
+    RunRequest, SlashCommand, SteeringMode, TodoItem, ToolCall, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::process::{Child, Command, Stdio};
@@ -68,7 +79,7 @@ const HEALTH_POLL: Duration = Duration::from_millis(150);
 /// Bound on ordinary (non-SSE) HTTP calls: everything is loopback and the
 /// only slow route is a cold /provider catalog. The synchronous per-turn
 /// command endpoint deliberately bypasses this (its response can take the
-/// whole turn and is ignored anyway).
+/// whole turn; failures are delivered to the session loop).
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Bus reconnect: the server is our own child on loopback, so a dropped
@@ -132,7 +143,7 @@ const INSTALL_HINT: &str = "opencode (searched PATH, the login shell's PATH, ~/.
      fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
      %APPDATA%\\npm, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
      `curl -fsSL https://opencode.ai/install | bash` or \
-     `npm install -g opencode-ai`, then `opencode auth login`; set \
+     `npm install -g @opencode/cli`, then `opencode auth login`; set \
      OPENCODE_EXECUTABLE to override)";
 
 /// The user's opencode: `OPENCODE_EXECUTABLE` when it exists, else PATH (plus
@@ -281,7 +292,14 @@ impl OpencodeHarness {
         let mut server = self.server(None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
-            let models = models_from_providers(&providers);
+            let mut models = models_from_providers(&providers);
+            if server.protocol().await == Protocol::V2 {
+                let agents = server.get_json("/api/agent", None).await?;
+                let option = agent_option(&agents);
+                for model in &mut models {
+                    model.options.push(option.clone());
+                }
+            }
             if models.is_empty() {
                 return Err(HarnessError::Protocol(
                     "opencode advertised no models (`opencode auth login` to configure a provider)"
@@ -407,6 +425,7 @@ struct Server {
     stderr_tail: crate::StderrTail,
     /// Wire generation, resolved once via the health endpoints.
     protocol: tokio::sync::OnceCell<Protocol>,
+    version: tokio::sync::OnceCell<ServerVersion>,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -418,27 +437,70 @@ enum Protocol {
     V2,
 }
 
+#[derive(Clone, Debug)]
+struct ServerVersion {
+    raw: String,
+    number: Option<(u64, u64, u64)>,
+}
+
+impl ServerVersion {
+    fn parse(raw: &str) -> Self {
+        let number = (|| {
+            let start = raw.find(|c: char| c.is_ascii_digit())?;
+            let mut parts = raw[start..].split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let patch = parts
+                .next()?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()?;
+            Some((major, minor, patch))
+        })();
+        Self {
+            raw: raw.to_owned(),
+            number,
+        }
+    }
+}
+
 impl Protocol {
-    /// One readiness poll across both generations. 2.x answers
-    /// `GET /api/health` with `{healthy, version}` and serves its web UI on
-    /// `/global/health`; 1.x answers `GET /global/health` with
-    /// `{healthy, version}` AND also serves `/api/health` — with
-    /// `{"healthy":true}`, no version (both observed live). The version
-    /// field is the only unambiguous discriminator. `None` = still booting.
-    async fn detect(server: &Server) -> Option<Self> {
+    /// Probe newest to oldest. A version-bearing JSON response distinguishes
+    /// the API from web UI catch-alls; `None` means the server is still booting.
+    async fn detect(server: &Server) -> Result<Option<Self>, HarnessError> {
         for (path, protocol) in [
+            ("/api/info", Protocol::V2),
+            ("/api/status", Protocol::V2),
             ("/api/health", Protocol::V2),
             ("/global/health", Protocol::V1),
         ] {
-            if let Ok(resp) = server.get_raw(path).await
-                && resp.status().is_success()
+            let Ok(resp) = server.get_raw(path).await else {
+                continue;
+            };
+            if matches!(resp.status().as_u16(), 401 | 403) {
+                return Err(HarnessError::Protocol(format!(
+                    "opencode authentication rejected at {path}: {}",
+                    resp.status()
+                )));
+            }
+            if resp.status().is_success()
                 && let Ok(v) = resp.json::<Value>().await
-                && v.get("version").and_then(Value::as_str).is_some()
+                && let Some(version) = v
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| {
+                        v.pointer("/data/version")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                    })
             {
-                return Some(protocol);
+                let _ = server.version.set(ServerVersion::parse(version));
+                return Ok(Some(protocol));
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -451,6 +513,7 @@ impl Server {
             client: http_client(),
             stderr_tail: crate::StderrTail::default(),
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -459,7 +522,13 @@ impl Server {
     async fn protocol(&self) -> Protocol {
         *self
             .protocol
-            .get_or_init(|| async { Protocol::detect(self).await.unwrap_or(Protocol::V1) })
+            .get_or_init(|| async {
+                Protocol::detect(self)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Protocol::V1)
+            })
             .await
     }
 
@@ -522,6 +591,7 @@ impl Server {
             client: http_client(),
             stderr_tail,
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -538,7 +608,18 @@ impl Server {
                     &server.stderr_tail,
                 )));
             }
-            if let Some(protocol) = Protocol::detect(&server).await {
+            let detected = match Protocol::detect(&server).await {
+                Ok(detected) => detected,
+                Err(error) => {
+                    server.shutdown(Duration::from_secs(1)).await;
+                    return Err(error);
+                }
+            };
+            if let Some(protocol) = detected {
+                tracing::debug!(
+                    version = server.version.get().map(|v| v.raw.as_str()),
+                    "opencode ready"
+                );
                 let _ = server.protocol.set(protocol);
                 break;
             }
@@ -952,6 +1033,42 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
     out
 }
 
+/// Stored with the models so overlapping discovery calls share the same probe.
+fn agent_option(agents: &Value) -> ModelOption {
+    let mut choices = vec![ModelOptionChoice {
+        id: String::new(),
+        label: "Server default".into(),
+    }];
+    for agent in agents
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if agent.get("hidden").and_then(Value::as_bool) == Some(true)
+            || agent.get("mode").and_then(Value::as_str) == Some("subagent")
+        {
+            continue;
+        }
+        if let (Some(id), Some(name)) = (
+            agent.get("id").and_then(Value::as_str),
+            agent.get("name").and_then(Value::as_str),
+        ) && !id.is_empty()
+        {
+            choices.push(ModelOptionChoice {
+                id: id.into(),
+                label: name.into(),
+            });
+        }
+    }
+    ModelOption {
+        id: "agent".into(),
+        label: "Agent".into(),
+        choices,
+        default_choice: String::new(),
+    }
+}
+
 fn commands_from_wire(commands: &Value) -> Vec<SlashCommand> {
     commands
         .as_array()
@@ -1097,6 +1214,7 @@ enum BusMsg {
     /// re-syncs from `GET /session/status`.
     Connected,
     Event(Value),
+    CommandFailed(String),
     /// The stream is gone past the reconnect budget (or the reader saw the
     /// consumer close).
     Disconnected,
@@ -1198,27 +1316,47 @@ async fn run_session(session: Session) {
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
     let dir = directory.as_deref();
 
+    let agent = request
+        .model_options
+        .get("agent")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty());
+
     // ---- session create/resume -------------------------------------------
     let setup = async {
         let session_id = match &request.resume {
             Some(resume) => {
                 // Sessions are durable server-side: resume = reuse the id.
                 match server.session_info(resume, dir).await {
-                    Ok(info) => info
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(resume)
-                        .to_owned(),
+                    Ok(info) => {
+                        let id = info
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(resume)
+                            .to_owned();
+                        if server.protocol().await == Protocol::V2
+                            && let Some(agent) = agent
+                        {
+                            server
+                                .post_json(
+                                    &format!("/api/session/{id}/agent"),
+                                    dir,
+                                    &json!({"agent": agent}),
+                                )
+                                .await?;
+                        }
+                        id
+                    }
                     Err(e) => {
                         tracing::debug!(
                             target: "zeron_harness::opencode",
                             "session resume failed (starting fresh): {e}"
                         );
-                        create_session(&server, dir).await?
+                        create_session(&server, dir, agent).await?
                     }
                 }
             }
-            None => create_session(&server, dir).await?,
+            None => create_session(&server, dir, agent).await?,
         };
 
         // Provider catalog: resolves the model's advertised reasoning
@@ -1340,7 +1478,7 @@ async fn run_session(session: Session) {
         server.base.clone(),
         server.auth.clone(),
         server.protocol().await,
-        bus_tx,
+        bus_tx.clone(),
     ));
 
     // ---- first prompt -----------------------------------------------------
@@ -1367,6 +1505,7 @@ async fn run_session(session: Session) {
     let stall = stall_bound();
     if let Err(e) = post_prompt(
         &server,
+        &bus_tx,
         &session_id,
         dir,
         &commands,
@@ -1455,6 +1594,7 @@ async fn run_session(session: Session) {
                 }
                 match post_prompt(
                     &server,
+                    &bus_tx,
                     &session_id,
                     dir,
                     &commands,
@@ -1575,6 +1715,7 @@ async fn run_session(session: Session) {
                             }).await;
                             if post_prompt(
                                 &server,
+                                &bus_tx,
                                 &session_id,
                                 dir,
                                 &commands,
@@ -1629,6 +1770,14 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
+                    BusMsg::CommandFailed(message) => {
+                        let _ = send(&event_tx, AgentEvent::Done {
+                            status: DoneStatus::Errored, result: None,
+                            error: Some(message), session_id: Some(session_id.clone()),
+                        }).await;
+                        done_sent = true;
+                        break 'main;
+                    }
                     BusMsg::Connected => {
                         // A RECONNECT mid-turn may have swallowed our idle
                         // (no replay): re-sync from the server's own status
@@ -1711,16 +1860,23 @@ async fn run_session(session: Session) {
     server.shutdown(kill_grace).await;
 }
 
-async fn create_session(server: &Server, dir: Option<&str>) -> Result<String, HarnessError> {
+async fn create_session(
+    server: &Server,
+    dir: Option<&str>,
+    agent: Option<&str>,
+) -> Result<String, HarnessError> {
     if server.protocol().await == Protocol::V2 {
         // 2.x takes the run directory in the BODY (`location.directory`) —
         // the header is ignored on this route (observed live, 2.0.3) — and
         // wraps the answer in `{data}`. Its schema is stable; the 1.x-only
         // lazy-migration crash below doesn't exist there.
-        let body = match dir {
+        let mut body = match dir {
             Some(dir) => json!({ "location": { "directory": dir } }),
             None => json!({}),
         };
+        if let Some(agent) = agent {
+            body["agent"] = json!(agent);
+        }
         let created = server.post_json("/api/session", dir, &body).await?;
         return created
             .pointer("/data/id")
@@ -1900,6 +2056,26 @@ struct TurnSpec<'a> {
     attachments: &'a [String],
 }
 
+fn command_body_v2(
+    version: Option<&ServerVersion>,
+    name: &str,
+    text: &str,
+    attachments: &[String],
+) -> Value {
+    if version
+        .and_then(|v| v.number)
+        .is_some_and(|v| v >= (2, 0, 4))
+    {
+        let mut body = json!({"name": name, "text": text});
+        if !attachments.is_empty() {
+            body["files"] = prompt_body_v2(text, attachments)["files"].clone();
+        }
+        body
+    } else {
+        json!({"command": name, "text": text})
+    }
+}
+
 /// Send a turn: a leading `/command` known to the agent routes through the
 /// command endpoint (the desktop parity — the server does NOT parse slash
 /// text out of an ordinary prompt); everything else is a prompt.
@@ -1908,6 +2084,7 @@ struct TurnSpec<'a> {
 /// delivers the actual turn.
 async fn post_prompt(
     server: &Server,
+    bus_tx: &mpsc::Sender<BusMsg>,
     session_id: &str,
     dir: Option<&str>,
     commands: &[SlashCommand],
@@ -1933,9 +2110,10 @@ async fn post_prompt(
                 ),
                 Protocol::V2 => (
                     format!("/api/session/{session_id}/command"),
-                    json!({ "command": name, "text": arguments }),
+                    command_body_v2(server.version.get(), name, &arguments, attachments),
                 ),
             };
+            let bus_tx = bus_tx.clone();
             let server_base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
@@ -1949,19 +2127,26 @@ async fn post_prompt(
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 // The command endpoint blocks for the whole turn; the bus
-                // carries the real events, so this response is ignored —
-                // but it must not be cut off mid-turn by CALL_TIMEOUT.
+                // carries completion; HTTP failures also reach the loop.
+                // Do not cut the request off mid-turn with CALL_TIMEOUT.
                 let mut req = server
                     .request(reqwest::Method::POST, &path_owned)
                     .json(&cmd_body);
                 req = server.scoped(req, dir_owned.as_deref()).await;
-                if let Err(e) = req.send().await {
-                    tracing::debug!(
-                        target: "zeron_harness::opencode",
-                        "command turn failed: {e}"
-                    );
+                let error = match req.send().await {
+                    Ok(resp) if resp.status().is_success() => None,
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        Some(post_error_message(&path_owned, status, &text))
+                    }
+                    Err(error) => Some(format!("opencode command turn failed: {error}")),
+                };
+                if let Some(error) = error {
+                    let _ = bus_tx.send(BusMsg::CommandFailed(error)).await;
                 }
             });
             return Ok(());
@@ -2417,6 +2602,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol: protocol_cell,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 let allowed = auto_approve
                     || (permission_input)(vec![question.clone()])
@@ -2495,6 +2681,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol: protocol_cell,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 let reply = match rx.await {
                     Ok(answers) => {
@@ -3116,6 +3303,28 @@ fn normalize_v2_frame(event: Value, tool_names: &mut HashMap<V2ToolKey, String>)
         });
     }
     match kind {
+        "session.status" => vec![json!({"type": "session.status", "properties": data})],
+        "session.retry.scheduled" => vec![json!({
+            "type": "session.status",
+            "properties": {"sessionID": session(), "status": {
+                "type": "retry", "attempt": data.get("attempt"), "next": data.get("at"),
+                "message": data.pointer("/error/message").and_then(Value::as_str).filter(|s| !s.is_empty())
+                    .or_else(|| data.pointer("/error/type").and_then(Value::as_str)).unwrap_or("provider retry"),
+            }}
+        })],
+        "session.tool.progress" => {
+            let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = tool_names
+                .get(&tool_key())
+                .map(String::as_str)
+                .unwrap_or_default();
+            vec![v2_tool_part(
+                &data,
+                id,
+                name,
+                &json!({"status": "running", "metadata": data.get("metadata")}),
+            )]
+        }
         "session.execution.started" => vec![json!({
             "type": "session.status",
             "properties": { "sessionID": session(), "status": { "type": "busy" } }

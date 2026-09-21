@@ -37,6 +37,18 @@ impl TurnWire {
         auto_approve: bool,
         answer: Option<bool>,
     ) -> Self {
+        Self::start_config(queued, v2, auto_approve, answer, "2.0.3", json!({}), false).await
+    }
+
+    async fn start_config(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        version: &'static str,
+        overrides: Value,
+        command_failure: bool,
+    ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -84,9 +96,14 @@ impl TurnWire {
                         }
                         return;
                     }
+                    if command_failure && is_post && path.ends_with("/command") {
+                        socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\nConnection: close\r\n\r\nbad command!").await.unwrap();
+                        return;
+                    }
+                    let health = json!({"version": version}).to_string();
                     let body = if v2 {
                         match path.as_str() {
-                            "/api/health" => r#"{"healthy":true,"version":"2.0.3"}"#,
+                            "/api/health" => &health,
                             "/api/session" => r#"{"data":{"id":"fixture"}}"#,
                             "/api/command" => r#"{"data":[]}"#,
                             // Non-empty: the catalog-sync retry loop must not stall tests.
@@ -126,6 +143,11 @@ impl TurnWire {
         }
         drop(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
+        let mut request = json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.as_object().unwrap().clone());
         let run = tokio::spawn(run_session(Session {
             server: Server::attached(base),
             event_tx,
@@ -133,21 +155,28 @@ impl TurnWire {
                 request_input: Box::new(move |questions| {
                     let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = tx.send(questions.into_iter().map(|q| UserInputAnswer {
-                        question_id: q.id, labels: vec![if answer { "Yes" } else { "No" }.into()],
-                    }).collect());
+                    let _ = tx.send(
+                        questions
+                            .into_iter()
+                            .map(|q| UserInputAnswer {
+                                question_id: q.id,
+                                labels: vec![if answer { "Yes" } else { "No" }.into()],
+                            })
+                            .collect(),
+                    );
                     rx
                 }),
                 steering,
                 interrupt: interrupt.clone(),
             },
-            request: serde_json::from_value(
-                json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"}),
-            )
-            .unwrap(),
+            request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
-            known_commands: Some(vec![]),
+            known_commands: Some(vec![SlashCommand {
+                name: "test".into(),
+                description: String::new(),
+                input_hint: None,
+            }]),
         }));
         Self {
             bus,
@@ -1391,4 +1420,373 @@ async fn v2_recovered_step_failure_does_not_poison_successful_execution() {
     let (status, text) = wire.done().await;
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "Recovered");
+}
+
+#[test]
+fn server_version_parsing() {
+    for (raw, expected) in [
+        ("2.0.4", Some((2, 0, 4))),
+        ("opencode v2.0.11", Some((2, 0, 11))),
+        ("v2.0.11-beta+build", Some((2, 0, 11))),
+        (" 1.18.21 ", Some((1, 18, 21))),
+        ("3.1.0", Some((3, 1, 0))),
+        ("2.0", None),
+        ("", None),
+        ("unknown", None),
+    ] {
+        let version = ServerVersion::parse(raw);
+        assert_eq!(version.raw, raw);
+        assert_eq!(version.number, expected, "{raw}");
+    }
+}
+
+#[tokio::test]
+async fn detection_routes_and_authentication() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (route, body, status, expected) in [
+        (
+            "/api/info",
+            r#"{"version":"2.0.11"}"#,
+            200,
+            Some(Protocol::V2),
+        ),
+        (
+            "/api/status",
+            r#"{"data":{"version":"2.0.4"}}"#,
+            201,
+            Some(Protocol::V2),
+        ),
+        (
+            "/api/health",
+            r#"{"healthy":true,"version":"2.0.3"}"#,
+            200,
+            Some(Protocol::V2),
+        ),
+        (
+            "/global/health",
+            r#"{"version":"1.18.21"}"#,
+            200,
+            Some(Protocol::V1),
+        ),
+        ("/api/info", r#"{"version":" "}"#, 200, None),
+        ("/api/info", r#"{"healthy":true}"#, 200, None),
+        ("/api/info", "<html>web UI</html>", 200, None),
+        ("/api/info", "{}", 401, None),
+        ("/api/status", "{}", 403, None),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = Server::attached(format!("http://{}", listener.local_addr().unwrap()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                let header = String::from_utf8_lossy(&bytes[..n]);
+                let path = header.split_whitespace().nth(1).unwrap();
+                recorded.lock().unwrap().push(path.to_owned());
+                let (code, text) = if path == route {
+                    (status, body)
+                } else {
+                    (404, "{}")
+                };
+                socket.write_all(format!("HTTP/1.1 {code} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let result = Protocol::detect(&server).await;
+        task.abort();
+        if status == 401 || status == 403 {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("authentication rejected")
+            );
+        } else {
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(server.version.get().is_some(), expected.is_some());
+        }
+        let seen = seen.lock().unwrap();
+        let order = ["/api/info", "/api/status", "/api/health", "/global/health"];
+        assert_eq!(*seen, order[..seen.len()]);
+    }
+}
+
+#[test]
+fn v2_command_bodies_follow_server_version() {
+    for version in ["2.0.2", "2.0.3", "unknown"] {
+        assert_eq!(
+            command_body_v2(Some(&ServerVersion::parse(version)), "test", "args", &[]),
+            json!({"command":"test","text":"args"})
+        );
+    }
+    for version in ["2.0.4", "v2.0.11", "3.0.0"] {
+        let version = ServerVersion::parse(version);
+        assert_eq!(
+            command_body_v2(Some(&version), "test", "args", &[]),
+            json!({"name":"test","text":"args"})
+        );
+        let attachments = vec!["/workspace/image.png".into()];
+        assert_eq!(
+            command_body_v2(Some(&version), "test", "args", &attachments)["files"],
+            prompt_body_v2("args", &attachments)["files"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn command_http_failure_errors_turn_without_watchdog() {
+    for (v2, version, key) in [
+        (false, "1.18.21", "command"),
+        (true, "2.0.3", "command"),
+        (true, "2.0.11", "name"),
+    ] {
+        let mut wire = TurnWire::start_config(
+            false,
+            v2,
+            true,
+            None,
+            version,
+            json!({"prompt":"/test args"}),
+            true,
+        )
+        .await;
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = wire.events.recv().await {
+                if let AgentEvent::Done { status, error, .. } = event.unwrap() {
+                    assert_eq!(status, DoneStatus::Errored);
+                    return error.unwrap();
+                }
+            }
+            panic!("missing Done");
+        })
+        .await
+        .unwrap();
+        assert!(error.contains("400"), "{error}");
+        assert!(error.contains("bad command!"), "{error}");
+        let posts = wire.posts.lock().unwrap();
+        let (_, body) = posts.iter().find(|(p, _)| p.ends_with("/command")).unwrap();
+        assert_eq!(body[key], "test");
+        assert_eq!(body[if v2 { "text" } else { "arguments" }], "args");
+    }
+}
+
+#[test]
+fn agent_model_option_filters_and_preserves_ids() {
+    let option = agent_option(&json!({"data":[
+        {"id":"build-id","name":"Build","mode":"primary","hidden":false},
+        {"id":"all-id","name":"All","mode":"all"},
+        {"id":"hidden","name":"Hidden","mode":"primary","hidden":true},
+        {"id":"sub","name":"Sub","mode":"subagent"}
+    ]}));
+    assert_eq!(option.id, "agent");
+    assert_eq!(option.label, "Agent");
+    assert_eq!(option.default_choice, "");
+    assert_eq!(
+        option
+            .choices
+            .iter()
+            .map(|c| (c.id.as_str(), c.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("", "Server default"),
+            ("build-id", "Build"),
+            ("all-id", "All")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agent_selection_on_create_and_resume() {
+    for v2 in [false, true] {
+        for resume in [false, true] {
+            for agent in [json!("build-id"), json!(""), json!(true)] {
+                let mut overrides = json!({"modelOptions":{"agent":agent}});
+                if resume {
+                    overrides["resume"] = json!("fixture");
+                }
+                let mut wire =
+                    TurnWire::start_config(false, v2, true, None, "2.0.11", overrides, false).await;
+                if v2 {
+                    wire.request("/api/model").await;
+                }
+                wire.request(if v2 { "/prompt" } else { "/prompt_async" })
+                    .await;
+                let posts = wire.posts.lock().unwrap();
+                let selection = posts.iter().find(|(p, _)| {
+                    if resume {
+                        p.ends_with("/agent")
+                    } else {
+                        p.ends_with("/session")
+                    }
+                });
+                let expected = if v2 && agent == "build-id" {
+                    json!("build-id")
+                } else {
+                    Value::Null
+                };
+                assert_eq!(
+                    selection
+                        .map(|(_, b)| b["agent"].clone())
+                        .unwrap_or(Value::Null),
+                    expected
+                );
+                if resume && v2 && agent == "build-id" {
+                    assert_eq!(
+                        posts[0],
+                        (
+                            "/api/session/fixture/agent".into(),
+                            json!({"agent":"build-id"})
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn v2_status_retry_and_progress_vocabulary() {
+    let mut names = HashMap::new();
+    for status in [
+        json!({"type":"busy"}),
+        json!({"type":"idle"}),
+        json!({"type":"retry","attempt":3,"message":"overloaded","next":123}),
+    ] {
+        let data = json!({"sessionID":"s", "status":status});
+        assert_eq!(
+            normalize_v2_frame(json!({"type":"session.status", "data":data}), &mut names),
+            vec![json!({"type":"session.status","properties":data})]
+        );
+    }
+    let retry = normalize_v2_frame(
+        json!({"type":"session.retry.scheduled","data":{"sessionID":"s","assistantMessageID":"m","attempt":3,"at":123,"error":{"type":"provider.api","message":"overloaded"}}}),
+        &mut names,
+    );
+    assert_eq!(
+        retry[0],
+        json!({"type":"session.status","properties":{"sessionID":"s","status":{"type":"retry","attempt":3,"next":123,"message":"overloaded"}}})
+    );
+    normalize_v2_frame(
+        json!({"type":"session.tool.input.started","data":{"sessionID":"s","assistantMessageID":"m","id":"tool","name":"task"}}),
+        &mut names,
+    );
+    let progress = normalize_v2_frame(
+        json!({"type":"session.tool.progress","data":{"sessionID":"s","assistantMessageID":"m","id":"tool","metadata":{"sessionId":"child"}}}),
+        &mut names,
+    );
+    assert_eq!(
+        progress[0]["properties"]["part"]["state"],
+        json!({"status":"running","metadata":{"sessionId":"child"}})
+    );
+    assert_eq!(progress[0]["properties"]["part"]["tool"], "task");
+    assert!(
+        normalize_v2_frame(
+            json!({"type":"session.future.event","data":{"sessionID":"s"}}),
+            &mut names
+        )
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn v2_discovery_settles_and_caches_agents_with_overlapping_models() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let harness =
+        OpencodeHarness::new().with_base_url(format!("http://{}", listener.local_addr().unwrap()));
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let n = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..n]);
+            let path = request.split_whitespace().nth(1).unwrap();
+            let body = {
+                let mut calls = recorded.lock().unwrap();
+                calls.push(path.to_owned());
+                match path {
+                    "/api/info" => json!({"version":"2.0.11"}),
+                    "/api/model" if calls.iter().filter(|p| p.as_str() == path).count() == 1 => json!({"data":[]}),
+                    "/api/model" => json!({"data":[
+                        {"providerID":"mock","id":"a","name":"A","enabled":true},
+                        {"providerID":"mock","id":"b","name":"B","enabled":true}
+                    ]}),
+                    "/api/agent" => json!({"data":[{"id":"agent-id","name":"Agent name","mode":"all","hidden":false}]}),
+                    _ => json!({"data":[]}),
+                }
+            }.to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let (first, overlapping) = tokio::join!(harness.models(), harness.models());
+    let first = first.unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&first).unwrap(),
+        serde_json::to_value(overlapping.unwrap()).unwrap()
+    );
+    for model in first {
+        assert_eq!(model.options.len(), 1);
+        assert_eq!(model.options[0].id, "agent");
+        assert_eq!(model.options[0].choices[1].id, "agent-id");
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/model")
+            .count(),
+        2,
+        "empty catalog must settle"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/agent")
+            .count(),
+        1,
+        "overlapping callers share agents with models"
+    );
+    harness.models().await.unwrap();
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/api/agent")
+            .count(),
+        2,
+        "later discovery refreshes agents too"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn v2_scheduled_retries_reach_existing_retry_abort() {
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.retry.scheduled", json!({"sessionID":"fixture","assistantMessageID":"m","attempt":RETRY_ABORT_ATTEMPT,"at":123,"error":{"type":"provider.api","message":"overloaded"}}));
+    wire.request("/interrupt").await;
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID":"fixture"}),
+    );
+    assert_eq!(wire.done().await.0, DoneStatus::Errored);
 }

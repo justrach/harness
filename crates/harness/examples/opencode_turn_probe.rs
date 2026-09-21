@@ -2,10 +2,13 @@
 //! opencode binary — prints the event stream and exits 0 only on a
 //! Completed turn with text. Arg 1 = executable (default: PATH resolution),
 //! arg 2 = model (`provider/model`), arg 3 = prompt.
+//! Optional env: OPENCODE_PROBE_WORKSPACE uses an existing configured directory,
+//! OPENCODE_PROBE_AGENT selects an agent, OPENCODE_PROBE_INTERRUPT_MS cancels
+//! after the first text delta. Set TMPDIR to control temporary workspace placement.
 //!
 //!     cargo run -p zeron-harness --example opencode_turn_probe -- \
 //!         ~/.opencode/bin/opencode opencode/muse-spark-1.3-contributor-free \
-//!         "Read /tmp/note.txt and reply with its secret word."
+//!         "Reply with exactly: PONG"
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -20,15 +23,30 @@ async fn main() {
         .nth(3)
         .unwrap_or_else(|| "Reply with exactly: PONG".into());
     let workspace = tempfile::tempdir().expect("create isolated probe workspace");
-    let cwd = workspace.path().to_str().expect("UTF-8 workspace path");
+    let cwd = std::env::var("OPENCODE_PROBE_WORKSPACE").unwrap_or_else(|_| {
+        workspace
+            .path()
+            .to_str()
+            .expect("UTF-8 workspace path")
+            .into()
+    });
+    let mut model_options = serde_json::Map::new();
+    if let Ok(agent) = std::env::var("OPENCODE_PROBE_AGENT") {
+        model_options.insert("agent".into(), agent.into());
+    }
+    let mut interrupt_after = std::env::var("OPENCODE_PROBE_INTERRUPT_MS")
+        .ok()
+        .map(|s| s.parse::<u64>().expect("interrupt milliseconds"));
+    let expect_interrupt = interrupt_after.is_some();
+    let interrupt = CancellationToken::new();
     let (_steer_tx, steering) = mpsc::channel(8);
     let request = RunRequest {
         prompt,
         harness: None,
         model,
         reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: cwd.into(),
+        model_options,
+        cwd,
         sandbox: SandboxLevel::WorkspaceWrite,
         auto_approve: true,
         attachments: Vec::new(),
@@ -45,7 +63,7 @@ async fn main() {
             RunControls {
                 request_input: Box::new(|_| panic!("probe must not ask for input")),
                 steering,
-                interrupt: CancellationToken::new(),
+                interrupt: interrupt.clone(),
             },
         )
         .await
@@ -70,6 +88,13 @@ async fn main() {
                 break Some(status);
             }
             Ok(AgentEvent::TextDelta { text: delta }) => {
+                if let Some(ms) = interrupt_after.take() {
+                    let interrupt = interrupt.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                        interrupt.cancel();
+                    });
+                }
                 text.push_str(&delta);
                 eprintln!("TXT {delta}");
             }
@@ -91,7 +116,9 @@ async fn main() {
     };
     eprintln!("--- done: {status:?} text={text:?} tools={tools}");
     match status {
-        Some(zeron_proto::DoneStatus::Completed) if !text.trim().is_empty() => {}
+        Some(zeron_proto::DoneStatus::Completed)
+            if !expect_interrupt && !text.trim().is_empty() => {}
+        Some(zeron_proto::DoneStatus::Interrupted) if expect_interrupt => {}
         _ => std::process::exit(1),
     }
 }
