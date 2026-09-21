@@ -11738,6 +11738,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeron-engine",
+ "zeron-mcp",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
@@ -11818,6 +11819,24 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-proto",
  "zip",
+]
+
+[[package]]
+name = "zeron-mcp"
+version = "0.2.81"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-proto",
+ "zeron-rpc",
 ]
 
 [[package]]
