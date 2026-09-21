@@ -42,13 +42,24 @@ impl ScratchDir {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        let path = std::env::temp_dir().join(format!(
-            "zeron-{label}-{}-{}",
-            std::process::id(),
-            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "zeron-{label}-{}-{}",
+                std::process::id(),
+                NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -142,4 +153,15 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn scratch_is_private_to_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ScratchDir::new("private").unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
 }
