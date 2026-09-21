@@ -96,6 +96,16 @@ pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
     newest_candidate(candidates)
 }
 
+pub(crate) fn binary_hint(path: &Path) -> String {
+    format!(
+        "{} (version {})",
+        path.display(),
+        binary_version(path)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    )
+}
+
 fn runnable(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -120,7 +130,11 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         let mut version = binary_version(&best);
         for path in candidates.iter().skip(1) {
             let next = binary_version(path);
-            if next > version {
+            if next.as_ref().is_some_and(|next| {
+                version
+                    .as_ref()
+                    .is_none_or(|current| next.cmp_precedence(current).is_gt())
+            }) {
                 best = path.clone();
                 version = next;
             }
@@ -135,7 +149,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
     use std::{
         collections::HashMap,
         sync::{Mutex, OnceLock},
-        time::{Duration, Instant, SystemTime},
+        time::{Duration, SystemTime},
     };
     type Key = (PathBuf, Option<SystemTime>, u64);
     static CACHE: OnceLock<Mutex<HashMap<Key, Option<semver::Version>>>> = OnceLock::new();
@@ -149,6 +163,7 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
     if let Some(version) = cache.get(&key) {
         return version.clone();
     }
+    #[cfg(not(windows))]
     let probe = || -> Option<semver::Version> {
         use std::io::Read;
         use std::process::{Command, Stdio};
@@ -157,20 +172,22 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
         let mut child = command.spawn().ok()?;
-        let stdout = child.stdout.take()?;
-        let reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stdout.take(65536).read_to_end(&mut bytes);
-            bytes
-        });
-        let start = Instant::now();
+        fn reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.take(65536).read_to_end(&mut bytes);
+                bytes
+            })
+        }
+        let readers = [reader(child.stdout.take()?), reader(child.stderr.take()?)];
+        let start = std::time::Instant::now();
         let success = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
@@ -191,32 +208,67 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         if !success {
             return None;
         }
-        // A descendant may inherit stdout on platforms without process groups.
-        let bytes = if reader.is_finished() {
-            reader.join().ok()?
-        } else {
+        let mut bytes = Vec::new();
+        for reader in readers {
             while !reader.is_finished() && start.elapsed() < Duration::from_secs(2) {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !reader.is_finished() {
                 return None;
             }
-            reader.join().ok()?
-        };
-        String::from_utf8_lossy(&bytes)
-            .split_whitespace()
-            .find_map(|word| {
-                semver::Version::parse(
-                    word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
-                        .trim_start_matches('v'),
-                )
-                .ok()
-            })
+            bytes.extend(reader.join().ok()?);
+            bytes.push(b' ');
+        }
+        parse_version(&bytes)
+    };
+    #[cfg(windows)]
+    let probe = || -> Option<semver::Version> {
+        let path = path.to_path_buf();
+        // Use the native launcher for npm .cmd/.bat shims and job-tree cleanup.
+        // A separate runtime is safe even when descriptors run inside Tokio.
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?
+                .block_on(async {
+                    let mut command = crate::process::Command::new(&path);
+                    command
+                        .arg("--version")
+                        .stdin(crate::process::Stdio::null())
+                        .stdout(crate::process::Stdio::piped())
+                        .stderr(crate::process::Stdio::piped())
+                        .kill_on_drop(true);
+                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
+                        .await
+                        .ok()?
+                        .ok()?;
+                    if !output.status.success() {
+                        return None;
+                    }
+                    parse_version(&output.stdout).or_else(|| parse_version(&output.stderr))
+                })
+        })
+        .join()
+        .ok()
+        .flatten()
     };
     let version = probe();
     cache.retain(|(p, _, _), _| p != &key.0);
     cache.insert(key, version.clone());
     version
+}
+
+fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
+    String::from_utf8_lossy(bytes)
+        .split_whitespace()
+        .find_map(|word| {
+            semver::Version::parse(
+                word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
+                    .trim_start_matches('v'),
+            )
+            .ok()
+        })
 }
 
 fn home_dir_with(env: &impl Fn(&str) -> Option<OsString>, platform: Platform) -> Option<PathBuf> {
@@ -469,6 +521,28 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn semantic_versions_support_cli_labels_and_prereleases() {
+        assert_eq!(
+            parse_version(b"Claude Code v2.1.3 (native)"),
+            Some(semver::Version::new(2, 1, 3))
+        );
+        assert!(
+            parse_version(b"codex-cli 0.100.0-beta.2").unwrap() < semver::Version::new(0, 100, 0)
+        );
+        assert!(parse_version(b"unknown").is_none());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn npm_shim_versions_are_probed_through_native_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("old.cmd");
+        let second = dir.path().join("new.cmd");
+        std::fs::write(&first, "@echo off\r\necho codex-cli 1.0.0\r\n").unwrap();
+        std::fs::write(&second, "@echo off\r\necho codex-cli 2.0.0\r\n").unwrap();
+        assert_eq!(newest_candidate(vec![first, second.clone()]), Some(second));
+    }
+
     #[cfg(unix)]
     #[test]
     fn newest_binary_deduplicates_caches_and_invalidates() {
@@ -508,6 +582,21 @@ mod tests {
             Some(first.clone())
         );
         script(&second, "1.200.0");
+        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stderr_versions_are_read_and_build_metadata_does_not_break_ties() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for (path, version) in [(&first, "1.0.0+aaa"), (&second, "1.0.0+zzz")] {
+            std::fs::write(path, format!("#!/bin/sh\necho codex-cli {version} >&2\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(binary_version(&first).unwrap().to_string(), "1.0.0+aaa");
         assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
     }
 
