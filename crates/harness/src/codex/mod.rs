@@ -594,6 +594,7 @@ impl Harness for CodexHarness {
         self.resolve_executable()?;
         match self.model_catalog(false).await {
             Ok(catalog) => Ok(catalog.models),
+            Err(error) if !crate::CatalogFailure::classify(&error).allows_stale() => Err(error),
             Err(error) => {
                 tracing::warn!(%error, source = "static", "Model discovery failed");
                 Ok(self.fallback_models())

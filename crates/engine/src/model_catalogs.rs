@@ -5,7 +5,9 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use zeron_harness::{Harness, HarnessError, ModelCatalog, ModelContext};
+use zeron_harness::{
+    CatalogFailure, CatalogFailureCode, Harness, HarnessError, ModelCatalog, ModelContext,
+};
 use zeron_proto::Model;
 
 #[derive(Serialize, Deserialize)]
@@ -76,7 +78,11 @@ pub(crate) async fn list(
     harness: Arc<dyn Harness>,
     force: bool,
 ) -> Result<Vec<Model>, HarnessError> {
-    let Some(context) = harness.model_context()? else {
+    let Some(context) = harness.model_context().map_err(|error| {
+        let failure = CatalogFailure::from(error);
+        tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
+        HarnessError::from(failure)
+    })? else {
         return harness
             .model_catalog(force)
             .await
@@ -95,6 +101,19 @@ pub(crate) async fn list(
                 return Err(HarnessError::Protocol(
                     "model discovery context changed; retry".into(),
                 ));
+            }
+            if let Err(error) = &result {
+                let code = CatalogFailure::classify(error);
+                tracing::warn!(%code, %error, "Model discovery failed");
+                if !code.allows_stale() {
+                    // A revoked credential must not be resurrected from disk on
+                    // the next outage, even if its file contents did not change.
+                    if let Err(error) = std::fs::remove_file(&path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(%error, "Could not retire model catalog");
+                    }
+                }
             }
             if let Ok(catalog) = &result
                 && (catalog.source == "live"
@@ -120,6 +139,19 @@ pub(crate) async fn list(
     }
     let catalog = match result {
         Some(Ok(Ok(catalog))) if !catalog.models.is_empty() => catalog,
+        Some(Ok(Err(error))) if !CatalogFailure::classify(&error).allows_stale() => {
+            // Claude intentionally offers its manifest even while logged out.
+            if harness.id() == zeron_proto::HarnessId::ClaudeCode
+                && CatalogFailure::classify(&error) == CatalogFailureCode::AuthRequired
+            {
+                ModelCatalog {
+                    models: harness.fallback_models(),
+                    source: "static",
+                }
+            } else {
+                return Err(CatalogFailure::from(error).into());
+            }
+        }
         result => {
             tracing::warn!(error = ?result, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable");
             match disk {
@@ -171,6 +203,8 @@ mod tests {
         delay: std::sync::atomic::AtomicBool,
         forced: std::sync::atomic::AtomicBool,
         cached: std::sync::atomic::AtomicBool,
+        failure: std::sync::Mutex<String>,
+        harness: zeron_proto::HarnessId,
     }
     impl Probe {
         fn new() -> Arc<Self> {
@@ -180,6 +214,8 @@ mod tests {
                 delay: false.into(),
                 forced: false.into(),
                 cached: false.into(),
+                failure: std::sync::Mutex::new("offline".into()),
+                harness: zeron_proto::HarnessId::Codex,
             })
         }
     }
@@ -187,7 +223,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Harness for Probe {
         fn id(&self) -> zeron_proto::HarnessId {
-            zeron_proto::HarnessId::Codex
+            self.harness
         }
         fn display_name(&self) -> &str {
             "Fixture"
@@ -218,7 +254,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             if self.fail.load(SeqCst) {
-                return Err(HarnessError::Protocol("offline".into()));
+                return Err(HarnessError::Protocol(self.failure.lock().unwrap().clone()));
             }
             Ok(ModelCatalog {
                 models: models(),
@@ -240,6 +276,31 @@ mod tests {
             unreachable!()
         }
     }
+    #[tokio::test]
+    async fn auth_and_missing_binary_failures_retire_disk_instead_of_serving_it() {
+        for message in ["not logged in", "spawn ENOENT"] {
+            let dir = tempfile::tempdir().unwrap();
+            let probe = Probe::new();
+            list(dir.path(), probe.clone(), false).await.unwrap();
+            probe.fail.store(true, SeqCst);
+            *probe.failure.lock().unwrap() = message.into();
+            let error = list(dir.path(), probe.clone(), true).await.unwrap_err();
+            assert!(!CatalogFailure::classify(&error).allows_stale());
+            let context = probe.model_context().unwrap().unwrap();
+            assert!(!location(dir.path(), probe.as_ref(), &context).exists());
+        }
+    }
+    #[tokio::test]
+    async fn logged_out_claude_uses_curated_rows_instead_of_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut probe = Probe::new();
+        Arc::get_mut(&mut probe).unwrap().harness = zeron_proto::HarnessId::ClaudeCode;
+        list(dir.path(), probe.clone(), false).await.unwrap();
+        probe.fail.store(true, SeqCst);
+        *probe.failure.lock().unwrap() = "authentication required".into();
+        assert_eq!(list(dir.path(), probe, true).await.unwrap()[0].id, "static");
+    }
+
     #[tokio::test]
     async fn successful_memory_catalog_is_saved_if_disk_is_missing() {
         let dir = tempfile::tempdir().unwrap();

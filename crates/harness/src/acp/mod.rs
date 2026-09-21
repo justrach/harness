@@ -1730,7 +1730,12 @@ impl Harness for AcpHarness {
         self.resolve_launch()?;
         match self.model_catalog(true).await {
             Ok(catalog) => Ok(catalog.models),
-            Err(error) if self.id() == HarnessId::Devin => Err(error),
+            Err(error)
+                if self.id() == HarnessId::Devin
+                    || !crate::CatalogFailure::classify(&error).allows_stale() =>
+            {
+                Err(error)
+            }
             Err(error) => {
                 tracing::warn!(%error, source = "static", "Model discovery failed");
                 Ok(self.fallback_models())

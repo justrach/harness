@@ -1,6 +1,6 @@
 //! A failed refresh is not a new catalog. Keep the last successful response
 //! for the same credential context, coalesce callers, and respect rate limits.
-use crate::{HarnessError, ModelCatalog};
+use crate::{CatalogFailure, CatalogFailureCode, HarnessError, ModelCatalog};
 use std::{
     future::Future,
     time::{Duration, Instant},
@@ -17,7 +17,7 @@ pub(crate) struct State {
     context: Option<[u8; 32]>,
     models: Option<Vec<Model>>,
     pub(crate) retry_at: Option<Instant>,
-    error: Option<String>,
+    error: Option<CatalogFailure>,
     completed_at: Option<Instant>,
 }
 
@@ -83,19 +83,27 @@ impl Catalog {
             });
         }
         let refresh = async {
-            let mut error = String::new();
+            let mut error = CatalogFailure {
+                code: CatalogFailureCode::Failed,
+                message: "model catalog unavailable".into(),
+            };
             for attempt in 0..3 {
                 if attempt > 0 {
                     tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
                 }
                 match discover().await {
                     Ok(models) if !models.is_empty() => return Ok(models),
-                    Ok(_) => error = "Harness returned an empty model catalog".into(),
-                    Err(e) => error = e.to_string(),
+                    Ok(_) => {
+                        error = CatalogFailure {
+                            code: CatalogFailureCode::Failed,
+                            message: "Harness returned an empty model catalog".into(),
+                        }
+                    }
+                    Err(e) => error = e.into(),
                 }
                 // Repeating a rate-limited or unauthenticated call cannot heal
                 // it. A subsequent login changes the context and bypasses cooldown.
-                if needs_cooldown(&error) {
+                if !error.code.allows_stale() || needs_cooldown(&error.message) {
                     break;
                 }
             }
@@ -103,7 +111,12 @@ impl Catalog {
         };
         let result = tokio::time::timeout(timeout, refresh)
             .await
-            .unwrap_or_else(|_| Err("Harness model discovery timed out".into()));
+            .unwrap_or_else(|_| {
+                Err(CatalogFailure {
+                    code: CatalogFailureCode::Timeout,
+                    message: "Harness model discovery timed out".into(),
+                })
+            });
         // Never publish a response from a login that changed during the request.
         if context()? != key {
             *state = State::default();
@@ -120,8 +133,15 @@ impl Catalog {
                 state.retry_at = Some(Instant::now() + Duration::from_secs(60));
             }
             Err(error) => {
-                tracing::warn!(%error, retaining_catalog = state.models.is_some(), "Harness model refresh failed");
-                let cooldown = if needs_cooldown(&error) { 60 } else { 10 };
+                if !error.code.allows_stale() {
+                    state.models = None;
+                }
+                tracing::warn!(code = %error.code, %error, retaining_catalog = state.models.is_some(), "Harness model refresh failed");
+                let cooldown = if !error.code.allows_stale() || needs_cooldown(&error.message) {
+                    60
+                } else {
+                    10
+                };
                 state.error = Some(error);
                 state.retry_at = Some(Instant::now() + Duration::from_secs(cooldown));
             }
@@ -149,12 +169,14 @@ fn needs_cooldown(error: &str) -> bool {
 
 fn cached(state: &State) -> Result<Vec<Model>, HarnessError> {
     state.models.clone().ok_or_else(|| {
-        HarnessError::Protocol(
-            state
-                .error
-                .clone()
-                .unwrap_or_else(|| "Harness model catalog is unavailable; retry".into()),
-        )
+        state
+            .error
+            .clone()
+            .unwrap_or_else(|| CatalogFailure {
+                code: CatalogFailureCode::Failed,
+                message: "Harness model catalog is unavailable; retry".into(),
+            })
+            .into()
     })
 }
 
@@ -176,6 +198,38 @@ mod tests {
     }
     async fn expire(catalog: &Catalog) {
         catalog.state.lock().await.retry_at = None;
+    }
+
+    #[tokio::test]
+    async fn stale_catalog_is_only_served_for_transient_failure_codes() {
+        for (message, code) in [
+            ("timed out", CatalogFailureCode::Timeout),
+            ("offline", CatalogFailureCode::Failed),
+            ("not logged in", CatalogFailureCode::AuthRequired),
+            ("spawn ENOENT", CatalogFailureCode::MissingExecutable),
+        ] {
+            let cache = Catalog::default();
+            cache
+                .get(|| Ok([1; 32]), || async { Ok(models("good")) })
+                .await
+                .unwrap();
+            let result = cache
+                .get_with(
+                    true,
+                    || Ok([1; 32]),
+                    || async { Err(HarnessError::Protocol(message.into())) },
+                )
+                .await;
+            if code.allows_stale() {
+                assert_eq!(result.unwrap().models, models("good"));
+            } else {
+                assert_eq!(CatalogFailure::classify(&result.unwrap_err()), code);
+                let cached = cache
+                    .get(|| Ok([1; 32]), || async { panic!("cooldown") })
+                    .await;
+                assert_eq!(CatalogFailure::classify(&cached.unwrap_err()), code);
+            }
+        }
     }
 
     #[tokio::test]

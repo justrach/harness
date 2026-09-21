@@ -515,6 +515,7 @@ pub struct Pickers {
     setting_scroll: gpui::ScrollHandle,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    model_refresh_errors: HashMap<HarnessId, String>,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -642,6 +643,7 @@ impl Pickers {
                 // a space switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
+                this.model_refresh_errors.clear();
                 this.catalog_rev += 1;
             }
             cx.notify();
@@ -701,6 +703,7 @@ impl Pickers {
             setting_scroll: gpui::ScrollHandle::new(),
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            model_refresh_errors: HashMap::new(),
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -1258,10 +1261,16 @@ impl Pickers {
         loaded: Loadable<Vec<Model>>,
         cx: &mut Context<Self>,
     ) {
+        if let Loadable::Error(error) = &loaded {
+            self.model_refresh_errors.insert(harness, error.clone());
+        } else {
+            self.model_refresh_errors.remove(&harness);
+        }
         if let Loadable::Error(error) = &loaded
             && matches!(self.models.get(&harness), Some(Loadable::Ready(_)))
         {
             tracing::warn!(%error, ?harness, "Model refresh failed; retaining visible rows");
+            cx.notify();
             return;
         }
         if let Loadable::Ready(models) = &loaded {
@@ -1655,7 +1664,7 @@ impl Pickers {
         let mut descriptors = offered_harnesses(list);
         if let Some(effective) = self.effective_harness(cx)
             && !descriptors.iter().any(|d| d.id == effective)
-            && let Some(descriptor) = list.iter().find(|d| d.id == effective)
+            && let Some(descriptor) = list.iter().find(|d| d.id == effective && d.installed)
         {
             descriptors.insert(0, descriptor.clone());
         }
@@ -2981,6 +2990,7 @@ impl Pickers {
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
+                            this.model_refresh_errors.clear();
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
@@ -3514,6 +3524,20 @@ impl Pickers {
             }
         };
 
+        let refresh_error = effective
+            .and_then(|harness| self.model_refresh_errors.get(&harness))
+            .filter(|_| !rows.is_empty())
+            .cloned()
+            .map(|message| {
+                self.retry_row(
+                    "model-refresh-retry",
+                    &message,
+                    PickerKind::HarnessModel,
+                    &theme,
+                    cx,
+                )
+            });
+
         let model_scrollbar = popover::rail(self, "model-scrollbar", &theme, cx);
         let list_host = div()
             .id("model-list-scroll-host")
@@ -3570,6 +3594,7 @@ impl Pickers {
             .flex_col()
             .child(tabs)
             .child(search_row)
+            .children(refresh_error)
             .child(list_host)
             .children(tray)
             .into_any_element()
@@ -4794,6 +4819,22 @@ mod tests {
     }
 
     #[gpui::test]
+    fn missing_selected_harness_is_not_reintroduced_into_the_rail(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| AppState::new());
+            let pickers = cx.new(|cx| Pickers::new(state, cx));
+            pickers.update(cx, |pickers, cx| {
+                pickers.config.harness = Some(HarnessId::Codex);
+                let mut missing = descriptor(HarnessId::Codex, "Codex");
+                missing.installed = false;
+                pickers.harnesses = Loadable::Ready(vec![missing]);
+                assert!(pickers.rail_descriptors(cx).is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
     fn refresh_failure_keeps_rows_and_catalog_change_reanchors_selection(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -4826,12 +4867,24 @@ mod tests {
                     pickers.models[&HarnessId::ClaudeCode],
                     Loadable::Ready(rows.clone())
                 );
+                assert_eq!(
+                    pickers
+                        .model_refresh_errors
+                        .get(&HarnessId::ClaudeCode)
+                        .map(String::as_str),
+                    Some("refresh failed")
+                );
                 pickers.apply_model_catalog(
                     HarnessId::ClaudeCode,
                     Loadable::Ready(rows.into_iter().rev().collect()),
                     cx,
                 );
                 assert_eq!(pickers.active, 1);
+                assert!(
+                    !pickers
+                        .model_refresh_errors
+                        .contains_key(&HarnessId::ClaudeCode)
+                );
                 pickers.apply_model_catalog(
                     HarnessId::Codex,
                     Loadable::Error("cold failure".into()),

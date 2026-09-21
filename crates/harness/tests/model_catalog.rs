@@ -24,7 +24,7 @@ if '--version' in sys.argv:
 state = json.loads((root / 'state.json').read_text())
 if 'list' in sys.argv:
     if state['fail']:
-        print('rate limit', file=sys.stderr)
+        print(state.get('error', 'rate limit'), file=sys.stderr)
         sys.exit(1)
     print(json.dumps({'families':[{'variants':[{'model_uid':state['id'],'label':state['id']}]}]}))
     sys.exit(0)
@@ -33,7 +33,7 @@ for line in sys.stdin:
     if 'id' not in request: continue
     method = request['method']
     if state['fail'] and method != 'initialize':
-        response = {'error':{'code':429,'message':'rate limit'}}
+        response = {'error':{'code':429,'message':state.get('error', 'rate limit')}}
     else:
         result = {}
         if method == 'model/list': result = {'data':[{'model':state['id'],'hidden':False,'isDefault':True}], 'nextCursor':None}
@@ -66,6 +66,21 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
         assert!(
             cold.model_catalog(false).await.is_err(),
             "{:?}",
+            harness.id()
+        );
+        std::fs::write(
+            &state,
+            r#"{"fail":true,"id":"unused","error":"not logged in"}"#,
+        )
+        .unwrap();
+        let error = harness.model_catalog(true).await.unwrap_err();
+        assert_eq!(
+            zeron_harness::CatalogFailure::classify(&error),
+            zeron_harness::CatalogFailureCode::AuthRequired
+        );
+        assert!(
+            harness.models().await.is_err(),
+            "auth failures must surface for {:?}",
             harness.id()
         );
     }

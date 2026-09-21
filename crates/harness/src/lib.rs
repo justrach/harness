@@ -34,6 +34,8 @@ pub enum HarnessError {
     /// the cause is diagnosable from the chat error alone.
     #[error("adapter install failed: {0}")]
     Install(String),
+    #[error(transparent)]
+    Discovery(#[from] CatalogFailure),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -141,6 +143,8 @@ pub mod acp;
 pub(crate) mod adapter_install;
 pub(crate) mod archive_install;
 mod catalog;
+mod catalog_failure;
+pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
 pub mod cursor;
