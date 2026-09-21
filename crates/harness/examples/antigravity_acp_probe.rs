@@ -9,10 +9,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() {
+    use zeron_harness::Harness;
+    let harness = zeron_harness::AcpHarness::antigravity();
+    println!("installed: {}", harness.installed());
+    if std::env::args().any(|arg| arg == "--detect-only") {
+        return;
+    }
     if std::env::args().any(|arg| arg == "--managed") {
-        use zeron_harness::Harness;
-        let result = zeron_harness::AcpHarness::antigravity().models().await;
-        println!("managed discovery: {result:?}");
+        match harness.models().await {
+            Ok(models) => println!("managed discovery: {models:?}"),
+            Err(error) => {
+                eprintln!("managed discovery refused: {error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let (server, args) = zeron_harness::AcpHarness::antigravity()
