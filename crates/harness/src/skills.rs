@@ -7,6 +7,8 @@ use std::{
 };
 use zeron_proto::{HarnessId, invocation::Skill};
 
+const MAX_DISCOVERY_ENTRIES: usize = 4096;
+
 /// Commands and skill metadata both need the provider's advertised catalog.
 /// Share an overlapping probe, but refresh on a later open so provider account,
 /// plugin and workspace changes are not hidden behind a persistent host cache.
@@ -212,8 +214,12 @@ fn discover_at(harness: HarnessId, cwd: &Path, home: &Path) -> Result<Vec<Skill>
         }
     }
     let mut found = BTreeMap::new();
+    let mut remaining = MAX_DISCOVERY_ENTRIES;
     for (root, namespace) in roots {
-        scan_root(&root, &namespace, harness, &mut found)?;
+        if remaining == 0 {
+            break;
+        }
+        scan_root(&root, &namespace, harness, &mut found, &mut remaining)?;
     }
     Ok(found.into_values().collect())
 }
@@ -223,12 +229,12 @@ fn scan_root(
     namespace: &str,
     harness: HarnessId,
     found: &mut BTreeMap<String, Skill>,
+    remaining: &mut usize,
 ) -> Result<(), HarnessError> {
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut seen = HashSet::new();
-    let mut entries = 0;
     while let Some((dir, depth)) = pending.pop() {
-        if entries >= 4096 {
+        if *remaining == 0 {
             break;
         }
         if depth > 12 {
@@ -253,6 +259,10 @@ fn scan_root(
             }
         };
         let mut children: Vec<_> = children
+            // Charge directory entries before filtering, allocation and sorting.
+            // Failed entries also consume work; all roots share this budget.
+            .take(*remaining)
+            .inspect(|_| *remaining -= 1)
             .filter_map(|entry| match entry {
                 Ok(entry) => Some(entry),
                 Err(error) => {
@@ -263,7 +273,6 @@ fn scan_root(
             .collect();
         children.sort_by_key(|entry| entry.file_name());
         for entry in children {
-            entries += 1;
             let path = entry.path();
             if path.is_dir() {
                 pending.push((path, depth + 1));
@@ -303,11 +312,25 @@ fn scan_root(
 
 fn read_skill(path: &Path) -> Result<Option<Skill>, HarnessError> {
     use std::io::Read;
+    // Keep regular-file symlinks working, but never open known devices/pipes.
+    if !std::fs::metadata(path)?.is_file() {
+        return Ok(None);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A regular file can be replaced with a FIFO after the metadata check.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
     // Bound reads even if the file grows between metadata and read.
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 256 * 1024 {
         return Ok(None);
     }
@@ -425,6 +448,77 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn discovery_caps_large_directories_across_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(&home, ".agents/skills/global.md", "Global");
+        for index in 0..4200 {
+            write(&repo, &format!(".pi/skills/skill-{index}.md"), "Body");
+        }
+        let skills = discover_at(HarnessId::Pi, &repo, &home).unwrap();
+        assert_eq!(skills.len(), MAX_DISCOVERY_ENTRIES);
+        assert!(skills.iter().any(|skill| skill.name == "global"));
+
+        // Directories count too; pending nested work cannot restart the budget.
+        let mut found = BTreeMap::new();
+        let mut remaining = 1;
+        scan_root(&repo, "", HarnessId::Pi, &mut found, &mut remaining).unwrap();
+        assert_eq!(remaining, 0);
+        assert!(found.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_skips_special_files_without_blocking() {
+        const CHILD: &str = "ZERON_SKILL_SPECIAL_FILE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the probe so a regression cannot strand the test runner.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "skills::tests::discovery_skips_special_files_without_blocking",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("skill discovery blocked on a special file");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let valid = write(root, "valid.md", "Body");
+        symlink(valid, root.join("linked.md")).unwrap();
+        let fifo = root.join("pipe.md");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        symlink(fifo, root.join("pipe-link.md")).unwrap();
+        symlink("/dev/zero", root.join("device.md")).unwrap();
+        let _socket = UnixListener::bind(root.join("socket.md")).unwrap();
+        let mut found = BTreeMap::new();
+        let mut remaining = MAX_DISCOVERY_ENTRIES;
+        scan_root(root, "", HarnessId::Pi, &mut found, &mut remaining).unwrap();
+        assert_eq!(
+            found.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["linked", "valid"]
+        );
     }
 
     #[test]
@@ -582,15 +676,30 @@ mod tests {
         write(&root, "bad folder/review.md", "---\nname: valid\n---\nBody");
         write(&root, "good/review.md", "Body");
         let mut found = BTreeMap::new();
-        scan_root(&root, "", HarnessId::ClaudeCode, &mut found).unwrap();
+        let mut remaining = MAX_DISCOVERY_ENTRIES;
+        scan_root(&root, "", HarnessId::ClaudeCode, &mut found, &mut remaining).unwrap();
         assert_eq!(
             found.keys().map(String::as_str).collect::<Vec<_>>(),
             ["good:review"]
         );
         found.clear();
-        scan_root(&root, "bad namespace:", HarnessId::ClaudeCode, &mut found).unwrap();
+        scan_root(
+            &root,
+            "bad namespace:",
+            HarnessId::ClaudeCode,
+            &mut found,
+            &mut remaining,
+        )
+        .unwrap();
         assert!(found.is_empty());
-        scan_root(&root, "é-plugin:", HarnessId::ClaudeCode, &mut found).unwrap();
+        scan_root(
+            &root,
+            "é-plugin:",
+            HarnessId::ClaudeCode,
+            &mut found,
+            &mut remaining,
+        )
+        .unwrap();
         assert_eq!(
             found.keys().map(String::as_str).collect::<Vec<_>>(),
             ["é-plugin:good:review"]
@@ -649,7 +758,8 @@ mod tests {
             HarnessId::Opencode,
         ] {
             let mut found = BTreeMap::new();
-            scan_root(&root, "", harness, &mut found).unwrap();
+            let mut remaining = MAX_DISCOVERY_ENTRIES;
+            scan_root(&root, "", harness, &mut found, &mut remaining).unwrap();
             assert_eq!(
                 found.keys().map(String::as_str).collect::<Vec<_>>(),
                 ["valid"],
@@ -827,7 +937,15 @@ mod tests {
         std::os::unix::fs::symlink(path.parent().unwrap(), root.join("review")).unwrap();
         std::os::unix::fs::symlink(&root, root.join("cycle")).unwrap();
         let mut found = BTreeMap::new();
-        scan_root(&root, "plugin:", HarnessId::ClaudeCode, &mut found).unwrap();
+        let mut remaining = MAX_DISCOVERY_ENTRIES;
+        scan_root(
+            &root,
+            "plugin:",
+            HarnessId::ClaudeCode,
+            &mut found,
+            &mut remaining,
+        )
+        .unwrap();
         assert_eq!(found.len(), 1);
         assert!(found.contains_key("plugin:review"));
     }
