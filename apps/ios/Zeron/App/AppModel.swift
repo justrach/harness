@@ -815,6 +815,7 @@ final class AppModel {
             }
         }
         let store = SessionStore(chatId: chat.id, config: config)
+        store.onPersisted = { [weak self] in self?.evictColdStores() }
         store.hostDeviceId = chat.deviceId
         store.hostLiveness = { [weak self] deviceId in
             self?.workspace?.peerLiveness(deviceId) ?? .unknown
@@ -896,9 +897,15 @@ final class AppModel {
     }
 
     func releaseSessionStore(chatId: String) {
-        guard sessionStores[chatId] != nil else { return }
+        guard let store = sessionStores[chatId] else { return }
+        store.detachView()
         touchStore(chatId)
         evictColdStores()
+    }
+
+    func attachSessionView(chatId: String) {
+        guard demo == nil else { return }
+        sessionStores[chatId]?.attachView()
     }
 
     /// Warm every non-archived session: stores hydrate from disk instantly
@@ -917,21 +924,35 @@ final class AppModel {
     /// its dial instantly.
     static let warmDialCap = 8
     static let warmStoreCap = 12
+    static let residentByteBudget = 80 * 1024 * 1024
+    static let residentBytesPerSnapshotByte = 6
+    static let residentFloorBytes = 512 * 1024
+
+    nonisolated static func residentEstimate(snapshotBytes: Int) -> Int {
+        max(snapshotBytes * residentBytesPerSnapshotByte, residentFloorBytes)
+    }
 
     nonisolated static func warmPreloadIDs(
         chats: [Chat],
         hasPendingOutbox: (String) -> Bool,
-        cap: Int
+        cap: Int,
+        snapshotBytes: (String) -> Int = { _ in 0 },
+        byteBudget: Int = .max
     ) -> [String] {
         let limit = max(0, cap)
         var ids: [String] = []
         var selected = Set<String>()
-        for chat in chats.prefix(limit) where selected.insert(chat.id).inserted {
-            ids.append(chat.id)
-        }
-        for chat in chats.dropFirst(limit)
-            where hasPendingOutbox(chat.id) && selected.insert(chat.id).inserted {
-            ids.append(chat.id)
+        var bytes = 0
+        for chat in chats where selected.insert(chat.id).inserted {
+            let pending = hasPendingOutbox(chat.id)
+            let estimate = residentEstimate(snapshotBytes: snapshotBytes(chat.id))
+            if pending {
+                ids.append(chat.id)
+                bytes += estimate
+            } else if ids.count < limit, bytes + estimate <= byteBudget {
+                ids.append(chat.id)
+                bytes += estimate
+            }
         }
         return ids
     }
@@ -967,9 +988,39 @@ final class AppModel {
             }
     }
 
+    nonisolated static func evictionPlan(
+        lastUsed: [String: UInt64],
+        estimates: [String: Int],
+        protected: (String) -> Bool,
+        countCap: Int,
+        byteBudget: Int
+    ) -> [String] {
+        let newest = lastUsed.max { $0.value < $1.value }?.key
+        var remainingCount = estimates.count
+        var remainingBytes = estimates.values.reduce(0, +)
+        guard remainingCount > countCap || remainingBytes > byteBudget else { return [] }
+        var plan: [String] = []
+        let order = evictionOrder(lastUsed: lastUsed) { id in
+            id == newest || protected(id)
+        }
+        for id in order {
+            guard remainingCount > countCap || remainingBytes > byteBudget else { break }
+            guard let estimate = estimates[id] else { continue }
+            plan.append(id)
+            remainingCount -= 1
+            remainingBytes -= estimate
+        }
+        return plan
+    }
+
     private func touchStore(_ id: String) {
         usageClock &+= 1
         storeLastUsed[id] = usageClock
+        let warmIDs = Set(storeLastUsed.sorted { $0.value > $1.value }
+            .prefix(3).map(\.key))
+        for (storeID, store) in sessionStores {
+            store.keepsParseCacheWarm = warmIDs.contains(storeID)
+        }
     }
 
     private func storeIsProtected(_ store: SessionStore) -> Bool {
@@ -979,13 +1030,20 @@ final class AppModel {
     }
 
     private func evictColdStores() {
-        guard sessionStores.count > Self.warmStoreCap else { return }
-        let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in
+        let estimates = sessionStores.mapValues { Self.residentEstimate(snapshotBytes: $0.snapshotBytes) }
+        let plan = Self.evictionPlan(
+            lastUsed: storeLastUsed,
+            estimates: estimates,
+            protected: { [weak self] id in
             guard let self, let store = self.sessionStores[id] else { return false }
             return self.storeIsProtected(store)
-        }
+            },
+            countCap: Self.warmStoreCap,
+            byteBudget: Self.residentByteBudget
+        )
+        guard !plan.isEmpty else { return }
         var removed = 0
-        for id in order where sessionStores.count > Self.warmStoreCap {
+        for id in plan {
             guard let store = sessionStores.removeValue(forKey: id) else { continue }
             store.stop()
             storeLastUsed.removeValue(forKey: id)
@@ -1017,7 +1075,9 @@ final class AppModel {
         let preloadIDs = Self.warmPreloadIDs(
             chats: overviewChats,
             hasPendingOutbox: { DocDisk.chat2HasPendingOutbox(id: $0) },
-            cap: Self.warmStoreCap
+            cap: Self.warmStoreCap,
+            snapshotBytes: { DocDisk.chat2SnapshotSize(id: $0) },
+            byteBudget: Self.residentByteBudget
         )
         for chat in overviewChats where preloadIDs.contains(chat.id) {
             if sessionStores[chat.id]?.stopped == true {
@@ -1026,6 +1086,7 @@ final class AppModel {
             }
             guard sessionStores[chat.id] == nil else { continue }
             let store = SessionStore(chatId: chat.id, config: config)
+            store.onPersisted = { [weak self] in self?.evictColdStores() }
             store.hostDeviceId = chat.deviceId
             store.hostLiveness = { [weak self] deviceId in
                 self?.workspace?.peerLiveness(deviceId) ?? .unknown

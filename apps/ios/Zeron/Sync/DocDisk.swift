@@ -7,6 +7,27 @@
 import Foundation
 import Loro
 
+@MainActor
+enum SnapshotLease {
+    private static var leases: [String: Int] = [:]
+    private static var epoch = 0
+
+    static func claim(_ chatId: String) -> Int {
+        epoch &+= 1
+        leases[chatId] = epoch
+        return epoch
+    }
+
+    static func isCurrent(_ chatId: String, _ token: Int) -> Bool {
+        leases[chatId] == token
+    }
+
+    static func revokeAll() {
+        epoch &+= 1
+        leases.removeAll()
+    }
+}
+
 enum DocDisk {
     static var directoryOverride: URL?
 
@@ -76,9 +97,10 @@ enum DocDisk {
     /// catch-up verified it, or nil when absent/unreadable.
     static func loadChat2(into doc: LoroDoc, id: String)
         -> (cursor: UInt64, verified: Bool, firstContactQueued: Bool,
-            outbox: [(batchId: String, bytes: Data)])? {
+            outbox: [(batchId: String, bytes: Data)], bytes: Int)? {
         guard let data = try? Data(contentsOf: chat2URL(for: id)),
               data.count >= 16 else { return nil }
+        let fileBytes = data.count
         let magic = data.prefix(8)
         let isLegacy = magic == legacyChat2Magic
         let hasOutbox = magic == chat2OutboxMagic
@@ -122,11 +144,11 @@ enum DocDisk {
             firstContactQueued = false
         }
         guard data.count > snapshotOffset else {
-            return (cursor, verified, firstContactQueued, outbox)
+            return (cursor, verified, firstContactQueued, outbox, fileBytes)
         }
         guard (try? doc.importWith(bytes: data.subdata(in: snapshotOffset..<data.count),
                                    origin: "disk")) != nil else { return nil }
-        return (cursor, verified, firstContactQueued, outbox)
+        return (cursor, verified, firstContactQueued, outbox, fileBytes)
     }
 
     /// Atomically persist the chat2 doc snapshot + its room cursor.
@@ -135,14 +157,30 @@ enum DocDisk {
                           firstContactQueued: Bool = false,
                           outbox: [(batchId: String, bytes: Data)] = []) -> Bool {
         guard let snapshot = try? doc.export(mode: .snapshot) else { return false }
-        return saveChat2(snapshot: snapshot, id: id, cursor: cursor, verified: verified,
-                         firstContactQueued: firstContactQueued, outbox: outbox)
+        return saveChat2ReturningBytes(snapshot: snapshot, id: id, cursor: cursor,
+                                       verified: verified,
+                                       firstContactQueued: firstContactQueued,
+                                       outbox: outbox) != nil
     }
 
     @discardableResult
     static func saveChat2(snapshot: Data, id: String, cursor: UInt64, verified: Bool,
                           firstContactQueued: Bool = false,
                           outbox: [(batchId: String, bytes: Data)] = []) -> Bool {
+        saveChat2ReturningBytes(snapshot: snapshot, id: id, cursor: cursor,
+                                verified: verified,
+                                firstContactQueued: firstContactQueued,
+                                outbox: outbox) != nil
+    }
+
+    static func saveChat2ReturningBytes(
+        snapshot: Data,
+        id: String,
+        cursor: UInt64,
+        verified: Bool,
+        firstContactQueued: Bool = false,
+        outbox: [(batchId: String, bytes: Data)] = []
+    ) -> Int? {
         var data = chat2OutboxMagic
         var le = cursor.littleEndian
         withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
@@ -152,7 +190,7 @@ enum DocDisk {
         for push in outbox {
             guard let id = push.batchId.data(using: .utf8),
                   let idLength = UInt32(exactly: id.count),
-                  let byteLength = UInt32(exactly: push.bytes.count) else { return false }
+                  let byteLength = UInt32(exactly: push.bytes.count) else { return nil }
             var idLE = idLength.littleEndian
             withUnsafeBytes(of: &idLE) { data.append(contentsOf: $0) }
             data.append(id)
@@ -161,7 +199,16 @@ enum DocDisk {
             data.append(push.bytes)
         }
         data.append(snapshot)
-        return saveRegistry(data: data, to: chat2URL(for: id))
+        return saveRegistryReturningBytes(data: data, to: chat2URL(for: id))
+    }
+
+    static func chat2SnapshotSize(id: String) -> Int {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: chat2URL(for: id).path
+        ), let size = attributes[.size] as? NSNumber else {
+            return 0
+        }
+        return size.intValue
     }
 
     private static func readUInt32LE(_ data: Data, at offset: Int) -> UInt32 {
@@ -192,11 +239,15 @@ enum DocDisk {
 
     @discardableResult
     static func saveRegistry(data: Data, to url: URL) -> Bool {
+        saveRegistryReturningBytes(data: data, to: url) != nil
+    }
+
+    static func saveRegistryReturningBytes(data: Data, to url: URL) -> Int? {
         do {
             try data.write(to: url, options: .atomic)
-            return true
+            return data.count
         } catch {
-            return false
+            return nil
         }
     }
 
@@ -284,39 +335,85 @@ enum DocDisk {
     }
 
     /// Sign-out hygiene: local doc state belongs to the signed-in identity.
+    @MainActor
     static func wipeAll() {
+        SnapshotLease.revokeAll()
         try? FileManager.default.removeItem(at: directory)
     }
 }
 
 /// Debounced snapshot persistence shared by the doc stores: poke on every
-/// change; `save` runs ~1.5s after the last poke, and `flush` forces it
+/// change; `save` runs after a quiet debounce, and `flush` forces it
 /// (backgrounding, store teardown). The closure captures whatever must be
 /// written together (e.g. a chat2 doc AND its cursor — one atomic file).
 @MainActor
 final class DocSaver {
     private let save: () -> Bool
+    private let quietDebounceNs: UInt64
+    private let maxDeferralNs: UInt64
+    private let staleRetryNs: UInt64
     private var generation = 0
+    private var deadlineGeneration = 0
+    private var syncCommits = 0
     private var dirty = false
     var onSaved: (() -> Void)?
+    var background: (() async -> Bool)?
     var isDirty: Bool { dirty }
 
-    init(save: @escaping () -> Bool) {
+    init(save: @escaping () -> Bool,
+         quietDebounceNs: UInt64 = 5_000_000_000,
+         maxDeferralNs: UInt64 = 300_000_000_000,
+         staleRetryNs: UInt64 = 30_000_000_000) {
         self.save = save
+        self.quietDebounceNs = quietDebounceNs
+        self.maxDeferralNs = maxDeferralNs
+        self.staleRetryNs = staleRetryNs
     }
 
     func retireTimers() {
         generation += 1
+        deadlineGeneration += 1
+    }
+
+    private func flushFromTimer() async {
+        guard dirty else { return }
+        if let background {
+            if await background(), dirty {
+                dirty = false
+                generation += 1
+                deadlineGeneration += 1
+                onSaved?()
+            } else if dirty {
+                armDeadline(after: min(maxDeferralNs, staleRetryNs))
+            }
+        } else {
+            flush()
+        }
+    }
+
+    private func armDeadline(after delay: UInt64) {
+        deadlineGeneration += 1
+        let expectedDeadline = deadlineGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard let self, self.deadlineGeneration == expectedDeadline,
+                  self.dirty else { return }
+            await self.flushFromTimer()
+        }
     }
 
     func poke() {
+        let wasDirty = dirty
         dirty = true
         generation += 1
         let expected = generation
+        if !wasDirty {
+            armDeadline(after: maxDeferralNs)
+        }
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            try? await Task.sleep(nanoseconds: self?.quietDebounceNs ?? 0)
             guard let self, self.generation == expected else { return }
-            self.flush()
+            await self.flushFromTimer()
         }
     }
 
@@ -327,6 +424,7 @@ final class DocSaver {
 
     @discardableResult
     func commitNow() -> Bool {
+        syncCommits &+= 1
         guard save() else {
             dirty = true
             scheduleRetry()
@@ -334,18 +432,25 @@ final class DocSaver {
         }
         dirty = false
         generation += 1
+        deadlineGeneration += 1
         onSaved?()
         return true
     }
 
-    /// Exports off-main and writes on the main actor only for the current generation.
+    /// Exports off-main and writes only if no newer generation superseded it.
     func commitAsync(export: @escaping @Sendable () -> Data?,
                      write: @escaping (Data) -> Bool) async -> Bool {
         guard dirty else { return true }
+        let syncCommitsAtStart = syncCommits
         generation += 1
         let expected = generation
-        let snapshot = await Task.detached(priority: .utility) { export() }.value
-        guard generation == expected else { return false }
+        let snapshot = await SnapshotExporter.shared.export(export)
+        if generation != expected {
+            if syncCommits == syncCommitsAtStart, let snapshot {
+                _ = write(snapshot)
+            }
+            return false
+        }
         guard let snapshot, write(snapshot) else {
             dirty = true
             scheduleRetry()
@@ -353,6 +458,7 @@ final class DocSaver {
         }
         dirty = false
         generation += 1
+        deadlineGeneration += 1
         onSaved?()
         return true
     }
@@ -363,8 +469,27 @@ final class DocSaver {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard let self, self.generation == expected else { return }
-            self.flush()
+            await self.flushFromTimer()
         }
+    }
+}
+
+actor SnapshotExporter {
+    static let shared = SnapshotExporter()
+    private var tail: Task<Void, Never>?
+
+    func export(_ work: @escaping @Sendable () -> Data?) async -> Data? {
+        let predecessor = tail
+        let current = Task.detached(priority: .utility) {
+            if let predecessor {
+                await predecessor.value
+            }
+            return work()
+        }
+        tail = Task.detached(priority: .utility) {
+            _ = await current.value
+        }
+        return await current.value
     }
 }
 

@@ -84,6 +84,7 @@ struct SessionView: View {
             }
         }
         .onAppear {
+            model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
         }
         .onDisappear {
