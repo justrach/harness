@@ -512,15 +512,10 @@ mod tests {
             vec![(0..3, String::new()), (9..12, String::new())]
         );
         let text = "***both*** and **bold _nested_**\nactive";
-        let edits = decorations(text, text.rfind('\n').unwrap() + 1..text.len());
-        for pair in edits.windows(2) {
-            assert!(pair[0].0.end <= pair[1].0.start);
-        }
-        let mut rendered = text.to_string();
-        for (range, replacement) in edits.into_iter().rev() {
-            rendered.replace_range(range, &replacement);
-        }
-        assert_eq!(rendered, "both and bold nested\nactive");
+        assert_eq!(
+            rendered(text, text.rfind('\n').unwrap() + 1..text.len()),
+            "both and bold nested\nactive"
+        );
         assert_eq!(newline_edit("café", 4), None);
         assert_eq!(newline_edit("short", 100), None);
     }

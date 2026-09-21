@@ -9633,6 +9633,20 @@ mod tests {
         (dir, window)
     }
 
+    fn with_composer_input(
+        cx: &mut gpui::TestAppContext,
+        test: impl FnOnce(&mut ComposerInput, &mut Window, &mut Context<ComposerInput>),
+    ) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer
+                    .input
+                    .update(cx, |input, cx| test(input, window, cx));
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn dock_morph_restores_skinny_height_with_a_continuous_editor_origin(
         cx: &mut gpui::TestAppContext,
@@ -9894,35 +9908,33 @@ mod tests {
     }
 
     #[test]
-    fn workspace_commands_extend_every_harness_without_overriding_native_commands() {
-        for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
-            let native = invocation_candidates(
-                vec![
-                    SlashCommand {
-                        name: "model".into(),
-                        description: "Native model command".into(),
-                        input_hint: Some("model id".into()),
-                    },
-                    SlashCommand {
-                        name: "zeron:model".into(),
-                        description: "Plugin command".into(),
-                        input_hint: None,
-                    },
-                ],
-                vec![],
-            );
-            let rows = with_workspace_commands(native, true);
-            assert_eq!(rows.len(), 11, "{harness:?}");
-            assert!(rows[0].workspace_command.is_none());
-            assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
-            assert_eq!(workspace_command_for_text("/model", &rows), None);
-            assert_eq!(workspace_command_for_text("/zeron:model", &rows), None);
-            assert_eq!(
-                workspace_command_for_text("/zeron:zeron:model", &rows),
-                Some(WorkspaceCommand::Model)
-            );
-            assert_eq!(with_workspace_commands(rows, true).len(), 11);
-        }
+    fn workspace_commands_preserve_native_commands_and_avoid_collisions() {
+        let native = invocation_candidates(
+            vec![
+                SlashCommand {
+                    name: "model".into(),
+                    description: "Native model command".into(),
+                    input_hint: Some("model id".into()),
+                },
+                SlashCommand {
+                    name: "zeron:model".into(),
+                    description: "Plugin command".into(),
+                    input_hint: None,
+                },
+            ],
+            vec![],
+        );
+        let rows = with_workspace_commands(native, true);
+        assert_eq!(rows.len(), 11);
+        assert!(rows[0].workspace_command.is_none());
+        assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
+        assert_eq!(workspace_command_for_text("/model", &rows), None);
+        assert_eq!(workspace_command_for_text("/zeron:model", &rows), None);
+        assert_eq!(
+            workspace_command_for_text("/zeron:zeron:model", &rows),
+            Some(WorkspaceCommand::Model)
+        );
+        assert_eq!(with_workspace_commands(rows, true).len(), 11);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
@@ -10277,68 +10289,63 @@ mod tests {
 
     #[gpui::test]
     fn crlf_navigation_deletion_and_newlines_keep_the_pair_intact(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    for (first, continued) in [
-                        ("plain café", ""),
-                        ("- item", "- "),
-                        ("- [x] item", "- [ ] "),
-                    ] {
-                        let raw = format!("{first}\r\nnext");
-                        input.set_text(&raw, cx);
-                        input.move_to(0, cx);
-                        input.end(&End, window, cx);
-                        assert_eq!(input.cursor_offset(), first.len());
-                        input.layout_text(px(600.0), &window.text_style(), window, cx);
-                        assert_eq!(
-                            input.caret_for_point(point(px(590.0), px(1.0))).0,
-                            first.len()
-                        );
-                        assert_eq!(
-                            input.selection_unit(PressIntent::Line, 0),
-                            0..first.len() + 2
-                        );
-                        input.move_to(0, cx);
-                        input.select_end(&SelectEnd, window, cx);
-                        assert_eq!(input.selected_range, 0..first.len());
-                        input.move_to(0, cx);
-                        input.end(&End, window, cx);
-                        input.backspace(&Backspace, window, cx);
-                        let previous = first.grapheme_indices(true).last().unwrap().0;
-                        assert_eq!(input.text(), format!("{}\r\nnext", &first[..previous]));
-                        input.undo(&Undo, window, cx);
-                        input.move_to(first.len(), cx);
-                        input.delete(&Delete, window, cx);
-                        assert_eq!(input.text(), format!("{first}next"));
-                        input.undo(&Undo, window, cx);
-                        input.move_to(first.len() + 2, cx);
-                        input.backspace(&Backspace, window, cx);
-                        assert_eq!(input.text(), format!("{first}next"));
-                        input.undo(&Undo, window, cx);
-                        input.move_to(0, cx);
-                        input.end(&End, window, cx);
-                        input.newline(&Newline, window, cx);
-                        assert_eq!(input.text(), format!("{first}\r\n{continued}\r\nnext"));
-                        input.undo(&Undo, window, cx);
-                        input.move_to(2, cx);
-                        input.delete_to_line_end(&DeleteToLineEnd, window, cx);
-                        assert_eq!(input.text(), format!("{}\r\nnext", &first[..2]));
-                        input.undo(&Undo, window, cx);
-                        assert_eq!(input.text(), raw);
-                    }
-                    input.set_text("\r\nnext", cx);
-                    input.move_to(0, cx);
-                    input.end(&End, window, cx);
-                    assert_eq!(input.cursor_offset(), 0);
-                    input.backspace(&Backspace, window, cx);
-                    assert_eq!(input.text(), "\r\nnext");
-                    input.delete(&Delete, window, cx);
-                    assert_eq!(input.text(), "next");
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            for (first, continued) in [
+                ("plain café", ""),
+                ("- item", "- "),
+                ("- [x] item", "- [ ] "),
+            ] {
+                let raw = format!("{first}\r\nnext");
+                input.set_text(&raw, cx);
+                input.move_to(0, cx);
+                input.end(&End, window, cx);
+                assert_eq!(input.cursor_offset(), first.len());
+                input.layout_text(px(600.0), &window.text_style(), window, cx);
+                assert_eq!(
+                    input.caret_for_point(point(px(590.0), px(1.0))).0,
+                    first.len()
+                );
+                assert_eq!(
+                    input.selection_unit(PressIntent::Line, 0),
+                    0..first.len() + 2
+                );
+                input.move_to(0, cx);
+                input.select_end(&SelectEnd, window, cx);
+                assert_eq!(input.selected_range, 0..first.len());
+                input.move_to(0, cx);
+                input.end(&End, window, cx);
+                input.backspace(&Backspace, window, cx);
+                let previous = first.grapheme_indices(true).last().unwrap().0;
+                assert_eq!(input.text(), format!("{}\r\nnext", &first[..previous]));
+                input.undo(&Undo, window, cx);
+                input.move_to(first.len(), cx);
+                input.delete(&Delete, window, cx);
+                assert_eq!(input.text(), format!("{first}next"));
+                input.undo(&Undo, window, cx);
+                input.move_to(first.len() + 2, cx);
+                input.backspace(&Backspace, window, cx);
+                assert_eq!(input.text(), format!("{first}next"));
+                input.undo(&Undo, window, cx);
+                input.move_to(0, cx);
+                input.end(&End, window, cx);
+                input.newline(&Newline, window, cx);
+                assert_eq!(input.text(), format!("{first}\r\n{continued}\r\nnext"));
+                input.undo(&Undo, window, cx);
+                input.move_to(2, cx);
+                input.delete_to_line_end(&DeleteToLineEnd, window, cx);
+                assert_eq!(input.text(), format!("{}\r\nnext", &first[..2]));
+                input.undo(&Undo, window, cx);
+                assert_eq!(input.text(), raw);
+            }
+            input.set_text("\r\nnext", cx);
+            input.move_to(0, cx);
+            input.end(&End, window, cx);
+            assert_eq!(input.cursor_offset(), 0);
+            input.backspace(&Backspace, window, cx);
+            assert_eq!(input.text(), "\r\nnext");
+            input.delete(&Delete, window, cx);
+            assert_eq!(input.text(), "next");
+        });
     }
 
     #[gpui::test]
@@ -10404,55 +10411,50 @@ mod tests {
     fn vertical_navigation_retains_column_across_short_and_wrapped_rows(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let long = "abcdefghijklmnopqrstuvwx";
-                    let raw = format!("{long}\nx\n{long}");
-                    let last_start = long.len() + 3;
-                    for width in [1000.0, 140.0] {
-                        input.set_text(&raw, cx);
-                        input.layout_text(px(width), &window.text_style(), window, cx);
-                        input.move_to(7, cx);
-                        let start = input.cursor_point().unwrap();
-                        let target = input.point_for_index(last_start + 7).unwrap();
-                        let rows = (f32::from(target.y - start.y) / f32::from(input.line_height))
-                            .round() as usize;
-                        assert!(rows >= 2);
-                        for _ in 0..rows {
-                            input.down(&Down, window, cx);
-                        }
-                        assert_eq!(
-                            input.cursor_offset(),
-                            last_start + 7,
-                            "column lost at width {width}"
-                        );
-                        assert_eq!(input.preferred_column, Some(start.x));
-                        for _ in 0..rows {
-                            input.up(&Up, window, cx);
-                        }
-                        assert_eq!(input.cursor_offset(), 7);
-                        for _ in 0..rows {
-                            input.select_down(&SelectDown, window, cx);
-                        }
-                        assert_eq!(input.selected_range, 7..last_start + 7);
-                        for _ in 0..rows {
-                            input.select_up(&SelectUp, window, cx);
-                        }
-                        assert_eq!(input.selected_range, 7..7);
-                        input.right(&Right, window, cx);
-                        assert_eq!(input.preferred_column, None);
-                        input.down(&Down, window, cx);
-                        assert!(input.preferred_column.is_some());
-                        input.replace_text_in_range(None, "é", window, cx);
-                        assert_eq!(input.preferred_column, None);
-                        input.undo(&Undo, window, cx);
-                        assert_eq!(input.text(), raw);
-                    }
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let long = "abcdefghijklmnopqrstuvwx";
+            let raw = format!("{long}\nx\n{long}");
+            let last_start = long.len() + 3;
+            for width in [1000.0, 140.0] {
+                input.set_text(&raw, cx);
+                input.layout_text(px(width), &window.text_style(), window, cx);
+                input.move_to(7, cx);
+                let start = input.cursor_point().unwrap();
+                let target = input.point_for_index(last_start + 7).unwrap();
+                let rows =
+                    (f32::from(target.y - start.y) / f32::from(input.line_height)).round() as usize;
+                assert!(rows >= 2);
+                for _ in 0..rows {
+                    input.down(&Down, window, cx);
+                }
+                assert_eq!(
+                    input.cursor_offset(),
+                    last_start + 7,
+                    "column lost at width {width}"
+                );
+                assert_eq!(input.preferred_column, Some(start.x));
+                for _ in 0..rows {
+                    input.up(&Up, window, cx);
+                }
+                assert_eq!(input.cursor_offset(), 7);
+                for _ in 0..rows {
+                    input.select_down(&SelectDown, window, cx);
+                }
+                assert_eq!(input.selected_range, 7..last_start + 7);
+                for _ in 0..rows {
+                    input.select_up(&SelectUp, window, cx);
+                }
+                assert_eq!(input.selected_range, 7..7);
+                input.right(&Right, window, cx);
+                assert_eq!(input.preferred_column, None);
+                input.down(&Down, window, cx);
+                assert!(input.preferred_column.is_some());
+                input.replace_text_in_range(None, "é", window, cx);
+                assert_eq!(input.preferred_column, None);
+                input.undo(&Undo, window, cx);
+                assert_eq!(input.text(), raw);
+            }
+        });
     }
 
     #[gpui::test]
@@ -10577,254 +10579,212 @@ mod tests {
     fn pasted_reference_resolution_is_one_undo_step_and_rejects_stale_results(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    input.set_text("Before ", cx);
-                    cx.write_to_clipboard(ClipboardItem::new_string("@README.md".into()));
-                    input.paste(&Paste, window, cx);
-                    let original = input.text().to_owned();
-                    let revision = input.edit_revision;
-                    input.layout_text(px(400.0), &window.text_style(), window, cx);
-                    assert_eq!(
-                        input.edit_revision, revision,
-                        "layout must not invalidate discovery"
-                    );
-                    let replacement =
-                        vec![(7..original.len(), local_file_link("README.md", false))];
-                    input.apply_pasted_references(
-                        &original,
-                        original.len(),
-                        revision,
-                        replacement.clone(),
-                        cx,
-                    );
-                    assert_eq!(input.projection.mentions.len(), 1);
-                    let canonical = input.text().to_owned();
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "Before ");
-                    input.redo(&Redo, window, cx);
-                    assert_eq!(input.text(), canonical);
-                    input.set_text(&original, cx);
-                    input.apply_pasted_references(
-                        &original,
-                        original.len(),
-                        revision,
-                        replacement,
-                        cx,
-                    );
-                    assert_eq!(
-                        input.text(),
-                        original,
-                        "stale discovery cannot change a restored draft"
-                    );
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("Before ", cx);
+            cx.write_to_clipboard(ClipboardItem::new_string("@README.md".into()));
+            input.paste(&Paste, window, cx);
+            let original = input.text().to_owned();
+            let revision = input.edit_revision;
+            input.layout_text(px(400.0), &window.text_style(), window, cx);
+            assert_eq!(
+                input.edit_revision, revision,
+                "layout must not invalidate discovery"
+            );
+            let replacement = vec![(7..original.len(), local_file_link("README.md", false))];
+            input.apply_pasted_references(
+                &original,
+                original.len(),
+                revision,
+                replacement.clone(),
+                cx,
+            );
+            assert_eq!(input.projection.mentions.len(), 1);
+            let canonical = input.text().to_owned();
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "Before ");
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.text(), canonical);
+            input.set_text(&original, cx);
+            input.apply_pasted_references(&original, original.len(), revision, replacement, cx);
+            assert_eq!(
+                input.text(),
+                original,
+                "stale discovery cannot change a restored draft"
+            );
+        });
     }
 
     #[gpui::test]
     fn clipboard_is_readable_outside_zeron_and_lossless_inside(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let raw = format!(
-                        "**Check** {} with {}",
-                        local_file_link("src/café.rs", false),
-                        zeron_proto::invocation::Invocation::Skill {
-                            name: "review".into(),
-                            path: "/repo/SKILL.md".into(),
-                            command: None
-                        }
-                        .link()
-                    );
-                    input.set_text(&raw, cx);
-                    input.select_all(&SelectAll, window, cx);
-                    input.copy(&Copy, window, cx);
-                    let copied = cx.read_from_clipboard().unwrap().text().unwrap();
-                    assert_eq!(
-                        copied,
-                        "**Check** [café.rs](src/caf%C3%A9.rs) with [$review](/repo/SKILL.md)"
-                    );
-                    input.set_text("", cx);
-                    input.paste(&Paste, window, cx);
-                    assert_eq!(input.text(), raw);
-                    assert_eq!(input.projection.mentions.len(), 2);
-                    input.set_text("x", cx);
-                    cx.write_to_clipboard(ClipboardItem::new_string("a".into()));
-                    input.paste(&Paste, window, cx);
-                    input.replace_text_in_range(None, "b", window, cx);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "xa");
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "x");
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let raw = format!(
+                "**Check** {} with {}",
+                local_file_link("src/café.rs", false),
+                zeron_proto::invocation::Invocation::Skill {
+                    name: "review".into(),
+                    path: "/repo/SKILL.md".into(),
+                    command: None
+                }
+                .link()
+            );
+            input.set_text(&raw, cx);
+            input.select_all(&SelectAll, window, cx);
+            input.copy(&Copy, window, cx);
+            let copied = cx.read_from_clipboard().unwrap().text().unwrap();
+            assert_eq!(
+                copied,
+                "**Check** [café.rs](src/caf%C3%A9.rs) with [$review](/repo/SKILL.md)"
+            );
+            input.set_text("", cx);
+            input.paste(&Paste, window, cx);
+            assert_eq!(input.text(), raw);
+            assert_eq!(input.projection.mentions.len(), 2);
+            input.set_text("x", cx);
+            cx.write_to_clipboard(ClipboardItem::new_string("a".into()));
+            input.paste(&Paste, window, cx);
+            input.replace_text_in_range(None, "b", window, cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "xa");
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "x");
+        });
     }
 
     #[gpui::test]
     fn dense_rich_draft_keeps_offsets_and_reuses_unchanged_layout(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let raw = "- **café** _text_\n".repeat(1000) + "active";
-                    input.set_text(&raw, cx);
-                    input.layout_text(px(320.), &window.text_style(), window, cx);
-                    assert!(input.projection.display.starts_with("• café text\n"));
-                    assert_eq!(input.last_lines.len(), 1001);
-                    let mut previous = 0;
-                    for (offset, _) in raw.char_indices() {
-                        let display = input.projection.raw_to_display(offset);
-                        assert!(display >= previous && display <= input.projection.display.len());
-                        assert!(input.projection.display.is_char_boundary(display));
-                        previous = display;
-                    }
-                    for (offset, _) in input.projection.display.char_indices() {
-                        assert!(raw.is_char_boundary(input.projection.display_to_raw(offset)));
-                    }
-                    let rebuilt = input.layout_rebuilds;
-                    input.layout_text(px(320.), &window.text_style(), window, cx);
-                    assert_eq!(input.layout_rebuilds, rebuilt);
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let raw = "- **café** _text_\n".repeat(1000) + "active";
+            input.set_text(&raw, cx);
+            input.layout_text(px(320.), &window.text_style(), window, cx);
+            assert!(input.projection.display.starts_with("• café text\n"));
+            assert_eq!(input.last_lines.len(), 1001);
+            let mut previous = 0;
+            for (offset, _) in raw.char_indices() {
+                let display = input.projection.raw_to_display(offset);
+                assert!(display >= previous && display <= input.projection.display.len());
+                assert!(input.projection.display.is_char_boundary(display));
+                previous = display;
+            }
+            for (offset, _) in input.projection.display.char_indices() {
+                assert!(raw.is_char_boundary(input.projection.display_to_raw(offset)));
+            }
+            let rebuilt = input.layout_rebuilds;
+            input.layout_text(px(320.), &window.text_style(), window, cx);
+            assert_eq!(input.layout_rebuilds, rebuilt);
+        });
     }
 
     #[gpui::test]
     fn rich_edit_state_is_current_before_the_next_layout(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let draft = "**first**\n_second_\nlast";
-                    input.set_text(draft, cx);
-                    assert_eq!(input.projection.display, "first\nsecond\nlast");
-                    input.replace_text_in_range(None, "\n**next**", window, cx);
-                    assert_eq!(input.projection.display, "first\nsecond\nlast\n**next**");
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.projection.display, "first\nsecond\nlast");
-                    input.redo(&Redo, window, cx);
-                    assert_eq!(input.projection.display, "first\nsecond\nlast\n**next**");
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let draft = "**first**\n_second_\nlast";
+            input.set_text(draft, cx);
+            assert_eq!(input.projection.display, "first\nsecond\nlast");
+            input.replace_text_in_range(None, "\n**next**", window, cx);
+            assert_eq!(input.projection.display, "first\nsecond\nlast\n**next**");
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.projection.display, "first\nsecond\nlast");
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.projection.display, "first\nsecond\nlast\n**next**");
+        });
     }
 
     #[gpui::test]
     fn ime_uses_replacement_relative_utf16_and_restores_markdown_on_unmark(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let before = "**bold**\n😀x";
-                    input.set_text(before, cx);
-                    let start = before.len() - 1;
-                    input.selected_range = start..before.len();
-                    input.selection_reversed = true;
-                    input.replace_and_mark_text_in_range(None, "あいう", Some(1..2), window, cx);
-                    assert_eq!(input.selected_range, start + 3..start + 6);
-                    assert!(!input.selection_reversed);
-                    assert_eq!(&input.text()[input.selected_range.clone()], "い");
-                    assert!(
-                        input.projection.display.starts_with("bold\n"),
-                        "composition must not reveal unrelated syntax"
-                    );
-                    input.layout_text(px(320.), &window.text_style(), window, cx);
-                    assert!(!input.needs_measure);
-                    input.unmark_text(window, cx);
-                    assert!(input.needs_measure);
-                    assert!(input.projection.display.starts_with("bold\n"));
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), before);
-                    assert_eq!(input.selected_range, start..before.len());
-                    assert!(input.selection_reversed);
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let before = "**bold**\n😀x";
+            input.set_text(before, cx);
+            let start = before.len() - 1;
+            input.selected_range = start..before.len();
+            input.selection_reversed = true;
+            input.replace_and_mark_text_in_range(None, "あいう", Some(1..2), window, cx);
+            assert_eq!(input.selected_range, start + 3..start + 6);
+            assert!(!input.selection_reversed);
+            assert_eq!(&input.text()[input.selected_range.clone()], "い");
+            assert!(
+                input.projection.display.starts_with("bold\n"),
+                "composition must not reveal unrelated syntax"
+            );
+            input.layout_text(px(320.), &window.text_style(), window, cx);
+            assert!(!input.needs_measure);
+            input.unmark_text(window, cx);
+            assert!(input.needs_measure);
+            assert!(input.projection.display.starts_with("bold\n"));
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), before);
+            assert_eq!(input.selected_range, start..before.len());
+            assert!(input.selection_reversed);
+        });
     }
 
     #[gpui::test]
     fn bulk_edits_and_following_typing_are_separate_undo_steps(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    input.set_text("", cx);
-                    input.replace_text_in_range(None, "paste", window, cx);
-                    input.replace_text_in_range(None, "d", window, cx);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "paste");
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "");
-                    input.set_text("@a", cx);
-                    input.replace_mention(0..2, "src/a.rs", false, cx);
-                    let chip = input.text().to_owned();
-                    input.replace_text_in_range(None, "x", window, cx);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), chip);
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("", cx);
+            input.replace_text_in_range(None, "paste", window, cx);
+            input.replace_text_in_range(None, "d", window, cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "paste");
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "");
+            input.set_text("@a", cx);
+            input.replace_mention(0..2, "src/a.rs", false, cx);
+            let chip = input.text().to_owned();
+            input.replace_text_in_range(None, "x", window, cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), chip);
+        });
     }
 
     #[gpui::test]
     fn inserting_references_preserves_surrounding_markdown_and_punctuation(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    for raw in [
-                        "**see @src**",
-                        "_see @src_",
-                        "~~see @src~~",
-                        "See (@src)",
-                        "- @src\r\nnext",
-                    ] {
-                        let start = raw.find("@src").unwrap();
-                        let token = mention_token(raw, start + 4).unwrap();
-                        input.set_text(raw, cx);
-                        let file = local_file_link("src/main.rs", false);
-                        input.replace_mention(token.range, "src/main.rs", false, cx);
-                        assert_eq!(input.text(), raw.replacen("@src", &file, 1));
-                        assert_eq!(input.projection.mentions.len(), 1);
-                        input.undo(&Undo, window, cx);
-                        assert_eq!(input.text(), raw);
-                        let source = raw.replace("@src", "$review");
-                        input.set_text(&source, cx);
-                        let skill = zeron_proto::invocation::Invocation::Skill {
-                            name: "review".into(),
-                            path: "/repo/SKILL.md".into(),
-                            command: None,
-                        }
-                        .link();
-                        let token = invocation_token(&source, start + 7, '$').unwrap();
-                        input.replace_plain_token(token.range, &skill, cx);
-                        assert_eq!(input.text(), source.replacen("$review", &skill, 1));
-                        assert_eq!(input.projection.mentions.len(), 1);
-                    }
-                    input.set_text("**selected**", cx);
-                    input.selected_range = 2..10;
-                    assert!(input.insert_dropped_mention("src/main.rs", false, cx));
-                    assert_eq!(
-                        input.text(),
-                        format!("**{}**", local_file_link("src/main.rs", false))
-                    );
-                    assert!(
-                        composer_markdown::faces(input.text())
-                            .iter()
-                            .any(|(_, face)| *face == composer_markdown::Face::Bold)
-                    );
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            for raw in [
+                "**see @src**",
+                "_see @src_",
+                "~~see @src~~",
+                "See (@src)",
+                "- @src\r\nnext",
+            ] {
+                let start = raw.find("@src").unwrap();
+                let token = mention_token(raw, start + 4).unwrap();
+                input.set_text(raw, cx);
+                let file = local_file_link("src/main.rs", false);
+                input.replace_mention(token.range, "src/main.rs", false, cx);
+                assert_eq!(input.text(), raw.replacen("@src", &file, 1));
+                assert_eq!(input.projection.mentions.len(), 1);
+                input.undo(&Undo, window, cx);
+                assert_eq!(input.text(), raw);
+                let source = raw.replace("@src", "$review");
+                input.set_text(&source, cx);
+                let skill = zeron_proto::invocation::Invocation::Skill {
+                    name: "review".into(),
+                    path: "/repo/SKILL.md".into(),
+                    command: None,
+                }
+                .link();
+                let token = invocation_token(&source, start + 7, '$').unwrap();
+                input.replace_plain_token(token.range, &skill, cx);
+                assert_eq!(input.text(), source.replacen("$review", &skill, 1));
+                assert_eq!(input.projection.mentions.len(), 1);
+            }
+            input.set_text("**selected**", cx);
+            input.selected_range = 2..10;
+            assert!(input.insert_dropped_mention("src/main.rs", false, cx));
+            assert_eq!(
+                input.text(),
+                format!("**{}**", local_file_link("src/main.rs", false))
+            );
+            assert!(
+                composer_markdown::faces(input.text())
+                    .iter()
+                    .any(|(_, face)| *face == composer_markdown::Face::Bold)
+            );
+        });
     }
 
     #[gpui::test]
@@ -10853,68 +10813,58 @@ mod tests {
 
     #[gpui::test]
     fn quoted_list_indentation_preserves_containers_and_selection(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    for original in ["> - café\n> - [x] done", "> > - café\r\n> > - [x] done"] {
-                        input.set_text(original, cx);
-                        input.selected_range = 0..original.len();
-                        input.selection_reversed = true;
-                        input.refresh_projection();
-                        assert!(input.indent_list(false, window, cx));
-                        let indented = original.replace("- ", "  - ");
-                        assert_eq!(input.text(), indented);
-                        assert_eq!(input.selected_range, 0..indented.len());
-                        assert!(input.selection_reversed);
-                        assert!(input.indent_list(true, window, cx));
-                        assert_eq!(input.text(), original);
-                        assert_eq!(input.selected_range, 0..original.len());
-                        assert!(input.selection_reversed);
-                        input.undo(&Undo, window, cx);
-                        assert_eq!(input.text(), indented);
-                        input.undo(&Undo, window, cx);
-                        assert_eq!(input.text(), original);
-                    }
-                    input.set_text("> ```\n> - literal\n> ```", cx);
-                    input.move_to(input.text().find("literal").unwrap(), cx);
-                    assert!(!input.indent_list(false, window, cx));
-                    input.set_text(
-                        ">     - literal code that wraps over several rows\n\nactive",
-                        cx,
-                    );
-                    input.layout_text(px(160.), &window.text_style(), window, cx);
-                    assert_eq!(input.line_indents[0], px(0.));
-                    assert!(input.projection.display.starts_with(">     - literal"));
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            for original in ["> - café\n> - [x] done", "> > - café\r\n> > - [x] done"] {
+                input.set_text(original, cx);
+                input.selected_range = 0..original.len();
+                input.selection_reversed = true;
+                input.refresh_projection();
+                assert!(input.indent_list(false, window, cx));
+                let indented = original.replace("- ", "  - ");
+                assert_eq!(input.text(), indented);
+                assert_eq!(input.selected_range, 0..indented.len());
+                assert!(input.selection_reversed);
+                assert!(input.indent_list(true, window, cx));
+                assert_eq!(input.text(), original);
+                assert_eq!(input.selected_range, 0..original.len());
+                assert!(input.selection_reversed);
+                input.undo(&Undo, window, cx);
+                assert_eq!(input.text(), indented);
+                input.undo(&Undo, window, cx);
+                assert_eq!(input.text(), original);
+            }
+            input.set_text("> ```\n> - literal\n> ```", cx);
+            input.move_to(input.text().find("literal").unwrap(), cx);
+            assert!(!input.indent_list(false, window, cx));
+            input.set_text(
+                ">     - literal code that wraps over several rows\n\nactive",
+                cx,
+            );
+            input.layout_text(px(160.), &window.text_style(), window, cx);
+            assert_eq!(input.line_indents[0], px(0.));
+            assert!(input.projection.display.starts_with(">     - literal"));
+        });
     }
 
     #[gpui::test]
     fn dropped_chip_replacement_rebuilds_same_length_layout(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    input.set_text(local_file_link("src/a.rs", false), cx);
-                    input.layout_text(px(320.), &window.text_style(), window, cx);
-                    let rebuilds = input.layout_rebuilds;
-                    input.selected_range = 0..input.content.len();
-                    assert!(input.insert_dropped_mention("src/b.rs", false, cx));
-                    assert!(input.needs_measure);
-                    input.layout_text(px(320.), &window.text_style(), window, cx);
-                    assert_eq!(input.layout_rebuilds, rebuilds + 1);
-                    assert!(input.projection.display.contains("b.rs"));
-                    input.set_text("    - code\n\nactive", cx);
-                    input.layout_text(px(160.), &window.text_style(), window, cx);
-                    assert_eq!(input.line_indents[0], px(0.));
-                    input.move_to(7, cx);
-                    assert!(!input.indent_list(false, window, cx));
-                    assert_eq!(input.text(), "    - code\n\nactive");
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text(local_file_link("src/a.rs", false), cx);
+            input.layout_text(px(320.), &window.text_style(), window, cx);
+            let rebuilds = input.layout_rebuilds;
+            input.selected_range = 0..input.content.len();
+            assert!(input.insert_dropped_mention("src/b.rs", false, cx));
+            assert!(input.needs_measure);
+            input.layout_text(px(320.), &window.text_style(), window, cx);
+            assert_eq!(input.layout_rebuilds, rebuilds + 1);
+            assert!(input.projection.display.contains("b.rs"));
+            input.set_text("    - code\n\nactive", cx);
+            input.layout_text(px(160.), &window.text_style(), window, cx);
+            assert_eq!(input.line_indents[0], px(0.));
+            input.move_to(7, cx);
+            assert!(!input.indent_list(false, window, cx));
+            assert_eq!(input.text(), "    - code\n\nactive");
+        });
     }
 
     #[gpui::test]
@@ -10994,29 +10944,24 @@ mod tests {
 
     #[gpui::test]
     fn rich_editor_selection_lists_and_undo(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    input.set_text("hello café world\n- item", cx);
-                    assert_eq!(input.selection_unit(PressIntent::Word, 8), 6..11);
-                    input.drag_unit = Some((PressIntent::Word, 6..11));
-                    input.drag_select_to(2, cx);
-                    assert_eq!(input.selected_range, 0..11);
-                    assert!(input.selection_reversed);
-                    input.drag_select_to(14, cx);
-                    assert_eq!(input.selected_range, 6..17);
-                    input.move_to(input.content.len(), cx);
-                    input.newline(&Newline, window, cx);
-                    assert!(input.content.ends_with("\n- "));
-                    input.undo(&Undo, window, cx);
-                    assert!(input.content.ends_with("\n- item"));
-                    input.redo(&Redo, window, cx);
-                    input.newline(&Newline, window, cx);
-                    assert!(input.content.ends_with("item\n"));
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("hello café world\n- item", cx);
+            assert_eq!(input.selection_unit(PressIntent::Word, 8), 6..11);
+            input.drag_unit = Some((PressIntent::Word, 6..11));
+            input.drag_select_to(2, cx);
+            assert_eq!(input.selected_range, 0..11);
+            assert!(input.selection_reversed);
+            input.drag_select_to(14, cx);
+            assert_eq!(input.selected_range, 6..17);
+            input.move_to(input.content.len(), cx);
+            input.newline(&Newline, window, cx);
+            assert!(input.content.ends_with("\n- "));
+            input.undo(&Undo, window, cx);
+            assert!(input.content.ends_with("\n- item"));
+            input.redo(&Redo, window, cx);
+            input.newline(&Newline, window, cx);
+            assert!(input.content.ends_with("item\n"));
+        });
     }
 
     #[gpui::test]
@@ -11077,56 +11022,32 @@ mod tests {
 
     #[test]
     fn message_enter_bindings_cover_both_platform_modifiers() {
-        assert_eq!(
-            message_enter_bindings(ComposerSendBehavior::Enter, "cmd-enter"),
-            vec![
-                MessageEnterBinding {
-                    keystroke: "enter".into(),
-                    action: MessageEnterBindingAction::Submit,
-                },
-                MessageEnterBinding {
-                    keystroke: "cmd-enter".into(),
-                    action: MessageEnterBindingAction::ModifiedSubmit,
-                },
-            ]
-        );
-        assert_eq!(
-            message_enter_bindings(ComposerSendBehavior::ModEnter, "cmd-enter"),
-            vec![
-                MessageEnterBinding {
-                    keystroke: "enter".into(),
-                    action: MessageEnterBindingAction::NewlineOrAccept,
-                },
-                MessageEnterBinding {
-                    keystroke: "cmd-enter".into(),
-                    action: MessageEnterBindingAction::ModifiedSubmit,
-                },
-            ]
-        );
-        assert_eq!(
-            message_enter_bindings(ComposerSendBehavior::ModEnter, "ctrl-enter"),
-            vec![
-                MessageEnterBinding {
-                    keystroke: "enter".into(),
-                    action: MessageEnterBindingAction::NewlineOrAccept,
-                },
-                MessageEnterBinding {
-                    keystroke: "ctrl-enter".into(),
-                    action: MessageEnterBindingAction::ModifiedSubmit,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn message_enter_never_adds_extra_modifier_bindings() {
-        let bindings = message_enter_bindings(ComposerSendBehavior::ModEnter, "cmd-enter");
-        assert!(!bindings.iter().any(|binding| {
-            matches!(
-                binding.keystroke.as_str(),
-                "ctrl-enter" | "shift-cmd-enter" | "alt-cmd-enter"
-            )
-        }));
+        for modifier in ["cmd-enter", "ctrl-enter"] {
+            for (behavior, action) in [
+                (
+                    ComposerSendBehavior::Enter,
+                    MessageEnterBindingAction::Submit,
+                ),
+                (
+                    ComposerSendBehavior::ModEnter,
+                    MessageEnterBindingAction::NewlineOrAccept,
+                ),
+            ] {
+                assert_eq!(
+                    message_enter_bindings(behavior, modifier),
+                    vec![
+                        MessageEnterBinding {
+                            keystroke: "enter".into(),
+                            action
+                        },
+                        MessageEnterBinding {
+                            keystroke: modifier.into(),
+                            action: MessageEnterBindingAction::ModifiedSubmit,
+                        },
+                    ]
+                );
+            }
+        }
     }
 
     #[test]
@@ -11499,25 +11420,20 @@ mod tests {
     fn explicit_navigation_breaks_undo_runs_but_backspace_remains_coalesced(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    input.set_text("", cx);
-                    input.replace_text_in_range(None, "a", window, cx);
-                    input.move_to(0, cx);
-                    input.move_to(1, cx);
-                    input.replace_text_in_range(None, "b", window, cx);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "a");
-                    input.set_text("abcd", cx);
-                    input.backspace(&Backspace, window, cx);
-                    input.backspace(&Backspace, window, cx);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), "abcd");
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            input.set_text("", cx);
+            input.replace_text_in_range(None, "a", window, cx);
+            input.move_to(0, cx);
+            input.move_to(1, cx);
+            input.replace_text_in_range(None, "b", window, cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "a");
+            input.set_text("abcd", cx);
+            input.backspace(&Backspace, window, cx);
+            input.backspace(&Backspace, window, cx);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), "abcd");
+        });
     }
 
     #[gpui::test]
@@ -11648,16 +11564,18 @@ mod tests {
             .unwrap();
     }
 
+    fn completion_token(text: &str, cursor: usize, prefix: char) -> Option<MentionToken> {
+        if prefix == '@' {
+            mention_token(text, cursor)
+        } else {
+            invocation_token(text, cursor, prefix)
+        }
+    }
+
     #[test]
     fn completion_respects_markdown_containers_and_destinations() {
         for prefix in ['@', '$', '/'] {
-            let token = |text: &str, cursor| {
-                if prefix == '@' {
-                    mention_token(text, cursor)
-                } else {
-                    invocation_token(text, cursor, prefix)
-                }
-            };
+            let token = |text: &str, cursor| completion_token(text, cursor, prefix);
             for container in [">", ">>", "> >", "- >", "> first\n>"] {
                 let text = format!("{container}{prefix}review");
                 let found = token(&text, text.len()).unwrap();
@@ -11689,13 +11607,7 @@ mod tests {
     #[test]
     fn completion_keeps_multiline_and_reference_destinations_literal() {
         for prefix in ['@', '$', '/'] {
-            let token = |text: &str, cursor| {
-                if prefix == '@' {
-                    mention_token(text, cursor)
-                } else {
-                    invocation_token(text, cursor, prefix)
-                }
-            };
+            let token = |text: &str, cursor| completion_token(text, cursor, prefix);
             for source in [
                 format!("[label](\n{prefix}review"),
                 format!("[label](foo\n {prefix}review"),
@@ -11731,13 +11643,7 @@ mod tests {
     #[test]
     fn completion_closes_at_parsed_emphasis_delimiters() {
         for prefix in ['@', '$', '/'] {
-            let token = |text: &str, cursor| {
-                if prefix == '@' {
-                    mention_token(text, cursor)
-                } else {
-                    invocation_token(text, cursor, prefix)
-                }
-            };
+            let token = |text: &str, cursor| completion_token(text, cursor, prefix);
             for delimiter in ["_", "**", "***", "~~"] {
                 let source = format!("{delimiter}see {prefix}review{delimiter}");
                 let closing = source.len() - delimiter.len();
@@ -13134,57 +13040,52 @@ mod tests {
                 assert!(input.projection.display.get(display.clone()).is_some());
             }
         }
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, window, cx| {
-                composer.input.update(cx, |input, cx| {
-                    let chip = local_file_link("src/café.rs", false);
-                    let raw = format!("**bold** e\u{301} 👨‍👩‍👧‍👦 {chip}\n`{chip}`\nactive ");
-                    input.set_text(&raw, cx);
-                    assert_eq!(input.projection.mentions.len(), 1);
-                    input.replace_and_mark_text_in_range(None, "かな", Some(0..1), window, cx);
-                    let composed = input.text().to_owned();
-                    let selection = input.selected_range.clone();
-                    let marked = input.marked_range.clone();
-                    let history = input.undo_stack.len();
-                    assert!(!input.insert_dropped_mention("src/dropped.rs", false, cx));
-                    assert_eq!(input.text(), composed);
-                    assert_eq!(input.selected_range, selection);
-                    assert_eq!(input.marked_range, marked);
-                    assert_eq!(input.undo_stack.len(), history);
-                    assert_ranges(input);
-                    input.replace_and_mark_text_in_range(None, "かんじ", Some(1..2), window, cx);
-                    assert_eq!(&input.content[input.selected_range.clone()], "ん");
-                    assert_ranges(input);
-                    input.replace_text_in_range(None, "漢字", window, cx);
-                    let committed = format!("{raw}漢字");
-                    assert_eq!(input.text(), committed);
-                    assert!(input.marked_range.is_none());
-                    assert_ranges(input);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), raw);
-                    input.redo(&Redo, window, cx);
-                    assert_eq!(input.text(), committed);
-                    assert_ranges(input);
-                    let link = input.projection.mentions[0].0.range.clone();
-                    let partial = input.range_to_utf16(&(link.start + 1..link.end - 1));
-                    input.replace_text_in_range(Some(partial), "🦀", window, cx);
-                    assert!(input.projection.mentions.is_empty());
-                    assert!(input.text().contains(&format!("`{chip}`")));
-                    assert_ranges(input);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), committed);
-                    assert_eq!(input.projection.mentions.len(), 1);
-                    input.move_to(input.content.len(), cx);
-                    assert!(input.insert_dropped_mention("src/dropped.rs", false, cx));
-                    assert_eq!(input.projection.mentions.len(), 2);
-                    assert_ranges(input);
-                    input.undo(&Undo, window, cx);
-                    assert_eq!(input.text(), committed);
-                    assert_ranges(input);
-                });
-            })
-            .unwrap();
+        with_composer_input(cx, |input, window, cx| {
+            let chip = local_file_link("src/café.rs", false);
+            let raw = format!("**bold** e\u{301} 👨‍👩‍👧‍👦 {chip}\n`{chip}`\nactive ");
+            input.set_text(&raw, cx);
+            assert_eq!(input.projection.mentions.len(), 1);
+            input.replace_and_mark_text_in_range(None, "かな", Some(0..1), window, cx);
+            let composed = input.text().to_owned();
+            let selection = input.selected_range.clone();
+            let marked = input.marked_range.clone();
+            let history = input.undo_stack.len();
+            assert!(!input.insert_dropped_mention("src/dropped.rs", false, cx));
+            assert_eq!(input.text(), composed);
+            assert_eq!(input.selected_range, selection);
+            assert_eq!(input.marked_range, marked);
+            assert_eq!(input.undo_stack.len(), history);
+            assert_ranges(input);
+            input.replace_and_mark_text_in_range(None, "かんじ", Some(1..2), window, cx);
+            assert_eq!(&input.content[input.selected_range.clone()], "ん");
+            assert_ranges(input);
+            input.replace_text_in_range(None, "漢字", window, cx);
+            let committed = format!("{raw}漢字");
+            assert_eq!(input.text(), committed);
+            assert!(input.marked_range.is_none());
+            assert_ranges(input);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), raw);
+            input.redo(&Redo, window, cx);
+            assert_eq!(input.text(), committed);
+            assert_ranges(input);
+            let link = input.projection.mentions[0].0.range.clone();
+            let partial = input.range_to_utf16(&(link.start + 1..link.end - 1));
+            input.replace_text_in_range(Some(partial), "🦀", window, cx);
+            assert!(input.projection.mentions.is_empty());
+            assert!(input.text().contains(&format!("`{chip}`")));
+            assert_ranges(input);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), committed);
+            assert_eq!(input.projection.mentions.len(), 1);
+            input.move_to(input.content.len(), cx);
+            assert!(input.insert_dropped_mention("src/dropped.rs", false, cx));
+            assert_eq!(input.projection.mentions.len(), 2);
+            assert_ranges(input);
+            input.undo(&Undo, window, cx);
+            assert_eq!(input.text(), committed);
+            assert_ranges(input);
+        });
     }
 
     #[test]

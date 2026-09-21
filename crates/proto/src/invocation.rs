@@ -283,6 +283,14 @@ pub fn leading_command(text: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    fn skill(name: &str, path: &str) -> Invocation {
+        Invocation::Skill {
+            name: name.into(),
+            path: path.into(),
+            command: None,
+        }
+    }
+
     const HARNESSES: [crate::HarnessId; 9] = [
         crate::HarnessId::ClaudeCode,
         crate::HarnessId::Codex,
@@ -321,11 +329,7 @@ mod tests {
 
     #[test]
     fn delivery_preserves_skill_names_and_paths_with_markdown_punctuation() {
-        let skill = Invocation::Skill {
-            name: r"review[ui]\draft".into(),
-            path: "/repo/é [draft](1)/SKILL.md".into(),
-            command: None,
-        };
+        let skill = skill(r"review[ui]\draft", "/repo/é [draft](1)/SKILL.md");
         assert_eq!(invocation_links(&skill.link())[0].1, skill);
         for harness in HARNESSES {
             let delivered = harness_prompt(&format!("Please {} now", skill.link()), harness);
@@ -357,12 +361,7 @@ mod tests {
 
     #[test]
     fn literal_markdown_examples_never_activate_skills_for_any_harness() {
-        let skill = Invocation::Skill {
-            name: "review".into(),
-            path: "/repo/SKILL.md".into(),
-            command: None,
-        }
-        .link();
+        let skill = skill("review", "/repo/SKILL.md").link();
         for literal in [
             format!("`{skill}`"),
             format!("``{skill}``"),
@@ -410,11 +409,7 @@ mod tests {
             crate::HarnessId::Hermes,
             crate::HarnessId::Pi,
         ] {
-            let skill = Invocation::Skill {
-                name: "review".into(),
-                path: "/repo/SKILL.md".into(),
-                command: None,
-            };
+            let skill = skill("review", "/repo/SKILL.md");
             assert_eq!(
                 harness_prompt(&skill.link(), harness),
                 "Use the skill [$review](/repo/SKILL.md)"
@@ -507,11 +502,7 @@ mod tests {
 
     #[test]
     fn delivery_preserves_native_skill_identity_only_for_codex() {
-        let skill = Invocation::Skill {
-            command: None,
-            name: "review".into(),
-            path: "/repo/with space/SKILL.md".into(),
-        };
+        let skill = skill("review", "/repo/with space/SKILL.md");
         let raw = format!(
             "Use {} on {}",
             skill.link(),
@@ -531,11 +522,7 @@ mod tests {
 
     #[test]
     fn legacy_backtick_labels_remain_recognizable() {
-        let skill = Invocation::Skill {
-            name: "review`ui".into(),
-            path: "/repo/SKILL.md".into(),
-            command: None,
-        };
+        let skill = skill("review`ui", "/repo/SKILL.md");
         let legacy = skill.link().replace("\\`", "`");
         assert_eq!(invocation_links(&legacy)[0].1, skill);
         let file = crate::file_mentions::local_file_link("src/a`b.rs", false);
@@ -548,11 +535,7 @@ mod tests {
 
     #[test]
     fn canonical_labels_cannot_open_markdown_code_spans_across_chips() {
-        let skill = Invocation::Skill {
-            name: "review`ui".into(),
-            path: "/repo/SKILL.md".into(),
-            command: None,
-        };
+        let skill = skill("review`ui", "/repo/SKILL.md");
         let file = crate::file_mentions::local_file_link("src/a`b.rs", false);
         let raw = format!("{} then {file} then {}", skill.link(), skill.link());
         assert_eq!(invocation_links(&raw).len(), 2);
@@ -578,11 +561,7 @@ mod tests {
                 continue; // A separator is not part of a local basename.
             }
             let punctuation = punctuation as char;
-            let skill = Invocation::Skill {
-                name: format!("review{punctuation}ui"),
-                path: "/repo/SKILL.md".into(),
-                command: None,
-            };
+            let skill = skill(&format!("review{punctuation}ui"), "/repo/SKILL.md");
             let path = format!("src/a{punctuation}b.rs");
             let file = crate::file_mentions::local_file_link(&path, false);
             let raw = format!("{} then {file} then {}", skill.link(), skill.link());
@@ -598,11 +577,7 @@ mod tests {
         let command = Invocation::Command {
             name: "compact".into(),
         };
-        let skill = Invocation::Skill {
-            command: None,
-            name: "review".into(),
-            path: "/repo/a b/SKILL.md".into(),
-        };
+        let skill = skill("review", "/repo/a b/SKILL.md");
         let raw = format!("first {} then {} finally", command.link(), skill.link());
         assert_eq!(invocation_links(&raw).len(), 2);
         assert_eq!(

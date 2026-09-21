@@ -1323,40 +1323,59 @@ async fn real_image_generation_smoke() {
 
 #[tokio::test]
 async fn native_commands_use_rpc_operations_and_render_results() {
-    for (prompt, expected) in [
-        ("/compact", "Context compacted."),
-        ("/review", "Review fixture result"),
-        ("/review check error handling", "Review fixture result"),
+    let selected_review = zeron_proto::invocation::Invocation::Command {
+        name: "review".into(),
+    }
+    .link();
+    for (prompt, resume, expected) in [
+        ("/compact", true, "Context compacted."),
+        ("/review", true, "Review fixture result"),
+        (
+            "/review check error handling",
+            true,
+            "Review fixture result",
+        ),
+        (
+            format!("  {selected_review} inspect errors").as_str(),
+            false,
+            "Review fixture result",
+        ),
     ] {
-        let (controls, steer, _token) = controls("Yes");
+        let (controls, steer, _) = controls("Yes");
         drop(steer);
         let mut req = request(prompt);
-        req.resume = Some("existing-thread".into());
-        let mut stream = harness().run(req, controls).await.unwrap();
+        req.resume = resume.then(|| "existing-thread".into());
+        let events = run_to_end(&harness(), req, controls).await;
         let mut text = String::new();
-        let mut complete = false;
-        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
-            .await
-            .unwrap()
-        {
-            match event.unwrap() {
+        let mut completions = 0;
+        for event in events {
+            match event {
                 AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
                 AgentEvent::Done { status, error, .. } => {
-                    assert_eq!(status, DoneStatus::Completed, "{error:?}");
-                    complete = true;
+                    assert_eq!(status, DoneStatus::Completed, "{prompt}: {error:?}");
+                    completions += 1;
                 }
                 _ => {}
             }
         }
-        assert!(complete);
-        assert_eq!(text, expected);
+        assert_eq!(completions, 1, "{prompt}");
+        assert_eq!(text, expected, "{prompt}");
     }
 }
 
 #[tokio::test]
 async fn compact_requires_existing_session_and_commands_reject_attachments() {
-    let (ctl, _, _) = controls("Yes");
-    assert!(harness().run(request("/compact"), ctl).await.is_err());
+    let selected_compact = zeron_proto::invocation::Invocation::Command {
+        name: "compact".into(),
+    }
+    .link();
+    for prompt in ["/compact", &selected_compact] {
+        let (ctl, _, _) = controls("Yes");
+        assert!(
+            harness().run(request(prompt), ctl).await.is_err(),
+            "{prompt}"
+        );
+    }
     let (ctl, _, _) = controls("Yes");
     let mut req = request("/review");
     req.attachments.push("/tmp/image.png".into());
@@ -1446,34 +1465,6 @@ async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
             ..
         }
     )));
-}
-
-#[tokio::test]
-async fn selected_command_chip_uses_native_operation() {
-    let command = zeron_proto::invocation::Invocation::Command {
-        name: "review".into(),
-    };
-    let (controls, steer, _) = controls("Yes");
-    drop(steer);
-    let events = run_to_end(
-        &harness(),
-        request(&format!("  {} inspect errors", command.link())),
-        controls,
-    )
-    .await;
-    assert!(events.iter().any(
-        |event| matches!(event, AgentEvent::TextDelta { text } if text == "Review fixture result")
-    ));
-    let (controls, _, _) = self::controls("Yes");
-    let compact = zeron_proto::invocation::Invocation::Command {
-        name: "compact".into(),
-    };
-    assert!(
-        harness()
-            .run(request(&compact.link()), controls)
-            .await
-            .is_err()
-    );
 }
 
 #[tokio::test]
