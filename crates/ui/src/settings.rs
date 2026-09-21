@@ -861,6 +861,7 @@ pub enum ShortcutId {
     BrowserReload,
     ToggleSidebar,
     ToggleChanges,
+    ToggleFiles,
     ToggleTerminal,
     NewSession,
     NewProject,
@@ -872,12 +873,13 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 12 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
+        ShortcutId::ToggleFiles,
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
         ShortcutId::NewProject,
@@ -908,6 +910,7 @@ impl ShortcutId {
             ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
             ShortcutId::ToggleChanges => "Toggle right sidebar",
+            ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
@@ -934,6 +937,7 @@ impl ShortcutId {
             ShortcutId::BrowserReload => "mod-shift-r",
             ShortcutId::ToggleSidebar => "mod-b",
             ShortcutId::ToggleChanges => "mod-r",
+            ShortcutId::ToggleFiles => "mod-e",
             ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
@@ -980,6 +984,7 @@ pub struct KeymapConfig {
     pub browser_reload: String,
     pub toggle_sidebar: String,
     pub toggle_changes: String,
+    pub toggle_files: String,
     pub toggle_terminal: String,
     pub new_session: String,
     pub new_project: String,
@@ -1043,6 +1048,7 @@ impl Default for KeymapConfig {
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
+            toggle_files: ShortcutId::ToggleFiles.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
@@ -1063,6 +1069,7 @@ impl KeymapConfig {
             ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
             ShortcutId::ToggleChanges => &self.toggle_changes,
+            ShortcutId::ToggleFiles => &self.toggle_files,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
@@ -1085,6 +1092,7 @@ impl KeymapConfig {
             ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
+            ShortcutId::ToggleFiles => self.toggle_files = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
@@ -1450,6 +1458,27 @@ impl UiSettings {
                                 .unwrap_or("");
                             resolved.set(id, combo.into());
                             keymap.insert(field.into(), serde_json::json!(combo));
+                        }
+                    }
+                    // A shortcut added after the file was written takes its
+                    // default only when that combo is free: a user who had
+                    // already bound the same chord elsewhere keeps their
+                    // binding and the new row arrives unbound.
+                    if let Some(keymap) = value
+                        .get_mut("keymap")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
+                            let default = platform_combo(id.default_combo());
+                            let taken = !keymap.contains_key(field)
+                                && keymap.values().any(|existing| {
+                                    existing
+                                        .as_str()
+                                        .is_some_and(|combo| platform_combo(combo) == default)
+                                });
+                            if taken {
+                                keymap.insert(field.into(), serde_json::json!(""));
+                            }
                         }
                     }
                     serde_json::from_value::<UiSettings>(value)
@@ -3057,6 +3086,32 @@ mod tests {
         assert_eq!(combo_modifiers("mod-alt-shift-k"), (true, true, true));
         assert_eq!(combo_modifiers("f5"), (false, false, false));
         assert_eq!(combo_modifiers("shift-tab"), (false, false, true));
+    }
+
+    #[test]
+    fn a_new_shortcut_default_yields_to_an_existing_custom_binding() {
+        // Upgrade path: a file that predates the files-panel shortcut and had
+        // already put its default chord on another action keeps that binding
+        // and the new row arrives unbound rather than double-bound.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"saveFile": "mod-s", "toggleTerminal": "mod-e"}}"#,
+        )
+        .unwrap();
+        let keymap = UiSettings::load(dir.path()).keymap;
+        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-e");
+        assert_eq!(keymap.get(ShortcutId::ToggleFiles), "");
+        assert!(conflicted_shortcuts(&keymap).is_empty());
+
+        // With the chord free, the new row takes its default.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"keymap": {"saveFile": "mod-s", "toggleTerminal": "mod-j"}}"#,
+        )
+        .unwrap();
+        let keymap = UiSettings::load(dir.path()).keymap;
+        assert_eq!(keymap.get(ShortcutId::ToggleFiles), "mod-e");
     }
 
     #[test]

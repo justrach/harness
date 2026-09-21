@@ -44,8 +44,11 @@ struct PanelTitlebarWidths {
     files_controls: f32,
 }
 
-/// The two fixed right-edge anchors: the explorer toggle and the pane toggle.
-const PANEL_TOGGLE_SLOTS: f32 = 56.0;
+/// The two fixed right-edge anchors: the explorer toggle and the pane toggle
+/// (28px each) with the same 4px gap the surface strip keeps between its
+/// controls, so the two never render as one fused block.
+const PANEL_TOGGLE_GAP: f32 = 4.0;
+const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
 
 fn panel_titlebar_widths(
     surfaces_visible: f32,
@@ -344,13 +347,13 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_end()
+                            .gap(px(PANEL_TOGGLE_GAP))
                             // The shared header carries the same hairline as
                             // the columns below it, so the pane reads as one
                             // surface split at the explorer. Only drawn while
                             // the slot's left edge sits exactly on that seam.
                             .when(
-                                right_pane_open
-                                    && files_width >= right_pad + PANEL_TOGGLE_SLOTS,
+                                right_pane_open && files_width >= right_pad + PANEL_TOGGLE_SLOTS,
                                 |slot| slot.border_l_1().border_color(theme.border),
                             )
                             .child(
@@ -376,9 +379,7 @@ impl Shell {
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
                                 &theme,
-                                cx.listener(|this, _, _, cx| {
-                                    this.toggle_right_pane(cx)
-                                }),
+                                cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
                     )
                     .into_any_element(),
