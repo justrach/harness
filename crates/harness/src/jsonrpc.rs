@@ -214,7 +214,9 @@ async fn read_loop(
     // unusable, pending requests must fail, and the session loop must know.
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
-        if let Some(url) = line.strip_prefix("Open the following link to authenticate the ACP server: ") {
+        if let Some(url) =
+            line.strip_prefix("Open the following link to authenticate the ACP server: ")
+        {
             if let Some(observer) = &observer {
                 observer(url);
             }
@@ -296,7 +298,10 @@ mod tests {
         };
         client.notify("session/cancel", Some(json!({"sessionId": "parent"})));
         let frame: Value = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
-        assert_eq!(frame, json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "parent"}}));
+        assert_eq!(
+            frame,
+            json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "parent"}})
+        );
         assert!(frame.get("id").is_none());
         assert!(client.pending.lock().unwrap().is_empty());
     }
