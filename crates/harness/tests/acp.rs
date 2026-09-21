@@ -1595,3 +1595,37 @@ async fn noise_and_large_crlf_frame_preserve_the_complete_turn() {
     assert_eq!(text, "x".repeat(2 * 1024 * 1024));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
+
+#[tokio::test]
+async fn queued_updates_are_drained_before_completion_under_backpressure() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("burst");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let mut stream = robust_harness().run(req, ctl).await.unwrap();
+    // Fill both bounded queues before allowing the consumer to progress.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut text = String::new();
+    let mut completed = false;
+    let mut done = 0;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { text: chunk } => {
+                    assert!(!completed);
+                    text.push_str(&chunk);
+                }
+                AgentEvent::AssistantMessageCompleted { .. } => completed = true,
+                AgentEvent::Done { status, .. } => {
+                    assert_eq!(status, DoneStatus::Completed);
+                    assert_eq!(text, (0..300).map(|i| format!("{i},")).collect::<String>());
+                    done += 1;
+                }
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    assert!(completed);
+    assert_eq!(done, 1);
+}

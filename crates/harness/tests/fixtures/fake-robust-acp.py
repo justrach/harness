@@ -29,4 +29,7 @@ for line in sys.stdin:
             for noise in [None, 42, [], "plain", {"unrelated": True}]:
                 emit(noise)
             update("x" * (2 * 1024 * 1024))
+        elif prompt == "burst":
+            for index in range(300):
+                update(f"{index},")
         emit({"id": ident, "result": {"stopReason": "end_turn"}})
