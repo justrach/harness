@@ -11,6 +11,9 @@
 //! classification) lives in free functions with unit tests; the elements only
 //! feed them measurements/events.
 
+mod hover_intent;
+pub use hover_intent::{HoverAction, HoverIntent};
+
 use gpui::{
     Anchor, AnyElement, Context, Div, ElementId, IntoElement, MouseButton, MouseDownEvent,
     MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px,

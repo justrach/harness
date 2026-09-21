@@ -31,31 +31,6 @@ use zeron_rpc::methods;
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
 
-/// A triangle from the last point in the active trigger to the near edge
-/// of its submenu. Mirroring the edge handles menus placed on either side.
-fn submenu_corridor(
-    origin: gpui::Point<gpui::Pixels>,
-    pointer: gpui::Point<gpui::Pixels>,
-    submenu: gpui::Bounds<gpui::Pixels>,
-    on_left: bool,
-) -> bool {
-    let edge = if on_left {
-        submenu.right()
-    } else {
-        submenu.left()
-    };
-    let direction = if on_left { -1.0 } else { 1.0 };
-    let distance = f32::from(edge - origin.x) * direction;
-    let advance = f32::from(pointer.x - origin.x) * direction;
-    if distance <= 0.0 || advance <= 0.0 || advance > distance + 8.0 {
-        return false;
-    }
-    let fraction = (advance / distance).min(1.0);
-    let top = origin.y + (submenu.top() - px(8.0) - origin.y) * fraction;
-    let bottom = origin.y + (submenu.bottom() + px(8.0) - origin.y) * fraction;
-    pointer.y >= top && pointer.y <= bottom
-}
-
 const FOOTER_CHIP_RADIUS: f32 = 6.0;
 
 /// Both sides of the composer handoff share one leading-aligned workspace
@@ -534,10 +509,7 @@ pub struct Pickers {
     setting_menu: Option<ModelSetting>,
     setting_active: usize,
     setting_on_left: bool,
-    setting_intent_origin: Option<gpui::Point<gpui::Pixels>>,
-    setting_hover_pending: Option<ModelSetting>,
-    setting_hover_pointer: Option<gpui::Point<gpui::Pixels>>,
-    setting_hover_task: Option<Task<()>>,
+    setting_hover: popover::HoverIntent<ModelSetting>,
     model_space_below: Option<f32>,
     setting_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     setting_scroll: gpui::ScrollHandle,
@@ -723,10 +695,7 @@ impl Pickers {
             setting_menu: None,
             setting_active: 0,
             setting_on_left: false,
-            setting_intent_origin: None,
-            setting_hover_pending: None,
-            setting_hover_pointer: None,
-            setting_hover_task: None,
+            setting_hover: popover::HoverIntent::default(),
             model_space_below: None,
             setting_bounds: None,
             setting_scroll: gpui::ScrollHandle::new(),
@@ -3838,9 +3807,7 @@ impl Pickers {
     }
 
     fn cancel_setting_hover(&mut self) {
-        self.setting_hover_task = None;
-        self.setting_hover_pending = None;
-        self.setting_hover_pointer = None;
+        self.setting_hover.cancel();
     }
 
     fn hover_setting(
@@ -3850,50 +3817,50 @@ impl Pickers {
         pointer: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_setting_hover();
-        if self.setting_menu.as_ref() == Some(&id) {
-            self.setting_intent_origin = Some(pointer);
-            return;
-        }
-        let toward_child = self.setting_menu.is_some()
-            && self
-                .setting_intent_origin
-                .zip(self.setting_bounds)
-                .is_some_and(|(origin, bounds)| {
-                    submenu_corridor(origin, pointer, bounds, self.setting_on_left)
-                });
-        if toward_child {
-            // A brief pause distinguishes crossing a sibling en route to the
-            // submenu from deliberately resting on that sibling. Leaving it
-            // or clicking cancels this task, so dismissed menus cannot reopen.
-            let source = self.setting_menu.clone();
-            self.setting_hover_pending = Some(id.clone());
-            self.setting_hover_pointer = Some(pointer);
-            self.setting_hover_task = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
+        let action = self.setting_hover.enter(
+            self.setting_menu.as_ref(),
+            &id,
+            pointer,
+            self.setting_bounds,
+            self.setting_on_left,
+        );
+        self.apply_setting_hover(action, id, index, pointer, cx);
+    }
+
+    fn apply_setting_hover(
+        &mut self,
+        action: popover::HoverAction,
+        id: ModelSetting,
+        index: usize,
+        pointer: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            popover::HoverAction::None => {}
+            popover::HoverAction::Open => {
+                self.active = index;
+                self.open_setting(id, cx);
+                self.setting_hover.record_origin(pointer);
+            }
+            popover::HoverAction::Defer => {
+                let source = self.setting_menu.clone();
+                self.setting_hover.defer(cx, move |this, cx| {
                     if this.is_open()
                         && this.setting_menu == source
-                        && this.setting_hover_pending.as_ref() == Some(&id)
+                        && this.setting_hover.pending() == Some(&id)
                     {
                         this.active = index;
                         this.open_setting(id, cx);
-                        this.setting_intent_origin = Some(pointer);
+                        this.setting_hover.record_origin(pointer);
                     }
                 });
-            }));
-        } else {
-            self.active = index;
-            self.open_setting(id, cx);
-            self.setting_intent_origin = Some(pointer);
+            }
         }
     }
 
     fn open_setting(&mut self, id: ModelSetting, cx: &mut Context<Self>) {
         self.cancel_setting_hover();
-        self.setting_intent_origin = None;
+        self.setting_hover.reset();
         self.setting_active = self
             .setting_groups(cx)
             .iter()
@@ -4010,26 +3977,18 @@ impl Pickers {
                                 if this.setting_menu.as_ref() != Some(&exit_id) {
                                     return;
                                 }
-                                let pointer = event.position;
-                                if trigger.contains(&pointer) {
-                                    this.setting_intent_origin = Some(pointer);
-                                    return;
-                                }
-                                let Some(bounds) = this.setting_bounds else {
-                                    return;
-                                };
-                                if bounds.contains(&pointer) {
-                                    return;
-                                }
-                                if this.setting_intent_origin.is_some_and(|origin| {
-                                    submenu_corridor(origin, pointer, bounds, this.setting_on_left)
-                                }) {
+                                if this.setting_hover.contains_pointer(
+                                    trigger,
+                                    this.setting_bounds,
+                                    event.position,
+                                    this.setting_on_left,
+                                ) {
                                     return;
                                 }
                                 this.cancel_setting_hover();
                                 this.setting_menu = None;
                                 this.setting_bounds = None;
-                                this.setting_intent_origin = None;
+                                this.setting_hover.reset();
                                 // Do not leave a keyboard-style selection on the
                                 // trigger after pointer navigation dismisses it.
                                 this.active = 0;
@@ -4138,45 +4097,26 @@ impl Pickers {
                                 window.mouse_position(),
                                 cx,
                             );
-                        } else if this.setting_hover_pending.as_ref() == Some(&id) {
-                            this.cancel_setting_hover();
+                        } else {
+                            this.setting_hover.leave(&id);
                         }
                     }))
                     .on_mouse_move(
                         cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                            if this.setting_menu.as_ref() == Some(&move_id) {
-                                this.setting_intent_origin = Some(event.position);
-                            } else if this.setting_hover_pending.as_ref() == Some(&move_id) {
-                                let in_corridor = this
-                                    .setting_intent_origin
-                                    .zip(this.setting_bounds)
-                                    .is_some_and(|(origin, bounds)| {
-                                        submenu_corridor(
-                                            origin,
-                                            event.position,
-                                            bounds,
-                                            this.setting_on_left,
-                                        )
-                                    });
-                                let forward = this.setting_hover_pointer.map_or(0.0, |previous| {
-                                    f32::from(event.position.x - previous.x)
-                                        * if this.setting_on_left { -1.0 } else { 1.0 }
-                                });
-                                if !in_corridor || forward <= -2.0 {
-                                    this.active = base_index + ix;
-                                    this.open_setting(move_id.clone(), cx);
-                                    this.setting_intent_origin = Some(event.position);
-                                } else if forward >= 2.0 {
-                                    // Slow but continuing progress renews grace;
-                                    // only a pause should activate the sibling.
-                                    this.hover_setting(
-                                        move_id.clone(),
-                                        base_index + ix,
-                                        event.position,
-                                        cx,
-                                    );
-                                }
-                            }
+                            let action = this.setting_hover.moved(
+                                this.setting_menu.as_ref(),
+                                &move_id,
+                                event.position,
+                                this.setting_bounds,
+                                this.setting_on_left,
+                            );
+                            this.apply_setting_hover(
+                                action,
+                                move_id.clone(),
+                                base_index + ix,
+                                event.position,
+                                cx,
+                            );
                         }),
                     )
                     .child(row),
@@ -5395,7 +5335,7 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 hover(window, cx, diagonal);
                 assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
-                assert!(pickers.read(cx).setting_hover_pending.is_some());
+                assert!(pickers.read(cx).setting_hover.pending().is_some());
             })
             .unwrap();
             cx.run_until_parked();
@@ -5426,7 +5366,7 @@ mod tests {
             cx.run_until_parked();
             pickers.read_with(cx, |pickers, _| {
                 assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                assert!(pickers.setting_hover_pending.is_none());
+                assert!(pickers.setting_hover.pending().is_none());
             });
             // Resting on the sibling expresses intent to switch after grace.
             cx.update_window(handle.into(), |_, window, cx| {
@@ -5464,7 +5404,7 @@ mod tests {
             cx.run_until_parked();
             pickers.read_with(cx, |pickers, _| {
                 assert!(pickers.setting_menu.is_none());
-                assert!(pickers.setting_hover_pending.is_none());
+                assert!(pickers.setting_hover.pending().is_none());
                 assert!(pickers.is_open());
             });
             cx.update_window(handle.into(), |_, window, cx| hover(window, cx, trigger))

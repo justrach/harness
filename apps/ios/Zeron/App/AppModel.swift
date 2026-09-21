@@ -386,7 +386,7 @@ final class AppModel {
         }
         if let live = await workspace?.listModels(deviceId: deviceId, harness: harness),
            !live.isEmpty {
-            return live
+            return HarnessCatalog.normalize(harness: harness, models: live)
         }
         return HarnessCatalog.models(for: harness)
     }

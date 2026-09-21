@@ -59,6 +59,7 @@ icon_assets![
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
+    (MORE_HORIZONTAL, "more-horizontal"),
     (SORT_VERTICAL, "sort-vertical"),
     // Compact six-dot grip used to reorder queued prompts.
     (DRAG_HANDLE, "drag-handle"),
@@ -75,6 +76,8 @@ icon_assets![
     (CALENDAR, "calendar"),
     (LIST, "list"),
     (FOLDER_WITH_FILES, "folder-with-files"),
+    // Original tree glyph with compact nodes for the independent Files panel.
+    (FILE_TREE, "file-tree"),
     (FOLDER, "folder"),
     // Hand-drawn floppy disk in the Solar Linear style. Workspace editor save.
     (FLOPPY_DISK, "floppy-disk"),
