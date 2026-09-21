@@ -1708,11 +1708,7 @@ pub fn rows_for_entry(
     rows
 }
 
-fn is_compact_work_part(
-    ix: usize,
-    part: &MessagePart,
-    reply_start: Option<usize>,
-) -> bool {
+fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize>) -> bool {
     match part {
         MessagePart::Tool { .. } => true,
         MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
@@ -2663,6 +2659,59 @@ fn tool_disclosure_progress(open: bool, fold: FoldState, now: Instant) -> f32 {
     if open { progress } else { 1.0 - progress }
 }
 
+/// The compact work fold's animated body budget: `fold.from` lerps toward
+/// the rows' measured total while open (zero when closed) under the shared
+/// [`TOOL_FOLD`] spec. Each sibling body row clips to `budget - prefix`, so
+/// the group opens/closes exactly like an ordinary tool fold's single
+/// overflow-hidden container — including reversals, which seed `from` with
+/// the budget in flight.
+fn compact_body_height(fold: FoldState, total: f32, reduce_motion: bool, now: Instant) -> f32 {
+    let target = if fold.open.unwrap_or(false) {
+        total
+    } else {
+        0.0
+    };
+    let Some(at) = fold.toggled_at.filter(|_| !reduce_motion) else {
+        return target;
+    };
+    let t = TOOL_FOLD
+        .curve
+        .eval(now.saturating_duration_since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
+    motion::lerp(fold.from, target, t)
+}
+
+/// Clip geometry for one compact-fold body row: `(prefix, own, total)`
+/// natural heights over the contiguous `work_id` run containing `ix`.
+/// Unmeasured rows report 0 until their prepaint probe lands — they stay
+/// clipped for that one pass instead of flashing open at full height.
+fn compact_fold_geometry(
+    rows: &[Row],
+    heights: &HashMap<SharedString, Rc<Cell<f32>>>,
+    work_id: &SharedString,
+    ix: usize,
+) -> (f32, f32, f32) {
+    let mut start = ix;
+    while start > 0 && rows[start - 1].compact_fold.as_ref() == Some(work_id) {
+        start -= 1;
+    }
+    let mut prefix = 0.0;
+    let mut own = 0.0;
+    let mut total = 0.0;
+    for (j, row) in rows.iter().enumerate().skip(start) {
+        if row.compact_fold.as_ref() != Some(work_id) {
+            break;
+        }
+        let height = heights.get(&row.id).map_or(0.0, |cell| cell.get());
+        if j < ix {
+            prefix += height;
+        } else if j == ix {
+            own = height;
+        }
+        total += height;
+    }
+    (prefix, own, total)
+}
+
 /// BoardUI's measured recipe: a 300%-wide repeating gradient moves from 200%
 /// to -100%. Its 38→50→62% highlight maps to a 36%-of-title shoulder around
 /// each peak; adjacent copies sit three title-widths apart. Sampling this by
@@ -3088,6 +3137,13 @@ pub struct Transcript {
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
+    /// Natural heights of compact-fold body rows, written by each row's
+    /// prepaint probe without notifying. The work fold's TOOL_FOLD tween
+    /// clips the sibling rows against one shared budget without knowing
+    /// their layout up front.
+    compact_fold_heights: HashMap<SharedString, Rc<Cell<f32>>>,
+    /// Post-tween sweep that drops a closed work fold's retained body rows.
+    compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
     show_jump_button: bool,
     /// Distance from the bottom at the last observation (wheel event or spring
@@ -3335,6 +3391,8 @@ impl Transcript {
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
             compact_worked_fade_at: HashMap::new(),
+            compact_fold_heights: HashMap::new(),
+            compact_fold_settle: None,
             highlights: HighlightStore::default(),
             show_jump_button: false,
             last_scroll_distance: 0.0,
@@ -4438,6 +4496,8 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.compact_fold_heights.clear();
+            self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
             self.user_hold_task = None;
             self.user_collapse_scroll = None;
@@ -4952,10 +5012,14 @@ impl Transcript {
         }
         rows.retain(|row| match &row.compact_fold {
             None => true,
-            Some(id) => self
-                .folds
-                .get(id)
-                .is_some_and(|fold| fold.open == Some(true)),
+            // A closing fold keeps its body mounted through the TOOL_FOLD
+            // tween; the shell's settle sweep drops the rows afterwards.
+            Some(id) => self.folds.get(id).is_some_and(|fold| {
+                fold.open == Some(true)
+                    || fold
+                        .toggled_at
+                        .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW)
+            }),
         });
         rows
     }
@@ -5166,7 +5230,7 @@ impl Transcript {
         auto_open: bool,
         cx: &mut Context<Self>,
     ) {
-        let is_shell = self.rows.iter().any(|row| {
+        let shell_ix = self.rows.iter().position(|row| {
             row.id == row_id
                 && matches!(
                     row.kind,
@@ -5176,19 +5240,73 @@ impl Transcript {
                     }
                 )
         });
-        {
-            let entry = self.folds.entry(row_id).or_default();
+        // A compact shell tweens its sibling body rows, so the tween opens
+        // from the body's CURRENT rendered height — including mid-tween
+        // reversals — not the header's analytic chip height.
+        let body_height = shell_ix.map(|ix| {
+            let total = self.compact_fold_total(&row_id, ix);
+            let fold = self.folds.get(&row_id).copied().unwrap_or_default();
+            compact_body_height(fold, total, motion::reduced_motion(cx), Instant::now())
+        });
+        let now_open = {
+            let entry = self.folds.entry(row_id.clone()).or_default();
             let currently_open = entry.open.unwrap_or(auto_open);
-            entry.from = if currently_open { open_height } else { 0.0 };
+            entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
             entry.open = Some(!currently_open);
             entry.epoch += 1;
             entry.toggled_at = Some(Instant::now());
             entry.disclosure_at = entry.toggled_at;
+            !currently_open
+        };
+        if shell_ix.is_none() {
+            return;
         }
-        if is_shell {
+        let reduce = motion::reduced_motion(cx);
+        if now_open || reduce {
+            if reduce && !now_open {
+                // Instant transition — no tween, so nothing retains the body.
+                if let Some(entry) = self.folds.get_mut(&row_id) {
+                    entry.toggled_at = None;
+                }
+            }
+            // Mount the folded rows so the tween has content to reveal —
+            // or, under reduced motion, drop them immediately on close.
             self.last_source = None;
             self.sync(cx);
+        } else {
+            // The body stays mounted through the close tween; sweep it out
+            // of the row list once the retention window elapses.
+            self.compact_fold_settle = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.last_source = None;
+                    this.sync(cx);
+                    cx.notify();
+                })
+                .ok();
+            }));
         }
+    }
+
+    /// A folded body row's natural height as measured by its prepaint probe;
+    /// zero until the row's first paint lands the measurement.
+    fn compact_fold_height(&self, row_id: &SharedString) -> f32 {
+        self.compact_fold_heights
+            .get(row_id)
+            .map_or(0.0, |cell| cell.get())
+    }
+
+    /// Total natural height of the contiguous body rows following a compact
+    /// shell header (`shell_ix` is the header's row index).
+    fn compact_fold_total(&self, work_id: &SharedString, shell_ix: usize) -> f32 {
+        self.rows
+            .iter()
+            .skip(shell_ix + 1)
+            .take_while(|row| row.compact_fold.as_ref() == Some(work_id))
+            .map(|row| self.compact_fold_height(&row.id))
+            .sum()
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -6477,7 +6595,7 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
-        div()
+        let outer = div()
             .id(row.id.clone())
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
@@ -6519,6 +6637,77 @@ impl Transcript {
                     .child(inner)
                     .children(strip)
                     .children(trailer),
+            );
+        let Some(work_id) = row.compact_fold.clone() else {
+            return outer.into_any_element();
+        };
+
+        // Compact work-fold body row: the shell header tweens ONE shared
+        // height budget across these sibling rows — each row clips to
+        // `budget - prefix`, reproducing an ordinary fold's single
+        // overflow-hidden container. A prepaint probe keeps the row's
+        // natural height current so the tween never needs its layout ahead
+        // of time.
+        let probe = self
+            .compact_fold_heights
+            .entry(row.id.clone())
+            .or_insert_with(|| Rc::new(Cell::new(0.0)))
+            .clone();
+        let body = div().relative().flex_none().w_full().child(outer).child(
+            canvas(
+                move |bounds, _, _| {
+                    let height = f32::from(bounds.size.height);
+                    if (probe.get() - height).abs() > 0.5 {
+                        probe.set(height);
+                    }
+                },
+                |_, _, _, _| (),
+            )
+            .absolute()
+            .inset_0(),
+        );
+        let fold = self.folds.get(&work_id).copied().unwrap_or_default();
+        let open = fold.open.unwrap_or(false);
+        let reduce_motion = motion::reduced_motion(cx);
+        let now = Instant::now();
+        let animating = !reduce_motion
+            && fold
+                .toggled_at
+                .is_some_and(|at| at.elapsed() < TOOL_FOLD.total());
+        if !animating {
+            // Settled states render plain — open rows untouched, closed rows
+            // empty until the settle sweep drops them from the row list.
+            return if open {
+                body.into_any_element()
+            } else {
+                gpui::Empty.into_any_element()
+            };
+        }
+        let (prefix, own, total) =
+            compact_fold_geometry(&self.rows, &self.compact_fold_heights, &work_id, ix);
+        let clip = (compact_body_height(fold, total, reduce_motion, now) - prefix).clamp(0.0, own);
+        if own > 0.0 && clip >= own {
+            return body.into_any_element();
+        }
+        if own > 0.0 && clip <= 0.0 {
+            return gpui::Empty.into_any_element();
+        }
+        let view = cx.entity_id();
+        div()
+            .relative()
+            .w_full()
+            .overflow_hidden()
+            .h(px(clip))
+            .child(body)
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_next_frame(move |_, cx| cx.notify(view));
+                    },
+                )
+                .absolute()
+                .inset_0(),
             )
             .into_any_element()
     }
@@ -6707,7 +6896,11 @@ impl Transcript {
         // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
         let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
         let open = !collapses || fold.open.unwrap_or(effective_auto_open);
-        if collapses {
+        // Compact shells only change `open` through `toggle_fold`, which
+        // already seeds `from` with the body's measured height — the
+        // rendered-height reset below must not clobber it with the shell's
+        // own (unused) body tracking.
+        if collapses && !compact_shell {
             let reveal = self.tool_group_reveals.entry(row_id.clone()).or_default();
             if reveal
                 .rendered_open
@@ -7059,6 +7252,15 @@ impl Transcript {
 
         if compact_shell {
             let view = cx.entity_id();
+            // The sibling body rows tween under TOOL_FOLD — keep frames (and
+            // the chevron's disclosure rotation) pumping until it lands.
+            if !reduce_motion
+                && fold
+                    .toggled_at
+                    .is_some_and(|at| at.elapsed() < TOOL_FOLD.total())
+            {
+                motion_active = true;
+            }
             return div()
                 .relative()
                 .flex()
@@ -10592,7 +10794,10 @@ mod tests {
         assert_eq!(tools[2].kind, ToolItemKind::Note);
         assert!(rows.iter().any(|row| {
             row.compact_fold.is_some()
-                && matches!(row.kind, RowKind::LiveMarkdown { .. } | RowKind::Markdown { .. })
+                && matches!(
+                    row.kind,
+                    RowKind::LiveMarkdown { .. } | RowKind::Markdown { .. }
+                )
         }));
 
         // On settle the same parts surface the reply as its own row.
@@ -10632,6 +10837,176 @@ mod tests {
             unreachable!();
         };
         assert_eq!(tools.len(), 2, "the error didn't split the work group");
+    }
+
+    #[test]
+    fn compact_fold_geometry_reports_prefix_own_and_total() {
+        // tool + narration + tool → three folded body rows (group, markdown,
+        // group) between the shell header and the reply.
+        let entry = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                tool_part("t1", "ls"),
+                text_part("n1", "checking the layout"),
+                tool_part("t2", "pwd"),
+                text_part("r0", "the answer"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let work_id: SharedString = "a1#work".into();
+        let folded_ixs: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.compact_fold.is_some())
+            .map(|(ix, _)| ix)
+            .collect();
+        assert_eq!(folded_ixs.len(), 3, "fixture produces three body rows");
+        let mut heights = HashMap::new();
+        for (ix, row_ix) in folded_ixs.iter().enumerate() {
+            heights.insert(
+                rows[*row_ix].id.clone(),
+                Rc::new(Cell::new(100.0 * (ix + 1) as f32)),
+            );
+        }
+        let (prefix, own, total) = compact_fold_geometry(&rows, &heights, &work_id, folded_ixs[1]);
+        assert_eq!(prefix, 100.0);
+        assert_eq!(own, 200.0);
+        assert_eq!(total, 600.0);
+        // A row tagged to a DIFFERENT fold is not part of the run.
+        let mut rows = rows.clone();
+        rows.push(Row {
+            compact_fold: Some("other#work".into()),
+            ..rows[folded_ixs[2]].clone()
+        });
+        let (_, _, total) = compact_fold_geometry(&rows, &heights, &work_id, folded_ixs[1]);
+        assert_eq!(total, 600.0);
+    }
+
+    #[test]
+    fn compact_body_height_tweens_from_seeded_height_to_target() {
+        let now = Instant::now();
+        let opening = FoldState {
+            open: Some(true),
+            from: 0.0,
+            toggled_at: Some(now),
+            ..Default::default()
+        };
+        assert_eq!(compact_body_height(opening, 300.0, false, now), 0.0);
+        let mid = compact_body_height(opening, 300.0, false, now + TOOL_FOLD.total() / 2);
+        assert!(mid > 150.0, "ease-out runs ahead of linear: {mid}");
+        assert!(mid < 300.0);
+        let landed = now + TOOL_FOLD.total() + Duration::from_millis(1);
+        assert_eq!(compact_body_height(opening, 300.0, false, landed), 300.0);
+        assert_eq!(
+            compact_body_height(opening, 300.0, true, now),
+            300.0,
+            "reduced motion jumps straight to the target"
+        );
+        // A reversal seeds `from` with the budget in flight; the tween then
+        // walks it down rather than restarting at the full height.
+        let closing = FoldState {
+            open: Some(false),
+            from: 120.0,
+            toggled_at: Some(now),
+            ..Default::default()
+        };
+        let mid = compact_body_height(closing, 300.0, false, now + TOOL_FOLD.total() / 2);
+        assert!(mid > 0.0 && mid < 120.0, "mid-close: {mid}");
+        assert_eq!(compact_body_height(closing, 300.0, false, landed), 0.0);
+    }
+
+    #[gpui::test]
+    fn compact_fold_keeps_body_mounted_through_the_close_tween(cx: &mut gpui::TestAppContext) {
+        let mut handle = None;
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            state.update(cx, |state, _| {
+                state.transcript = vec![assistant(
+                    "a1",
+                    MessageStatus::Complete,
+                    vec![
+                        reasoning_part("r0", "thinking"),
+                        tool_part("t1", "ls"),
+                        text_part("r0", "the reply"),
+                    ],
+                )];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| {
+                this.compact_mode = true;
+                this.last_source = None;
+                this.sync(cx);
+            });
+            let work_id: SharedString = "a1#work".into();
+            let folded = |this: &Transcript| {
+                this.rows
+                    .iter()
+                    .filter(|row| row.compact_fold.is_some())
+                    .count()
+            };
+            transcript.update(cx, |this, _| {
+                assert_eq!(folded(this), 0, "collapsed fold mounts no body rows")
+            });
+            transcript.update(cx, |this, cx| {
+                this.toggle_fold(work_id.clone(), 0.0, false, cx);
+                assert_eq!(this.folds[&work_id].open, Some(true));
+                assert_eq!(this.folds[&work_id].from, 0.0);
+                assert!(folded(this) > 0, "opening mounts the body rows");
+                // A settled-open fold carries its measured total into the
+                // close tween's start.
+                for row in this.rows.iter().filter(|row| row.compact_fold.is_some()) {
+                    this.compact_fold_heights
+                        .insert(row.id.clone(), Rc::new(Cell::new(100.0)));
+                }
+                let total = 100.0 * folded(this) as f32;
+                this.folds.get_mut(&work_id).unwrap().toggled_at =
+                    Some(Instant::now() - FOLD_TWEEN_WINDOW);
+                this.toggle_fold(work_id.clone(), 0.0, false, cx);
+                assert_eq!(this.folds[&work_id].open, Some(false));
+                assert_eq!(
+                    this.folds[&work_id].from, total,
+                    "closing tweens from the body's measured height"
+                );
+                assert!(
+                    folded(this) > 0,
+                    "the body stays mounted through the close tween"
+                );
+                assert!(this.compact_fold_settle.is_some());
+                // Reopening mid-tween continues from the budget in flight.
+                this.folds.get_mut(&work_id).unwrap().toggled_at =
+                    Some(Instant::now() - TOOL_FOLD.total() / 2);
+                this.toggle_fold(work_id.clone(), 0.0, false, cx);
+                let from = this.folds[&work_id].from;
+                let expected = motion::lerp(total, 0.0, TOOL_FOLD.curve.eval(0.5));
+                assert!(
+                    (from - expected).abs() < 1.0,
+                    "reversal resumes from the in-flight budget: {from} ≈ {expected}"
+                );
+                assert_eq!(this.folds[&work_id].open, Some(true));
+            });
+            // Close again, expire the retention window, and let the settle
+            // sweep's sync drop the rows. The sweep's scheduled task needs the
+            // app borrow, so it has to run after this update returns.
+            transcript.update(cx, |this, cx| {
+                this.toggle_fold(work_id.clone(), 0.0, false, cx);
+                assert!(folded(this) > 0);
+                this.folds.get_mut(&work_id).unwrap().toggled_at =
+                    Some(Instant::now() - FOLD_TWEEN_WINDOW - Duration::from_millis(50));
+            });
+            handle = Some(transcript);
+        });
+        let transcript = handle.unwrap();
+        cx.executor()
+            .advance_clock(FOLD_TWEEN_WINDOW + Duration::from_millis(100));
+        cx.run_until_parked();
+        transcript.update(cx, |this, _| {
+            let folded = this
+                .rows
+                .iter()
+                .filter(|row| row.compact_fold.is_some())
+                .count();
+            assert_eq!(folded, 0, "the settle sweep drops closed rows")
+        });
     }
 
     fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
