@@ -1507,17 +1507,7 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
     }
 }
 
-/// A user-named sidebar section. Archived sessions retain membership so restoring
-/// them restores their section; deleting the section never deletes sessions.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SidebarSection {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub session_ids: Vec<String>,
-    #[serde(default)]
-    pub collapsed: bool,
-}
+pub use zeron_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {

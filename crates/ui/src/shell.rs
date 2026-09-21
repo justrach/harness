@@ -1550,6 +1550,7 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
+    sidebar_section_migration: Option<(String, crate::state::EngineHandle)>,
     section_dialog: Option<sidebar_sections::SectionDialog>,
     section_menu: Option<(String, Point<Pixels>)>,
     section_header_hover: Option<String>,
@@ -1945,6 +1946,7 @@ impl Shell {
             delete_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
+            sidebar_section_migration: None,
             section_dialog: None,
             section_menu: None,
             section_header_hover: None,
@@ -4152,6 +4154,7 @@ impl Shell {
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
         self.discard_stale_sidebar_pin_writes(cx);
+        self.migrate_sidebar_sections(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };

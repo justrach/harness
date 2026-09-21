@@ -283,6 +283,7 @@ mod pinned_session_tests {
 
     fn pin_snapshot(revision: u64, pins: &[&str]) -> zeron_proto::SidebarPreferencesState {
         zeron_proto::SidebarPreferencesState {
+            sections: vec![],
             revision,
             synced: true,
             initialized: true,
@@ -570,7 +571,7 @@ mod pinned_session_tests {
                         .sidebar_notice
                         .as_deref()
                         .unwrap()
-                        .contains("Couldn't save pins")
+                        .contains("Couldn't save sidebar changes")
                 );
             })
             .unwrap();
@@ -2640,23 +2641,39 @@ impl Shell {
                 session_id: payload.chat_id.clone(),
             }
         };
-        if saved != next && !self.apply_sidebar_pin_change(payload.profile_key.clone(), change, cx)
+        if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Local)
+            && !matches!(target, SidebarSessionDrop::Pinned(_))
         {
-            self.cancel_sidebar_session_transfer(cx);
-            return;
-        }
-        if !matches!(target, SidebarSessionDrop::Pinned(_))
-            || self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
-            || saved == next
-        {
-            self.assign_sidebar_section(
-                &payload.chat_id,
-                match &target {
-                    SidebarSessionDrop::Section(id) => Some(id.as_str()),
-                    _ => None,
+            if !self.change_sidebar_section(
+                zeron_proto::SidebarSectionChange::Assign {
+                    session_id: payload.chat_id.clone(),
+                    section_id: target_section.map(str::to_owned),
                 },
                 cx,
-            );
+            ) {
+                self.cancel_sidebar_session_transfer(cx);
+                return;
+            }
+        } else {
+            if saved != next
+                && !self.apply_sidebar_pin_change(payload.profile_key.clone(), change, cx)
+            {
+                self.cancel_sidebar_session_transfer(cx);
+                return;
+            }
+            if !matches!(target, SidebarSessionDrop::Pinned(_))
+                || self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
+                || saved == next
+            {
+                self.assign_sidebar_section(
+                    &payload.chat_id,
+                    match &target {
+                        SidebarSessionDrop::Section(id) => Some(id.as_str()),
+                        _ => None,
+                    },
+                    cx,
+                );
+            }
         }
         self.sidebar_session_transfer = None;
         self.cancel_pinned_session_drag(cx);

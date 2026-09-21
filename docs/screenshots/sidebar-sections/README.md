@@ -7,7 +7,9 @@ ZERON_SIDEBAR_COMPACT=1 cargo run -p zeron-ui --example sidebar-fixture --featur
 
 The sidebar's three-dot menu offers Create Section. Sections appear below Pinned
 and above Sessions/project/device groups. Empty sections say “Drop sessions here”.
-Section names, membership, and collapsed state persist per profile on this device.
+Section names, membership, and collapsed state now sync across devices within the
+same account. Local workspaces retain device-local settings. These screenshots
+show the unchanged section UI; registry tests cover sync and legacy migration.
 
 Captured interactions:
 

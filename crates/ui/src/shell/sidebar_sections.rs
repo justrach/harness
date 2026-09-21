@@ -1,6 +1,7 @@
-//! Device-local, profile-isolated custom sections. Session data stays in the engine.
+//! Account-synced sections; local workspaces keep their settings on this device.
 use super::*;
 use crate::settings::SidebarSection;
+use zeron_proto::{SidebarPinChange, SidebarSectionChange};
 
 pub(super) struct SectionDialog {
     profile: String,
@@ -12,28 +13,18 @@ pub(super) struct SectionDialog {
 
 impl Shell {
     pub(super) fn active_sidebar_sections(&self, cx: &App) -> Vec<SidebarSection> {
-        let mut sections = self
-            .active_sidebar_pin_profile_key(cx)
-            .and_then(|key| self.settings.sidebar_sections_by_profile.get(&key).cloned())
-            .unwrap_or_default();
-        // Mask membership during optimistic remote pins, but keep its durable
-        // value until acknowledgement. A rejected pin restores the section.
-        if self.optimistic_sidebar_pins(cx).is_some() {
+        let local = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
+        let mut sections = if local {
+            self.active_sidebar_pin_profile_key(cx)
+                .and_then(|key| self.settings.sidebar_sections_by_profile.get(&key).cloned())
+                .unwrap_or_default()
+        } else {
+            self.state.read(cx).sidebar_preferences.sections.clone()
+        };
+        if !local && self.optimistic_sidebar_pins(cx).is_some() {
             if let Some(pending) = &self.sidebar_pin_write {
-                let mut pinned = std::collections::HashSet::new();
                 for change in &pending.queue {
-                    match change {
-                        zeron_proto::SidebarPinChange::Pin { session_id, .. } => {
-                            pinned.insert(session_id);
-                        }
-                        zeron_proto::SidebarPinChange::Unpin { session_id } => {
-                            pinned.remove(session_id);
-                        }
-                        _ => {}
-                    }
-                }
-                for section in &mut sections {
-                    section.session_ids.retain(|id| !pinned.contains(id));
+                    change.project_sections(&mut sections);
                 }
             }
         }
@@ -46,25 +37,102 @@ impl Shell {
         target: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        self.change_sidebar_section(
+            SidebarSectionChange::Assign {
+                session_id: chat.to_owned(),
+                section_id: target.map(str::to_owned),
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn change_sidebar_section(
+        &mut self,
+        change: SidebarSectionChange,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(key) = self.active_sidebar_pin_profile_key(cx) else {
+            return false;
+        };
+        if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local) {
+            if let SidebarSectionChange::Assign {
+                session_id,
+                section_id,
+            } = &change
+            {
+                if section_id
+                    .as_ref()
+                    .is_some_and(|id| !self.active_sidebar_sections(cx).iter().any(|s| &s.id == id))
+                {
+                    return false;
+                }
+                if let Some(pins) = self
+                    .settings
+                    .sidebar_pinned_session_ids_by_profile
+                    .get_mut(&key)
+                {
+                    // Clearing membership after a local pin must preserve the pin.
+                    if section_id.is_some() {
+                        pins.retain(|id| id != session_id);
+                    }
+                }
+            }
+            change.project(
+                self.settings
+                    .sidebar_sections_by_profile
+                    .entry(key)
+                    .or_default(),
+            );
+            self.schedule_save(cx);
+            cx.notify();
+            true
+        } else {
+            if !self.state.read(cx).sidebar_preferences.can_edit() {
+                self.sidebar_notice = Some("Sidebar is still syncing. Try again shortly.".into());
+                cx.notify();
+                return false;
+            }
+            self.queue_sidebar_pin_write(key, SidebarPinChange::Section { change }, cx)
+        }
+    }
+
+    pub(super) fn migrate_sidebar_sections(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if state.workspace_scope == Some(WorkspaceScope::Local) || !state.sidebar_preferences.synced
+        {
+            return;
+        }
+        let Some(engine) = state.engine().cloned() else {
+            return;
+        };
         let Some(key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
-        let sections = self
-            .settings
-            .sidebar_sections_by_profile
-            .entry(key)
-            .or_default();
-        if target.is_some_and(|id| !sections.iter().any(|section| section.id == id)) {
+        if self
+            .sidebar_section_migration
+            .as_ref()
+            .is_some_and(|(profile, previous)| profile == &key && previous.same_connection(&engine))
+        {
             return;
         }
-        for section in sections {
-            section.session_ids.retain(|id| id != chat);
-            if target == Some(section.id.as_str()) {
-                section.session_ids.push(chat.to_string());
-                section.collapsed = false;
-            }
+        let Some(sections) = self
+            .settings
+            .sidebar_sections_by_profile
+            .get(&key)
+            .filter(|s| !s.is_empty())
+            .cloned()
+        else {
+            return;
+        };
+        if self.queue_sidebar_pin_write(
+            key.clone(),
+            SidebarPinChange::Section {
+                change: SidebarSectionChange::Import { sections },
+            },
+            cx,
+        ) {
+            self.sidebar_section_migration = Some((key, engine));
         }
-        self.schedule_save(cx);
     }
 
     pub(super) fn open_section_dialog(&mut self, id: Option<String>, cx: &mut Context<Self>) {
@@ -112,36 +180,23 @@ impl Shell {
             return;
         }
         let dialog = self.section_dialog.take().unwrap();
-        let sections = self
-            .settings
-            .sidebar_sections_by_profile
-            .entry(dialog.profile)
-            .or_default();
-        if let Some(id) = dialog.id {
-            if let Some(section) = sections.iter_mut().find(|section| section.id == id) {
-                section.name = name;
-            }
-        } else {
-            sections.push(SidebarSection {
+        let change = match dialog.id.clone() {
+            Some(id) => SidebarSectionChange::Rename { id, name },
+            None => SidebarSectionChange::Create {
                 id: uuid::Uuid::new_v4().to_string(),
                 name,
-                session_ids: Vec::new(),
-                collapsed: false,
-            });
+            },
+        };
+        if !self.change_sidebar_section(change, cx) {
+            self.section_dialog = Some(dialog);
         }
-        self.schedule_save(cx);
         cx.notify();
     }
 
     fn delete_sidebar_section(&mut self, id: &str, cx: &mut Context<Self>) {
         self.section_menu = None;
         self.cancel_sidebar_session_transfer(cx);
-        if let Some(key) = self.active_sidebar_pin_profile_key(cx) {
-            if let Some(sections) = self.settings.sidebar_sections_by_profile.get_mut(&key) {
-                sections.retain(|section| section.id != id);
-            }
-        }
-        self.schedule_save(cx);
+        self.change_sidebar_section(SidebarSectionChange::Delete { id: id.to_owned() }, cx);
         cx.notify();
     }
 
@@ -235,17 +290,13 @@ impl Shell {
                     if open { height } else { 0.0 },
                     if open { 0.0 } else { height },
                 );
-                if let Some(key) = this.active_sidebar_pin_profile_key(cx) {
-                    if let Some(section) = this
-                        .settings
-                        .sidebar_sections_by_profile
-                        .get_mut(&key)
-                        .and_then(|sections| sections.iter_mut().find(|s| s.id == toggle_id))
-                    {
-                        section.collapsed = open;
-                    }
-                }
-                this.schedule_save(cx);
+                this.change_sidebar_section(
+                    SidebarSectionChange::Collapse {
+                        id: toggle_id.clone(),
+                        collapsed: open,
+                    },
+                    cx,
+                );
                 cx.notify();
             }))
             .child(
@@ -837,6 +888,14 @@ mod tests {
                         collapsed: false,
                     }],
                 );
+                let section = shell.settings.sidebar_sections_by_profile[&key][0].clone();
+                shell.state.update(cx, |state, _| {
+                    state.sidebar_preferences.sections = vec![section.clone()];
+                });
+                let empty_section = SidebarSection {
+                    session_ids: vec![],
+                    ..section.clone()
+                };
                 let pin = zeron_proto::SidebarPinChange::Pin {
                     session_id: "regular".into(),
                     after: None,
@@ -863,8 +922,11 @@ mod tests {
                     engine: engine.clone(),
                     queue: std::collections::VecDeque::from([
                         pin.clone(),
-                        zeron_proto::SidebarPinChange::Unpin {
-                            session_id: "regular".into(),
+                        zeron_proto::SidebarPinChange::Section {
+                            change: SidebarSectionChange::Assign {
+                                session_id: "regular".into(),
+                                section_id: Some("a".into()),
+                            },
                         },
                     ]),
                     unconfirmed: false,
@@ -872,6 +934,7 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     2,
                     Ok(zeron_proto::SidebarPreferencesState {
+                        sections: vec![empty_section.clone()],
                         revision: 1,
                         synced: true,
                         initialized: true,
@@ -887,6 +950,7 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     2,
                     Ok(zeron_proto::SidebarPreferencesState {
+                        sections: vec![section.clone()],
                         revision: 2,
                         synced: true,
                         initialized: true,
@@ -904,6 +968,7 @@ mod tests {
                 shell.finish_sidebar_pin_write(
                     3,
                     Ok(zeron_proto::SidebarPreferencesState {
+                        sections: vec![empty_section],
                         revision: 3,
                         synced: true,
                         initialized: true,
@@ -911,12 +976,89 @@ mod tests {
                     }),
                     cx,
                 );
-                assert!(
-                    shell.settings.sidebar_sections_by_profile[&key][0]
-                        .session_ids
-                        .is_empty()
-                );
+                assert!(shell.active_sidebar_sections(cx)[0].session_ids.is_empty());
                 assert_eq!(shell.active_sidebar_pins(cx), vec!["regular".to_string()]);
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn sections_migration_waits_for_sync_and_keeps_local_copy_until_ack(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel(16);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Synced);
+                    state.auth = Some(zeron_proto::AuthState::SignedIn {
+                        user: zeron_proto::UserProfile {
+                            id: "user".into(),
+                            email: "test@example.test".into(),
+                            name: None,
+                        },
+                        org_id: Some("org".into()),
+                    });
+                    state.set_test_engine(engine.clone());
+                });
+                let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
+                let sections = shell.settings.sidebar_sections_by_profile["local"].clone();
+                shell
+                    .settings
+                    .sidebar_sections_by_profile
+                    .insert(key.clone(), sections.clone());
+                shell.migrate_sidebar_sections(cx);
+                assert!(
+                    shell.sidebar_pin_write.is_none(),
+                    "Wait for the authoritative snapshot"
+                );
+                shell
+                    .state
+                    .update(cx, |state, _| state.sidebar_preferences.synced = true);
+                shell.migrate_sidebar_sections(cx);
+                let id = shell.sidebar_pin_write.as_ref().unwrap().id;
+                shell.migrate_sidebar_sections(cx);
+                assert_eq!(shell.sidebar_pin_write.as_ref().unwrap().queue.len(), 1);
+                shell.finish_sidebar_pin_write(id, Err("disk full".into()), cx);
+                assert_eq!(shell.settings.sidebar_sections_by_profile[&key], sections);
+                // A reconnect/restart permits another idempotent attempt.
+                shell.sidebar_section_migration = None;
+                shell.migrate_sidebar_sections(cx);
+                let id = shell.sidebar_pin_write.as_ref().unwrap().id;
+                shell.finish_sidebar_pin_write(
+                    id,
+                    Ok(zeron_proto::SidebarPreferencesState {
+                        revision: 1,
+                        synced: true,
+                        initialized: true,
+                        pinned_session_ids: vec![],
+                        sections: sections.clone(),
+                    }),
+                    cx,
+                );
+                assert!(
+                    !shell
+                        .settings
+                        .sidebar_sections_by_profile
+                        .contains_key(&key)
+                );
+                assert_eq!(shell.active_sidebar_sections(cx), sections);
+                assert!(
+                    shell
+                        .settings
+                        .sidebar_sections_by_profile
+                        .contains_key("local")
+                );
             })
             .unwrap();
     }
