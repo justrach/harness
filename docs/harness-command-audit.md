@@ -54,8 +54,9 @@ OpenCode uses its [server command API](https://opencode.ai/docs/server/).
    or after the menu opens, are not propagated live. Same-project definition edits
    may require refreshing the composer context. Discovery can create temporary
    provider sessions. Consider a session-backed catalog subscription.
-6. **Skills versus commands:** Agents settings expose independent per-harness
-   toggles for `$` completion and separating skills from `/` commands. Both
+6. **Skills versus commands:** Settings → Shortcuts → Composer completion exposes
+   independent per-harness toggles for `$` completion and separating skills from
+   `/` commands, for installed, enabled agents on this device. Both
    default on for Codex and off for the other eight harnesses; users can opt
    Claude Code, OpenCode, or another harness into `$`. Providers can also
    advertise skills inside an undifferentiated command catalog. Those entries
