@@ -1193,7 +1193,7 @@ impl Pickers {
             self.catalog_rev += 1;
         }
         cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({ "harness": harness });
+            let mut params = serde_json::json!({ "harness": harness, "force": force });
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
                 object.insert(
                     "targetDeviceId".into(),
@@ -1245,29 +1245,44 @@ impl Pickers {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
-                if let Loadable::Ready(models) = &loaded {
-                    let fresh = pickers
-                        .defaults
-                        .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
-                    if fresh {
-                        pickers.save_defaults();
-                    }
-                }
-                pickers.models.insert(harness, loaded);
-                pickers.catalog_rev += 1;
-                // A list that landed while its popover is open re-anchors the
-                // keyboard highlight onto the selected row (it sat at 0 while
-                // loading).
-                if pickers.open_kind() == Some(PickerKind::HarnessModel)
-                    && pickers.effective_harness(cx) == Some(harness)
-                {
-                    pickers.active = pickers.selected_model_index(cx);
-                }
-                cx.notify();
+                pickers.apply_model_catalog(harness, loaded, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn apply_model_catalog(
+        &mut self,
+        harness: HarnessId,
+        loaded: Loadable<Vec<Model>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Loadable::Error(error) = &loaded
+            && matches!(self.models.get(&harness), Some(Loadable::Ready(_)))
+        {
+            tracing::warn!(%error, ?harness, "Model refresh failed; retaining visible rows");
+            return;
+        }
+        if let Loadable::Ready(models) = &loaded {
+            let fresh = self
+                .defaults
+                .remember_labels(models.iter().map(|m| (m.id.as_str(), m.label.as_str())));
+            if fresh {
+                self.save_defaults();
+            }
+        }
+        self.models.insert(harness, loaded);
+        self.catalog_rev += 1;
+        // A list that landed while its popover is open re-anchors the
+        // keyboard highlight onto the selected row (it sat at 0 while
+        // loading).
+        if self.open_kind() == Some(PickerKind::HarnessModel)
+            && self.effective_harness(cx) == Some(harness)
+        {
+            self.active = self.selected_model_index(cx);
+        }
+        cx.notify();
     }
 
     /// ListRefs for the selected SPACE's folder — targeted at the space's
@@ -4776,6 +4791,58 @@ mod tests {
                 .child(div().track_focus(&self.neutral))
                 .child(self.pickers.clone())
         }
+    }
+
+    #[gpui::test]
+    fn refresh_failure_keeps_rows_and_catalog_change_reanchors_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut pickers = Pickers::new(state, cx);
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.config.model = Some("chosen".into());
+            pickers.harnesses =
+                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers
+        });
+        handle
+            .update(cx, |pickers, window, cx| {
+                let rows = vec![bare_model("chosen", "Chosen"), bare_model("other", "Other")];
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(rows.clone()),
+                    cx,
+                );
+                pickers.open_model_menu(window, cx);
+                assert_eq!(pickers.active, 0);
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Error("refresh failed".into()),
+                    cx,
+                );
+                assert_eq!(
+                    pickers.models[&HarnessId::ClaudeCode],
+                    Loadable::Ready(rows.clone())
+                );
+                pickers.apply_model_catalog(
+                    HarnessId::ClaudeCode,
+                    Loadable::Ready(rows.into_iter().rev().collect()),
+                    cx,
+                );
+                assert_eq!(pickers.active, 1);
+                pickers.apply_model_catalog(
+                    HarnessId::Codex,
+                    Loadable::Error("cold failure".into()),
+                    cx,
+                );
+                assert!(matches!(
+                    pickers.models[&HarnessId::Codex],
+                    Loadable::Error(_)
+                ));
+            })
+            .unwrap();
     }
 
     #[gpui::test]
