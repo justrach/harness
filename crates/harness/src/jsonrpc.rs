@@ -40,6 +40,8 @@ pub(crate) enum Incoming {
     Eof,
 }
 
+type StdoutObserver = Box<dyn Fn(&str) + Send>;
+
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
 #[derive(Clone)]
@@ -60,7 +62,7 @@ impl RpcClient {
     pub(crate) fn with_stdout_observer(
         stdin: ChildStdin,
         stdout: ChildStdout,
-        observer: Option<Box<dyn Fn(&str) + Send>>,
+        observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(write_loop(stdin, writer_rx));
@@ -207,7 +209,7 @@ async fn read_loop(
     pending: Pending,
     tx: mpsc::Sender<Incoming>,
     closed: Arc<AtomicBool>,
-    observer: Option<Box<dyn Fn(&str) + Send>>,
+    observer: Option<StdoutObserver>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     // A read error ends the loop like EOF: either way the child's stdout is
