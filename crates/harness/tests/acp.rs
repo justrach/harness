@@ -1573,3 +1573,25 @@ async fn antigravity_strips_echoed_background_task_wakeups_from_the_reply() {
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
+
+fn robust_harness() -> AcpHarness {
+    AcpHarness::grok().with_executable(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+    )
+}
+
+#[tokio::test]
+async fn noise_and_large_crlf_frame_preserve_the_complete_turn() {
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("frames");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let events = run_to_end(&robust_harness(), req, ctl).await;
+    let text: String = events.iter().filter_map(|event| match event {
+        AgentEvent::TextDelta { text } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(text, "x".repeat(2 * 1024 * 1024));
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
