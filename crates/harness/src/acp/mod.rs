@@ -52,6 +52,7 @@ use zeron_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
+use crate::scratch::ScratchDir;
 use crate::process::{Command, Stdio};
 use child::Child;
 mod child;
@@ -910,7 +911,7 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (mut child, _stderr, _scratch) = self.spawn_agent(home.as_deref(), false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -978,6 +979,10 @@ impl AcpHarness {
         }
         if let Some(browser) = browser {
             cmd.env("BROWSER", browser);
+        }
+        let scratch = self.adapter_scratch()?;
+        if let Some(dir) = &scratch {
+            dir.apply(&mut cmd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1210,12 +1215,18 @@ impl AcpHarness {
         }
     }
 
+    fn adapter_scratch(&self) -> Result<Option<ScratchDir>, HarnessError> {
+        Ok(matches!(self.resolve_launch()?, Launch::Archive { .. })
+            .then(|| ScratchDir::new(self.spec.executable))
+            .transpose()?)
+    }
+
     async fn spawn_agent(
         &self,
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-    ) -> Result<(Child, crate::StderrTail), HarnessError> {
+    ) -> Result<(Child, crate::StderrTail, Option<ScratchDir>), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
@@ -1230,6 +1241,10 @@ impl AcpHarness {
             // Python webbrowser accepts an executable template; never launch a browser here.
             #[cfg(unix)]
             cmd.env("BROWSER", "/usr/bin/true %s");
+        }
+        let scratch = self.adapter_scratch()?;
+        if let Some(dir) = &scratch {
+            dir.apply(&mut cmd);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1255,7 +1270,7 @@ impl AcpHarness {
                 tail.close();
             });
         }
-        Ok((child, stderr_tail))
+        Ok((child, stderr_tail, scratch))
     }
 
     /// Short-lived discovery run for [`Harness::commands`]: initialize, scan
@@ -1264,7 +1279,7 @@ impl AcpHarness {
     /// refuses sessions before login still surfaces whatever the handshake
     /// advertised.
     async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        let (mut child, _stderr) = self.spawn_agent(None, false, &[]).await?;
+        let (mut child, _stderr, _scratch) = self.spawn_agent(None, false, &[]).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1328,7 +1343,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+        let (mut child, stderr_tail, _scratch) = self.spawn_agent(None, false, &[]).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1772,7 +1787,7 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (mut child, stderr_tail) = self.spawn_agent(Some(&request.cwd), true, &[]).await?;
+        let (mut child, stderr_tail, scratch) = self.spawn_agent(Some(&request.cwd), true, &[]).await?;
         let stdin = child
             .stdin
             .take()
@@ -1785,6 +1800,7 @@ impl Harness for AcpHarness {
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             child,
+            scratch,
             client,
             incoming,
             event_tx,
@@ -1819,6 +1835,7 @@ impl Harness for AcpHarness {
 
 struct Session {
     child: Child,
+    scratch: Option<ScratchDir>,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -2724,6 +2741,8 @@ fn steering_call_future(
 /// turn, the steering mailbox, the interrupt token, and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        // Locals drop in reverse binding order: reap the child before cleanup.
+        scratch: _scratch,
         mut child,
         client,
         mut incoming,

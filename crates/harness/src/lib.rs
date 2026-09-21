@@ -154,6 +154,7 @@ pub mod mock;
 mod model_context;
 pub mod opencode;
 pub mod process;
+mod scratch;
 pub mod shell_env;
 #[cfg(windows)]
 pub mod windows_process;

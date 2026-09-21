@@ -9,6 +9,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--managed") {
+        use zeron_harness::Harness;
+        let result = zeron_harness::AcpHarness::antigravity().models().await;
+        println!("managed discovery: {result:?}");
+        return;
+    }
     let (server, args) = zeron_harness::AcpHarness::antigravity()
         .resolve_program(true)
         .await
