@@ -1268,6 +1268,7 @@ impl SubagentSink {
             device_id: device_id.to_owned(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            duration_ms: None,
         };
         if let Err(err) = self.doc.push_message(&entry) {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent steer write failed");
@@ -2510,6 +2511,7 @@ mod tests {
             device_id: "test".into(),
             status: None,
             continuation_of: None,
+            duration_ms: None,
         })
         .unwrap();
         let current = format!("Current {skill}\nKeep **Markdown**");
@@ -2550,6 +2552,7 @@ mod tests {
                 device_id: "test".into(),
                 status: None,
                 continuation_of: None,
+                duration_ms: None,
             })
             .unwrap();
         }

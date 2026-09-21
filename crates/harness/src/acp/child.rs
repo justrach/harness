@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::process::{Child as ProcessChild, Command};
 
-pub(super) fn configure(command: &mut Command) {
+pub(crate) fn configure(command: &mut Command) {
     #[cfg(unix)]
     command.process_group(0);
     for key in [
@@ -16,14 +16,14 @@ pub(super) fn configure(command: &mut Command) {
     }
 }
 
-pub(super) struct Child {
+pub(crate) struct Child {
     inner: ProcessChild,
     #[cfg(unix)]
     group: Option<i32>,
 }
 
 impl Child {
-    pub(super) fn new(inner: ProcessChild) -> Self {
+    pub(crate) fn new(inner: ProcessChild) -> Self {
         Self {
             #[cfg(unix)]
             group: Some(-(inner.id().expect("newly spawned ACP child") as i32)),
@@ -31,7 +31,7 @@ impl Child {
         }
     }
 
-    pub(super) async fn shutdown(&mut self, grace: std::time::Duration) {
+    pub(crate) async fn shutdown(&mut self, grace: std::time::Duration) {
         #[cfg(unix)]
         if let Some(group) = self.group.take() {
             crate::send_signal(&group, crate::Signal::Term);
@@ -54,14 +54,14 @@ impl Child {
         crate::shutdown_child(&mut self.inner, grace).await;
     }
 
-    pub(super) fn request_group_shutdown(&self) {
+    pub(crate) fn request_group_shutdown(&self) {
         #[cfg(unix)]
         if let Some(group) = self.group {
             crate::send_signal(&group, crate::Signal::Term);
         }
     }
 
-    pub(super) fn terminate_group(&mut self) {
+    pub(crate) fn terminate_group(&mut self) {
         #[cfg(unix)]
         if let Some(group) = self.group.take() {
             crate::send_signal(&group, crate::Signal::Kill);

@@ -166,6 +166,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+pub mod install;
 pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;

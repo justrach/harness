@@ -8,6 +8,8 @@ publish.workspace = true
 [features]
 # Synthetic native protocol peer for subprocess tests; never part of a normal build.
 native-fixture = []
+# Explicit installer injection for integration tests; never enabled in the app.
+installer-fixture = []
 
 [[bin]]
 name = "harness-native-fixture"
