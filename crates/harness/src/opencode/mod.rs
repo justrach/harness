@@ -2630,7 +2630,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let protocol = server.protocol().await;
             // 1.x: global permission endpoint + a session-scoped fallback;
             // 2.x: the reply rides the session's permission route
-            // (`{"reply": "once" | "always" | "reject"}`).
+            // (the key changed from reply to decision in 2.0.4).
             let (reply_path, fallback_path) = match protocol {
                 Protocol::V1 => (
                     format!("/permission/{id}/reply"),
@@ -2645,6 +2645,17 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
             let protocol_cell = server.protocol.clone();
+            let reply_key = if protocol == Protocol::V2
+                && server
+                    .version
+                    .get()
+                    .and_then(|v| v.number)
+                    .is_some_and(|v| v >= (2, 0, 4))
+            {
+                "decision"
+            } else {
+                "reply"
+            };
             let permission_input = Arc::clone(request_input);
             let question = UserInputQuestion {
                 id: format!("permission:{id}"),
@@ -2682,7 +2693,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     .post_json(
                         &reply_path,
                         dir_owned.as_deref(),
-                        &json!({ "reply": reply }),
+                        &json!({ reply_key: reply }),
                     )
                     .await
                     .is_err()

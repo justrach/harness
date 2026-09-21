@@ -1229,31 +1229,40 @@ async fn permissions_stay_session_scoped_and_never_persist_grants() {
 
 #[tokio::test]
 async fn permissions_without_auto_approve_require_an_explicit_answer() {
-    for accept in [false, true] {
-        let mut wire = TurnWire::start_policy(false, true, false, Some(accept)).await;
-        wire.request("/api/model").await;
-        wire.request("/prompt").await;
-        wire.v2(
-            "permission.asked",
-            json!({"id":"approval", "sessionID":"fixture"}),
-        );
-        let body = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some((_, body)) = wire
-                    .posts
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(p, _)| p.contains("permission"))
-                {
-                    break body.clone();
+    for version in ["2.0.0", "2.0.3", "2.0.4", "2.0.11"] {
+        for accept in [false, true] {
+            let mut wire =
+                TurnWire::start_config(false, true, false, Some(accept), version, json!({}), false)
+                    .await;
+            wire.request("/api/model").await;
+            wire.request("/prompt").await;
+            wire.v2(
+                "permission.asked",
+                json!({"id":"approval", "sessionID":"fixture"}),
+            );
+            let body = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some((_, body)) = wire
+                        .posts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(p, _)| p.contains("permission"))
+                    {
+                        break body.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(body["reply"], if accept { "once" } else { "reject" });
+            })
+            .await
+            .unwrap();
+            let key = if version == "2.0.0" || version == "2.0.3" {
+                "reply"
+            } else {
+                "decision"
+            };
+            assert_eq!(body, json!({key: if accept { "once" } else { "reject" }}));
+        }
     }
 }
 
