@@ -54,6 +54,13 @@ while read -r line; do
       SETS="$SETS$set;"
       emit "{\"id\":$id,\"result\":{\"configOptions\":$OPTIONS}}"
     fi
+  elif has "$line" '"method":"session/prompt"' && has "$line" 'echo-wakeup'; then
+    # the model parroting a background-task wakeup, split mid-tag across chunks
+    for text in 'Waiting for the build.\n\n<SYSTEM_' 'MESSAGE>\n[Message] timestamp=2026-09-18T10:07:35Z sender=c1/task-156 priority=MESSAGE_PRIORITY_HIGH content=Task id \"c1/task-156\" finished with result:\n\nThe command exited with code 0.\n</SYSTEM_MES' 'SAGE>\n\nThe build finished.'; do
+      emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"$text\"}}}}"
+    done
+    emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+    exit 0
   elif has "$line" '"method":"session/prompt"'; then
     [ "$BROWSER" = '/usr/bin/true %s' ] || exit 12
     if [ "$PROMPT_AUTH" -eq 1 ]; then

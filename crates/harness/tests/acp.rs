@@ -1552,3 +1552,24 @@ async fn pi_dropping_stream_terminates_tool_tree() {
     .await
     .expect("consumer shutdown must terminate the tool tree");
 }
+
+#[tokio::test]
+async fn antigravity_strips_echoed_background_task_wakeups_from_the_reply() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut req = request("echo-wakeup");
+    req.model = None;
+    req.cwd = workspace.path().display().to_string();
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&antigravity_harness(), req, controls).await;
+
+    let reply: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reply, "Waiting for the build.\n\n\n\nThe build finished.");
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+

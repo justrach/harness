@@ -33,6 +33,7 @@ mod devin_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
+mod system_message;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -1822,10 +1823,15 @@ impl Harness for AcpHarness {
             stderr_tail,
         }));
 
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+        let events = futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|ev| (ev, rx))
         })
-        .boxed())
+        .boxed();
+        Ok(if self.spec.id == HarnessId::Antigravity {
+            system_message::strip_system_message_echoes(events)
+        } else {
+            events
+        })
     }
 }
 
