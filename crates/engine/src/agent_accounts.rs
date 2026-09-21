@@ -705,9 +705,6 @@ impl AgentAccounts {
                 .sign_in(browser, move |progress| {
                     let mut state = lock(&progress_state);
                     match progress {
-                        zeron_harness::acp::SignInProgress::Installing => {
-                            state.message = Some("Downloading Antigravity…".into());
-                        }
                         zeron_harness::acp::SignInProgress::OpenBrowser(url) => {
                             state.message = Some("Finish signing in in your browser.".into());
                             state.url = Some(url);

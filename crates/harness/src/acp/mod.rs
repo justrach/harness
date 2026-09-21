@@ -521,6 +521,25 @@ fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     })
 }
 
+/// Whether the listing device has a pinned, explicitly installable archive.
+pub fn can_install(harness: HarnessId) -> bool {
+    harness == HarnessId::Antigravity && antigravity_archive().is_some()
+}
+
+/// Only an explicit Settings action may call this installer.
+pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
+    let pin = (harness == HarnessId::Antigravity)
+        .then(antigravity_archive)
+        .flatten()
+        .ok_or_else(|| {
+            HarnessError::NotInstalled(
+                "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+            )
+        })?;
+    crate::archive_install::ensure_installed(pin, "Antigravity").await?;
+    Ok(())
+}
+
 /// the user-global skill folders the server loads (`resolve_skills_paths`).
 /// its project-level `.gemini/skills` and `.agents/skills` depend on a session
 /// cwd the command listing doesn't have, so those still reach the agent when
@@ -715,9 +734,9 @@ fn antigravity_spec() -> AcpAgentSpec {
         npm_package: None,
         archive: antigravity_archive(),
         extra_paths: Vec::new,
-        cli_executable: "agy",
-        cli_extra_paths: || npm_global_bins("agy"),
-        install_hint: "Install the agy CLI or set ANTIGRAVITY_ACP_EXECUTABLE to a server binary",
+        cli_executable: "agy_acp_server",
+        cli_extra_paths: Vec::new,
+        install_hint: "Install Antigravity to enable, or set ANTIGRAVITY_ACP_EXECUTABLE to its ACP server",
         models: || {
             use ReasoningLevel::{High, Low, Medium};
             vec![
@@ -765,7 +784,6 @@ const SIGN_OUT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInProgress {
     /// the server is being downloaded before sign-in can start.
-    Installing,
     /// the agent is waiting on the user at this sign-in url.
     OpenBrowser(String),
 }
@@ -786,8 +804,7 @@ fn sign_in_url(line: &str) -> Option<String> {
 /// on this device, so a first chat never pays (or trips over) an npm run.
 /// Skips agents whose adapter is already resolvable; failures are logged and
 /// retried on the next daemon start or blocking launch. A no-op outside a
-/// tokio runtime. Archive-distributed servers install when their sign-in
-/// runs instead.
+/// tokio runtime. Archive-distributed servers require explicit installation.
 pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -953,6 +970,7 @@ impl AcpHarness {
                 "{display_name} has no sign-in flow"
             )));
         };
+        let (exe, args) = self.resolve_program(false).await?;
         let gemini_home = (self.spec.id == HarnessId::Antigravity)
             .then(antigravity_paths::home)
             .transpose()?;
@@ -963,12 +981,6 @@ impl AcpHarness {
             })
             .transpose()?
             .flatten();
-        if let Launch::Archive { pin, .. } = self.resolve_launch()?
-            && crate::archive_install::installed_entry(&pin).is_none()
-        {
-            on_progress(SignInProgress::Installing);
-        }
-        let (exe, args) = self.resolve_program(true).await?;
         let mut cmd = Command::new(&exe);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
@@ -1113,6 +1125,18 @@ impl AcpHarness {
     /// Resolve what to spawn: an explicit/installed adapter binary, or the
     /// managed install of the spec's pinned npm package. `NotInstalled` only
     /// when neither the binary nor the machinery to install it (npm) exists.
+    fn find_server(&self) -> Option<PathBuf> {
+        find_on_paths(self.spec.executable, (self.spec.extra_paths)()).or_else(|| {
+            if self.spec.id == HarnessId::Antigravity {
+                ["agy_acp_server.par", "agy_acp_server.exe"]
+                    .into_iter()
+                    .find_map(|name| find_on_paths(name, (self.spec.cli_extra_paths)()))
+            } else {
+                None
+            }
+        })
+    }
+
     fn resolve_launch(&self) -> Result<Launch, HarnessError> {
         let spec_args: Vec<String> = self.spec.args.iter().map(|a| a.to_string()).collect();
         if let Some(p) = &self.executable {
@@ -1125,7 +1149,7 @@ impl AcpHarness {
             return crate::executable::validate_native_override(&PathBuf::from(p))
                 .map(|program| Launch::Program(program, spec_args));
         }
-        if let Some(found) = find_on_paths(self.spec.executable, (self.spec.extra_paths)()) {
+        if let Some(found) = self.find_server() {
             return Ok(Launch::Program(found, spec_args));
         }
         if let Some(pkg) = self.spec.npm_package {
@@ -1141,6 +1165,9 @@ impl AcpHarness {
             }
         }
         if let Some(pin) = self.spec.archive {
+            if crate::archive_install::installed_entry(&pin).is_none() {
+                return Err(HarnessError::NotInstalled(self.spec.install_hint.into()));
+            }
             return Ok(Launch::Archive {
                 pin,
                 args: spec_args,
@@ -1204,27 +1231,9 @@ impl AcpHarness {
                 Ok((program, node_args))
             }
             Launch::Archive { pin, args } => {
-                if let Some(entry) = crate::archive_install::installed_entry(&pin) {
-                    return Ok((entry, args));
-                }
-                let display_name = self.spec.display_name;
-                if block_on_install {
-                    let entry = crate::archive_install::ensure_installed(pin, display_name).await?;
-                    return Ok((entry, args));
-                }
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::archive_install::ensure_installed(pin, display_name).await
-                    {
-                        tracing::warn!(
-                            target: "zeron_harness::adapter_install",
-                            "background ACP server install failed: {e}"
-                        );
-                    }
-                });
-                Err(HarnessError::Protocol(format!(
-                    "{display_name} ACP server is installing in the background"
-                )))
+                let entry = crate::archive_install::installed_entry(&pin)
+                    .ok_or_else(|| HarnessError::NotInstalled(self.spec.install_hint.into()))?;
+                Ok((entry, args))
             }
         }
     }
@@ -1715,7 +1724,11 @@ impl Harness for AcpHarness {
         {
             return true;
         }
-        find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
+        if self.spec.id == HarnessId::Antigravity {
+            self.find_server().is_some()
+        } else {
+            find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
+        }
     }
 
     /// Devin refreshes through its native catalog command on each request.

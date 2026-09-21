@@ -141,7 +141,7 @@ pub trait Harness: Send + Sync {
 
 pub mod acp;
 pub(crate) mod adapter_install;
-pub(crate) mod archive_install;
+pub mod archive_install;
 mod catalog;
 mod catalog_failure;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
