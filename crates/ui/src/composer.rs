@@ -4860,6 +4860,7 @@ fn pasted_reference_tokens(text: &str, pasted: Range<usize>) -> Vec<(char, Menti
         return Vec::new();
     }
     let mut tokens = Vec::new();
+    let mut attempts = 0;
     for (relative, prefix) in text[pasted.clone()].char_indices() {
         if !matches!(prefix, '@' | '$' | '/') {
             continue;
@@ -4892,6 +4893,12 @@ fn pasted_reference_tokens(text: &str, pasted: Range<usize>) -> Vec<(char, Menti
         if end == start + 1 {
             continue;
         }
+        // Rejected code/link candidates still parse the whole document. Bound
+        // attempts, not just accepted chips, so pasted examples cannot stall UI.
+        if attempts == 32 {
+            break;
+        }
+        attempts += 1;
         let token = if prefix == '@' {
             mention_token(text, end)
         } else {
@@ -4901,9 +4908,6 @@ fn pasted_reference_tokens(text: &str, pasted: Range<usize>) -> Vec<(char, Menti
             token.range.end = end;
             token.query = text[start + 1..end].to_owned();
             tokens.push((prefix, token));
-            if tokens.len() == 32 {
-                break;
-            }
         }
     }
     tokens
@@ -6294,6 +6298,34 @@ impl Composer {
         target.map(|_| params)
     }
 
+    fn catalog_params(&self, cx: &App) -> serde_json::Value {
+        let harness = self.pickers.read(cx).resolved(cx).harness;
+        let selected_worktree = match self.pickers.read(cx).checkout_plan() {
+            crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
+            _ => None,
+        };
+        let mut params = serde_json::json!({ "harness": harness });
+        {
+            let state = self.state.read(cx);
+            if let Some(chat) = state.selected_chat_row() {
+                params["chatId"] = chat.id.clone().into();
+                params["targetDeviceId"] = chat.device_id.clone().into();
+                // Include the resolved cwd in the cache identity, too.
+                params["cwd"] = chat.cwd.clone().into();
+            } else if let Some(space) = state.selected_space_row() {
+                params["spaceId"] = space.id.clone().into();
+                params["targetDeviceId"] = space.device_id.clone().into();
+                params["cwd"] = space.path.clone().into();
+                if let Some(path) = selected_worktree {
+                    params["path"] = path.into();
+                }
+            } else if let Some(device) = state.effective_device_id() {
+                params["targetDeviceId"] = device.into();
+            }
+        }
+        params
+    }
+
     fn completion_connection_context(&self, cx: &App) -> String {
         let state = self.state.read(cx);
         let engine = state
@@ -6328,9 +6360,8 @@ impl Composer {
         if tokens.is_empty() {
             return;
         }
-        let Some(mut params) = self.file_search_params("", cx) else {
-            return;
-        };
+        let params = self.catalog_params(cx);
+        let file_params = self.file_search_params("", cx);
         if !params["targetDeviceId"].as_str().is_some_and(|target| {
             self.state
                 .read(cx)
@@ -6345,10 +6376,9 @@ impl Composer {
             return;
         };
         let context = format!(
-            "{}:{params}:{harness:?}",
+            "{}:{params}:{preferences:?}",
             self.completion_connection_context(cx)
         );
-        params["harness"] = serde_json::json!(harness);
         cx.spawn(async move |this, cx| {
             let mut candidates = Vec::new();
             if tokens.iter().any(|(prefix, _)| *prefix != '@') && harness.is_some() {
@@ -6388,7 +6418,9 @@ impl Composer {
                 }
                 let replacement = if prefix == '@' {
                     if !files.contains_key(&token.query) {
-                        let mut search = params.clone();
+                        let Some(mut search) = file_params.clone() else {
+                            continue;
+                        };
                         search["query"] = token.query.clone().into();
                         let results = engine
                             .client()
@@ -6430,14 +6462,15 @@ impl Composer {
                 return;
             }
             this.update(cx, |this, cx| {
-                let current = this.file_search_params("", cx).map(|params| {
-                    format!(
-                        "{}:{params}:{:?}",
-                        this.completion_connection_context(cx),
-                        this.pickers.read(cx).resolved(cx).harness
-                    )
-                });
-                if current.as_deref() != Some(context.as_str()) {
+                let harness = this.pickers.read(cx).resolved(cx).harness;
+                let preferences = crate::settings::current(cx)
+                    .skill_completion(harness.unwrap_or(HarnessId::Codex));
+                let current = format!(
+                    "{}:{}:{preferences:?}",
+                    this.completion_connection_context(cx),
+                    this.catalog_params(cx)
+                );
+                if current != context {
                     return;
                 }
                 this.input.update(cx, |input, cx| {
@@ -6741,7 +6774,7 @@ impl Composer {
     // ---- slash commands ---------------------------------------------------
 
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
-    /// harness's command list on first open, filter locally per keystroke.
+    /// harness's command list on each open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
         let harness = self.pickers.read(cx).resolved(cx).harness;
         let preferences =
@@ -6754,29 +6787,7 @@ impl Composer {
             self.reset_slash(None, cx);
             return;
         }
-        let selected_worktree = match self.pickers.read(cx).checkout_plan() {
-            crate::pickers::CheckoutPlan::ReuseWorktree { path, .. } => Some(path),
-            _ => None,
-        };
-        let mut params = serde_json::json!({ "harness": harness });
-        {
-            let state = self.state.read(cx);
-            if let Some(chat) = state.selected_chat_row() {
-                params["chatId"] = chat.id.clone().into();
-                params["targetDeviceId"] = chat.device_id.clone().into();
-                // Include the resolved cwd in the cache identity, too.
-                params["cwd"] = chat.cwd.clone().into();
-            } else if let Some(space) = state.selected_space_row() {
-                params["spaceId"] = space.id.clone().into();
-                params["targetDeviceId"] = space.device_id.clone().into();
-                params["cwd"] = space.path.clone().into();
-                if let Some(path) = selected_worktree {
-                    params["path"] = path.into();
-                }
-            } else if let Some(device) = state.effective_device_id() {
-                params["targetDeviceId"] = device.into();
-            }
-        }
+        let params = self.catalog_params(cx);
         let catalog_context = format!(
             "{preferences:?}:{}:{params}",
             self.completion_connection_context(cx),
@@ -6798,6 +6809,7 @@ impl Composer {
         if !context_changed && token == self.slash.token {
             return;
         }
+        let refresh_catalog = context_changed || self.slash.token.is_none();
         self.slash.dismissed = None;
         if context_changed {
             self.slash.request = self.slash.request.wrapping_add(1);
@@ -6826,7 +6838,10 @@ impl Composer {
                 with_workspace_commands(vec![], self.state.read(cx).selected_chat.is_some()),
             );
         }
-        if harness.is_none() || self.slash_cache.contains_key(&context) || self.slash.loading {
+        if harness.is_none()
+            || (self.slash_cache.contains_key(&context) && !refresh_catalog)
+            || self.slash.loading
+        {
             self.refilter_slash(cx);
             return;
         }
@@ -6903,6 +6918,7 @@ impl Composer {
                         composer.slash_cache.insert(context, candidates);
                     }
                     Err(err) => {
+                        composer.slash_cache.remove(&context);
                         composer.slash.error = Some(slash_error_message(&err, skill));
                         if !skill && commands_allowed {
                             composer.slash_cache.insert(
@@ -10573,6 +10589,103 @@ mod tests {
             pasted_reference_tokens(text, 0..5).is_empty(),
             "partial pasted token"
         );
+        // Invalid candidates consume the same work budget as accepted ones.
+        // Do not repeatedly parse a large pasted block of literal examples.
+        let text = format!("```\n{}\n```\n$review", "@example ".repeat(4_000));
+        assert!(pasted_reference_tokens(&text, 0..text.len()).is_empty());
+    }
+
+    #[gpui::test]
+    fn projectless_paste_discovers_invocations_and_rejects_changed_targets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        crate::settings::composer::ComposerDefaults {
+            harness: Some(HarnessId::Codex),
+            ..Default::default()
+        }
+        .save(directory.path())
+        .unwrap();
+        cx.update(|cx| crate::settings::init(Default::default(), directory.path(), cx));
+        for change_target in [false, true] {
+            let (out, mut requests) = tokio::sync::mpsc::channel(64);
+            let (replies, inbound) = tokio::sync::mpsc::channel(64);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.data_dir = Some(directory.path().to_path_buf());
+                state.selected_device = Some("peer".into());
+                state.devices = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "peer", "name": "Peer", "platform": "linux",
+                        "capabilities": [capabilities::COMPOSER_REFERENCES_V1]
+                    }))
+                    .unwrap(),
+                ];
+                state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                    zeron_rpc::RpcClient::new(out, inbound),
+                ));
+            });
+            let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+            let raw = "$review /compact @README.md";
+            composer.update(cx, |composer, cx| {
+                assert!(composer.file_search_params("", cx).is_none());
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text(raw, cx));
+                let revision = composer.input.read(cx).edit_revision;
+                composer.resolve_pasted_references(0..raw.len(), revision, cx);
+            });
+            cx.run_until_parked();
+            if change_target {
+                state.update(cx, |state, _| state.selected_device = Some("other".into()));
+            }
+            let mut methods = Vec::new();
+            while let Ok(frame) = requests.try_recv() {
+                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                assert_eq!(frame.params["targetDeviceId"], "peer");
+                assert!(frame.params.get("cwd").is_none());
+                let value = match frame.method.as_deref() {
+                    Some(methods::LIST_COMMANDS) => {
+                        serde_json::json!([{"name":"compact", "description":"Compact"}])
+                    }
+                    Some(methods::LIST_SKILLS) => {
+                        serde_json::json!([{"name":"review", "path":"/skills/SKILL.md", "description":"Review", "enabled":true}])
+                    }
+                    method => panic!("unexpected projectless request: {method:?}"),
+                };
+                methods.push(frame.method.unwrap());
+                replies
+                    .try_send(
+                        serde_json::to_string(&zeron_rpc::ServerFrame {
+                            id: frame.id,
+                            ok: Some(value),
+                            ..Default::default()
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            methods.sort();
+            let mut expected = vec![methods::LIST_COMMANDS, methods::LIST_SKILLS];
+            expected.sort();
+            assert_eq!(methods, expected);
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+            composer.read_with(cx, |composer, cx| {
+                let text = composer.input.read(cx).text();
+                if change_target {
+                    assert_eq!(text, raw);
+                } else {
+                    assert_eq!(zeron_proto::invocation::invocation_links(text).len(), 2);
+                    assert!(text.ends_with(" @README.md"));
+                }
+            });
+        }
     }
 
     #[gpui::test]
@@ -11349,34 +11462,56 @@ mod tests {
         assert_eq!(skill_requests.len(), 1);
         respond(skill_requests, "current");
         cx.run_until_parked();
-        for token in ["$", "/", "$", "/"] {
+        let mut names = ["current-skill".to_string(), "current-command".to_string()];
+        for (index, token) in ["$", "/", "$", "/"].into_iter().enumerate() {
+            let kind = usize::from(token == "/");
             composer.update(cx, |composer, cx| {
                 composer.reset_slash(None, cx);
                 composer.update_slash("ordinary prose ", 15, cx);
                 composer.update_slash(token, token.len(), cx);
+                assert!(composer.slash.loading, "each open refreshes the catalog");
                 assert!(
-                    !composer.slash.loading,
-                    "warm {token} must not show a skeleton"
+                    visible_names(composer).contains(&names[kind]),
+                    "warm rows stay visible"
                 );
-                let names = visible_names(composer);
-                assert!(names.iter().any(|name| name
-                    == if token == "$" {
-                        "current-skill"
-                    } else {
-                        "current-command"
-                    }));
+                let query = format!("{token}refreshed");
+                composer.update_slash(&query, query.len(), cx);
             });
             cx.run_until_parked();
+            let mut refresh = Vec::new();
             while let Ok(frame) = requests.try_recv() {
                 let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
-                assert!(
-                    !matches!(
-                        frame.method.as_deref(),
-                        Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
-                    ),
-                    "warm completion reissued discovery"
-                );
+                if matches!(
+                    frame.method.as_deref(),
+                    Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
+                ) {
+                    refresh.push(frame);
+                }
             }
+            assert_eq!(
+                refresh.len(),
+                if token == "$" { 1 } else { 2 },
+                "typing shares the open's request"
+            );
+            let fresh = format!("refreshed-{index}");
+            respond(refresh, &fresh);
+            cx.run_until_parked();
+            let expected = if token == "$" {
+                format!("{fresh}-skill")
+            } else {
+                fresh
+            };
+            composer.read_with(cx, |composer, _| {
+                assert!(!composer.slash.loading);
+                assert_eq!(visible_names(composer), [expected.clone()]);
+                assert!(
+                    !composer.slash_cache[&composer.slash.context]
+                        .iter()
+                        .any(|row| row.name == names[kind]),
+                    "removed catalog entries must disappear"
+                );
+            });
+            names[kind] = expected;
         }
     }
 
