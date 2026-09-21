@@ -2,12 +2,10 @@
 //! `packages/harness/src/claude.ts` (which itself mirrors Claude Code's own
 //! picker via t3code's catalog).
 //!
-//! The TS harness discovers models at runtime through the SDK's
-//! `supportedModels()` control request and then OVERLAYS these static effort
-//! ladders / option sets (the SDK under-reports both). Until we grow a
-//! short-lived control-channel discovery session, [`static_models`] returns the
-//! curated list directly; `ClaudeHarness::models` is the single seam where
-//! dynamic discovery can later be spliced in.
+//! Runtime initialize discovery appends concrete model ids to this curated list.
+//! Curated rows retain their labels, effort ladders, and option sets because the
+//! CLI can under-report supported modes. The shared initialize probe also supplies
+//! slash commands and is cached by credential and binary context.
 
 use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
