@@ -70,16 +70,18 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
         }
         .into();
     }
-    if !can_install && let Some(command) = zeron_harness::install::manual_command(harness) {
-        return format!("Install with `{command}`");
-    }
-    if enabled {
+    let hint = if enabled {
         format!(
             "{} CLI not installed — turn it off or install it",
             cli_name(harness)
         )
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
+    };
+    if !can_install && let Some(command) = zeron_harness::install::manual_command(harness) {
+        format!("{hint}. Install with `{command}`")
+    } else {
+        hint
     }
 }
 
@@ -219,7 +221,6 @@ impl HarnessesPage {
             return;
         }
         self.cancel_sign_in(cx);
-        self.cancel_install(cx);
         self.title_task = None;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
@@ -1297,6 +1298,10 @@ fn install_phase_copy_and_cancel_target_match_install() {
     }
     assert_eq!(
         install_hint(HarnessId::Codex, false, false),
-        "Install with `npm install -g @openai/codex`"
+        "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
+    );
+    assert!(
+        install_hint(HarnessId::Codex, true, false)
+            .starts_with("codex CLI not installed — turn it off or install it.")
     );
 }
