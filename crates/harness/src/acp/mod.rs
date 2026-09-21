@@ -3903,6 +3903,9 @@ async fn run_session(session: Session) {
             // or signal a pid after the child has been reaped.
             _ = tokio::time::sleep_until(escalation_deadline.unwrap_or_else(tokio::time::Instant::now)),
                 if escalation_deadline.is_some() => {
+                // Once signal escalation starts, a late prompt response no longer
+                // owns this turn (including any usage attached to that response).
+                turn = None;
                 if let Some(target) = &escalation_target {
                     send_signal(target, escalation_signal);
                 }

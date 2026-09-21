@@ -2,6 +2,7 @@
 """ACP wire edge cases shared by adapter specifications."""
 import json
 import sys
+import signal
 
 
 def emit(frame):
@@ -38,6 +39,17 @@ for line in sys.stdin:
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
+        if prompt in ("wedge", "late-settle"):
+            pending = ident
+            if prompt == "late-settle":
+                def late_response(_signal, _frame):
+                    emit({"id": pending, "result": {"stopReason": "end_turn", "usage": {
+                        "inputTokens": 900, "outputTokens": 900}}})
+                signal.signal(signal.SIGTERM, late_response)
+            else:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            update("ready")
+            continue
         if prompt == "foreign":
             pending = ident
             emit({"method": "_x.ai/session/prompt_complete", "params": {"sessionId": "child", "stopReason": "end_turn"}})

@@ -1645,3 +1645,31 @@ async fn foreign_notifications_and_permissions_cannot_affect_parent_turn() {
     assert_eq!(text, "foreign permission rejected");
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
+
+#[tokio::test]
+async fn cancel_watchdog_ignores_late_settlement_for_all_acp_specs() {
+    for adapter in [AcpHarness::grok(), AcpHarness::pi(), AcpHarness::antigravity()] {
+        let adapter = adapter.with_executable(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
+        ).with_graces(Duration::from_millis(50), Duration::from_millis(50));
+        for scenario in ["wedge", "late-settle"] {
+            let (ctl, _steer, token) = controls();
+            let mut req = request(scenario);
+            req.model = None;
+            req.cwd = std::env::temp_dir().display().to_string();
+            let mut stream = adapter.run(req, ctl).await.unwrap();
+            let mut events = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    if matches!(&event, AgentEvent::TextDelta { text } if text == "ready") {
+                        token.cancel();
+                    }
+                    assert!(!matches!(event, AgentEvent::Usage { .. }), "late usage in {scenario}");
+                    events.push(event);
+                }
+            }).await.unwrap();
+            assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)], "{scenario}");
+        }
+    }
+}
