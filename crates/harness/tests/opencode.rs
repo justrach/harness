@@ -34,6 +34,7 @@ struct FakeOpencode {
     /// Recorded `(path, body)` of every POST.
     posts: Arc<Mutex<Vec<(String, Value)>>>,
     providers: Arc<Mutex<Value>>,
+    statuses: Arc<Mutex<serde_json::Map<String, Value>>>,
     /// Whether an SSE subscriber existed when the FIRST prompt_async landed
     /// (the no-replay bus makes prompting before the subscription a real
     /// event-loss race — observed live on fast-failing turns).
@@ -54,6 +55,7 @@ impl FakeOpencode {
             backlog: Arc::new(Mutex::new(Vec::new())),
             posts: Arc::new(Mutex::new(Vec::new())),
             providers: Arc::new(Mutex::new(json!({ "all": [], "default": {} }))),
+            statuses: Arc::default(),
             first_prompt_had_subscriber: Arc::new(Mutex::new(None)),
             fail_session_creates: Arc::new(Mutex::new(0)),
         };
@@ -73,6 +75,14 @@ impl FakeOpencode {
     /// Push one bus event (the driver accepts both the bare and the
     /// `/global/event` envelope; the fake uses the enveloped form).
     fn emit(&self, payload: Value) {
+        if payload["type"] == "session.status"
+            && let Some(id) = payload["properties"]["sessionID"].as_str()
+        {
+            self.statuses
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), payload["properties"]["status"].clone());
+        }
         let framed = format!(
             "data: {}\n\n",
             json!({ "directory": "/", "payload": payload })
@@ -221,6 +231,10 @@ impl FakeOpencode {
                     ("200 OK", json!({ "id": "ses_test" }))
                 }
             }
+            ("GET", "/session/status") => (
+                "200 OK",
+                Value::Object(self.statuses.lock().unwrap().clone()),
+            ),
             ("GET", "/session/ses_resume") => ("200 OK", json!({ "id": "ses_resume" })),
             ("GET", p) if p.starts_with("/session/") => ("404 Not Found", json!({})),
             ("POST", p) if p.ends_with("/prompt_async") => ("204 No Content", json!({})),
