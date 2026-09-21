@@ -92,6 +92,8 @@ struct ChatParams {
 #[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1375,8 +1377,7 @@ impl RpcService for EngineRpc {
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = harness
-                    .models()
+                let models = crate::model_catalogs::list(self.repos.data_dir(), harness, p.force)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)
@@ -2791,6 +2792,16 @@ mod tests {
 
     /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
     /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.
+    #[test]
+    fn list_models_force_is_optional_and_backward_compatible() {
+        let old: ListModelsParams =
+            serde_json::from_value(serde_json::json!({"harness":"codex"})).unwrap();
+        assert!(!old.force);
+        let forced: ListModelsParams =
+            serde_json::from_value(serde_json::json!({"harness":"codex","force":true})).unwrap();
+        assert!(forced.force);
+    }
+
     #[test]
     fn agent_account_params_accept_ui_shape() {
         let p: AgentAccountParams = parse_params(serde_json::json!({
