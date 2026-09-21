@@ -836,7 +836,9 @@ impl Server {
             Protocol::V2 => "/api/session/active",
         };
         let map = unwrap_data(self.get_json(path, directory).await?);
-        Ok(map.get(session_id).is_some())
+        Ok(map
+            .get(session_id)
+            .is_some_and(|state| state.get("type").and_then(Value::as_str) != Some("idle")))
     }
 
     /// End the live turn.
@@ -1270,6 +1272,9 @@ struct TurnState {
     /// or after we explicitly abort it. A trailing idle from the previous
     /// turn must not settle a just-submitted boundary steer.
     idle_ready: bool,
+    idle_confirmations: u8,
+    status_poll: Option<tokio::time::Instant>,
+    status_backoff: Duration,
     /// Bus events about our session seen since the prompt was posted.
     saw_activity: bool,
     /// Renderable content (text/reasoning/tool) seen this turn.
@@ -1289,6 +1294,9 @@ impl TurnState {
         Self {
             active: true,
             idle_ready: false,
+            idle_confirmations: 0,
+            status_poll: None,
+            status_backoff: Duration::from_millis(100),
             saw_activity: false,
             saw_content: false,
             error: None,
@@ -1576,6 +1584,7 @@ async fn run_session(session: Session) {
             }
             turn.active = false;
             if let Some(usage) = pending_usage.take()
+                && !interrupt_requested
                 && !send(&event_tx, usage).await
             {
                 break $label;
@@ -1774,9 +1783,21 @@ async fn run_session(session: Session) {
                 break 'main;
             }
 
+            _ = tokio::time::sleep_until(turn.status_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if turn.status_poll.is_some() && turn.active => {
+                match tokio::time::timeout(Duration::from_secs(2), server.session_running(&session_id, dir)).await {
+                    Ok(Ok(false)) => settle_idle!('main),
+                    _ => {
+                        turn.status_backoff = (turn.status_backoff * 2).min(Duration::from_secs(2));
+                        turn.status_poll = Some(tokio::time::Instant::now() + turn.status_backoff);
+                    }
+                }
+            }
+
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
+                    BusMsg::CommandFailed(_) if interrupt_requested => {}
                     BusMsg::CommandFailed(message) => {
                         let _ = send(&event_tx, AgentEvent::Done {
                             status: DoneStatus::Errored, result: None,
@@ -1828,6 +1849,16 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     BusMsg::Event(event) => {
+                        if interrupt_requested {
+                            // Only the terminal idle/interrupt acknowledgement may
+                            // affect an aborted turn; discard late content and usage.
+                            let kind = event.get("type").and_then(Value::as_str);
+                            let ours = event.pointer("/properties/sessionID").and_then(Value::as_str) == Some(session_id.as_str());
+                            let idle = kind == Some("session.idle") || kind == Some("session.interrupted")
+                                || (kind == Some("session.status") && event.pointer("/properties/status/type").and_then(Value::as_str) == Some("idle"));
+                            if ours && idle { settle_idle!('main); }
+                            continue;
+                        }
                         let outcome = handle_bus_event(BusCtx {
                             event: &event,
                             session_id: &session_id,
@@ -2159,25 +2190,40 @@ async fn post_prompt(
             return Ok(());
         }
     }
-    match protocol {
-        Protocol::V1 => {
-            let body = prompt_body(
+    let (path, body) = match protocol {
+        Protocol::V1 => (
+            format!("/session/{session_id}/prompt_async"),
+            prompt_body(
                 prompt,
                 model.map(|(provider, model)| (provider.as_str(), model.as_str())),
                 variant,
                 attachments,
-            );
-            let path = format!("/session/{session_id}/prompt_async");
-            server.post_json(&path, dir, &body).await.map(|_| ())
+            ),
+        ),
+        Protocol::V2 => (
+            format!("/api/session/{session_id}/prompt"),
+            prompt_body_v2(prompt, attachments),
+        ),
+    };
+    let server = Server {
+        child: None,
+        base: server.base.clone(),
+        auth: server.auth.clone(),
+        client: server.client.clone(),
+        stderr_tail: crate::StderrTail::default(),
+        protocol: server.protocol.clone(),
+        version: tokio::sync::OnceCell::new(),
+    };
+    let bus_tx = bus_tx.clone();
+    let dir = dir.map(str::to_owned);
+    // The bus owns turn completion. A stalled HTTP acknowledgement must not
+    // prevent cancellation or event consumption; post_json bounds the request.
+    tokio::spawn(async move {
+        if let Err(error) = server.post_json(&path, dir.as_deref(), &body).await {
+            let _ = bus_tx.send(BusMsg::CommandFailed(error.to_string())).await;
         }
-        Protocol::V2 => {
-            // 2.x prompts carry text + `{uri, name}` files; model/variant
-            // were set on the session at run start.
-            let body = prompt_body_v2(prompt, attachments);
-            let path = format!("/api/session/{session_id}/prompt");
-            server.post_json(&path, dir, &body).await.map(|_| ())
-        }
-    }
+    });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,13 +2349,19 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
         // may submit a queued prompt before we consume the second. Until that
         // prompt starts (or fails/gets aborted), the second is stale. It must
         // neither complete the prompt nor disarm its startup watchdog.
-        return if turn.idle_ready || turn.error.is_some() {
-            BusOutcome::TurnIdle
-        } else {
-            BusOutcome::Continue
-        };
+        if turn.idle_ready || turn.error.is_some() {
+            turn.idle_confirmations += 1;
+            if turn.idle_confirmations >= 2 {
+                return BusOutcome::TurnIdle;
+            }
+        }
+        turn.status_poll = Some(tokio::time::Instant::now() + turn.status_backoff);
+        return BusOutcome::Continue;
     }
     if is_ours && turn.active {
+        turn.idle_confirmations = 0;
+        turn.status_poll = None;
+        turn.status_backoff = Duration::from_millis(100);
         turn.note_activity();
     }
 
