@@ -1673,3 +1673,30 @@ async fn cancel_watchdog_ignores_late_settlement_for_all_acp_specs() {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn dropping_idle_stream_reaps_warm_adapter() {
+    let (ctl, _steer, _) = controls();
+    let mut req = request("idle-pid");
+    req.model = None;
+    req.cwd = std::env::temp_dir().display().to_string();
+    let adapter = robust_harness().with_graces(Duration::from_millis(50), Duration::from_millis(50));
+    let mut stream = adapter.run(req, ctl).await.unwrap();
+    let mut pid = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                AgentEvent::TextDelta { text } => pid = Some(text.parse::<u32>().unwrap()),
+                AgentEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    let path = PathBuf::from(format!("/proc/{}", pid.unwrap()));
+    assert!(path.exists(), "mailbox keeps the idle adapter warm");
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while path.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+    }).await.expect("dropped consumer reaps the idle child");
+}

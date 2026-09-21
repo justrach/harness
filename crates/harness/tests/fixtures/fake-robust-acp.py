@@ -3,6 +3,7 @@
 import json
 import sys
 import signal
+import os
 
 
 def emit(frame):
@@ -39,6 +40,8 @@ for line in sys.stdin:
         emit({"id": ident, "result": {"sessionId": "parent"}})
     elif method == "session/prompt":
         prompt = frame["params"]["prompt"][0]["text"]
+        if prompt == "idle-pid":
+            update(str(os.getpid()))
         if prompt in ("wedge", "late-settle"):
             pending = ident
             if prompt == "late-settle":
