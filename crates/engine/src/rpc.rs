@@ -994,6 +994,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
             Duration::from_secs(15 * 60)
         }
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Allow the adapter discovery budget plus relay and shutdown overhead.
+        methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
         _ => Duration::from_secs(30),
     }
 }
@@ -2861,6 +2863,9 @@ mod tests {
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
     #[test]
     fn forward_deadlines_are_tiered_and_bounded() {
+        for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
+            assert_eq!(forward_deadline(method), std::time::Duration::from_secs(100));
+        }
         use std::time::Duration;
         assert_eq!(
             forward_deadline(methods::CREATE_WORKTREE),
