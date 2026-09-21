@@ -64,6 +64,7 @@ mod command_palette;
 mod files_panel;
 mod project_icon;
 mod sidebar_pins;
+mod sidebar_sections;
 mod spaces;
 mod tabs;
 
@@ -811,10 +812,11 @@ struct SidebarSessionDrag {
     profile_key: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum SidebarSessionDrop {
     Pinned(usize),
     Regular,
+    Section(String),
 }
 
 struct SidebarSessionTransfer {
@@ -895,6 +897,7 @@ struct PinnedSessionDragState {
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
+    custom_count: usize,
     regular_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
@@ -1547,6 +1550,11 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
+    section_dialog: Option<sidebar_sections::SectionDialog>,
+    section_menu: Option<(String, Point<Pixels>)>,
+    section_header_hover: Option<String>,
+    section_menu_focus: FocusHandle,
+    section_menu_active: Option<usize>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
     /// The add-space palette (device tabs + folder search), `Some`
@@ -1937,6 +1945,11 @@ impl Shell {
             delete_confirm: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
+            section_dialog: None,
+            section_menu: None,
+            section_header_hover: None,
+            section_menu_focus: cx.focus_handle(),
+            section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
             command_palette: None,
@@ -4171,6 +4184,17 @@ impl Shell {
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
+        let mut pins = self.raw_sidebar_pins(cx);
+        let sections = self.active_sidebar_sections(cx);
+        pins.retain(|id| {
+            !sections
+                .iter()
+                .any(|section| section.session_ids.contains(id))
+        });
+        pins
+    }
+
+    fn raw_sidebar_pins(&self, cx: &App) -> Vec<String> {
         if let Some(pins) = self.optimistic_sidebar_pins(cx) {
             return pins;
         }
@@ -4228,10 +4252,10 @@ impl Shell {
         change: zeron_proto::SidebarPinChange,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut pinned_session_ids = self.active_sidebar_pins(cx);
+        let mut pinned_session_ids = self.raw_sidebar_pins(cx);
         change.project(&mut pinned_session_ids);
         if !self.validate_sidebar_pin_change(&profile_key, &pinned_session_ids, cx)
-            || self.active_sidebar_pins(cx) == pinned_session_ids
+            || self.raw_sidebar_pins(cx) == pinned_session_ids
         {
             return false;
         }
@@ -4275,18 +4299,28 @@ impl Shell {
         if pins.contains(&chat_id) == pinned {
             return;
         }
+        if pinned && self.raw_sidebar_pins(cx).contains(&chat_id) {
+            self.assign_sidebar_section(&chat_id, None, cx);
+            cx.notify();
+            return;
+        }
         let change = if pinned {
             zeron_proto::SidebarPinChange::Pin {
-                session_id: chat_id,
+                session_id: chat_id.clone(),
                 after: pins.last().cloned(),
                 before: None,
             }
         } else {
             zeron_proto::SidebarPinChange::Unpin {
-                session_id: chat_id,
+                session_id: chat_id.clone(),
             }
         };
-        self.apply_sidebar_pin_change(profile_key, change, cx);
+        if self.apply_sidebar_pin_change(profile_key, change, cx)
+            && pinned
+            && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
+        {
+            self.assign_sidebar_section(&chat_id, None, cx);
+        }
         cx.notify();
     }
 
@@ -4339,6 +4373,8 @@ impl Shell {
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
+            || self.section_dialog.is_some()
+            || self.section_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
@@ -6553,18 +6589,20 @@ impl Shell {
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
+        let custom_count = session_rows.custom_count;
+        let regular_start = pinned_count + custom_count;
         let keyed = session_rows.rows;
         let regular_count = session_rows.regular_count;
         let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
         let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + keyed
                 .iter()
-                .skip(pinned_count)
+                .skip(regular_start)
                 .map(|(_, height, _)| height)
                 .sum::<f32>()
-            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(pinned_count + 1) as f32;
+            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(regular_start + 1) as f32;
         let regular_body_height =
-            if keyed.len() == pinned_count && self.sidebar_session_transfer.is_some() {
+            if keyed.len() == regular_start && self.sidebar_session_transfer.is_some() {
                 spaces::SIDEBAR_DISCLOSURE_BODY_INSET
                     + 48.0
                     + self.sidebar_transfer_extra_gap("regular")
@@ -6601,11 +6639,15 @@ impl Shell {
             ));
         }
         for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if ungrouped && ix == pinned_count {
+            if ungrouped && ix == regular_start {
                 order.push((
                     "sidebar-sessions-header".into(),
                     spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                        + if show_pinned_section { 12.0 } else { 0.0 }
+                        + if show_pinned_section || custom_count > 0 {
+                            12.0
+                        } else {
+                            0.0
+                        }
                         + if self.sessions_open {
                             spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
                         } else {
@@ -6613,7 +6655,7 @@ impl Shell {
                         },
                 ));
             }
-            if ungrouped && ix >= pinned_count && !self.sessions_open {
+            if ungrouped && ix >= regular_start && !self.sessions_open {
                 continue;
             }
             if ix < pinned_count && !self.pinned_open {
@@ -6762,7 +6804,8 @@ impl Shell {
         let filter_row = self.render_spaces_filter(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
-            let regular_items = pinned_items.split_off(pinned_count);
+            let mut custom_items = pinned_items.split_off(pinned_count);
+            let regular_items = custom_items.split_off(custom_count);
             let regular_empty = regular_items.is_empty();
             let pinned_group = show_pinned_section
                 .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
@@ -6773,6 +6816,7 @@ impl Shell {
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
+                .children(custom_items)
                 .when(
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
@@ -6842,7 +6886,7 @@ impl Shell {
                                     .into_any_element(),
                                 regular_body_height,
                                 regular_count,
-                                show_pinned_section,
+                                show_pinned_section || custom_count > 0,
                                 theme,
                                 cx,
                             ),
@@ -8020,6 +8064,7 @@ impl Shell {
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
+        overlays.extend(self.render_section_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }

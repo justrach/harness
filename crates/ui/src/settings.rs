@@ -648,6 +648,9 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// Custom sidebar organization, isolated between account profiles on this device.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
@@ -774,6 +777,7 @@ impl Default for UiSettings {
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
+            sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
             sound_enabled: true,
@@ -1503,6 +1507,18 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
     }
 }
 
+/// A user-named sidebar section. Archived sessions retain membership so restoring
+/// them restores their section; deleting the section never deletes sessions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SidebarSection {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2002,6 +2018,7 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
                     "local".to_string(),

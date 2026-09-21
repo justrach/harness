@@ -59,6 +59,7 @@ icon_assets![
     (LAPTOP, "laptop"),
     (PEN_NEW_SQUARE, "pen-new-square"),
     (SORT, "sort"),
+    (MORE_HORIZONTAL, "more-horizontal"),
     (SORT_VERTICAL, "sort-vertical"),
     // Compact six-dot grip used to reorder queued prompts.
     (DRAG_HANDLE, "drag-handle"),
