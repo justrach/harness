@@ -132,7 +132,7 @@ const INSTALL_HINT: &str = "opencode (searched PATH, the login shell's PATH, ~/.
      fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
      %APPDATA%\\npm, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
      `curl -fsSL https://opencode.ai/install | bash` or \
-     `npm install -g opencode-ai`, then `opencode auth login`; set \
+     `npm install -g @opencode/cli`, then `opencode auth login`; set \
      OPENCODE_EXECUTABLE to override)";
 
 /// The user's opencode: `OPENCODE_EXECUTABLE` when it exists, else PATH (plus
@@ -407,6 +407,7 @@ struct Server {
     stderr_tail: crate::StderrTail,
     /// Wire generation, resolved once via the health endpoints.
     protocol: tokio::sync::OnceCell<Protocol>,
+    version: tokio::sync::OnceCell<ServerVersion>,
 }
 
 /// The attached server's wire generation: the 1.x "v1" global namespace
@@ -418,27 +419,70 @@ enum Protocol {
     V2,
 }
 
+#[derive(Clone, Debug)]
+struct ServerVersion {
+    raw: String,
+    number: Option<(u64, u64, u64)>,
+}
+
+impl ServerVersion {
+    fn parse(raw: &str) -> Self {
+        let number = (|| {
+            let start = raw.find(|c: char| c.is_ascii_digit())?;
+            let mut parts = raw[start..].split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let patch = parts
+                .next()?
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()?;
+            Some((major, minor, patch))
+        })();
+        Self {
+            raw: raw.to_owned(),
+            number,
+        }
+    }
+}
+
 impl Protocol {
-    /// One readiness poll across both generations. 2.x answers
-    /// `GET /api/health` with `{healthy, version}` and serves its web UI on
-    /// `/global/health`; 1.x answers `GET /global/health` with
-    /// `{healthy, version}` AND also serves `/api/health` — with
-    /// `{"healthy":true}`, no version (both observed live). The version
-    /// field is the only unambiguous discriminator. `None` = still booting.
-    async fn detect(server: &Server) -> Option<Self> {
+    /// Probe newest to oldest. A version-bearing JSON response distinguishes
+    /// the API from web UI catch-alls; `None` means the server is still booting.
+    async fn detect(server: &Server) -> Result<Option<Self>, HarnessError> {
         for (path, protocol) in [
+            ("/api/info", Protocol::V2),
+            ("/api/status", Protocol::V2),
             ("/api/health", Protocol::V2),
             ("/global/health", Protocol::V1),
         ] {
-            if let Ok(resp) = server.get_raw(path).await
-                && resp.status().is_success()
+            let Ok(resp) = server.get_raw(path).await else {
+                continue;
+            };
+            if matches!(resp.status().as_u16(), 401 | 403) {
+                return Err(HarnessError::Protocol(format!(
+                    "opencode authentication rejected at {path}: {}",
+                    resp.status()
+                )));
+            }
+            if resp.status().is_success()
                 && let Ok(v) = resp.json::<Value>().await
-                && v.get("version").and_then(Value::as_str).is_some()
+                && let Some(version) = v
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| {
+                        v.pointer("/data/version")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                    })
             {
-                return Some(protocol);
+                let _ = server.version.set(ServerVersion::parse(version));
+                return Ok(Some(protocol));
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -451,6 +495,7 @@ impl Server {
             client: http_client(),
             stderr_tail: crate::StderrTail::default(),
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -459,7 +504,13 @@ impl Server {
     async fn protocol(&self) -> Protocol {
         *self
             .protocol
-            .get_or_init(|| async { Protocol::detect(self).await.unwrap_or(Protocol::V1) })
+            .get_or_init(|| async {
+                Protocol::detect(self)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Protocol::V1)
+            })
             .await
     }
 
@@ -522,6 +573,7 @@ impl Server {
             client: http_client(),
             stderr_tail,
             protocol: tokio::sync::OnceCell::new(),
+            version: tokio::sync::OnceCell::new(),
         };
 
         // Readiness: the server binds a few seconds into the process's life
@@ -538,7 +590,18 @@ impl Server {
                     &server.stderr_tail,
                 )));
             }
-            if let Some(protocol) = Protocol::detect(&server).await {
+            let detected = match Protocol::detect(&server).await {
+                Ok(detected) => detected,
+                Err(error) => {
+                    server.shutdown(Duration::from_secs(1)).await;
+                    return Err(error);
+                }
+            };
+            if let Some(protocol) = detected {
+                tracing::debug!(
+                    version = server.version.get().map(|v| v.raw.as_str()),
+                    "opencode ready"
+                );
                 let _ = server.protocol.set(protocol);
                 break;
             }
@@ -1949,6 +2012,7 @@ async fn post_prompt(
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 // The command endpoint blocks for the whole turn; the bus
                 // carries the real events, so this response is ignored —
@@ -2417,6 +2481,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol: protocol_cell,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 let allowed = auto_approve
                     || (permission_input)(vec![question.clone()])
@@ -2495,6 +2560,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     client: http_client(),
                     stderr_tail: crate::StderrTail::default(),
                     protocol: protocol_cell,
+                    version: tokio::sync::OnceCell::new(),
                 };
                 let reply = match rx.await {
                     Ok(answers) => {

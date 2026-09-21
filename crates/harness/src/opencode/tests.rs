@@ -1383,3 +1383,94 @@ async fn v2_recovered_step_failure_does_not_poison_successful_execution() {
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "Recovered");
 }
+
+#[test]
+fn server_version_parsing() {
+    for (raw, expected) in [
+        ("2.0.4", Some((2, 0, 4))),
+        ("opencode v2.0.11", Some((2, 0, 11))),
+        ("v2.0.11-beta+build", Some((2, 0, 11))),
+        (" 1.18.21 ", Some((1, 18, 21))),
+        ("3.1.0", Some((3, 1, 0))),
+        ("2.0", None),
+        ("", None),
+        ("unknown", None),
+    ] {
+        let version = ServerVersion::parse(raw);
+        assert_eq!(version.raw, raw);
+        assert_eq!(version.number, expected, "{raw}");
+    }
+}
+
+#[tokio::test]
+async fn detection_routes_and_authentication() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (route, body, status, expected) in [
+        (
+            "/api/info",
+            r#"{"version":"2.0.11"}"#,
+            200,
+            Some(Protocol::V2),
+        ),
+        (
+            "/api/status",
+            r#"{"data":{"version":"2.0.4"}}"#,
+            201,
+            Some(Protocol::V2),
+        ),
+        (
+            "/api/health",
+            r#"{"healthy":true,"version":"2.0.3"}"#,
+            200,
+            Some(Protocol::V2),
+        ),
+        (
+            "/global/health",
+            r#"{"version":"1.18.21"}"#,
+            200,
+            Some(Protocol::V1),
+        ),
+        ("/api/info", r#"{"version":" "}"#, 200, None),
+        ("/api/info", r#"{"healthy":true}"#, 200, None),
+        ("/api/info", "<html>web UI</html>", 200, None),
+        ("/api/info", "{}", 401, None),
+        ("/api/status", "{}", 403, None),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = Server::attached(format!("http://{}", listener.local_addr().unwrap()));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                let header = String::from_utf8_lossy(&bytes[..n]);
+                let path = header.split_whitespace().nth(1).unwrap();
+                recorded.lock().unwrap().push(path.to_owned());
+                let (code, text) = if path == route {
+                    (status, body)
+                } else {
+                    (404, "{}")
+                };
+                socket.write_all(format!("HTTP/1.1 {code} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let result = Protocol::detect(&server).await;
+        task.abort();
+        if status == 401 || status == 403 {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("authentication rejected")
+            );
+        } else {
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(server.version.get().is_some(), expected.is_some());
+        }
+        let seen = seen.lock().unwrap();
+        let order = ["/api/info", "/api/status", "/api/health", "/global/health"];
+        assert_eq!(*seen, order[..seen.len()]);
+    }
+}
