@@ -11,7 +11,7 @@ pinned Antigravity archive.
 | [Claude Code](https://code.claude.com/docs/en/setup) | `curl -fsSL https://claude.ai/install.sh \| bash` | `irm https://claude.ai/install.ps1 \| iex` |
 | [Codex](https://github.com/openai/codex/blob/main/README.md) | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `irm https://chatgpt.com/codex/install.ps1 \| iex` |
 | [Cursor](https://cursor.com/docs/cli/installation) | `curl https://cursor.com/install -fsS \| bash` | `irm 'https://cursor.com/install?win32=true' \| iex` |
-| [OpenCode](https://opencode.ai/docs/) | `curl -fsSL https://opencode.ai/install \| bash` | `npm.cmd install -g opencode-ai` |
+| [OpenCode](https://opencode.ai/docs/) | `curl -fsSL https://opencode.ai/install \| bash` | `npm.cmd install -g @opencode/cli` |
 | [Pi](https://pi.dev/docs/latest) | `curl -fsSL https://pi.dev/install.sh \| sh` | `npm.cmd install -g --ignore-scripts @earendil-works/pi-coding-agent` |
 | [Grok](https://docs.x.ai/developers/release-notes) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | `npm.cmd install -g @xai-official/grok` |
 | [Hermes](https://hermes-agent.nousresearch.com/docs/getting-started/installation) | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | `irm https://hermes-agent.nousresearch.com/install.ps1 \| iex` |
@@ -25,7 +25,7 @@ Windows npm commands use the resolved npm launcher (normally `npm.cmd`).
 
 If shell prerequisites are absent, these documented npm alternatives are used
 when npm resolves: `npm install -g @openai/codex`,
-`npm install -g opencode-ai`,
+`npm install -g @opencode/cli`,
 `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, and
 `npm install -g @xai-official/grok`. Codex also falls back to npm on Windows when
 PowerShell is unavailable. Grok's npm route is documented in its

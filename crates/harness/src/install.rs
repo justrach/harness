@@ -71,10 +71,10 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             "irm 'https://cursor.com/install?win32=true' | iex",
         )],
         Cursor => vec![Shell("curl https://cursor.com/install -fsS | bash", "bash")],
-        Opencode if windows => vec![Npm("opencode-ai", false)],
+        Opencode if windows => vec![Npm("@opencode/cli", false)],
         Opencode => vec![
             Shell("curl -fsSL https://opencode.ai/install | bash", "bash"),
-            Npm("opencode-ai", false),
+            Npm("@opencode/cli", false),
         ],
         Pi if windows => vec![Npm("@earendil-works/pi-coding-agent", true)],
         Pi => vec![
@@ -153,7 +153,7 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
         Codex => "npm install -g @openai/codex",
         Cursor => "curl https://cursor.com/install -fsS | bash",
-        Opencode => "npm install -g opencode-ai",
+        Opencode => "npm install -g @opencode/cli",
         Pi => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
         Grok => "npm install -g @xai-official/grok",
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
