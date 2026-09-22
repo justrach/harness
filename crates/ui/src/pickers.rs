@@ -4471,7 +4471,7 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
 /// space's device may run any version): the `default` alias row drops when a
 /// real row exists, an orphan `<model>[1m]` variant presents as its base id
 /// with the Context Window trait pinned to 1M, and Claude rows adopt the
-/// curated catalog's labels so the version number always shows ("Opus 5",
+/// curated catalog's labels so the version number always shows ("Opus 5.5",
 /// not the wire's terse "Opus" alias — user request). Idempotent over
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
@@ -6344,7 +6344,7 @@ mod tests {
         );
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
+            vec!["Opus 5.5", "Fable 5", "Sonnet 5", "Haiku 4.5", "Nova 1"]
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),

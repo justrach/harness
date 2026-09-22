@@ -1494,7 +1494,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
     // Family-alias catalog row: the claude adapter advertises bare aliases
     // (`opus`, `sonnet`, `haiku`) meaning "the current generation" — match
     // them to the first (flagship-ordered) catalog row of that family so
-    // the picker shows the curated label/ladder ("Opus 5") instead of the
+    // the picker shows the curated label/ladder ("Opus 5.5") instead of the
     // terse alias. Alphabetic-only ids ONLY: versioned ids
     // (`gpt-5.2-codex`) must never fuzzy-match a foreign row.
     let alias = |id: &str| {
@@ -4690,7 +4690,7 @@ mod tests {
         let models = models_from_session(&response, &crate::claude::catalog::static_models());
         assert_eq!(
             models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec!["Opus 5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"]
+            vec!["Opus 5.5", "Fable 5.1", "Sonnet 5", "Haiku 4.5"]
         );
         // The alias rows carry the catalog's per-model ladders.
         assert!(
