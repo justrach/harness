@@ -4,6 +4,8 @@
 
 *[English](README.md) | 简体中文*
 
+[♥ 赞助 Zeron](https://github.com/sponsors/zeronsh)
+
 ![Zeron 驱动一个 Claude Code 会话，侧边栏是实时的分支 diff](apps/landing/public/assets/app-screenshot.jpg)
 
 每台设备各跑一个小引擎，会话就存在这台设备上。装完默认是纯本地模式，不用账号，也不用联网。
@@ -48,6 +50,12 @@ zeron daemon start
 如果有引擎正占着数据目录，`zeron login` 和 `zeron logout` 会拒绝改动凭据。桌面应用同样遵守这条边界：profile 要等下次重启才切换。
 
 macOS 上用桌面版发行包，或者从源码构建 `zeron`，再运行 `zeron daemon install` 装上 launchd 服务。
+
+## 赞助
+
+感谢 [The Context Company](https://www.thecontextcompany.com/) 对 Zeron 的赞助。
+
+你也可以资助 Zeron 的开发。欢迎个人和公司[通过 GitHub 成为赞助者](https://github.com/sponsors/zeronsh)。
 
 ---
 

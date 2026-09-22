@@ -4,6 +4,8 @@ Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi,
 
 *English | [简体中文](README.zh-CN.md)*
 
+[♥ Sponsor Zeron](https://github.com/sponsors/zeronsh)
+
 ![Zeron driving a Claude Code session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
 
 Every device runs a small engine that stores sessions on that device. A new installation starts in local-only mode without an account or a network connection.
@@ -54,6 +56,12 @@ zeron daemon start
 On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
 
 On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
+
+## Sponsors
+
+Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron.
+
+You can help fund Zeron's development too. Individuals and companies are welcome to [become a sponsor on GitHub](https://github.com/sponsors/zeronsh).
 
 ---
 
