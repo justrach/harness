@@ -614,6 +614,9 @@ impl Shell {
             control = control.child(retry);
         } else {
             let add = action_segment(&theme, "project-action-add")
+                // Follow the inner edge of the control's 6px radius and 1px border.
+                .rounded_l(px(5.0))
+                .when(!has_imports, |el| el.rounded_r(px(5.0)))
                 .cursor_pointer()
                 .on_click(
                     cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
