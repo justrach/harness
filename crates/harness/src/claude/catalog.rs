@@ -15,7 +15,9 @@ use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 pub(crate) const ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
 
 pub(crate) fn apply_ultrathink(reasoning: Option<ReasoningLevel>, text: &str) -> String {
-    if reasoning == Some(ReasoningLevel::Ultrathink) {
+    if reasoning == Some(ReasoningLevel::Ultrathink)
+        && zeron_proto::invocation::leading_command(text).is_none()
+    {
         format!("{ULTRATHINK_PREFIX}{text}")
     } else {
         text.to_owned()
@@ -404,6 +406,30 @@ mod tests {
         assert!(supports_xhigh("claude-opus-4-7-20260101"));
         assert!(!supports_xhigh("claude-opus-4-5"));
         assert!(!supports_xhigh("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn ultrathink_preserves_leading_commands_and_arguments() {
+        for command in ["/compact", "/review focus on tests"] {
+            for prefix in ["", " ", "   ", "\n", "\r\n  "] {
+                let text = format!("{prefix}{command}");
+                assert_eq!(
+                    apply_ultrathink(Some(ReasoningLevel::Ultrathink), &text),
+                    text
+                );
+            }
+        }
+        for literal in [
+            "    /compact",
+            "\t/compact",
+            "\n    /compact",
+            "\u{a0}/compact",
+        ] {
+            assert_eq!(
+                apply_ultrathink(Some(ReasoningLevel::Ultrathink), literal),
+                format!("{ULTRATHINK_PREFIX}{literal}")
+            );
+        }
     }
 
     #[test]

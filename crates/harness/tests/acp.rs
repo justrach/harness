@@ -1949,3 +1949,73 @@ async fn antigravity_detection_subprocess() {
             .unwrap_or(true)
     );
 }
+
+#[tokio::test]
+async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
+    for h in [
+        AcpHarness::devin(),
+        AcpHarness::grok(),
+        AcpHarness::hermes(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let h = h.with_executable(fixture_path());
+        for name in ["project-a", "project-b"] {
+            let cwd = tempfile::tempdir().unwrap();
+            std::fs::write(cwd.path().join(".command-fixture"), name).unwrap();
+            let commands = h
+                .commands_for(&cwd.path().canonicalize().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(commands.len(), 1, "{:?}", h.id());
+            assert_eq!(commands[0].name, name, "{:?}", h.id());
+        }
+    }
+}
+
+#[tokio::test]
+async fn shared_acp_skills_require_explicit_native_command_classification() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+    for h in [
+        AcpHarness::devin(),
+        AcpHarness::grok(),
+        AcpHarness::hermes(),
+        AcpHarness::pi(),
+        AcpHarness::antigravity(),
+    ] {
+        let h = h.with_executable(fixture_path());
+        let cwd = tempfile::tempdir().unwrap();
+        let skill_dir = cwd.path().join(".agents/skills/zeron-fixture-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: zeron-fixture-review\ndescription: Review changes\n---\nReview the changes.").unwrap();
+        let command_name = if h.id() == HarnessId::Pi {
+            "skill:zeron-fixture-review"
+        } else {
+            "zeron-fixture-review"
+        };
+        std::fs::write(cwd.path().join(".command-fixture"), command_name).unwrap();
+        let skills = h
+            .skills(&cwd.path().canonicalize().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let skill = skills
+            .into_iter()
+            .find(|s| s.name == "zeron-fixture-review")
+            .unwrap();
+        assert_eq!(skill.command.is_some(), h.id() == HarnessId::Pi);
+        let invocation = Invocation::Skill {
+            name: skill.name,
+            path: skill.path,
+            command: skill.command,
+        };
+        assert_eq!(
+            harness_prompt(&format!("{} inspect tests", invocation.link()), h.id()),
+            if h.id() == HarnessId::Pi {
+                format!("/{command_name} inspect tests")
+            } else {
+                format!("Use the skill {} inspect tests", invocation.prompt_text())
+            }
+        );
+    }
+}

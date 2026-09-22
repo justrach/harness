@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum NativeCommandReply {
+    Http404,
+    Disconnect,
+    DelayedHttp404,
+}
+
 /// Real HTTP/SSE transport with explicitly ordered turn events. No provider or
 /// installed CLI is involved, so duplicate completion frames are reproducible.
 struct TurnWire {
@@ -9,6 +16,7 @@ struct TurnWire {
     events: mpsc::Receiver<Result<AgentEvent, HarnessError>>,
     interrupt: tokio_util::sync::CancellationToken,
     polls: Arc<std::sync::atomic::AtomicUsize>,
+    command_failure_release: Option<tokio::sync::oneshot::Sender<()>>,
     server: tokio::task::JoinHandle<()>,
     run: tokio::task::JoinHandle<()>,
 }
@@ -50,6 +58,43 @@ impl TurnWire {
         overrides: Value,
         command_failure: bool,
     ) -> Self {
+        Self::start_fixture(
+            queued,
+            v2,
+            auto_approve,
+            answer,
+            version,
+            overrides,
+            command_failure,
+            None,
+        )
+        .await
+    }
+
+    async fn start_native_command(queued: bool, reply: NativeCommandReply) -> Self {
+        Self::start_fixture(
+            queued,
+            false,
+            true,
+            None,
+            "2.0.3",
+            json!({}),
+            false,
+            Some(reply),
+        )
+        .await
+    }
+
+    async fn start_fixture(
+        queued: bool,
+        v2: bool,
+        auto_approve: bool,
+        answer: Option<bool>,
+        version: &'static str,
+        overrides: Value,
+        command_failure: bool,
+        native_command_reply: Option<NativeCommandReply>,
+    ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -62,6 +107,8 @@ impl TurnWire {
         let busy_polls = overrides["busyPolls"].as_u64().unwrap_or(0) as usize;
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let server_polls = polls.clone();
+        let (command_failure_release, command_failure_wait) = tokio::sync::oneshot::channel();
+        let command_failure_wait = Arc::new(tokio::sync::Mutex::new(Some(command_failure_wait)));
         let server = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
@@ -70,6 +117,7 @@ impl TurnWire {
                 let request_tx = request_tx.clone();
                 let recorded = recorded.clone();
                 let polls = server_polls.clone();
+                let command_failure_wait = command_failure_wait.clone();
                 connections.spawn(async move {
                     let mut request = Vec::new();
                     let mut buf = [0; 4096];
@@ -118,24 +166,58 @@ impl TurnWire {
                         return;
                     }
                     let health = json!({"version": version}).to_string();
-                    let body = if v2 {
+                    if native_command_reply.is_some() && is_post && path == "/session/fixture/command" {
+                        let _ = request_tx.send(path.clone());
+                        match native_command_reply.expect("native command fixture configured") {
+                            NativeCommandReply::Disconnect => return,
+                            NativeCommandReply::DelayedHttp404 => {
+                                if let Some(wait) = command_failure_wait.lock().await.take() {
+                                    let _ = wait.await;
+                                }
+                            }
+                            NativeCommandReply::Http404 => {}
+                        }
+                        let body = r#"{"error":"command removed"}"#;
+                        socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                        return;
+                    }
+                    let missing_resume = path == "/session/missing" || path == "/api/session/missing";
+                    let (status, body) = if missing_resume {
+                        ("404 Not Found", r#"{"error":"missing"}"#)
+                    } else if v2 {
                         match path.as_str() {
-                            "/api/health" => &health,
-                            "/api/session" => r#"{"data":{"id":"fixture"}}"#,
-                            "/api/command" => r#"{"data":[]}"#,
+                            "/api/health" => ("200 OK", health.as_str()),
+                            "/api/session" => ("200 OK", r#"{"data":{"id":"fixture"}}"#),
+                            "/api/command" => ("200 OK", r#"{"data":[]}"#),
                             // Non-empty: the catalog-sync retry loop must not stall tests.
-                            "/api/model" => r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#,
-                            _ => "{}",
+                            "/api/model" => ("200 OK", r#"{"data":[{"providerID":"opencode","id":"muse","name":"Muse","limit":{"context":1000},"variants":[{"id":"low"}],"enabled":true}]}"#),
+                            _ => ("200 OK", "{}"),
                         }
                     } else {
                         match path.as_str() {
-                            "/global/health" => r#"{"healthy":true,"version":"1.18.31"}"#,
-                            "/session" => r#"{"id":"fixture"}"#,
-                            "/command" => "[]",
-                            _ => "{}",
+                            "/global/health" => ("200 OK", r#"{"healthy":true,"version":"1.18.31"}"#),
+                            "/session" => ("200 OK", r#"{"id":"fixture"}"#),
+                            "/command" => (
+                                "200 OK",
+                                if native_command_reply.is_some() {
+                                    r#"[{"name":"project-review","description":"Review"}]"#
+                                } else {
+                                    "[]"
+                                },
+                            ),
+                            _ => ("200 OK", "{}"),
                         }
                     };
-                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                     if path.ends_with("/prompt_async")
                         || path.ends_with("/prompt")
                         || path.ends_with("/abort")
@@ -160,7 +242,7 @@ impl TurnWire {
         }
         drop(steer_tx);
         let interrupt = tokio_util::sync::CancellationToken::new();
-        let mut request = json!({"prompt":"first", "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
+        let mut request = json!({"prompt": if native_command_reply.is_some() { "/project-review" } else { "first" }, "cwd":"", "sandbox":"workspace-write", "autoApprove": auto_approve, "model": if v2 { Some("opencode/muse") } else { None }, "reasoning": "low"});
         request
             .as_object_mut()
             .unwrap()
@@ -190,10 +272,16 @@ impl TurnWire {
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_millis(50),
             known_commands: Some(vec![SlashCommand {
-                name: "test".into(),
+                name: if native_command_reply.is_some() {
+                    "project-review"
+                } else {
+                    "test"
+                }
+                .into(),
                 description: String::new(),
                 input_hint: None,
             }]),
+            initial_native_command_selected: native_command_reply.is_some(),
         }));
         Self {
             bus,
@@ -202,6 +290,11 @@ impl TurnWire {
             events,
             interrupt,
             polls,
+            command_failure_release: matches!(
+                native_command_reply,
+                Some(NativeCommandReply::DelayedHttp404)
+            )
+            .then_some(command_failure_release),
             server,
             run,
         }
@@ -276,6 +369,74 @@ async fn queued_turn_ignores_previous_turn_duplicate_idle() {
             "queued turn was completed before its response"
         );
     }
+}
+
+#[tokio::test]
+async fn native_command_http_failures_settle_the_current_turn() {
+    for (reply, expected_status) in [
+        (NativeCommandReply::Http404, Some("404 Not Found")),
+        (NativeCommandReply::Disconnect, None),
+    ] {
+        let mut wire = TurnWire::start_native_command(false, reply).await;
+        wire.request("/command").await;
+        let (status, error) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut surfaced = None;
+            loop {
+                match wire.events.recv().await.unwrap().unwrap() {
+                    AgentEvent::Error { message } => surfaced = Some(message),
+                    AgentEvent::Done { status, error, .. } => {
+                        return (status, error.or(surfaced));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status, DoneStatus::Errored);
+        let error = error.expect("native command HTTP failure is surfaced");
+        assert!(error.contains("opencode POST /session/fixture/command:"));
+        if let Some(expected_status) = expected_status {
+            assert!(error.contains(expected_status), "{error}");
+        } else {
+            assert!(!error.contains("404 Not Found"), "{error}");
+        }
+        assert!(
+            !wire
+                .posts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| path.ends_with("/prompt_async")),
+            "failed native command must not fall back to an ordinary prompt"
+        );
+    }
+}
+
+#[tokio::test]
+async fn late_native_command_failure_does_not_poison_the_queued_turn() {
+    let mut wire = TurnWire::start_native_command(true, NativeCommandReply::DelayedHttp404).await;
+    wire.request("/command").await;
+    wire.status("busy");
+    wire.status("idle");
+    wire.request("/prompt_async").await;
+
+    // The synchronous command endpoint returns only after the event bus has
+    // settled its turn and the queued ordinary prompt owns a new generation.
+    wire.command_failure_release
+        .take()
+        .unwrap()
+        .send(())
+        .unwrap();
+    tokio::task::yield_now().await;
+
+    wire.status("busy");
+    wire.bus.send(json!({"type":"message.updated", "properties":{"info":{"id":"answer", "sessionID":"fixture", "role":"assistant"}}})).unwrap();
+    wire.bus.send(json!({"type":"message.part.updated", "properties":{"part":{"id":"text", "messageID":"answer", "sessionID":"fixture", "type":"text", "text":"SECOND_OK"}}})).unwrap();
+    wire.status("idle");
+    let (status, text) = wire.done().await;
+    assert_eq!(status, DoneStatus::Completed);
+    assert_eq!(text, "SECOND_OK");
 }
 
 #[tokio::test]
@@ -960,6 +1121,39 @@ fn commands_map_from_wire() {
     assert_eq!(commands[0].name, "init");
     assert_eq!(commands[0].description, "Create AGENTS.md");
     assert_eq!(commands[1].name, "share");
+}
+
+#[test]
+fn canonical_command_removed_after_discovery_is_not_downgraded_to_prompt_text() {
+    use zeron_proto::invocation::{Invocation, harness_prompt};
+
+    let discovered = commands_from_wire(&json!([{
+        "name": "project-review",
+        "description": "Review this project"
+    }]));
+    let canonical = Invocation::Command {
+        name: discovered[0].name.clone(),
+    }
+    .link();
+    assert!(selected_native_command(&canonical, HarnessId::Opencode));
+    let delivered = harness_prompt(&canonical, HarnessId::Opencode);
+
+    // The project-scoped catalog changed after composer discovery. A
+    // canonical selection retains command intent and fails explicitly.
+    let live = commands_from_wire(&json!([]));
+    let error = native_command_request(&delivered, &live, true).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "harness protocol error: The selected OpenCode command /project-review is no longer available in this project"
+    );
+
+    // Identical raw slash text was never a composer selection, so it keeps
+    // the historical ordinary-prompt fallback.
+    assert!(
+        native_command_request(&delivered, &live, false)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -1975,5 +2169,50 @@ async fn v2_spawn_names_bind_child_traffic_to_the_parent_chip() {
             matches!(&calls[0].1, ToolCall::Unknown { name, .. } if name == "Agent: Inspect project")
         );
         assert!(child_events.iter().any(|(id, event)| id == &calls[0].0 && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "child answer")), "{name}: {child_events:?}");
+    }
+}
+
+#[test]
+fn native_skill_catalog_rejects_unrepresentable_commands() {
+    use zeron_proto::invocation::{Invocation, Skill, invocation_links};
+    let mut skills = vec![Skill {
+        name: "review[ui]".into(),
+        path: "/repo/é skill/SKILL.md".into(),
+        description: String::new(),
+        enabled: true,
+        command: None,
+    }];
+    let mut commands = vec![];
+    for name in [
+        "",
+        "two words",
+        " padded",
+        "padded ",
+        "line\nbreak",
+        "tab\tname",
+        "nul\0name",
+        "non\u{a0}breaking",
+        "review[ui]",
+        "review/extra",
+    ] {
+        commands.push(json!({"name":name,"source":"skill"}));
+    }
+    for name in ["review", "审查-é:ui.v2_test"] {
+        commands.push(json!({"name":name,"source":"skill"}));
+    }
+    merge_skill_commands(&mut skills, &json!(commands));
+    assert_eq!(skills.len(), 3);
+    assert!(
+        skills[0].command.is_none(),
+        "an invalid command must not poison a valid file skill"
+    );
+    assert_eq!(skills[2].path, "opencode-skill:审查-é:ui.v2_test");
+    for skill in skills {
+        let invocation = Invocation::Skill {
+            name: skill.name,
+            path: skill.path,
+            command: skill.command,
+        };
+        assert_eq!(invocation_links(&invocation.link())[0].1, invocation);
     }
 }

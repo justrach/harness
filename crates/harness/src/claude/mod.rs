@@ -94,6 +94,7 @@ pub struct ClaudeHarness {
     kill_grace: Duration,
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
+    workspace_commands: crate::skills::CommandDiscovery,
 }
 
 impl Default for ClaudeHarness {
@@ -104,6 +105,7 @@ impl Default for ClaudeHarness {
             kill_grace: Duration::from_secs(3),
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
+            workspace_commands: crate::skills::CommandDiscovery::default(),
         }
     }
 }
@@ -230,20 +232,28 @@ impl ClaudeHarness {
         self.initialize
             .get(
                 || self.model_context().map(|c| c.unwrap().key()),
-                || self.probe_initialize(),
+                || self.probe_initialize(None),
             )
             .await
     }
 
-    async fn discover_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.initialize()
-            .await
-            .map(|response| parse_initialize_commands(&response))
+    async fn discover_commands(
+        &self,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Vec<SlashCommand>, HarnessError> {
+        let response = match cwd {
+            Some(cwd) => self.probe_initialize(Some(cwd)).await?,
+            None => self.initialize().await?,
+        };
+        Ok(parse_initialize_commands(&response))
     }
 
-    async fn probe_initialize(&self) -> Result<Value, HarnessError> {
+    async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         cmd.args([
             "--print",
@@ -419,9 +429,50 @@ impl Harness for ClaudeHarness {
     /// the same channel the Claude Agent SDK's `query()` opens. The response
     /// carries every command with description + argument hint and involves no
     /// model turn (verified live, 2.1.228: the control_response is the first
-    /// stdout line, well before any API traffic). Shared with models for two minutes.
+    /// stdout line, well before any API traffic). Cached on success.
+    async fn skills(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        let (skills, commands) = tokio::try_join!(
+            crate::skills::discover(self.id(), cwd),
+            self.workspace_commands
+                .get(cwd, self.discover_commands(Some(cwd)))
+        )?;
+        // The native advertised catalog controls availability (including plugin
+        // enablement and skillOverrides). Shared Agent Skills can use file delivery.
+        Ok(Some(
+            skills
+                .into_iter()
+                .filter_map(|mut skill| {
+                    if crate::skills::is_shared_skill(&skill.path) {
+                        // Shared files are not Claude command definitions. A
+                        // same-named built-in must not replace their identity.
+                        Some(skill)
+                    } else if zeron_proto::invocation::valid_skill_command_name(&skill.name)
+                        && commands.iter().any(|command| command.name == skill.name)
+                    {
+                        skill.command = Some(zeron_proto::invocation::SkillCommand {
+                            name: skill.name.clone(),
+                            harness: self.id(),
+                        });
+                        Some(skill)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        ))
+    }
+
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        self.discover_commands().await
+        self.discover_commands(None).await
+    }
+
+    async fn commands_for(&self, cwd: &std::path::Path) -> Result<Vec<SlashCommand>, HarnessError> {
+        self.workspace_commands
+            .get(cwd, self.discover_commands(Some(cwd)))
+            .await
     }
 
     async fn run(
