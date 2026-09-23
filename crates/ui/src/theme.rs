@@ -74,7 +74,7 @@ impl AccentColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Zeron",
+            Self::Zeron => "Harnesser",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -772,8 +772,8 @@ impl TerminalColors {
 
     fn zeron(appearance: Appearance) -> Self {
         let id = match appearance {
-            Appearance::Dark => "zeron-dark",
-            Appearance::Light => "zeron-light",
+            Appearance::Dark => "harnesser-dark",
+            Appearance::Light => "harnesser-light",
         };
         let registry = ThemeRegistry::active();
         Self::from_variant(registry.variant(id).expect("Zeron terminal palette exists"))
@@ -1065,8 +1065,8 @@ impl Theme {
         let accent = accent_color.tokens(Appearance::Dark);
         Self {
             appearance: Appearance::Dark,
-            variant_id: "zeron-dark".into(),
-            family_id: "zeron".into(),
+            variant_id: "harnesser-dark".into(),
+            family_id: "harnesser".into(),
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
@@ -1145,8 +1145,8 @@ impl Theme {
         let accent = accent_color.tokens(Appearance::Light);
         Self {
             appearance: Appearance::Light,
-            variant_id: "zeron-light".into(),
-            family_id: "zeron".into(),
+            variant_id: "harnesser-light".into(),
+            family_id: "harnesser".into(),
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
@@ -1276,8 +1276,8 @@ impl Theme {
     ) -> Self {
         let registry = ThemeRegistry::active();
         let fallback_id = match appearance {
-            Appearance::Dark => "zeron-dark",
-            Appearance::Light => "zeron-light",
+            Appearance::Dark => "harnesser-dark",
+            Appearance::Light => "harnesser-light",
         };
         let variant = registry
             .variant(variant_id)
@@ -2022,7 +2022,7 @@ mod tests {
 
         let opaque_zeron = Theme::for_selection(
             Appearance::Dark,
-            "zeron-dark",
+            "harnesser-dark",
             AccentSelection::ThemeDefault,
             SurfacePreference::Opaque,
         );
@@ -2080,7 +2080,7 @@ mod tests {
     #[test]
     fn runtime_hardening_protects_native_custom_theme_edits() {
         let mut variant = ThemeRegistry::builtin()
-            .variant("zeron-dark")
+            .variant("harnesser-dark")
             .unwrap()
             .clone();
         variant.colors.text = variant.colors.background;

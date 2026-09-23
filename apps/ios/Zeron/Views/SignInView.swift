@@ -13,7 +13,7 @@ enum Endpoints {
     static let edgeURL = URL(string: "https://edge.zeron.sh")!
     static let workosClientId = "client_01KWD0EAKZKD50YCQJNYSRE4BY"
     static let workosAPIBase = "https://api.workos.com"
-    static let callbackScheme = "zeron"
+    static let callbackScheme = "harness"
 
     static func authorizeURL(state: String) -> URL {
         var components = URLComponents(string: "\(workosAPIBase)/user_management/authorize")!
@@ -45,7 +45,7 @@ struct SignInView: View {
                     ZeronMark()
                         .frame(width: 72, height: 72)
                     VStack(spacing: 6) {
-                        Text("Zeron")
+                        Text("Harnesser")
                             .font(Theme.sans(28, weight: .semibold))
                             .kerning(-0.5)
                             .foregroundStyle(Theme.text)
@@ -64,7 +64,7 @@ struct SignInView: View {
                                 ProgressView()
                                     .tint(Theme.bg)
                             } else {
-                                Text("Log in to Zeron")
+                                Text("Log in to Harnesser")
                                     .font(Theme.sans(15, weight: .semibold))
                                     .foregroundStyle(Theme.bg)
                             }
@@ -92,7 +92,7 @@ struct SignInView: View {
         }
     }
 
-    /// The AuthKit code flow: system browser session → zeron://callback with
+    /// The AuthKit code flow: system browser session → harness://callback with
     /// code + state → exchange on the edge.
     private func signIn() {
         busy = true

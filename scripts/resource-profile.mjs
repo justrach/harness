@@ -163,7 +163,7 @@ try {
   } });
   ws.send(JSON.stringify({ id, method: 'WatchDocMessages', params: { chatId } }));
   const locator = createHash('sha256').update(`Local\0device:${deviceId}`).digest('hex').slice(0, 16);
-  const ui = start([`zeron://open/chat/${chatId}?workspace=${locator}`], 'ui', { ZERON_DATA_DIR: `${output}/ui` });
+  const ui = start([`harness://open/chat/${chatId}?workspace=${locator}`], 'ui', { ZERON_DATA_DIR: `${output}/ui` });
   writeFileSync(`${output}/pids.json`, JSON.stringify({engine: engine.pid, ui: ui.pid}));
   // Native windows activate themselves. Let the initial layout/splash settle.
   if (macOS) {

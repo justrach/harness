@@ -724,7 +724,7 @@ impl Auth {
         let sign_in = lock(&self.inner.sign_in);
         if sign_in.generation != generation {
             return Err(EngineError::Other(
-                "sign-in was canceled — start again from Zeron".into(),
+                "sign-in was canceled — start again from Harnesser".into(),
             ));
         }
         let org_id = jwt_claims(&result.access_token).and_then(|c| c.org_id);
@@ -1125,7 +1125,7 @@ async fn handle_loopback_conn(
         let invalid_callback = || {
             (
                 "400 Bad Request",
-                page("Invalid or expired sign-in link. Start again from Zeron."),
+                page("Invalid or expired sign-in link. Start again from Harnesser."),
             )
         };
         match (code, state) {
@@ -1134,14 +1134,14 @@ async fn handle_loopback_conn(
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
-                            page("Signed in. You can close this tab and return to Zeron."),
+                            page("Signed in. You can close this tab and return to Harnesser."),
                         ),
                         Err(err) => {
                             tracing::info!(error = %err, "auth: discarded canceled callback exchange");
                             (
                                 "409 Conflict",
                                 page(
-                                    "This sign-in was canceled. Start again from Zeron if you still want to enable sync.",
+                                    "This sign-in was canceled. Start again from Harnesser if you still want to enable sync.",
                                 ),
                             )
                         }
@@ -1150,7 +1150,7 @@ async fn handle_loopback_conn(
                         tracing::warn!(error = %err, "auth: loopback code exchange failed");
                         (
                             "502 Bad Gateway",
-                            page("Sign-in failed during token exchange — check the Zeron logs."),
+                            page("Sign-in failed during token exchange — check the Harnesser logs."),
                         )
                     }
                 },

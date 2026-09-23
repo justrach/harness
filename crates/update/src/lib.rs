@@ -497,7 +497,7 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
+            &["kickstart", "-k", &format!("gui/{uid}/harness.codegraff.app")],
         )
     } else {
         run("systemctl", &["--user", "restart", "zeron.service"])
@@ -519,7 +519,7 @@ pub async fn stage_mac_app(
     require_mac_app_update_platform()?;
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
-    let staged = dir.join("Zeron.app");
+    let staged = dir.join("Harnesser.app");
     if staged.join("Contents/MacOS/zeron").exists() {
         return Ok(staged);
     }
@@ -539,7 +539,11 @@ pub async fn stage_mac_app(
     )?;
     std::fs::remove_file(&tarball).ok();
     if !staged.join("Contents/MacOS/zeron").exists() {
-        bail!("app tarball {file} did not contain Zeron.app");
+        let legacy = dir.join("Zeron.app");
+        if legacy.join("Contents/MacOS/zeron").exists() {
+            return Ok(legacy);
+        }
+        bail!("app tarball {file} did not contain Harnesser.app");
     }
     Ok(staged)
 }
@@ -713,6 +717,11 @@ impl Updater {
     }
 
     async fn check_loop(&self) {
+        // Harnesser is a fork: zeron's release channel would replace this
+        // binary with upstream zeron, so the fork never checks or applies.
+        if !cfg!(test) {
+            return;
+        }
         let mut shutdown = self.shutdown_tx.subscribe();
         // Shutdown must cut the loop at ANY await point — including mid
         // `check_once()` / `auto_apply_when_idle()` HTTP — so the whole body

@@ -200,7 +200,7 @@ impl CodexHarness {
                     json!({
                         "clientInfo": {
                             "name": "zeron-native",
-                            "title": "Zeron",
+                            "title": "Harnesser",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                         "capabilities": { "experimentalApi": true },
@@ -254,7 +254,7 @@ impl CodexHarness {
                     json!({
                         "clientInfo": {
                             "name": "zeron-native",
-                            "title": "Zeron",
+                            "title": "Harnesser",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                         "capabilities": { "experimentalApi": true },
@@ -335,7 +335,7 @@ fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
     })
 }
 
-/// Codex accepts both names, but Zeron has historically persisted `fast`.
+/// Codex accepts both names, but Harnesser has historically persisted `fast`.
 /// Normalize the app server's `priority` id so live and fallback catalogs do
 /// not produce two different settings for the same tier.
 fn normalized_service_tier(value: &str) -> &str {
@@ -899,7 +899,7 @@ fn command_request(
         | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
         | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
             Err(HarnessError::Protocol(format!(
-                "/{name} is not mapped in Zeron's Codex integration. Available commands: /compact and /review."
+                "/{name} is not mapped in Harnesser's Codex integration. Available commands: /compact and /review."
             )))
         }
         _ => Ok(None),
@@ -1016,7 +1016,7 @@ async fn run_session(session: Session) {
                 json!({
                     "clientInfo": {
                         "name": "zeron-native",
-                        "title": "Zeron",
+                        "title": "Harnesser",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": { "experimentalApi": true },

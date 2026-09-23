@@ -419,6 +419,23 @@ pub fn default_registry() -> HarnessRegistry {
             },
         ],
     }));
+    // graff over ACP (`graff acp`), registered first so it leads the picker.
+    // Turn-boundary steering, no effort ladder; models are discovered from
+    // `graff route` + `graff --schema` and applied with `--model` at launch.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Graff,
+            name: "graff".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::AcpHarness::graff().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::graff()) as Arc<dyn Harness>)),
+    );
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::ClaudeCode,
@@ -685,6 +702,7 @@ mod tests {
             ids,
             vec![
                 HarnessId::Mock,
+                HarnessId::Graff,
                 HarnessId::ClaudeCode,
                 HarnessId::Codex,
                 HarnessId::Cursor,

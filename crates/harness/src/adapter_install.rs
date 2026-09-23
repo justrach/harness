@@ -95,12 +95,12 @@ fn adapters_root_with(
                 value("USERPROFILE").map(|home| {
                     home.join("AppData")
                         .join("Local")
-                        .join("Zeron")
+                        .join("Harnesser")
                         .join("adapters")
                 })
             })
     } else {
-        value("HOME").map(|home| home.join(".zeron").join("adapters"))
+        value("HOME").map(|home| home.join(".harnesser").join("adapters"))
     }
 }
 

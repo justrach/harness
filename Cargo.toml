@@ -15,6 +15,8 @@ members = [
     "crates/mcp",
     "apps/zeron",
 ]
+# Vendored forks are their own (trimmed) workspaces.
+exclude = ["vendor/zui", "vendor/gpui-component"]
 
 [workspace.package]
 version = "0.2.84"
@@ -68,15 +70,19 @@ loro-protocol = "0.3"
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add", features = [
+#
+# Harnesser vendors both forks (Apache-2.0; see vendor/README.md): zui at
+# gaelcado/zui 53869c2 (the text-fade patch zeron pinned on top of
+# zeronsh/zui c2d273d) and gpui-base from zeronsh/gpui-component 03cd994.
+gpui = { path = "vendor/zui/crates/gpui" }
+gpui_platform = { path = "vendor/zui/crates/gpui_platform", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "c2d273dc3dadcb260b0fa7c35fc2fe02a14f5add" }
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "03cd9947a6aa07921cb284ad66c87fd6735e55b0" }
+gpui_tokio = { path = "vendor/zui/crates/gpui_tokio" }
+gpui-base = { path = "vendor/gpui-component/crates/base" }
 
 # diffs
 similar = "2"
@@ -145,11 +151,3 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
-
-# Temporary renderer override for the companion per-pixel text fade PR.
-# Replace with an upstream revision once it merges.
-[patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_macros = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_platform = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }
-gpui_tokio = { git = "https://github.com/gaelcado/zui", rev = "53869c204efb866d19af292cab8b1773898eeedd" }

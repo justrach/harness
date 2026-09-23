@@ -1475,7 +1475,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Zeron \
+                                "The Claude Code, Codex, and Cursor logins on this device. Harnesser \
                                  detects the live session, keeps each account backed up, and can \
                                  swap between them.",
                             ))

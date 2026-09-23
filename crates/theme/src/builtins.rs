@@ -12,7 +12,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
-            family("zeron", "Zeron", vec![zeron_light(), zeron_dark()]),
+            family("harnesser", "Harnesser", vec![zeron_light(), zeron_dark()]),
             family(
                 "vscode-default",
                 "VS Code Default",
@@ -238,9 +238,9 @@ const ANSI_LIGHT: [&str; 16] = [
 
 fn zeron_dark() -> ThemeVariant {
     variant(Seeds {
-        id: "zeron-dark",
-        family_id: "zeron",
-        name: "Zeron Dark",
+        id: "harnesser-dark",
+        family_id: "harnesser",
+        name: "Harnesser Dark",
         appearance: Appearance::Dark,
         treatment: SurfaceTreatment::Frosted,
         background: "#060606",
@@ -261,7 +261,7 @@ fn zeron_dark() -> ThemeVariant {
             "#a1a1aa", "#f472b6", "#22d3ee", "#f87171",
         ],
         source: source(
-            "zeron-dark",
+            "harnesser-dark",
             "native",
             "https://github.com/zeronsh/comet",
             "d138049",
@@ -272,9 +272,9 @@ fn zeron_dark() -> ThemeVariant {
 
 fn zeron_light() -> ThemeVariant {
     variant(Seeds {
-        id: "zeron-light",
-        family_id: "zeron",
-        name: "Zeron Light",
+        id: "harnesser-light",
+        family_id: "harnesser",
+        name: "Harnesser Light",
         appearance: Appearance::Light,
         treatment: SurfaceTreatment::Frosted,
         background: "#ffffff",
@@ -295,7 +295,7 @@ fn zeron_light() -> ThemeVariant {
             "#52525b", "#be185d", "#0e7490", "#b91c1c",
         ],
         source: source(
-            "zeron-light",
+            "harnesser-light",
             "native",
             "https://github.com/zeronsh/comet",
             "d138049",

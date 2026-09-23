@@ -4,9 +4,9 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
+//! created under `~/.harnesser/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
+//! matching `harness/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
@@ -88,7 +88,7 @@ fn default_worktrees_root() -> PathBuf {
     std::env::var_os("ZERON_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+        .unwrap_or_else(|| home_dir().join(".harnesser").join("worktrees"))
 }
 
 struct ReposInner {
@@ -504,7 +504,7 @@ impl Repos {
     }
 
     /// Public commit history in topological order. Only user-facing branches,
-    /// remotes, and tags seed the walk, so Zeron's internal refs never leak
+    /// remotes, and tags seed the walk, so Harnesser's internal refs never leak
     /// into the graph or keep otherwise-unreachable checkpoints visible.
     pub async fn history(
         &self,
@@ -1084,7 +1084,7 @@ impl Repos {
                 ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
                 NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
             );
-            if !base.join(&candidate).exists() && !existing.contains(&format!("zeron/{candidate}"))
+            if !base.join(&candidate).exists() && !own_branch_taken(&existing, &candidate)
             {
                 name = Some(candidate);
                 break;
@@ -1093,7 +1093,7 @@ impl Repos {
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
         let path = base.join(&name);
-        let branch_name = format!("zeron/{name}");
+        let branch_name = own_branch(&name);
         self.git(
             &[
                 "worktree",
@@ -1150,7 +1150,7 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if current != expected_branch || expected_branch != format!("zeron/{folder}") {
+        if current != expected_branch || !is_original_own_branch(expected_branch, &folder) {
             return Ok(current);
         }
         let preferred = worktree_branch_from_title(title);
@@ -1209,7 +1209,7 @@ impl Repos {
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
-        if branch.starts_with("zeron/") {
+        if is_own_branch(&branch) {
             let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
         }
         Ok(())
@@ -1365,7 +1365,7 @@ async fn disposable_worker<T: Send + 'static>(
 fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
-            EngineError::Other("Zeron doesn't have access to this folder on the device.".into())
+            EngineError::Other("Harnesser doesn't have access to this folder on the device.".into())
         }
         _ => EngineError::Other(format!("could not read that folder: {e}")),
     })?;
@@ -1968,10 +1968,30 @@ fn rank_file_matches(
         .collect()
 }
 
-/// Turn a generated chat title into the semantic portion of a Zeron branch
-/// (port of zeron's `worktreeBranchFromTitle`). Zeron NFKD-normalizes accented
+/// Turn a generated chat title into the semantic portion of a Harnesser branch
+/// (port of zeron's `worktreeBranchFromTitle`). Harnesser NFKD-normalizes accented
 /// letters first; native keeps it ASCII-only (generated titles are Title Case
 /// English), so non-ASCII characters collapse into the `-` separator.
+pub const OWN_BRANCH_PREFIX: &str = "harness/";
+const LEGACY_BRANCH_PREFIX: &str = "zeron/";
+
+pub fn is_own_branch(branch: &str) -> bool {
+    branch.starts_with(OWN_BRANCH_PREFIX) || branch.starts_with(LEGACY_BRANCH_PREFIX)
+}
+
+pub fn own_branch(name: &str) -> String {
+    format!("{OWN_BRANCH_PREFIX}{name}")
+}
+
+fn own_branch_taken(existing: &std::collections::HashSet<String>, candidate: &str) -> bool {
+    existing.contains(&own_branch(candidate))
+        || existing.contains(&format!("{LEGACY_BRANCH_PREFIX}{candidate}"))
+}
+
+fn is_original_own_branch(branch: &str, folder: &str) -> bool {
+    branch == own_branch(folder) || branch == format!("{LEGACY_BRANCH_PREFIX}{folder}")
+}
+
 pub fn worktree_branch_from_title(title: &str) -> String {
     let mut slug = String::new();
     for c in title.trim().chars() {
@@ -1986,7 +2006,7 @@ pub fn worktree_branch_from_title(title: &str) -> String {
     }
     slug.truncate(48);
     let slug = slug.trim_matches('-');
-    format!("zeron/{}", if slug.is_empty() { "update" } else { slug })
+    own_branch(if slug.is_empty() { "update" } else { slug })
 }
 
 fn bounded_field(value: &str, max_chars: usize) -> String {

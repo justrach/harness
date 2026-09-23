@@ -619,9 +619,9 @@ fn parse_semantic_style(value: &Value) -> SemanticStyle {
 fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResult> {
     let registry = ThemeRegistry::builtin();
     let base_id = if options.appearance.is_dark() {
-        "zeron-dark"
+        "harnesser-dark"
     } else {
-        "zeron-light"
+        "harnesser-light"
     };
     let mut output = registry
         .variant(base_id)
@@ -645,7 +645,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
         ..ImportReport::default()
     };
     report.fallbacks.push(
-        "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Zeron surface preference can override it"
+        "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harnesser surface preference can override it"
             .into(),
     );
     macro_rules! apply {
@@ -659,7 +659,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
                 });
             } else {
                 report.fallbacks.push(format!(
-                    "{} retained the Zeron {} fallback",
+                    "{} retained the Harnesser {} fallback",
                     $role,
                     if options.appearance.is_dark() {
                         "dark"
@@ -838,7 +838,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     } else {
         report
             .fallbacks
-            .push("accent.* retained the Zeron fallback; curate a native accent".into());
+            .push("accent.* retained the Harnesser fallback; curate a native accent".into());
     }
 
     apply!(

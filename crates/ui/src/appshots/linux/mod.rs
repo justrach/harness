@@ -118,7 +118,7 @@ fn start_activation_socket(data_dir: PathBuf, tx: mpsc::UnboundedSender<()>) {
             }
             let path = activation_socket_path(&data_dir);
             // The socket belongs exclusively to this feature. Removing a stale
-            // inode here is safe and lets a restarted Zeron become reachable.
+            // inode here is safe and lets a restarted Harnesser become reachable.
             let _ = fs::remove_file(&path);
             let Ok(socket) = UnixDatagram::bind(&path) else {
                 return;
@@ -146,7 +146,7 @@ pub fn request_running_appshot(data_dir: &Path) -> Result<(), CaptureError> {
         .map(|_| ())
         .map_err(|error| {
             CaptureError::CaptureFailed(format!(
-                "Could not reach a running Zeron instance for Appshot capture: {error}"
+                "Could not reach a running Harnesser instance for Appshot capture: {error}"
             ))
         })
 }

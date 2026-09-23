@@ -298,7 +298,7 @@ impl AccentPreset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Zeron",
+            Self::Zeron => "Harnesser",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -400,8 +400,8 @@ pub struct ThemeSelection {
 impl Default for ThemeSelection {
     fn default() -> Self {
         Self {
-            light: "zeron-light".into(),
-            dark: "zeron-dark".into(),
+            light: "harnesser-light".into(),
+            dark: "harnesser-dark".into(),
         }
     }
 }
@@ -537,6 +537,11 @@ impl ThemeRegistry {
     }
 
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
+        let id = match id {
+            "zeron-dark" => "harnesser-dark",
+            "zeron-light" => "harnesser-light",
+            other => other,
+        };
         self.families
             .iter()
             .flat_map(|family| &family.variants)
@@ -554,9 +559,9 @@ impl ThemeRegistry {
         self.variant(selection.variant_id(appearance))
             .or_else(|| {
                 self.variant(if appearance.is_dark() {
-                    "zeron-dark"
+                    "harnesser-dark"
                 } else {
-                    "zeron-light"
+                    "harnesser-light"
                 })
             })
             .expect("the built-in registry always contains both Zeron variants")
@@ -812,8 +817,8 @@ mod tests {
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
         assert_eq!(registry.families.len(), 19);
-        assert!(registry.variant("zeron-light").is_some());
-        assert!(registry.variant("zeron-dark").is_some());
+        assert!(registry.variant("harnesser-light").is_some());
+        assert!(registry.variant("harnesser-dark").is_some());
         let errors: Vec<_> = registry
             .validate()
             .into_iter()

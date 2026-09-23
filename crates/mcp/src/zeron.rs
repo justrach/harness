@@ -144,7 +144,7 @@ impl Zeron {
         }
         let client = connect_ws(&self.url).await.map_err(|e| {
             anyhow!(
-                "no Zeron engine listening at {} ({e}) — is Zeron running?",
+                "no Harnesser engine listening at {} ({e}) — is Harnesser running?",
                 self.url
             )
         })?;

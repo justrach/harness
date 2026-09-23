@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Zeron
+Name=Harnesser
 GenericName=Coding Agent Controller
 Comment=Multi-device controller for coding agents
 Exec=zeron %u
@@ -10,4 +10,4 @@ Terminal=false
 Categories=Development;Utility;
 Keywords=agent;claude;codex;ai;coding;
 StartupWMClass=zeron
-MimeType=x-scheme-handler/zeron;
+MimeType=x-scheme-handler/harness;

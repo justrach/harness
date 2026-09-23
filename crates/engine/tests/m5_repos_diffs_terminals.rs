@@ -157,7 +157,7 @@ async fn repos_round_trip_add_branches_worktrees() {
         .await
         .expect("worktree");
     assert!(
-        worktree.branch.starts_with("zeron/"),
+        worktree.branch.starts_with("harness/"),
         "branch: {}",
         worktree.branch
     );
@@ -1842,7 +1842,7 @@ async fn rpc_dispatch_for_m5_methods() {
         worktree["branch"]
             .as_str()
             .expect("branch")
-            .starts_with("zeron/")
+            .starts_with("harness/")
     );
     assert!(worktree["checkoutId"].is_string());
     assert!(worktree.get("setupAction").is_none());

@@ -293,7 +293,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     assert_eq!(chat.cwd.as_deref(), Some(first_cwd.as_str()));
     let branch = chat.branch.expect("branch stamped");
     assert!(
-        branch.starts_with("zeron/"),
+        branch.starts_with("harness/"),
         "stamped branch is the worktree's own: {branch}"
     );
 

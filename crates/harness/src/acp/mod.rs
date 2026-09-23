@@ -30,6 +30,7 @@
 
 mod antigravity_paths;
 mod devin_models;
+mod graff_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
@@ -401,6 +402,50 @@ fn hermes_spec() -> AcpAgentSpec {
         steering_mode: SteeringMode::TurnBoundary,
         // Hermes exposes no effort config over ACP today (hybrid reasoning is
         // model-internal); revisit when the adapter advertises a ladder.
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "The agent process is likely wedged.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+    }
+}
+
+fn graff_install_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join(".local").join("bin").join("graff"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/bin/graff"));
+    dirs.push(PathBuf::from("/usr/local/bin/graff"));
+    dirs
+}
+
+fn graff_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Graff,
+        display_name: "graff",
+        executable: "graff",
+        env_override: "GRAFF_EXECUTABLE",
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: graff_install_paths,
+        cli_executable: "graff",
+        cli_extra_paths: graff_install_paths,
+        install_hint: "graff (searched PATH, the login shell's PATH, ~/.local/bin, \
+             /opt/homebrew/bin, and /usr/local/bin; install codegraff, then \
+             `graff login`; set GRAFF_EXECUTABLE to override)",
+        // graff advertises no model config option over ACP; the live catalog
+        // comes from `graff route` + `graff --schema` (see graff_models) and
+        // the pick is applied as `graff acp --model <name>` at launch.
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
         reasoning_levels: &[],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
@@ -912,6 +957,11 @@ impl AcpHarness {
     /// Hermes Agent (`hermes acp`) — Nous Research's native ACP server.
     pub fn hermes() -> Self {
         Self::with_spec(hermes_spec())
+    }
+
+    /// graff (`graff acp`) — codegraff's native ACP server.
+    pub fn graff() -> Self {
+        Self::with_spec(graff_spec())
     }
 
     /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
@@ -1782,6 +1832,9 @@ impl Harness for AcpHarness {
                         self.devin_models
                             .refresh(&exe, self.model_discovery_timeout)
                             .await
+                    } else if self.id() == HarnessId::Graff {
+                        let (exe, _) = self.resolve_program(false).await?;
+                        graff_models::discover(&exe, self.model_discovery_timeout).await
                     } else {
                         self.discover_models().await
                     }
@@ -1865,8 +1918,13 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let launch_args = if self.id() == HarnessId::Graff {
+            graff_models::launch_args(request.model.as_deref())
+        } else {
+            Vec::new()
+        };
         let (scratch, mut child, stderr_tail) =
-            self.spawn_agent(Some(&request.cwd), true, &[]).await?;
+            self.spawn_agent(Some(&request.cwd), true, &launch_args).await?;
         let stdin = child
             .stdin
             .take()
@@ -1951,14 +2009,14 @@ fn initialize_params(harness: HarnessId) -> Value {
         // Devin otherwise exposes only the parent's run_subagent call. This
         // unlocks lifecycle tags plus every nested message, thought, and tool
         // update, all of which DevinTracker can route. Do not advertise the
-        // separate subagentControl extension: Zeron has no matching UI yet.
+        // separate subagentControl extension: Harnesser has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
     }
     json!({
         "protocolVersion": 1,
         "clientInfo": {
             "name": "zeron",
-            "title": "Zeron",
+            "title": "Harnesser",
             "version": env!("CARGO_PKG_VERSION"),
         },
         // Declined: agents fall back to their own fs/terminal access, which
