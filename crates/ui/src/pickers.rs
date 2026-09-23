@@ -207,6 +207,7 @@ pub fn clamp_reasoning(
 
 pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     match level {
+        ReasoningLevel::None => "Off",
         ReasoningLevel::Minimal => "Minimal",
         ReasoningLevel::Low => "Low",
         ReasoningLevel::Medium => "Medium",
@@ -216,6 +217,22 @@ pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
         ReasoningLevel::Ultra => "Ultra",
         ReasoningLevel::Ultracode => "Ultracode",
         ReasoningLevel::Ultrathink => "Ultrathink",
+    }
+}
+
+/// A two-choice advertised ladder is a switch, regardless of provider or model id.
+fn binary_reasoning_switch(model: Option<&Model>) -> bool {
+    let Some(model) = model else { return false };
+    model.reasoning_levels.len() == 2
+        && model.reasoning_levels.contains(&ReasoningLevel::None)
+        && model.reasoning_levels.contains(&ReasoningLevel::High)
+}
+
+fn reasoning_label_for_model(level: ReasoningLevel, binary_switch: bool) -> &'static str {
+    if binary_switch && level == ReasoningLevel::High {
+        "On"
+    } else {
+        reasoning_label(level)
     }
 }
 
@@ -231,7 +248,7 @@ pub fn traits_summary(
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(level) = reasoning {
-        parts.push(reasoning_label(level).to_string());
+        parts.push(reasoning_label_for_model(level, binary_reasoning_switch(model)).to_string());
     }
     if let Some(model) = model {
         for option in &model.options {
@@ -3946,6 +3963,7 @@ impl Pickers {
         let mut groups = Vec::new();
         let levels = self.trait_ladder(cx);
         if !levels.is_empty() {
+            let binary_switch = binary_reasoning_switch(self.selected_model(cx));
             let selected = self.effective_reasoning(cx);
             let default = default_reasoning(&levels);
             groups.push(SettingGroup {
@@ -3954,7 +3972,7 @@ impl Pickers {
                 choices: levels
                     .into_iter()
                     .map(|level| SettingChoice {
-                        label: reasoning_label(level).into(),
+                        label: reasoning_label_for_model(level, binary_switch).into(),
                         value: String::new(),
                         reasoning: Some(level),
                         selected: selected == Some(level),
@@ -5640,6 +5658,38 @@ mod tests {
             reasoning_levels: Vec::new(),
             options: Vec::new(),
         }
+    }
+
+    #[test]
+    fn binary_effort_labels_are_off_on_only_for_advertised_switch() {
+        let mut mimo = bare_model("xiaomi/mimo-v2.6-flash", "MiMo Flash");
+        mimo.reasoning_levels = vec![ReasoningLevel::None, ReasoningLevel::High];
+        assert!(binary_reasoning_switch(Some(&mimo)));
+        assert_eq!(reasoning_label_for_model(ReasoningLevel::None, true), "Off");
+        assert_eq!(reasoning_label_for_model(ReasoningLevel::High, true), "On");
+        assert_eq!(
+            traits_summary(Some(&mimo), Some(ReasoningLevel::High), &Default::default()),
+            Some("On".into())
+        );
+        assert_eq!(
+            traits_summary(Some(&mimo), Some(ReasoningLevel::None), &Default::default()),
+            Some("Off".into())
+        );
+        assert_eq!(
+            default_reasoning(&mimo.reasoning_levels),
+            Some(ReasoningLevel::High)
+        );
+        let mut other_binary = bare_model("other/model", "Other");
+        other_binary.reasoning_levels = vec![ReasoningLevel::None, ReasoningLevel::High];
+        assert!(binary_reasoning_switch(Some(&other_binary)));
+
+        let mut graded = bare_model("xiaomi/mimo-v2.6-flash", "MiMo Flash");
+        graded.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+        assert!(!binary_reasoning_switch(Some(&graded)));
+        assert_eq!(
+            reasoning_label_for_model(ReasoningLevel::High, false),
+            "High"
+        );
     }
 
     #[gpui::test]

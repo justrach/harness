@@ -40,6 +40,9 @@ for line in sys.stdin:
     option = {'id':'effort','name':'Thought level','category':'thought_level','type':'select',
               'currentValue':'low','options':[{'value':'low','name':'Low'},
                                             {'value':'high','name':'High'}]}
+    if mode.startswith('mimo'):
+        option['currentValue'] = 'high'
+        option['options'] = [{'value':'none','name':'Off'}, {'value':'high','name':'On'}]
     if mode == 'no-id': option.pop('id')
     if method == 'initialize':
         result = {'protocolVersion':0 if mode == 'bad-version' else 1,
@@ -58,6 +61,10 @@ for line in sys.stdin:
             {'provider':'p1','name':'shared','authenticated':True,'effortLevels':['low','high']},
             {'provider':'p2','name':'shared','authenticated':True,'effortLevels':['medium']},
             {'provider':'p3','name':'closed','authenticated':False,'effortLevels':['high']}]}
+        if mode.startswith('mimo'):
+            result = {'current':{'provider':'xiaomi','model':'mimo-v2.6-flash','effort':'high'},
+                      'models':[{'provider':'xiaomi','name':'mimo-v2.6-flash',
+                                 'authenticated':True,'effortLevels':['none','high']}]}
         if mode == 'no-auth': result['models'] = []
     elif method == 'session/set_config_option':
         if mode == 'reject':
@@ -75,6 +82,10 @@ for line in sys.stdin:
         if mode == 'remove-effort':
             print(json.dumps({'method':'session/update','params':{'sessionId':'fixture',
                   'update':{'sessionUpdate':'config_option_update','configOptions':[]}}}),flush=True)
+        if mode == 'mimo-live-off':
+            option['currentValue'] = 'none'
+            print(json.dumps({'method':'session/update','params':{'sessionId':'fixture',
+                  'update':{'sessionUpdate':'config_option_update','configOptions':[option]}}}),flush=True)
         result = {'stopReason':'end_turn'}
     else:
         result = {}
@@ -122,14 +133,80 @@ fn wire(root: &Path) -> Vec<serde_json::Value> {
 }
 
 async fn run(root: &Path, level: ReasoningLevel) -> Vec<AgentEvent> {
+    run_selected(root, request(root, level)).await
+}
+
+async fn run_selected(root: &Path, request: RunRequest) -> Vec<AgentEvent> {
     let harness = AcpHarness::graff().with_executable(root.join("graff"));
-    let events = harness.run(request(root, level), controls()).await.unwrap();
+    let events = harness.run(request, controls()).await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(10),
         events.map(Result::unwrap).collect(),
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn mimo_off_is_discovered_and_set_before_prompt_without_inference_on_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    fake_agent(root.path());
+    std::fs::write(root.path().join("mode"), "mimo").unwrap();
+    let harness = AcpHarness::graff().with_executable(root.path().join("graff"));
+    let catalog = harness.model_catalog(true).await.unwrap();
+    assert_eq!(catalog.models.len(), 1);
+    assert_eq!(catalog.models[0].id, "xiaomi/mimo-v2.6-flash");
+    assert_eq!(
+        catalog.models[0].reasoning_levels,
+        vec![ReasoningLevel::None, ReasoningLevel::High]
+    );
+    assert!(
+        !wire(root.path())
+            .iter()
+            .any(|entry| entry["method"] == "session/prompt")
+    );
+
+    let mut selected = request(root.path(), ReasoningLevel::None);
+    selected.model = Some("xiaomi/mimo-v2.6-flash".into());
+    let events = run_selected(root.path(), selected).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+    let entries = wire(root.path());
+    assert!(
+        entries.iter().any(|entry| entry["argv"]
+            == serde_json::json!(["acp", "--model", "xiaomi/mimo-v2.6-flash"]))
+    );
+    let set = entries
+        .iter()
+        .position(|entry| entry["method"] == "session/set_config_option")
+        .unwrap();
+    let prompt = entries
+        .iter()
+        .position(|entry| entry["method"] == "session/prompt")
+        .unwrap();
+    assert!(set < prompt);
+    assert_eq!(entries[set]["params"]["value"], "none");
+}
+
+#[tokio::test]
+async fn mimo_live_off_update_keeps_none_distinct_from_missing_option() {
+    let root = tempfile::tempdir().unwrap();
+    fake_agent(root.path());
+    std::fs::write(root.path().join("mode"), "mimo-live-off").unwrap();
+    let mut selected = request(root.path(), ReasoningLevel::High);
+    selected.model = Some("xiaomi/mimo-v2.6-flash".into());
+    let events = run_selected(root.path(), selected).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ReasoningChanged {
+            reasoning: Some(ReasoningLevel::None)
+        }
+    )));
 }
 
 async fn resume(root: &Path) -> Vec<AgentEvent> {
@@ -201,6 +278,7 @@ async fn catalog_has_per_provider_efforts_without_inference_then_run_sets_picked
 async fn unsupported_or_unconfirmed_effort_never_reaches_prompt() {
     for (mode, effort) in [
         ("", ReasoningLevel::Ultra),
+        ("", ReasoningLevel::None),
         ("no-id", ReasoningLevel::High),
         ("reject", ReasoningLevel::High),
         ("ignored", ReasoningLevel::High),

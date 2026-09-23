@@ -162,6 +162,7 @@ fn default_effort_values(
         return Vec::new();
     };
     match level {
+        ReasoningLevel::None => vec!["none"],
         ReasoningLevel::Minimal => vec!["minimal", "low"],
         ReasoningLevel::Low => vec!["low", "minimal"],
         ReasoningLevel::Medium => vec!["medium"],
@@ -1573,6 +1574,7 @@ impl AcpHarness {
 /// Map an advertised `thought_level` value id onto zeron's ladder.
 fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     match norm_id(value).as_str() {
+        "none" => Some(ReasoningLevel::None),
         "minimal" => Some(ReasoningLevel::Minimal),
         "low" => Some(ReasoningLevel::Low),
         "medium" => Some(ReasoningLevel::Medium),

@@ -26,6 +26,7 @@ pub(crate) const REASONING_LEVELS: &[ReasoningLevel] = &[
 /// effort (port of codex.ts `toEffort`).
 pub(crate) fn to_effort(reasoning: Option<ReasoningLevel>) -> Option<&'static str> {
     Some(match reasoning? {
+        ReasoningLevel::None => return None,
         ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",
         ReasoningLevel::High => "high",

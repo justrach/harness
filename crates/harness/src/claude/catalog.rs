@@ -50,6 +50,7 @@ pub(crate) fn to_effort(
     model: Option<&str>,
 ) -> Option<&'static str> {
     let base = match reasoning? {
+        ReasoningLevel::None => return None,
         ReasoningLevel::Ultrathink => return None,
         ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",

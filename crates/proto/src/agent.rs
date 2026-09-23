@@ -32,6 +32,7 @@ pub enum HarnessId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
+    None,
     Minimal,
     Low,
     Medium,
@@ -466,6 +467,22 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_none_serializes_as_an_explicit_level() {
+        assert_eq!(
+            serde_json::to_string(&ReasoningLevel::None).unwrap(),
+            "\"none\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningLevel>("\"none\"").unwrap(),
+            ReasoningLevel::None
+        );
+        assert_eq!(
+            serde_json::to_string(&Option::<ReasoningLevel>::None).unwrap(),
+            "null"
+        );
+    }
 
     #[test]
     fn agent_event_round_trips() {

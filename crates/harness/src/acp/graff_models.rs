@@ -33,6 +33,7 @@ fn seat_name(id: &str) -> &str {
 
 fn effort_value(level: ReasoningLevel) -> &'static str {
     match level {
+        ReasoningLevel::None => "none",
         ReasoningLevel::Minimal => "minimal",
         ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",
