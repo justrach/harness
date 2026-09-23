@@ -95,6 +95,23 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 }
 
 /// The CLI named in the not-installed hint.
+/// Env var that points the GUI at a custom build of this agent's binary.
+/// Cursor's shim override is internal and not advertised here.
+pub fn executable_override(harness: HarnessId) -> Option<&'static str> {
+    match harness {
+        HarnessId::ClaudeCode => Some("CLAUDE_CODE_EXECUTABLE"),
+        HarnessId::Codex => Some("CODEX_EXECUTABLE"),
+        HarnessId::Devin => Some("DEVIN_EXECUTABLE"),
+        HarnessId::Grok => Some("GROK_EXECUTABLE"),
+        HarnessId::Hermes => Some("HERMES_EXECUTABLE"),
+        HarnessId::Graff => Some("GRAFF_EXECUTABLE"),
+        HarnessId::Pi => Some("PI_ACP_EXECUTABLE"),
+        HarnessId::Opencode => Some("OPENCODE_EXECUTABLE"),
+        HarnessId::Antigravity => Some("ANTIGRAVITY_ACP_EXECUTABLE"),
+        HarnessId::Cursor | HarnessId::Mock => None,
+    }
+}
+
 pub fn cli_name(harness: HarnessId) -> &'static str {
     match harness {
         HarnessId::ClaudeCode => "claude",
@@ -1001,6 +1018,16 @@ impl HarnessesPage {
                             )))
                             .into_any_element(),
                     );
+                    if let Some(var) = executable_override(harness) {
+                        meta.push(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(format!(
+                                    "Custom build: set {var} to that binary."
+                                )))
+                                .into_any_element(),
+                        );
+                    }
                 }
                 // widgets::row_tile with the brand tint honored (the Claude
                 // mark keeps its orange, like the picker rail).
@@ -1201,9 +1228,9 @@ impl Render for HarnessesPage {
                             .child(
                                 widgets::page_subtitle(
                                     &theme,
-                                    "Install coding agents and choose which ones the composer offers. \
-                                     Installations and settings apply to the selected device. \
-                                     Downloads start only when you choose Install.",
+                                    "This GUI drives whatever agent is installed on the selected device. \
+                                     A custom build can point at its binary with that agent's \
+                                     *_EXECUTABLE variable. Downloads start only when you choose Install.",
                                 )
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),
@@ -1220,6 +1247,20 @@ impl Render for HarnessesPage {
 #[cfg(test)]
 mod tests {
     use super::SignInPhase;
+
+    #[test]
+    fn custom_build_override_is_advertised_for_bring_your_own_agents() {
+        use zeron_proto::HarnessId;
+        assert_eq!(
+            super::executable_override(HarnessId::Graff),
+            Some("GRAFF_EXECUTABLE")
+        );
+        assert_eq!(
+            super::executable_override(HarnessId::ClaudeCode),
+            Some("CLAUDE_CODE_EXECUTABLE")
+        );
+        assert_eq!(super::executable_override(HarnessId::Mock), None);
+    }
 
     #[test]
     fn explicit_sign_in_requires_installed_antigravity() {
