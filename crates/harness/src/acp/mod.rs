@@ -3128,6 +3128,17 @@ async fn run_session(session: Session) {
                 "session/new returned no sessionId".into(),
             ));
         }
+        if harness == HarnessId::Graff
+            && request.resume.is_some()
+            && let Some(model) = request.model.as_deref()
+            && model.contains('/')
+        {
+            // session/load restores the saved provider/model, superseding
+            // --model. Do not send a turn on a route other than the picker.
+            let catalog =
+                request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
+            graff_models::verify_resumed_model(&catalog, model)?;
+        }
         if harness == HarnessId::Devin
             && let Some(model) = request.model.as_deref()
         {

@@ -53,7 +53,8 @@ for line in sys.stdin:
             print(json.dumps({'jsonrpc':'2.0','id':request['id'],
                               'error':{'code':-32601,'message':'method not found'}}),flush=True)
             continue
-        result = {'current':{'provider':'p1','model':'shared','effort':'low'},'models':[
+        result = {'current':{'provider':'p2' if mode == 'resume-mismatch' else 'p1',
+                             'model':'shared','effort':'low'},'models':[
             {'provider':'p1','name':'shared','authenticated':True,'effortLevels':['low','high']},
             {'provider':'p2','name':'shared','authenticated':True,'effortLevels':['medium']},
             {'provider':'p3','name':'closed','authenticated':False,'effortLevels':['high']}]}
@@ -123,6 +124,19 @@ fn wire(root: &Path) -> Vec<serde_json::Value> {
 async fn run(root: &Path, level: ReasoningLevel) -> Vec<AgentEvent> {
     let harness = AcpHarness::graff().with_executable(root.join("graff"));
     let events = harness.run(request(root, level), controls()).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        events.map(Result::unwrap).collect(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn resume(root: &Path) -> Vec<AgentEvent> {
+    let harness = AcpHarness::graff().with_executable(root.join("graff"));
+    let mut selected = request(root, ReasoningLevel::High);
+    selected.resume = Some("fixture".into());
+    let events = harness.run(selected, controls()).await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(10),
         events.map(Result::unwrap).collect(),
@@ -291,4 +305,28 @@ async fn incompatible_init_stops_before_session_and_unknown_extension_uses_legac
             .iter()
             .any(|entry| entry["argv"] == serde_json::json!(["route"]))
     );
+}
+
+#[tokio::test]
+async fn resumed_session_never_prompts_on_a_different_provider_than_qualified_picker() {
+    for (mode, expected) in [
+        ("resume-mismatch", DoneStatus::Errored),
+        ("resume-match", DoneStatus::Completed),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fake_agent(root.path());
+        std::fs::write(root.path().join("mode"), mode).unwrap();
+        let events = resume(root.path()).await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+            AgentEvent::Done { status, .. } if *status == expected)),
+            "{mode}: {events:?}"
+        );
+        assert_eq!(
+            wire(root.path())
+                .iter()
+                .any(|entry| entry["method"] == "session/prompt"),
+            expected == DoneStatus::Completed
+        );
+    }
 }

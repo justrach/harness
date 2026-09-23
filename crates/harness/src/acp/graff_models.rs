@@ -120,6 +120,28 @@ pub(super) fn verify_effort_set(response: &Value, wanted: &str) -> Result<(), Ha
     }
 }
 
+pub(super) fn verify_resumed_model(catalog: &Value, requested: &str) -> Result<(), HarnessError> {
+    let Some((provider, name)) = requested.split_once('/') else {
+        return Ok(()); // Preserve legacy bare-name resolution.
+    };
+    let current = catalog.get("current");
+    if current
+        .and_then(|value| value.get("provider"))
+        .and_then(Value::as_str)
+        == Some(provider)
+        && current
+            .and_then(|value| value.get("model"))
+            .and_then(Value::as_str)
+            == Some(name)
+    {
+        Ok(())
+    } else {
+        Err(HarnessError::Protocol(format!(
+            "graff restored a different model; {requested} requires a new session"
+        )))
+    }
+}
+
 pub(super) async fn discover(
     harness: &AcpHarness,
     exe: &Path,
