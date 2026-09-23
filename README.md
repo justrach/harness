@@ -4,8 +4,6 @@ A native desktop GUI for the coding agents already on your machine — Claude Co
 
 *English | [简体中文](README.zh-CN.md)*
 
-![Harnesser driving a coding-agent session](apps/landing/public/assets/app-screenshot.jpg)
-
 The app is **Harnesser** (`harness.codegraff.app`). The binary, env vars, and data roots are still `zeron` / `ZERON_*` so existing installs keep updating. One binary covers headed GUI and a headless engine.
 
 New installs open on the **Codegraff** theme (Warm Graphite — cream and amber light, near-black and gold dark). Settings → Appearance still has Harnesser, the VS Code catalog, and VS Code import.

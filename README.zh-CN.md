@@ -4,8 +4,6 @@
 
 *[English](README.md) | 简体中文*
 
-![Harnesser 驱动一个编码 agent 会话](apps/landing/public/assets/app-screenshot.jpg)
-
 产品名是 **Harnesser**（`harness.codegraff.app`）。二进制、环境变量和数据目录仍是 `zeron` / `ZERON_*`，这样已有安装还能继续更新。一个二进制同时覆盖带界面的 GUI 和无界面引擎。
 
 新安装默认使用 **Codegraff** 主题（Warm Graphite：浅色是奶油+琥珀，深色是近黑+金）。设置 → 外观里仍有 Harnesser、VS Code 目录，以及 VS Code 主题导入。
