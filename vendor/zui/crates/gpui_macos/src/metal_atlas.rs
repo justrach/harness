@@ -153,6 +153,12 @@ impl MetalAtlasState {
             height: DevicePixels(16384),
         };
         let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        if std::env::var("ZERON_GPU_STATS").is_ok_and(|v| !v.is_empty() && v != "0") {
+            log::warn!(
+                "gpu texture: atlas {:?} {}x{} (requested {}x{})",
+                kind, size.width.0, size.height.0, min_size.width.0, min_size.height.0
+            );
+        }
         let texture_descriptor = metal::TextureDescriptor::new();
         texture_descriptor.set_width(size.width.into());
         texture_descriptor.set_height(size.height.into());

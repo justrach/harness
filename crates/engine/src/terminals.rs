@@ -319,7 +319,7 @@ impl Terminals {
         lock(&self.inner.sessions).insert(id.clone(), session.clone());
 
         // Raw PTY bytes: blocking reader thread → batcher task (12ms windows).
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (raw_tx, raw_rx) = pty_pipe();
         let reader_thread = std::thread::Builder::new()
             .name(format!("pty-read-{id}"))
             .spawn(move || read_pty(reader, raw_tx))
@@ -504,13 +504,93 @@ fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
 
 /// Blocking PTY reader: forwards raw chunks until EOF. A closed PTY reads as an
 /// error on some platforms (EIO on Linux once the shell exits) — both end the loop.
-fn read_pty(mut reader: Box<dyn Read + Send>, tx: mpsc::UnboundedSender<Vec<u8>>) {
-    let mut buf = [0u8; 8192];
+/// PTY output handed from the blocking reader thread to the async pump. A
+/// flood arrives as many small reads (the macOS PTY returns ~1KB at a time);
+/// rather than one channel message and cross-thread wakeup per read, the
+/// reader appends to a single buffer and wakes the pump only when that buffer
+/// goes from empty to non-empty. The pump takes everything at once.
+struct PtyPipe {
+    state: Mutex<PtyPipeState>,
+    ready: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct PtyPipeState {
+    buf: Vec<u8>,
+    closed: bool,
+    receiver_gone: bool,
+}
+
+struct PtyWriter(Arc<PtyPipe>);
+struct PtyReceiver(Arc<PtyPipe>);
+
+fn pty_pipe() -> (PtyWriter, PtyReceiver) {
+    let pipe = Arc::new(PtyPipe {
+        state: Mutex::new(PtyPipeState::default()),
+        ready: tokio::sync::Notify::new(),
+    });
+    (PtyWriter(pipe.clone()), PtyReceiver(pipe))
+}
+
+impl PtyWriter {
+    /// Append output; false once the pump is gone.
+    fn push(&self, bytes: &[u8]) -> bool {
+        let wake = {
+            let mut state = lock(&self.0.state);
+            if state.receiver_gone {
+                return false;
+            }
+            let wake = state.buf.is_empty();
+            state.buf.extend_from_slice(bytes);
+            wake
+        };
+        if wake {
+            // notify_one stores a permit when nobody waits yet: never lost.
+            self.0.ready.notify_one();
+        }
+        true
+    }
+}
+
+impl Drop for PtyWriter {
+    fn drop(&mut self) {
+        lock(&self.0.state).closed = true;
+        self.0.ready.notify_one();
+    }
+}
+
+impl PtyReceiver {
+    /// Everything buffered since the last call, or `None` once the reader
+    /// has finished and the buffer is drained.
+    async fn recv(&mut self) -> Option<Vec<u8>> {
+        loop {
+            {
+                let mut state = lock(&self.0.state);
+                if !state.buf.is_empty() {
+                    return Some(std::mem::take(&mut state.buf));
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            self.0.ready.notified().await;
+        }
+    }
+}
+
+impl Drop for PtyReceiver {
+    fn drop(&mut self) {
+        lock(&self.0.state).receiver_gone = true;
+    }
+}
+
+fn read_pty(mut reader: Box<dyn Read + Send>, tx: PtyWriter) {
+    let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if tx.send(buf[..n].to_vec()).is_err() {
+                if !tx.push(&buf[..n]) {
                     // ConPTY must finish writing even when the output pump is
                     // gone; stopping this reader can deadlock ClosePseudoConsole.
                     #[cfg(not(windows))]
@@ -528,7 +608,7 @@ fn read_pty(mut reader: Box<dyn Read + Send>, tx: mpsc::UnboundedSender<Vec<u8>>
 /// Holds only a weak session handle so a closed terminal tears this task down.
 async fn pump_output(
     session: Weak<Mutex<LiveTerminal>>,
-    mut raw_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut raw_rx: PtyReceiver,
     mut wait: tokio::task::JoinHandle<Result<portable_pty::ExitStatus, std::io::Error>>,
 ) {
     let batch = Duration::from_millis(TERMINAL_OUTPUT_BATCH_MS);
@@ -558,8 +638,10 @@ async fn pump_output(
                 Some(chunk) => {
                     if buffer.is_empty() {
                         flush.as_mut().reset(tokio::time::Instant::now() + batch);
+                        buffer = chunk;
+                    } else {
+                        buffer.extend_from_slice(&chunk);
                     }
-                    buffer.extend_from_slice(&chunk);
                 },
                 None => raw_open = false,
             },
@@ -1183,5 +1265,43 @@ mod initial_command_tests {
                 .is_err()
         );
         assert!(!terminals.any_open());
+    }
+}
+
+#[cfg(test)]
+mod pty_pipe_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pty_pipe_coalesces_reads_and_closes_after_draining() {
+        let (tx, mut rx) = pty_pipe();
+        let reader = std::thread::spawn(move || {
+            for chunk in [b"ab".as_slice(), b"cd", b"ef"] {
+                assert!(tx.push(chunk));
+            }
+            // tx drops here: the pipe closes after the buffered bytes.
+        });
+        reader.join().unwrap();
+        assert_eq!(
+            rx.recv().await.as_deref(),
+            Some(b"abcdef".as_slice()),
+            "one wake for three reads"
+        );
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn pty_pipe_wakes_a_waiting_pump_and_stops_the_reader_when_it_goes() {
+        let (tx, mut rx) = pty_pipe();
+        let waiter = tokio::spawn(async move {
+            let first = rx.recv().await;
+            (first, rx)
+        });
+        tokio::task::yield_now().await;
+        assert!(tx.push(b"late"));
+        let (first, rx) = waiter.await.unwrap();
+        assert_eq!(first.as_deref(), Some(b"late".as_slice()));
+        drop(rx);
+        assert!(!tx.push(b"x"), "the reader learns the pump is gone");
     }
 }

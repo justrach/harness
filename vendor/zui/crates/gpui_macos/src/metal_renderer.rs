@@ -73,7 +73,7 @@ mod gpu_stats {
 
     static WINDOW: Mutex<Option<Window>> = Mutex::new(None);
 
-    pub fn record(gpu_secs: f64, blurs: u32) {
+    pub fn record(gpu_secs: f64, blurs: u32, device_bytes: u64) {
         let mut window = WINDOW.lock();
         let w = window.get_or_insert_with(|| Window {
             start: Instant::now(),
@@ -87,11 +87,12 @@ mod gpu_stats {
         let elapsed = w.start.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
             log::warn!(
-                "gpu frame stats: fps={:.1} gpu_ms_per_frame={:.2} gpu_busy_pct={:.1} blurs_per_frame={:.1}",
+                "gpu frame stats: fps={:.1} gpu_ms_per_frame={:.2} gpu_busy_pct={:.1} blurs_per_frame={:.1} device_mib={:.1}",
                 w.frames as f64 / elapsed,
                 1000.0 * w.gpu_secs / w.frames as f64,
                 100.0 * w.gpu_secs / elapsed,
                 w.blurs as f64 / w.frames as f64,
+                device_bytes as f64 / (1024.0 * 1024.0),
             );
             *window = None;
         }
@@ -573,6 +574,9 @@ impl MetalRenderer {
             return;
         }
 
+        if gpu_stats::enabled() {
+            log::warn!("gpu texture: path intermediate {}x{} (+msaa x{})", size.width.0, size.height.0, self.path_sample_count);
+        }
         let texture_descriptor = metal::TextureDescriptor::new();
         texture_descriptor.set_width(size.width.0 as u64);
         texture_descriptor.set_height(size.height.0 as u64);
@@ -658,6 +662,11 @@ impl MetalRenderer {
                     let instance_buffer_pool = self.instance_buffer_pool.clone();
                     let instance_buffer = Cell::new(Some(instance_buffer));
                     let blur_count = scene.backdrop_blurs.len() as u32;
+                    let device_bytes = if gpu_stats::enabled() {
+                        self.device.current_allocated_size()
+                    } else {
+                        0
+                    };
                     let block = ConcreteBlock::new(move |buffer: &metal::CommandBufferRef| {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
@@ -666,7 +675,7 @@ impl MetalRenderer {
                             let (start, end): (f64, f64) = unsafe {
                                 (msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime])
                             };
-                            gpu_stats::record(end - start, blur_count);
+                            gpu_stats::record(end - start, blur_count, device_bytes);
                         }
                     });
                     let block = block.copy();
