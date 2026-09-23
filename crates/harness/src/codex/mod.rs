@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
@@ -200,7 +200,7 @@ impl CodexHarness {
                     json!({
                         "clientInfo": {
                             "name": "zeron-native",
-                            "title": "Harnesser",
+                            "title": "Harness",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                         "capabilities": { "experimentalApi": true },
@@ -254,7 +254,7 @@ impl CodexHarness {
                     json!({
                         "clientInfo": {
                             "name": "zeron-native",
-                            "title": "Harnesser",
+                            "title": "Harness",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                         "capabilities": { "experimentalApi": true },
@@ -295,13 +295,7 @@ impl CodexHarness {
                 cursor = Some(next);
             }
 
-            if let Some(default_id) = default_model_id
-                && let Some(index) = models.iter().position(|model| model.id == default_id)
-                && index != 0
-            {
-                let default_model = models.remove(index);
-                models.insert(0, default_model);
-            }
+            catalog::promote_default_family(&mut models, default_model_id.as_deref());
             if models.is_empty() {
                 return Err(crate::CatalogFailure {
                     code: crate::CatalogFailureCode::Failed,
@@ -335,7 +329,7 @@ fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
     })
 }
 
-/// Codex accepts both names, but Harnesser has historically persisted `fast`.
+/// Codex accepts both names, but Harness has historically persisted `fast`.
 /// Normalize the app server's `priority` id so live and fallback catalogs do
 /// not produce two different settings for the same tier.
 fn normalized_service_tier(value: &str) -> &str {
@@ -505,7 +499,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
 /// `skills/list` result → typed skills. Keep distinct paths for duplicate names.
 /// Identical name/path pairs are deduplicated across cwd groups. The interface's
 /// shortDescription is picker-sized; the model-facing description is a fallback.
-fn parse_skills(result: &Value) -> Vec<zeron_proto::invocation::Skill> {
+fn parse_skills(result: &Value) -> Vec<harness_proto::invocation::Skill> {
     let mut seen = HashSet::new();
     result
         .get("data")
@@ -522,13 +516,13 @@ fn parse_skills(result: &Value) -> Vec<zeron_proto::invocation::Skill> {
         .filter_map(|skill| {
             let name = skill.get("name")?.as_str()?;
             let path = skill.get("path")?.as_str()?;
-            if !zeron_proto::invocation::valid_invocation_name(name)
-                || !zeron_proto::invocation::valid_skill_path(path)
+            if !harness_proto::invocation::valid_invocation_name(name)
+                || !harness_proto::invocation::valid_skill_path(path)
                 || !seen.insert((name.to_owned(), path.to_owned()))
             {
                 return None;
             }
-            Some(zeron_proto::invocation::Skill {
+            Some(harness_proto::invocation::Skill {
                 command: None,
                 name: name.to_owned(),
                 path: path.to_owned(),
@@ -612,7 +606,7 @@ impl Harness for CodexHarness {
     async fn skills(
         &self,
         cwd: &std::path::Path,
-    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+    ) -> Result<Option<Vec<harness_proto::invocation::Skill>>, HarnessError> {
         self.discover_skills(Some(cwd))
             .await
             .map(|value| Some(parse_skills(&value)))
@@ -686,9 +680,9 @@ impl CodexHarness {
         // worktree on a slash-named branch derives a malformed mount that
         // kills every command.
         request.sandbox = if title_only {
-            zeron_proto::SandboxLevel::ReadOnly
+            harness_proto::SandboxLevel::ReadOnly
         } else {
-            zeron_proto::SandboxLevel::DangerFullAccess
+            harness_proto::SandboxLevel::DangerFullAccess
         };
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
@@ -722,7 +716,7 @@ impl CodexHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::codex", "stderr: {line}");
+                    tracing::debug!(target: "harness_adapters::codex", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -839,12 +833,12 @@ async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEven
 /// Preserve the selected path in the app-server's native skill input. Text
 /// stays first for command routing; repeated selections do not load a skill twice.
 fn prompt_input(text: &str) -> Value {
-    use zeron_proto::invocation::{Invocation, invocation_links, invocation_prompt};
+    use harness_proto::invocation::{Invocation, invocation_links, invocation_prompt};
     let mut input = vec![json!({"type": "text", "text": invocation_prompt(text)})];
     let mut seen = std::collections::HashSet::new();
     for (_, invocation) in invocation_links(text) {
         if let Invocation::Skill { name, path, .. } = invocation {
-            if !zeron_proto::invocation::native_skill_identity(&path)
+            if !harness_proto::invocation::native_skill_identity(&path)
                 && seen.insert((name.clone(), path.clone()))
             {
                 input.push(json!({"type": "skill", "name": name, "path": path}));
@@ -859,17 +853,17 @@ fn command_request(
     text: &str,
     thread_id: &str,
 ) -> Result<Option<(&'static str, Value)>, HarnessError> {
-    let decoded = zeron_proto::invocation::invocation_prompt(text);
-    let Some((name, args)) = zeron_proto::invocation::leading_command(&decoded) else {
+    let decoded = harness_proto::invocation::invocation_prompt(text);
+    let Some((name, args)) = harness_proto::invocation::leading_command(&decoded) else {
         return Ok(None);
     };
     if matches!(name, "compact" | "review")
-        && zeron_proto::invocation::invocation_links(text)
+        && harness_proto::invocation::invocation_links(text)
             .iter()
             .any(|(_, invocation)| {
                 matches!(
                     invocation,
-                    zeron_proto::invocation::Invocation::Skill { .. }
+                    harness_proto::invocation::Invocation::Skill { .. }
                 )
             })
     {
@@ -899,7 +893,7 @@ fn command_request(
         | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
         | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
             Err(HarnessError::Protocol(format!(
-                "/{name} is not mapped in Harnesser's Codex integration. Available commands: /compact and /review."
+                "/{name} is not mapped in Harness's Codex integration. Available commands: /compact and /review."
             )))
         }
         _ => Ok(None),
@@ -1016,7 +1010,7 @@ async fn run_session(session: Session) {
                 json!({
                     "clientInfo": {
                         "name": "zeron-native",
-                        "title": "Harnesser",
+                        "title": "Harness",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": { "experimentalApi": true },
@@ -1053,7 +1047,7 @@ async fn run_session(session: Session) {
                         return Err(e);
                     }
                     tracing::debug!(
-                        target: "zeron_harness::codex",
+                        target: "harness_adapters::codex",
                         "thread/resume failed (starting fresh): {e}"
                     );
                     client
@@ -1503,7 +1497,7 @@ async fn run_session(session: Session) {
                             // fallback for older Codex without steering).
                             Err(e) => {
                                 tracing::debug!(
-                                    target: "zeron_harness::codex",
+                                    target: "harness_adapters::codex",
                                     "turn/steer rejected (queued as next turn): {e}"
                                 );
                                 if router.active.as_deref() == Some(expected.as_str())
@@ -1550,7 +1544,7 @@ async fn run_session(session: Session) {
                             .await
                         {
                             tracing::debug!(
-                                target: "zeron_harness::codex",
+                                target: "harness_adapters::codex",
                                 "turn/interrupt failed (escalation will reap): {e}"
                             );
                         }
@@ -1708,7 +1702,7 @@ fn handle_server_request(
     );
     if !is_approval {
         tracing::debug!(
-            target: "zeron_harness::codex",
+            target: "harness_adapters::codex",
             "unhandled server request: {method}"
         );
         client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
@@ -1966,7 +1960,7 @@ mod skill_discovery_tests {
     use super::*;
     #[test]
     fn selected_skills_use_native_identity_for_initial_and_steered_inputs() {
-        use zeron_proto::invocation::Invocation;
+        use harness_proto::invocation::Invocation;
         let a = Invocation::Skill {
             command: None,
             name: "review".into(),
@@ -2012,13 +2006,13 @@ mod skill_discovery_tests {
 
     #[test]
     fn backtick_labels_keep_native_skill_identity_with_repeated_selections() {
-        use zeron_proto::invocation::{Invocation, harness_prompt};
+        use harness_proto::invocation::{Invocation, harness_prompt};
         let skill = Invocation::Skill {
             command: None,
             name: "review`ui".into(),
             path: "/repo/é skill/SKILL.md".into(),
         };
-        let file = zeron_proto::file_mentions::local_file_link("src/a`b.rs", false);
+        let file = harness_proto::file_mentions::local_file_link("src/a`b.rs", false);
         let raw = format!("{} on {file} and {}", skill.link(), skill.link());
         let input = prompt_input(&harness_prompt(&raw, HarnessId::Codex));
         assert_eq!(input.as_array().unwrap().len(), 2);
@@ -2066,7 +2060,7 @@ mod skill_discovery_tests {
 
     #[test]
     fn catalog_rejects_invalid_identities_without_changing_valid_names() {
-        use zeron_proto::invocation::{Invocation, invocation_links};
+        use harness_proto::invocation::{Invocation, invocation_links};
         let mut entries = vec![];
         for name in [
             "",

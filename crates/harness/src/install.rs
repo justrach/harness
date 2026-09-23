@@ -2,7 +2,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
-use zeron_proto::HarnessId;
+use harness_proto::HarnessId;
 
 use crate::{
     CancellationToken, Harness, HarnessError, StderrTail,

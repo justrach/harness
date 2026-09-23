@@ -1,4 +1,4 @@
-//! zeron-update — release checking and self-update, shared by the engine (the
+//! harness-update — release checking and self-update, shared by the engine (the
 //! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
@@ -508,7 +508,7 @@ pub fn restart_service() -> anyhow::Result<()> {
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Zeron.app`
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Harness.app`
 /// (idempotent). Returns the staged bundle path.
 pub async fn stage_mac_app(
     edge_url: &str,
@@ -519,8 +519,7 @@ pub async fn stage_mac_app(
     require_mac_app_update_platform()?;
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
-    let staged = dir.join("Harnesser.app");
-    if staged.join("Contents/MacOS/zeron").exists() {
+    if let Some(staged) = staged_mac_app(&dir) {
         return Ok(staged);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -538,14 +537,22 @@ pub async fn stage_mac_app(
         ],
     )?;
     std::fs::remove_file(&tarball).ok();
-    if !staged.join("Contents/MacOS/zeron").exists() {
-        let legacy = dir.join("Zeron.app");
-        if legacy.join("Contents/MacOS/zeron").exists() {
-            return Ok(legacy);
+    staged_mac_app(&dir).ok_or_else(|| anyhow::anyhow!("app tarball {file} did not contain Harness.app"))
+}
+
+fn mac_app_has_executable(bundle: &Path) -> bool {
+    let macos = bundle.join("Contents/MacOS");
+    macos.join("harness").exists() || macos.join("zeron").exists()
+}
+
+fn staged_mac_app(dir: &Path) -> Option<PathBuf> {
+    for name in ["Harness.app", "Harnesser.app", "Zeron.app"] {
+        let staged = dir.join(name);
+        if mac_app_has_executable(&staged) {
+            return Some(staged);
         }
-        bail!("app tarball {file} did not contain Harnesser.app");
     }
-    Ok(staged)
+    None
 }
 
 /// Swap the installed bundle for the staged one: `ditto` the staged copy next to
@@ -717,7 +724,7 @@ impl Updater {
     }
 
     async fn check_loop(&self) {
-        // Harnesser is a fork: zeron's release channel would replace this
+        // Harness is a fork: zeron's release channel would replace this
         // binary with upstream zeron, so the fork never checks or applies.
         if !cfg!(test) {
             return;

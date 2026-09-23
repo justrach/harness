@@ -84,5 +84,5 @@ in the full suite. Validation commands:
 
 ```sh
 cargo build --release --locked -p zeron
-cargo test --locked -p zeron-ui --lib -- --test-threads=1
+cargo test --locked -p harness-ui --lib -- --test-threads=1
 ```

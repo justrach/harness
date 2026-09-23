@@ -30,7 +30,7 @@ use tokio::sync::watch;
 
 use crate::EngineError;
 use crate::http_error::describe_http_error;
-use zeron_rpc::TokenError;
+use harness_rpc::TokenError;
 
 const SIGN_IN_TTL: Duration = Duration::from_secs(15 * 60);
 /// Refresh when the cached token has less than this much life left.
@@ -89,7 +89,7 @@ pub struct OrgMembership {
 }
 
 /// AuthStatus stream payload (`SignedOut | NeedsOrganization{user} |
-/// SignedIn{user, orgId?}`). Serializes as the canonical [`zeron_proto::AuthState`]
+/// SignedIn{user, orgId?}`). Serializes as the canonical [`harness_proto::AuthState`]
 /// wire shape (`{"state": "signedIn", …}`) so every client parses one form.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthState {
@@ -123,18 +123,18 @@ impl AuthState {
     }
 
     /// The proto wire twin — the one shape the engine emits over AuthStatus.
-    pub fn to_proto(&self) -> zeron_proto::AuthState {
-        let profile = |user: &AuthUser| zeron_proto::UserProfile {
+    pub fn to_proto(&self) -> harness_proto::AuthState {
+        let profile = |user: &AuthUser| harness_proto::UserProfile {
             id: user.id.clone(),
             email: user.email.clone(),
             name: user.name.clone(),
         };
         match self {
-            AuthState::SignedOut => zeron_proto::AuthState::SignedOut,
-            AuthState::NeedsOrganization { user } => zeron_proto::AuthState::NeedsOrganization {
+            AuthState::SignedOut => harness_proto::AuthState::SignedOut,
+            AuthState::NeedsOrganization { user } => harness_proto::AuthState::NeedsOrganization {
                 user: profile(user),
             },
-            AuthState::SignedIn { user, org_id } => zeron_proto::AuthState::SignedIn {
+            AuthState::SignedIn { user, org_id } => harness_proto::AuthState::SignedIn {
                 user: profile(user),
                 org_id: org_id.clone(),
             },
@@ -442,8 +442,8 @@ impl Auth {
                 return;
             }
             let mut state_rx = auth.watch_state();
-            let mut wake = zeron_sync::wake::subscribe();
-            let mut online = zeron_sync::wake::subscribe_online();
+            let mut wake = harness_sync::wake::subscribe();
+            let mut online = harness_sync::wake::subscribe_online();
             let mut retry_rx = auth.inner.retry_tx.subscribe();
             loop {
                 if !state_rx.borrow().is_signed_in() {
@@ -724,7 +724,7 @@ impl Auth {
         let sign_in = lock(&self.inner.sign_in);
         if sign_in.generation != generation {
             return Err(EngineError::Other(
-                "sign-in was canceled — start again from Harnesser".into(),
+                "sign-in was canceled — start again from Harness".into(),
             ));
         }
         let org_id = jwt_claims(&result.access_token).and_then(|c| c.org_id);
@@ -1054,10 +1054,10 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
     }
 }
 
-/// The relay/room token seam: `Auth` IS a [`zeron_rpc::TokenSource`], so the host relay
+/// The relay/room token seam: `Auth` IS a [`harness_rpc::TokenSource`], so the host relay
 /// and link cache always dial with a fresh bearer after refreshes.
 #[async_trait::async_trait]
-impl zeron_rpc::TokenSource for Auth {
+impl harness_rpc::TokenSource for Auth {
     async fn token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_some() && !self.state().is_signed_in() {
             return Err(TokenError::SignedOut);
@@ -1125,7 +1125,7 @@ async fn handle_loopback_conn(
         let invalid_callback = || {
             (
                 "400 Bad Request",
-                page("Invalid or expired sign-in link. Start again from Harnesser."),
+                page("Invalid or expired sign-in link. Start again from Harness."),
             )
         };
         match (code, state) {
@@ -1134,14 +1134,14 @@ async fn handle_loopback_conn(
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
-                            page("Signed in. You can close this tab and return to Harnesser."),
+                            page("Signed in. You can close this tab and return to Harness."),
                         ),
                         Err(err) => {
                             tracing::info!(error = %err, "auth: discarded canceled callback exchange");
                             (
                                 "409 Conflict",
                                 page(
-                                    "This sign-in was canceled. Start again from Harnesser if you still want to enable sync.",
+                                    "This sign-in was canceled. Start again from Harness if you still want to enable sync.",
                                 ),
                             )
                         }
@@ -1150,7 +1150,7 @@ async fn handle_loopback_conn(
                         tracing::warn!(error = %err, "auth: loopback code exchange failed");
                         (
                             "502 Bad Gateway",
-                            page("Sign-in failed during token exchange — check the Harnesser logs."),
+                            page("Sign-in failed during token exchange — check the Harness logs."),
                         )
                     }
                 },
@@ -1329,7 +1329,7 @@ mod tests {
         let edge = crate::EdgeConfig::new("https://edge.invalid", Arc::new(auth.clone()));
         assert!(matches!(
             edge.room_url("/registry/org_1/ws").url().await,
-            Err(zeron_sync::SyncError::TemporarilyUnavailable(message)) if &message == reason
+            Err(harness_sync::SyncError::TemporarilyUnavailable(message)) if &message == reason
         ));
         assert!(matches!(
             auth.list_orgs().await,
@@ -1409,8 +1409,8 @@ mod tests {
             })
         );
         // The proto type itself round-trips the emitted value.
-        let parsed: zeron_proto::AuthState = serde_json::from_value(value).expect("proto parse");
-        assert!(matches!(parsed, zeron_proto::AuthState::SignedIn { .. }));
+        let parsed: harness_proto::AuthState = serde_json::from_value(value).expect("proto parse");
+        assert!(matches!(parsed, harness_proto::AuthState::SignedIn { .. }));
         assert_eq!(
             serde_json::to_value(AuthState::SignedOut).expect("json"),
             serde_json::json!({"state": "signedOut"})
@@ -1426,7 +1426,7 @@ mod tests {
 }
 
 #[async_trait::async_trait]
-impl zeron_preview::signaling::TokenSource for Auth {
+impl harness_preview::signaling::TokenSource for Auth {
     async fn token(&self) -> anyhow::Result<String> {
         Ok(self.access_token().await?)
     }

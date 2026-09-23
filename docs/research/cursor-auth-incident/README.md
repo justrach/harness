@@ -76,7 +76,7 @@ cursor_auth_probe=$(mktemp -d)
 ZERON_CURSOR_STATE_DIR="$cursor_auth_probe/state" \
 ZERON_CURSOR_AUTH_CLOCK="$cursor_auth_probe/clock" \
 NODE_OPTIONS="--import=$PWD/crates/harness/tests/fixtures/cursor-auth-clock.mjs" \
-cargo run -p zeron-harness --example cursor_stability_probe -- parked 2
+cargo run -p harness-adapters --example cursor_stability_probe -- parked 2
 ```
 
 The preload records only exchange counts, process IDs, and timestamps. The
@@ -122,15 +122,15 @@ saved checkpoints; it cannot manufacture provider state that was never saved.
 Reproduce without credentials:
 
 ```sh
-cargo test -p zeron-harness
+cargo test -p harness-adapters
 ```
 
 Opt-in live checks (use provider quota and disposable workspaces):
 
 ```sh
-cargo run -p zeron-harness --example cursor_stability_probe -- models 1000
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- sessions 6
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=grok-4.6 cargo run -p zeron-harness --example cursor_stability_probe -- parked 6
+cargo run -p harness-adapters --example cursor_stability_probe -- models 1000
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p harness-adapters --example cursor_stability_probe -- sessions 6
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=grok-4.6 cargo run -p harness-adapters --example cursor_stability_probe -- parked 6
 ```
 
 ## Ongoing safeguards

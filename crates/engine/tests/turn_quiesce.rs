@@ -25,10 +25,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use tokio::sync::{Mutex, mpsc};
 
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use zeron_engine::{EngineCore, HarnessRegistry, SteerOutcome};
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use harness_engine::{EngineCore, HarnessRegistry, SteerOutcome};
+use harness_adapters::{Harness, HarnessError, RunControls};
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode, ToolCall,
 };

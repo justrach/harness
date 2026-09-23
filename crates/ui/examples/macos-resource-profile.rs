@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
-use zeron_ui::*;
+use harness_ui::*;
 
 #[cfg(target_os = "macos")]
 #[global_allocator]
@@ -16,7 +16,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(serde::Deserialize)]
 struct Frame {
     at: u64,
-    frame: zeron_doc::TranscriptFrame,
+    frame: harness_doc::TranscriptFrame,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -58,13 +58,13 @@ fn main() -> anyhow::Result<()> {
             theme_library::init(data.clone(), cx);
             appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
                 settings.accent, settings.surface, cx);
-            composer::init(cx, zeron_ui::settings::ComposerSendBehavior::default());
+            composer::init(cx, harness_ui::settings::ComposerSendBehavior::default());
             terminal::panel::init(cx);
             app_menus::init(cx);
             let state = cx.new(|_| {
                 let mut state = state::AppState::new();
-                state.connection = zeron_proto::view::ConnectionStatus::Ready;
-                state.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+                state.connection = harness_proto::view::ConnectionStatus::Ready;
+                state.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
                 state.selected_chat = Some("profile".into());
                 state.selected_space = Some("project".into());
                 state.auto_selected = true;
@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
                         });
                     }
                     for chat in &mut state.chats {
-                        chat.source_context = Some(zeron_proto::ConversationSourceContext {
+                        chat.source_context = Some(harness_proto::ConversationSourceContext {
                             checkout_id: "layout-checkout".into(), repo_root: "/tmp/resource-profile".into(),
                             cwd: "/tmp/resource-profile".into(), branch: chat.branch.clone().unwrap(),
                             head_sha: None, observed_at: chrono::Utc::now(),
@@ -135,7 +135,7 @@ fn main() -> anyhow::Result<()> {
             let elapsed = start.elapsed().as_millis() as u64;
             while frames.peek().is_some_and(|f| f.at - first_at <= elapsed) {
                 let frame = frames.next().unwrap();
-                let text_only = matches!(&frame.frame, zeron_doc::TranscriptFrame::Delta {
+                let text_only = matches!(&frame.frame, harness_doc::TranscriptFrame::Delta {
                     upsert, append, remove, ..
                 } if upsert.is_empty() && remove.is_empty() && !append.is_empty());
                 let before = notifications.get();
@@ -145,15 +145,15 @@ fn main() -> anyhow::Result<()> {
                         let streaming = state
                             .transcript
                             .iter()
-                            .any(|entry| entry.status == Some(zeron_doc::MessageStatus::Streaming));
-                        state.apply_sessions(vec![zeron_proto::Session {
+                            .any(|entry| entry.status == Some(harness_doc::MessageStatus::Streaming));
+                        state.apply_sessions(vec![harness_proto::Session {
                             last_completed_turn: None,
                             chat_id: "profile".into(),
                             device_id: "local".into(),
                             status: if streaming {
-                                zeron_proto::SessionStatus::Working
+                                harness_proto::SessionStatus::Working
                             } else {
-                                zeron_proto::SessionStatus::Idle
+                                harness_proto::SessionStatus::Idle
                             },
                             started_at: Some(chrono::Utc::now()),
                             updated_at: chrono::Utc::now(),

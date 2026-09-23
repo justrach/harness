@@ -4,7 +4,7 @@ use gpui::{
     Context, IntoElement, PathBuilder, Render, SharedString, Window, canvas, div, point,
     prelude::*, px,
 };
-use zeron_proto::ContextUsage;
+use harness_proto::ContextUsage;
 
 pub fn render(
     usage: Option<ContextUsage>,

@@ -144,7 +144,7 @@ ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=10000 \
   node scripts/resource-profile.mjs target/release/zeron /tmp/zeron-native claude-code
 
 # UI-only offscreen replay of those verified protocol frames:
-cargo build --release --locked -p zeron-ui --features resource-profile \
+cargo build --release --locked -p harness-ui --features resource-profile \
   --example macos-resource-profile
 ZERON_VERIFY_CACHE=1 ZERON_VERIFY_INTERACTIONS=1 ZERON_FRAME_STATS=0 \
   target/release/examples/macos-resource-profile \

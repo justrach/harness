@@ -239,8 +239,8 @@ copies an unhandled URI.
 
 ### Slice A — conversation source truth
 
-1. Add the optional source-context wire/doc model in `zeron-proto` and
-   `zeron-doc`; keep old rows readable.
+1. Add the optional source-context wire/doc model in `harness-proto` and
+   `harness-doc`; keep old rows readable.
 2. Capture the actual git context in the host command drain after worktree
    creation and before dispatch.
 3. Remove branch fan-out from `diff_sync::sync_entry`; retain checkout diff and
@@ -304,14 +304,14 @@ Run the narrow checks first:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p zeron-proto
-cargo test -p zeron-doc
-cargo test -p zeron-engine change_request
-cargo test -p zeron-ui change_request
-cargo test -p zeron-ui shell
+cargo test -p harness-proto
+cargo test -p harness-doc
+cargo test -p harness-engine change_request
+cargo test -p harness-ui change_request
+cargo test -p harness-ui shell
 ```
 
-Broaden to `cargo test -p zeron-engine`, `cargo test -p zeron-ui`, and finally
+Broaden to `cargo test -p harness-engine`, `cargo test -p harness-ui`, and finally
 `cargo test --workspace` in proportion to the implemented slice.
 
 ## Coordination

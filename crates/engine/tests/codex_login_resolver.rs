@@ -4,8 +4,8 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use zeron_engine::{AgentAccounts, AgentAccountsConfig};
-use zeron_proto::HarnessId;
+use harness_engine::{AgentAccounts, AgentAccountsConfig};
+use harness_proto::HarnessId;
 
 #[tokio::test]
 async fn codex_login_resolves_override_and_adds_its_directory_to_child_path() {

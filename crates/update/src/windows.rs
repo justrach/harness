@@ -11,14 +11,14 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
-const CONFIG: &str = "zeron-update.json";
+const CONFIG: &str = "harness-update.json";
 /// The running image, moved aside during a swap. A running executable can be
 /// renamed but not deleted, so the file survives until the process exits and
 /// is removed by the relaunched instance (or the next update attempt).
 const BACKUP: &str = "zeron.exe.old";
 /// Deterministic name for the copy that becomes the next installation; a
 /// crash between the two renames leaves at most this file behind.
-const INCOMING: &str = ".zeron-update-incoming.exe";
+const INCOMING: &str = ".harness-update-incoming.exe";
 
 #[derive(serde::Deserialize)]
 struct Config {
@@ -70,7 +70,7 @@ pub async fn stage(
         "invalid SHA-256 checksum"
     );
     let temporary = tempfile::Builder::new()
-        .prefix(".zeron-update-")
+        .prefix(".harness-update-")
         .tempdir_in(directory)?;
     let staged = temporary.path().join("zeron.exe");
     super::download_release_file(edge_url, manifest, &file, &staged).await?;

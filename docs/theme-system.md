@@ -1,7 +1,7 @@
 # Theme system
 
 Zeron themes are complete, source-neutral `ThemeVariant` values owned by the
-`zeron-theme` crate. Runtime components consume only Zeron semantic roles. VS
+`harness-theme` crate. Runtime components consume only Zeron semantic roles. VS
 Code workbench ids and TextMate selectors stop at the source compiler.
 
 ## Runtime model
@@ -41,8 +41,10 @@ Windows using their in-app renderers. Windows uses the bounded Direct3D
 `BackdropBlur` implementation; native window Acrylic remains independent.
 The preference remains portable even where a particular surface cannot honor blur.
 
-The built-in registry contains 30 variants across 19 families:
+New installs select Codegraff Light and Dark. The built-in registry contains
+32 variants across 20 families:
 
+- Codegraff Light and Dark
 - Zeron Light and Dark
 - VS Code Light+ and Dark+
 - Catppuccin Latte and Mocha
@@ -119,13 +121,13 @@ activated only after the updated library is persisted successfully. The library 
 `{data_dir}/theme-library.json` and is loaded before the first palette is
 installed.
 
-The `zeron-theme-import` development tool exposes the same single-file adapter
+The `harness-theme-import` development tool exposes the same single-file adapter
 for built-in curation:
 
 Example:
 
 ```bash
-cargo run -p zeron-theme --bin zeron-theme-import -- \
+cargo run -p harness-theme --bin harness-theme-import -- \
   --input /path/to/theme.json \
   --output /tmp/theme.zeron.json \
   --report /tmp/theme.report.json \

@@ -4,9 +4,10 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.harnesser/worktrees/<repoName>/<worktreeName>` (NOT the data
+//! created under `~/.harness/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `harness/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
+//! matching `harness/<name>` branch. `HARNESS_WORKTREES_DIR` / `ZERON_WORKTREES_DIR`
+//! override the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
@@ -18,7 +19,7 @@ use std::time::Duration;
 use futures::{StreamExt, stream};
 use sha2::{Digest, Sha256};
 
-use zeron_proto::{
+use harness_proto::{
     DriveEntry, FileSearchMatch, FolderEntry, FolderListing, GitHistoryCommit,
     GitHistoryComparison, GitHistoryPage, GitHistoryRef, GitHistoryRefKind, Repo, RepoRef,
     Worktree,
@@ -82,13 +83,26 @@ pub(crate) fn home_dir() -> PathBuf {
 }
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
-/// worktrees are user-facing working checkouts. `ZERON_WORKTREES_DIR` overrides
-/// (test isolation); empty reads as unset.
+/// worktrees are user-facing working checkouts. `HARNESS_WORKTREES_DIR` /
+/// `ZERON_WORKTREES_DIR` override (test isolation); empty reads as unset.
 fn default_worktrees_root() -> PathBuf {
-    std::env::var_os("ZERON_WORKTREES_DIR")
+    std::env::var_os("HARNESS_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".harnesser").join("worktrees"))
+        .or_else(|| {
+            std::env::var_os("ZERON_WORKTREES_DIR")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| {
+            let home = home_dir();
+            let preferred = home.join(".harness");
+            if preferred.exists() || !home.join(".harnesser").exists() {
+                preferred.join("worktrees")
+            } else {
+                home.join(".harnesser").join("worktrees")
+            }
+        })
 }
 
 struct ReposInner {
@@ -504,7 +518,7 @@ impl Repos {
     }
 
     /// Public commit history in topological order. Only user-facing branches,
-    /// remotes, and tags seed the walk, so Harnesser's internal refs never leak
+    /// remotes, and tags seed the walk, so Harness's internal refs never leak
     /// into the graph or keep otherwise-unreachable checkpoints visible.
     pub async fn history(
         &self,
@@ -1365,7 +1379,7 @@ async fn disposable_worker<T: Send + 'static>(
 fn list_folders_blocking(target: &Path) -> Result<FolderListing, EngineError> {
     let read = std::fs::read_dir(target).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
-            EngineError::Other("Harnesser doesn't have access to this folder on the device.".into())
+            EngineError::Other("Harness doesn't have access to this folder on the device.".into())
         }
         _ => EngineError::Other(format!("could not read that folder: {e}")),
     })?;
@@ -1968,8 +1982,8 @@ fn rank_file_matches(
         .collect()
 }
 
-/// Turn a generated chat title into the semantic portion of a Harnesser branch
-/// (port of zeron's `worktreeBranchFromTitle`). Harnesser NFKD-normalizes accented
+/// Turn a generated chat title into the semantic portion of a Harness branch
+/// (port of zeron's `worktreeBranchFromTitle`). Harness NFKD-normalizes accented
 /// letters first; native keeps it ASCII-only (generated titles are Title Case
 /// English), so non-ASCII characters collapse into the `-` separator.
 pub const OWN_BRANCH_PREFIX: &str = "harness/";

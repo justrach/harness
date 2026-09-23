@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use zeron_doc::SessionDoc;
-use zeron_sync::DocsStore;
+use harness_doc::SessionDoc;
+use harness_sync::DocsStore;
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeron_proto::WorkspaceScope;
+use harness_proto::WorkspaceScope;
 
 use crate::EngineError;
 
@@ -379,7 +379,7 @@ mod tests {
         let core = crate::EngineCore::assemble_with_profile(
             profile,
             std::sync::Arc::new(crate::default_registry()),
-            zeron_proto::HarnessId::Mock,
+            harness_proto::HarnessId::Mock,
             None,
         )
         .unwrap();
@@ -403,7 +403,7 @@ mod tests {
         let core = crate::EngineCore::assemble(
             dir.path(),
             std::sync::Arc::new(crate::default_registry()),
-            zeron_proto::HarnessId::Mock,
+            harness_proto::HarnessId::Mock,
             None,
         )
         .unwrap();

@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zeron_doc::SessionCommandPayload;
-use zeron_proto::{
+use harness_doc::SessionCommandPayload;
+use harness_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
@@ -849,7 +849,7 @@ impl Tools {
             _ => short(origin_id).to_owned(),
         };
         format!(
-            "[Message from Harnesser chat {label}. Reply to it with the Harnesser `send_message` tool, chat {}.]\n\n{text}",
+            "[Message from Harness chat {label}. Reply to it with the Harness `send_message` tool, chat {}.]\n\n{text}",
             short(origin_id)
         )
     }
@@ -974,14 +974,14 @@ impl Tools {
         let rendered = render_entries(&entries, RenderOptions::default());
         let replies: Vec<&RenderedMessage> = rendered
             .iter()
-            .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
+            .filter(|m| m.role == harness_doc::MessageRole::Assistant)
             .filter(|m| m.created_at >= since_millis.saturating_sub(2_000))
             .collect();
         let replies: Vec<&RenderedMessage> = if replies.is_empty() {
             rendered
                 .iter()
                 .rev()
-                .find(|m| m.role == zeron_doc::MessageRole::Assistant)
+                .find(|m| m.role == harness_doc::MessageRole::Assistant)
                 .into_iter()
                 .collect()
         } else {
@@ -1024,7 +1024,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
     use std::sync::Mutex;
-    use zeron_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
+    use harness_rpc::{RpcError, RpcReply, RpcService, memory_client, methods};
 
     /// A fixed little workspace: one device, one project, one chat with a
     /// two-message transcript. Writes are recorded for assertions.
@@ -1171,7 +1171,7 @@ mod tests {
         assert_eq!(params["command"]["kind"], "run");
         let prompt = params["command"]["request"]["prompt"].as_str().unwrap();
         assert!(
-            prompt.starts_with("[Message from Harnesser chat Beta (chat-bet)"),
+            prompt.starts_with("[Message from Harness chat Beta (chat-bet)"),
             "{prompt}"
         );
         assert!(prompt.ends_with("please review"));

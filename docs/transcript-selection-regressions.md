@@ -35,7 +35,7 @@ The recorded release binary has SHA-256
 All 620 release UI tests passed:
 
 ```sh
-cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+cargo test --release --locked -p harness-ui --lib -- --test-threads=1
 ```
 
 The new headless tests use the cached transcript view and real mouse events.

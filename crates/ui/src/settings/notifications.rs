@@ -326,7 +326,7 @@ impl Render for NotificationsPage {
                                     div()
                                         .child(SharedString::from(
                                             "Show a system banner on the same events, so pings \
-                                             reach you while Harnesser is in the background.",
+                                             reach you while Harness is in the background.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -364,7 +364,7 @@ impl Render for NotificationsPage {
                                 vec![
                                     div()
                                         .child(SharedString::from(
-                                            "Skip the banner while a Harnesser window is focused.",
+                                            "Skip the banner while a Harness window is focused.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -373,7 +373,7 @@ impl Render for NotificationsPage {
                     .child(
                         toggle(
                             "notifications-background-toggle",
-                            "Only notify when Harnesser is in the background",
+                            "Only notify when Harness is in the background",
                             background_only,
                             desktop,
                         )

@@ -1,12 +1,12 @@
-# Harnesser
+# Harness
 
 A native desktop GUI for the coding agents already on your machine — Claude Code, Codex, Cursor, Devin, Grok, Hermes, graff, Pi, OpenCode, and Antigravity. Local by default. Optional multi-device sync when you want it.
 
 *English | [简体中文](README.zh-CN.md)*
 
-The app is **Harnesser** (`harness.codegraff.app`). The CLI binary is `harness`. `HARNESS_*` env vars win; `ZERON_*` still works. One binary covers headed GUI and a headless engine.
+The app is **Harness** (`harness.codegraff.app`). The CLI binary is `harness`. `HARNESS_*` env vars win; `ZERON_*` still works. One binary covers headed GUI and a headless engine.
 
-New installs open on the **Codegraff** theme (Warm Graphite — cream and amber light, near-black and gold dark). Settings → Appearance still has Harnesser, the VS Code catalog, and VS Code import.
+New installs open on the **Codegraff** theme (Warm Graphite — cream and amber light, near-black and gold dark). Settings → Appearance still has Harness, the VS Code catalog, and VS Code import.
 
 ## Run from source
 
@@ -18,7 +18,7 @@ Needs the Rust toolchain in `rust-toolchain.toml` (currently 1.97.1).
 ./scripts/run-macos-dev.sh
 ```
 
-That builds `harness`, stages `target/macos-dev/Harnesser.app`, and opens it through Launch Services so TCC stays on the app instead of the terminal. Dev data lives under `target/macos-dev/data` (override with `HARNESS_DEV_DATA_DIR`); IPC defaults to port `49777`. Quit the app before rebuilding.
+That builds `harness`, stages `target/macos-dev/Harness.app`, and opens it through Launch Services so TCC stays on the app instead of the terminal. Dev data lives under `target/macos-dev/data` (override with `HARNESS_DEV_DATA_DIR`); IPC defaults to port `49777`. Quit the app before rebuilding.
 
 Offline look-and-feel with seeded sessions:
 
@@ -45,7 +45,7 @@ The sidebar browser needs the [Linux browser runtime](docs/reference/linux-brows
 
 ### Windows
 
-Extract a portable ZIP and run `harness.exe`, keeping `zeron-update.json` beside it for in-app updates. Source builds: [Windows development](docs/reference/windows-development.md).
+Extract a portable ZIP and run `harness.exe`, keeping `harness-update.json` beside it for in-app updates. Source builds: [Windows development](docs/reference/windows-development.md).
 
 ```powershell
 cargo run --locked -p harness

@@ -1,13 +1,13 @@
 //! #296 through the engine: completed tools must not park a pending ACP turn.
 //! Separate binary because the diagnostic watchdog setting is process-wide.
 use std::{sync::Arc, time::Duration};
-use zeron_doc::{
+use harness_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,
     SessionCommandStatus,
 };
-use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::AcpHarness;
-use zeron_proto::{HarnessId, RunRequest, SandboxLevel, SessionStatus};
+use harness_engine::{EngineCore, HarnessRegistry};
+use harness_adapters::AcpHarness;
+use harness_proto::{HarnessId, RunRequest, SandboxLevel, SessionStatus};
 
 async fn wait_for(mut condition: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(15), async {

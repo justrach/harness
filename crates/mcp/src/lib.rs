@@ -1,8 +1,8 @@
-//! zeron-mcp — a Model Context Protocol server over the running engine.
+//! harness-mcp — a Model Context Protocol server over the running engine.
 //!
 //! `zeron mcp` speaks MCP (JSON-RPC 2.0, newline-delimited) on stdin/stdout
 //! and proxies every tool into the engine's localhost IPC — the same
-//! `zeron_rpc` WebSocket the headed app and `zeron sync` dial. Nothing here
+//! `harness_rpc` WebSocket the headed app and `zeron sync` dial. Nothing here
 //! talks to the edge or touches the filesystem: the engine stays the single
 //! authority for chats, devices, projects, and the command plane.
 //!

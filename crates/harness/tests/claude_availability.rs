@@ -4,7 +4,7 @@
 //! Child-process probes: resolution reads process env (PATH, the override), so
 //! each case re-runs this test binary with a controlled environment.
 
-use zeron_harness::{ClaudeHarness, Harness};
+use harness_adapters::{ClaudeHarness, Harness};
 
 #[test]
 fn availability_child() {

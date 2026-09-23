@@ -103,6 +103,40 @@ impl Shell {
     /// chats frame has synced (manual selection wins; no chats → the
     /// new-session canvas shows).
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
+        // First synced frame: reopen what was open at quit (its chat and
+        // split layout), unless a deep link or manual pick already landed.
+        if !self.boot_restored && self.state.read(cx).chats_synced {
+            self.boot_restored = true;
+            let restore = {
+                let state = self.state.read(cx);
+                let live = |id: &str| state.chats.iter().any(|c| c.id == id && !c.archived);
+                (state.selected_chat.is_none() && !state.auto_selected).then(|| {
+                    (
+                        self.settings.last_chat_id.clone().filter(|id| live(id)),
+                        self.settings
+                            .chat_layout
+                            .as_ref()
+                            .and_then(|saved| chat_split::ChatSplit::from_saved(saved, live)),
+                    )
+                })
+            };
+            if let Some((last, layout)) = restore {
+                let restored_layout = layout.is_some();
+                self.chat_split = layout;
+                self.chat_split_selected = last.clone();
+                self.sync_chat_panes(cx);
+                if last.is_some() || restored_layout {
+                    self.focus_composer(cx);
+                    self.state.update(cx, |s, cx| {
+                        // A restored blank canvas is a choice too: keep the
+                        // most-recent fallback below from overriding it.
+                        s.auto_selected = true;
+                        s.select_chat(last, cx)
+                    });
+                    return;
+                }
+            }
+        }
         let first = {
             let state = self.state.read(cx);
             if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
@@ -179,7 +213,7 @@ impl Shell {
         let (title, target, harness, on_canvas): (
             SharedString,
             Option<SharedString>,
-            Option<zeron_proto::HarnessId>,
+            Option<harness_proto::HarnessId>,
             bool,
         ) = {
             let state = self.state.read(cx);

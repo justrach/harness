@@ -20,11 +20,11 @@ use gpui::{
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_engine::registry::HarnessDescriptor;
-use zeron_proto::{
+use harness_engine::registry::HarnessDescriptor;
+use harness_proto::{
     ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
-use zeron_rpc::methods;
+use harness_rpc::methods;
 
 /// Display cap for the ref list (t3code shows pages of 100 with a status
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
@@ -405,7 +405,7 @@ pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
 }
 
 /// Directory rows of a listing (files never render in the browser).
-pub fn browser_rows(listing: &FolderListing) -> Vec<&zeron_proto::FolderEntry> {
+pub fn browser_rows(listing: &FolderListing) -> Vec<&harness_proto::FolderEntry> {
     listing.entries.iter().filter(|e| e.is_dir).collect()
 }
 
@@ -2075,10 +2075,10 @@ impl Pickers {
     }
 
     /// Devices in picker order: this device first, then by name.
-    fn device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    fn device_rows(&self, cx: &App) -> Vec<harness_proto::Device> {
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let mut devices: Vec<zeron_proto::Device> = state.devices.clone();
+        let mut devices: Vec<harness_proto::Device> = state.devices.clone();
         devices.sort_by_key(|d| {
             (
                 local.as_deref() != Some(d.id.as_str()),
@@ -2091,7 +2091,7 @@ impl Pickers {
 
     /// [`Self::device_rows`] filtered by the search box (same ranked
     /// substring match as the project rows).
-    fn filtered_device_rows(&self, cx: &App) -> Vec<zeron_proto::Device> {
+    fn filtered_device_rows(&self, cx: &App) -> Vec<harness_proto::Device> {
         let query = self.search.read(cx).text().to_string();
         let rows = self.device_rows(cx);
         let names: Vec<String> = rows.iter().map(|d| d.name.clone()).collect();
@@ -4390,7 +4390,7 @@ fn scoped_model_rows<'a>(
         // + favorite boost, collapsed to our ranks). The description stays
         // in the haystack — opencode's provider attribution ("anthropic")
         // must find its models even inside one tab.
-        let mut ranked: Vec<(usize, usize, usize, ModelRowData)> = Vec::new();
+        let mut ranked: Vec<(usize, usize, usize, usize, ModelRowData)> = Vec::new();
         let mut input_ix = 0usize;
         for descriptor in descriptors {
             let Some(models) = models_for(descriptor.id) else {
@@ -4412,13 +4412,22 @@ fn scoped_model_rows<'a>(
                 .map(|rank| rank + 2);
                 if let Some(rank) = by_label.into_iter().chain(by_description).min() {
                     let starred = !is_favorite(descriptor.id, &model.id);
-                    ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
+                    let alias = (model.id.contains('/') || model.id.contains(':')) as usize;
+                    ranked.push((
+                        rank,
+                        alias,
+                        starred as usize,
+                        input_ix,
+                        row(descriptor, model),
+                    ));
                 }
                 input_ix += 1;
             }
         }
-        ranked.sort_by_key(|(rank, unstarred, ix, _)| (*rank, *unstarred, *ix));
-        return ranked.into_iter().map(|(_, _, _, row)| row).collect();
+        ranked.sort_by_key(|(rank, alias, unstarred, ix, _)| {
+            (*rank, *alias, *unstarred, *ix)
+        });
+        return ranked.into_iter().map(|(_, _, _, _, row)| row).collect();
     }
     match rail {
         ModelRail::Favorites => {
@@ -4486,7 +4495,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
             .to_ascii_lowercase()
     }
     let catalog = match harness {
-        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
+        HarnessId::ClaudeCode => harness_adapters::claude::catalog::static_models(),
         _ => Vec::new(),
     };
     // Curated label for an id: exact normalized match, else — for bare
@@ -4527,15 +4536,15 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
                     }
                 }
                 if !model.options.iter().any(|o| o.id == "contextWindow") {
-                    model.options.push(zeron_proto::ModelOption {
+                    model.options.push(harness_proto::ModelOption {
                         id: "contextWindow".into(),
                         label: "Context Window".into(),
                         choices: vec![
-                            zeron_proto::ModelOptionChoice {
+                            harness_proto::ModelOptionChoice {
                                 id: "200k".into(),
                                 label: "200K".into(),
                             },
-                            zeron_proto::ModelOptionChoice {
+                            harness_proto::ModelOptionChoice {
                                 id: "1m".into(),
                                 label: "1M".into(),
                             },
@@ -4623,7 +4632,7 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
         .into_iter()
         .filter(|d| {
             d.installed
-                && (zeron_engine::registry::descriptor_enabled(d)
+                && (harness_engine::registry::descriptor_enabled(d)
                     || (allow_mock && d.id == HarnessId::Mock))
         })
         .collect()
@@ -4920,7 +4929,7 @@ impl Render for Pickers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+    use harness_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
 
     struct ModelShortcutHost {
         focus_sub: Option<gpui::Subscription>,
@@ -6161,7 +6170,7 @@ mod tests {
             can_install: false,
             enabled: Some(true),
             reasoning_levels: Vec::new(),
-            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            steering_mode: harness_proto::SteeringMode::StepBoundary,
             supports_steering: false,
         }
     }
@@ -6356,16 +6365,16 @@ mod tests {
     #[test]
     fn standard_tier_is_hidden_but_other_defaults_remain() {
         let mut model = bare_model("test", "Test");
-        model.options = vec![zeron_proto::ModelOption {
+        model.options = vec![harness_proto::ModelOption {
             id: "serviceTier".into(),
             label: "Service Tier".into(),
             default_choice: "default".into(),
             choices: vec![
-                zeron_proto::ModelOptionChoice {
+                harness_proto::ModelOptionChoice {
                     id: "default".into(),
                     label: "Standard".into(),
                 },
-                zeron_proto::ModelOptionChoice {
+                harness_proto::ModelOptionChoice {
                     id: "fast".into(),
                     label: "Fast".into(),
                 },
@@ -6684,7 +6693,7 @@ mod tests {
             id,
             name: name.into(),
             supports_steering: true,
-            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            steering_mode: harness_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
             can_install: false,
@@ -6711,7 +6720,7 @@ mod tests {
             id,
             name: name.into(),
             supports_steering: true,
-            steering_mode: zeron_proto::SteeringMode::StepBoundary,
+            steering_mode: harness_proto::SteeringMode::StepBoundary,
             reasoning_levels: vec![],
             installed: true,
             can_install: false,
@@ -6764,7 +6773,7 @@ mod tests {
                 id,
                 name: name.into(),
                 supports_steering: true,
-                steering_mode: zeron_proto::SteeringMode::StepBoundary,
+                steering_mode: harness_proto::SteeringMode::StepBoundary,
                 reasoning_levels: vec![],
                 installed,
                 can_install: false,

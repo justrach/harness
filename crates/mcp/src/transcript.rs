@@ -7,8 +7,8 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use zeron_proto::ToolCall;
+use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
+use harness_proto::ToolCall;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -229,6 +229,7 @@ mod tests {
             device_id: "dev-a".into(),
             status: Some(MessageStatus::Complete),
             continuation_of: None,
+            duration_ms: None,
         }
     }
 

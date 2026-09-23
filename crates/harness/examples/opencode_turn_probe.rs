@@ -6,14 +6,14 @@
 //! OPENCODE_PROBE_AGENT selects an agent, OPENCODE_PROBE_INTERRUPT_MS cancels
 //! after the first text delta. Set TMPDIR to control temporary workspace placement.
 //!
-//!     cargo run -p zeron-harness --example opencode_turn_probe -- \
+//!     cargo run -p harness-adapters --example opencode_turn_probe -- \
 //!         ~/.opencode/bin/opencode opencode/muse-spark-1.3-contributor-free \
 //!         "Reply with exactly: PONG"
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use zeron_harness::{CancellationToken, Harness, OpencodeHarness, RunControls};
-use zeron_proto::{AgentEvent, RunRequest, SandboxLevel};
+use harness_adapters::{CancellationToken, Harness, OpencodeHarness, RunControls};
+use harness_proto::{AgentEvent, RunRequest, SandboxLevel};
 
 #[tokio::main]
 async fn main() {
@@ -71,7 +71,7 @@ async fn main() {
                         .into_iter()
                         .map(|question| {
                             eprintln!("PERMISSION Yes (once): {}", question.question);
-                            zeron_proto::UserInputAnswer {
+                            harness_proto::UserInputAnswer {
                                 question_id: question.id,
                                 labels: vec!["Yes".into()],
                             }
@@ -135,9 +135,9 @@ async fn main() {
     };
     eprintln!("--- done: {status:?} text={text:?} tools={tools}");
     match status {
-        Some(zeron_proto::DoneStatus::Completed)
+        Some(harness_proto::DoneStatus::Completed)
             if !expect_interrupt && !text.trim().is_empty() => {}
-        Some(zeron_proto::DoneStatus::Interrupted) if expect_interrupt => {}
+        Some(harness_proto::DoneStatus::Interrupted) if expect_interrupt => {}
         _ => std::process::exit(1),
     }
 }

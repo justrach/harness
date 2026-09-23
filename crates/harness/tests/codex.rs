@@ -10,10 +10,10 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{
+use harness_adapters::{
     CancellationToken, CodexHarness, Harness, HarnessError, RunControls, SteerMessage,
 };
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
     ToolCall, UserInputAnswer, UserInputQuestion,
 };
@@ -351,7 +351,7 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
         .send(SteerMessage {
             prompt: format!(
                 "redirect please {}",
-                zeron_proto::invocation::Invocation::Skill {
+                harness_proto::invocation::Invocation::Skill {
                     command: None,
                     name: "review".into(),
                     path: "/repo/followup/SKILL.md".into(),
@@ -1104,7 +1104,7 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
 
 /// Live smoke against the REAL codex app-server (installed + authed):
 /// one trivial turn, ending on turn/completed.
-/// `cargo test -p zeron-harness --test codex -- --ignored`.
+/// `cargo test -p harness-adapters --test codex -- --ignored`.
 #[tokio::test]
 #[ignore = "spawns the real codex app-server; needs install + auth + network"]
 async fn live_real_app_server_single_turn() {
@@ -1182,7 +1182,7 @@ async fn skills_are_not_advertised_as_commands() {
     );
 }
 
-/// Live smoke against the real CLI: `cargo test -p zeron-harness --test
+/// Live smoke against the real CLI: `cargo test -p harness-adapters --test
 /// codex -- --ignored live_skills`.
 #[tokio::test]
 #[ignore]
@@ -1323,7 +1323,7 @@ async fn real_image_generation_smoke() {
 
 #[tokio::test]
 async fn native_commands_use_rpc_operations_and_render_results() {
-    let selected_review = zeron_proto::invocation::Invocation::Command {
+    let selected_review = harness_proto::invocation::Invocation::Command {
         name: "review".into(),
     }
     .link();
@@ -1365,7 +1365,7 @@ async fn native_commands_use_rpc_operations_and_render_results() {
 
 #[tokio::test]
 async fn compact_requires_existing_session_and_commands_reject_attachments() {
-    let selected_compact = zeron_proto::invocation::Invocation::Command {
+    let selected_compact = harness_proto::invocation::Invocation::Command {
         name: "compact".into(),
     }
     .link();
@@ -1424,7 +1424,7 @@ async fn native_command_during_a_turn_waits_for_its_boundary() {
 
 #[tokio::test]
 async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
-    use zeron_proto::invocation::{Invocation, harness_prompt};
+    use harness_proto::invocation::{Invocation, harness_prompt};
     let initial = Invocation::Skill {
         command: None,
         name: "review".into(),
@@ -1447,7 +1447,7 @@ async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
     let raw = format!(
         "scenario:native-skills {} {}",
         initial.link(),
-        zeron_proto::file_mentions::local_file_link("src/lib.rs", false)
+        harness_proto::file_mentions::local_file_link("src/lib.rs", false)
     );
     let events = run_to_end(
         &harness(),

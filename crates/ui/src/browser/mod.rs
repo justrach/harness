@@ -84,7 +84,7 @@ pub struct BrowserSurface {
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
-    previews: zeron_proto::PreviewSnapshot,
+    previews: harness_proto::PreviewSnapshot,
     previews_loading: bool,
     previews_task: Option<gpui::Task<()>>,
     #[cfg(feature = "browser-fixture")]
@@ -162,7 +162,7 @@ impl BrowserSurface {
             address_edited: false,
             validation: None,
             remote,
-            previews: zeron_proto::PreviewSnapshot::default(),
+            previews: harness_proto::PreviewSnapshot::default(),
             previews_loading: true,
             previews_task: None,
             #[cfg(feature = "browser-fixture")]
@@ -247,7 +247,7 @@ impl BrowserSurface {
     }
 
     #[cfg(feature = "browser-fixture")]
-    pub fn fixture_previews(&self) -> zeron_proto::PreviewSnapshot {
+    pub fn fixture_previews(&self) -> harness_proto::PreviewSnapshot {
         self.previews.clone()
     }
     #[cfg(feature = "browser-fixture")]
@@ -268,14 +268,14 @@ impl BrowserSurface {
                 let subscription = handle
                     .client()
                     .subscribe(
-                        zeron_rpc::methods::WATCH_PREVIEWS,
+                        harness_rpc::methods::WATCH_PREVIEWS,
                         serde_json::json!({"chatId": chat_id}),
                     )
                     .await;
                 if let Ok(mut updates) = subscription {
                     while let Some(value) = updates.recv().await {
                         if let Ok(snapshot) =
-                            serde_json::from_value::<zeron_proto::PreviewSnapshot>(value)
+                            serde_json::from_value::<harness_proto::PreviewSnapshot>(value)
                         {
                             if this
                                 .update(cx, |this, cx| {

@@ -79,7 +79,7 @@ pub(super) async fn exercise(
         let entries = serde_json::from_value(serde_json::json!([
             {"id":"fixture-links","role":"assistant","parts":[{"id":"text","kind":"text","text":markdown}],"createdAt":1788900001000_i64,"deviceId":"local","status":"complete"}
         ])).unwrap();
-        s.receive_transcript_frame(zeron_doc::TranscriptFrame::Reset { reset: entries }, cx).unwrap();
+        s.receive_transcript_frame(harness_doc::TranscriptFrame::Reset { reset: entries }, cx).unwrap();
     });
     pause(cx, 900).await;
     let (position, _) = markdown::render::fixture_link(origin)

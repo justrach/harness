@@ -1,5 +1,5 @@
 [package]
-name = "zeron-harness"
+name = "harness-adapters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,7 @@ path = "tests/fixtures/native_agent.rs"
 required-features = ["native-fixture"]
 
 [dependencies]
-zeron-proto.workspace = true
+harness-proto.workspace = true
 base64 = "0.22"
 reqwest.workspace = true
 tokio.workspace = true

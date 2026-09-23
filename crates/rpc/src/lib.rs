@@ -1,4 +1,4 @@
-//! zeron-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
+//! harness-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
 //! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
@@ -90,11 +90,11 @@ pub mod methods {
     /// counters for the workspace room and every open chat doc. No params;
     /// IPC-only.
     pub const SYNC_STATUS: &str = "SyncStatus";
-    /// Pushed edge-connectivity posture (`zeron_proto::Connectivity`):
+    /// Pushed edge-connectivity posture (`harness_proto::Connectivity`):
     /// current value first, then every change — the connection pill /
     /// composer-honesty / queued-badge feed. No params; IPC-only.
     pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
-    /// In-flight queued-attachment transfers (`zeron_proto::TransferProgress`
+    /// In-flight queued-attachment transfers (`harness_proto::TransferProgress`
     /// list): current set first, then a fresh snapshot per landed chunk —
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
@@ -126,6 +126,10 @@ pub mod methods {
     pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
     pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
     pub const SIGN_OUT: &str = "SignOut";
+    // "Sign in with Codegraff" (engine codegraff_auth; identity only).
+    pub const CODEGRAFF_SIGN_IN: &str = "CodegraffSignIn";
+    pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
+    pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";

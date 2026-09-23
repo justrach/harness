@@ -1,4 +1,4 @@
-//! The engine client: a thin, reconnecting wrapper over `zeron_rpc` with the
+//! The engine client: a thin, reconnecting wrapper over `harness_rpc` with the
 //! snapshot/resolve helpers the tools share.
 //!
 //! Watch streams are the engine's only read surface for chats, devices,
@@ -13,13 +13,13 @@ use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
-use zeron_doc::{
+use harness_doc::{
     SessionCommandPayload, SessionMessageEntry, TranscriptFrame, apply_transcript_frame,
 };
-use zeron_proto::{
+use harness_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use zeron_rpc::{RpcClient, RpcError, connect_ws, methods};
+use harness_rpc::{RpcClient, RpcError, connect_ws, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -144,7 +144,7 @@ impl Zeron {
         }
         let client = connect_ws(&self.url).await.map_err(|e| {
             anyhow!(
-                "no Harnesser engine listening at {} ({e}) — is Harnesser running?",
+                "no Harness engine listening at {} ({e}) — is Harness running?",
                 self.url
             )
         })?;

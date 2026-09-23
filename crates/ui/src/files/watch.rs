@@ -1,7 +1,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use gpui::Context;
-use zeron_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
+use harness_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
 
 use super::{FilesEvent, FilesSurface, client::WorkspaceFilesClient, model::parent_path};
 

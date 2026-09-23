@@ -26,8 +26,8 @@ use portable_pty::{CommandBuilder, native_pty_system};
 mod windows;
 use tokio::sync::mpsc;
 
-use zeron_doc::TERMINAL_OUTPUT_BATCH_MS;
-use zeron_proto::{TerminalEvent, TerminalSession};
+use harness_doc::TERMINAL_OUTPUT_BATCH_MS;
+use harness_proto::{TerminalEvent, TerminalSession};
 
 use crate::{EngineError, new_id};
 
@@ -277,7 +277,7 @@ impl Terminals {
             cmd.cwd(cwd);
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
-            cmd.env("TERM_PROGRAM", "Harnesser");
+            cmd.env("TERM_PROGRAM", "Harness");
             for (name, value) in environment {
                 cmd.env(name, value);
             }
@@ -645,7 +645,7 @@ mod windows_tests {
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
-    use zeron_proto::TerminalEvent;
+    use harness_proto::TerminalEvent;
 
     use super::Terminals;
 

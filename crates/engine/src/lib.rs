@@ -1,4 +1,4 @@
-//! zeron-engine — the headless backend: sessions engine, doc host + command executor,
+//! harness-engine — the headless backend: sessions engine, doc host + command executor,
 //! run journal + crash recovery, and the IPC RPC server.
 //!
 //! Spec: ARCHITECTURE.md §5 and docs/research/feature-inventory.md §3. M2 surface:
@@ -10,15 +10,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use zeron_proto::{EngineInfo, HarnessId, WorkspaceScope};
-use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
+pub use harness_proto::{EngineInfo, HarnessId, WorkspaceScope};
+use harness_rpc::{RpcError, RpcReply, RpcService, methods};
 
-use zeron_sync::DocsStore;
+use harness_sync::DocsStore;
 
 pub mod agent_accounts;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
+pub mod codegraff_auth;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
@@ -78,15 +79,15 @@ pub(crate) const LEGACY_UNKNOWN_DEVICE_NAME: &str = "unknown-device";
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(transparent)]
-    Token(#[from] zeron_rpc::TokenError),
+    Token(#[from] harness_rpc::TokenError),
     #[error("doc: {0}")]
-    Doc(#[from] zeron_doc::DocError),
+    Doc(#[from] harness_doc::DocError),
     #[error("journal: {0}")]
     Journal(#[from] run_journal::JournalError),
     #[error("store: {0}")]
-    Store(#[from] zeron_sync::StoreError),
+    Store(#[from] harness_sync::StoreError),
     #[error("harness: {0}")]
-    Harness(#[from] zeron_harness::HarnessError),
+    Harness(#[from] harness_adapters::HarnessError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -133,7 +134,7 @@ pub struct EngineCore {
     pub workspace_files: WorkspaceFiles,
     pub terminals: Terminals,
     pub project_actions: ProjectActionsStore,
-    pub previews: zeron_preview::PreviewService,
+    pub previews: harness_preview::PreviewService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -146,10 +147,10 @@ pub struct EngineCore {
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
-    links: std::sync::Mutex<Option<Arc<zeron_rpc::LinkCache>>>,
+    links: std::sync::Mutex<Option<Arc<harness_rpc::LinkCache>>>,
     /// Release checker (attached by [`Engine::assemble_runtime`]) — the
     /// UpdateStatus stream + ApplyUpdate.
-    updater: std::sync::Mutex<Option<zeron_update::Updater>>,
+    updater: std::sync::Mutex<Option<harness_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
@@ -258,7 +259,7 @@ impl EngineCore {
         let terminals = Terminals::new();
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
-        let previews = zeron_preview::PreviewService::new(
+        let previews = harness_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),
             local_device_name(&device_id),
@@ -369,7 +370,7 @@ impl EngineCore {
 
     /// Attach the peer link cache — enables `targetDeviceId` routing,
     /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
-    pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
+    pub fn set_links(&self, links: Arc<harness_rpc::LinkCache>) {
         self.doc_host.set_links(links.clone());
         *self
             .links
@@ -377,7 +378,7 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(links);
     }
 
-    pub fn links(&self) -> Option<Arc<zeron_rpc::LinkCache>> {
+    pub fn links(&self) -> Option<Arc<harness_rpc::LinkCache>> {
         self.links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -392,14 +393,14 @@ impl EngineCore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
     }
 
-    pub fn set_updater(&self, updater: zeron_update::Updater) {
+    pub fn set_updater(&self, updater: harness_update::Updater) {
         *self
             .updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(updater);
     }
 
-    pub fn updater(&self) -> Option<zeron_update::Updater> {
+    pub fn updater(&self) -> Option<harness_update::Updater> {
         self.updater
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -411,7 +412,7 @@ impl EngineCore {
     pub async fn dial_device(
         &self,
         device_id: &str,
-    ) -> Result<Arc<zeron_rpc::RpcClient>, EngineError> {
+    ) -> Result<Arc<harness_rpc::RpcClient>, EngineError> {
         let links = self
             .links()
             .ok_or_else(|| EngineError::Other("peer links unavailable (offline)".into()))?;
@@ -424,12 +425,12 @@ impl EngineCore {
     /// Start hosting our device room: serve the full RPC surface to relay clients and
     /// warm-open chat docs on nudges (§7 cold-chat command delivery). The token source
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
-    pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
+    pub fn start_host_relay(&self, edge_url: &str) -> harness_rpc::HostRelay {
         let auth = self.auth();
         let config =
-            zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+            harness_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
         let doc_host = self.doc_host.clone();
-        let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
+        let on_nudge: harness_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             // Opening the doc joins its room + syncs; drain fires on the change
             // subscription — the command executes with no standing per-chat socket.
             match doc_host.open(&chat_id) {
@@ -439,7 +440,7 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        harness_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -538,7 +539,7 @@ pub struct Engine {
 /// in-process engine so their production authentication paths cannot diverge.
 pub struct EngineRuntime {
     core: EngineCore,
-    host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    host_relay: std::sync::Mutex<Option<harness_rpc::HostRelay>>,
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -698,8 +699,8 @@ impl Engine {
         Ok(EngineInfo {
             device_id: load_or_create_device_id(&config.data_dir)?,
             workspace_scope,
-            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
-            capabilities: zeron_proto::capabilities::current(),
+            cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
+            capabilities: harness_proto::capabilities::current(),
         })
     }
 
@@ -761,7 +762,7 @@ impl Engine {
             // path returns every parked reconnect backoff redials, and while
             // the OS says there is no path the dial loops park instead of
             // burning attempts. No-op on platforms without a monitor.
-            zeron_sync::net_path::spawn_path_monitor();
+            harness_sync::net_path::spawn_path_monitor();
         }
         let device_id = load_or_create_device_id(profile.device_root())?;
         let edge = edge_enabled.then(|| {
@@ -796,7 +797,7 @@ impl Engine {
                 .filter_map(|chat| chat.cwd.map(std::path::PathBuf::from))
                 .collect()
         });
-        let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
+        let preview_signaling = edge_enabled.then(|| harness_preview::signaling::Config {
             edge_url: config.edge_url.clone(),
             org_id: preview_org,
             tokens: Arc::new(auth.clone()),
@@ -808,19 +809,19 @@ impl Engine {
         #[cfg(windows)]
         let check_updates = check_updates
             || matches!(
-                zeron_update::detect_install(),
-                zeron_update::InstallKind::WindowsPortable { .. }
+                harness_update::detect_install(),
+                harness_update::InstallKind::WindowsPortable { .. }
             );
         if check_updates {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
             // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
             // on quiescence so a restart never lands under a live run or open PTY.
-            let quiescent: zeron_update::QuiescentCheck = {
+            let quiescent: harness_update::QuiescentCheck = {
                 let sessions = core.sessions.clone();
                 let terminals = core.terminals.clone();
                 Arc::new(move || !sessions.any_active() && !terminals.any_open())
             };
-            let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+            let updater = harness_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
             if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
                 let updater_for_tokens = updater.clone();
                 let wake = tokio::spawn(async move {
@@ -836,11 +837,11 @@ impl Engine {
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
-        zeron_harness::acp::prewarm_managed_adapters();
+        harness_adapters::acp::prewarm_managed_adapters();
 
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =
-                zeron_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));
+                harness_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));
             // Registry-dark dial gate: devices with no recent presence fail
             // fast with zero dials; presence returning un-parks them (the
             // peer-alive hook below clears any cooldown at the same moment).
@@ -848,7 +849,7 @@ impl Engine {
             link_config.liveness = Some(Arc::new(move |device_id: &str| {
                 workspace_for_liveness.peer_liveness(device_id)
             }));
-            let links = zeron_rpc::LinkCache::new(link_config);
+            let links = harness_rpc::LinkCache::new(link_config);
             let links_for_presence = links.clone();
             core.workspace
                 .set_peer_alive_hook(Arc::new(move |device_id: &str| {
@@ -965,11 +966,11 @@ async fn shutdown_signal() -> std::io::Result<()> {
 /// port, not who can reach it.
 pub async fn serve_ipc(
     port: u16,
-    service: std::sync::Arc<dyn zeron_rpc::RpcService>,
+    service: std::sync::Arc<dyn harness_rpc::RpcService>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     tracing::info!(port, "IPC server listening");
-    Ok(tokio::spawn(zeron_rpc::serve_ws_listener(
+    Ok(tokio::spawn(harness_rpc::serve_ws_listener(
         listener, service,
     )))
 }
@@ -1018,7 +1019,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                 }
                 if stdin_reader.is_none() {
                     let url = auth.start_headless_sign_in();
-                    println!("Sign in to Harnesser:\n\n  {url}\n");
+                    println!("Sign in to Harness:\n\n  {url}\n");
                     println!("Then paste the code shown in the browser here and press enter.");
                     let auth = auth.clone();
                     stdin_reader = Some(tokio::spawn(async move {
@@ -1075,7 +1076,7 @@ async fn run_org_onboarding(auth: Auth) {
         Ok(orgs) => orgs,
         Err(err) => {
             println!(
-                "Could not list workspaces ({err}) — create or select one from the Harnesser UI to continue."
+                "Could not list workspaces ({err}) — create or select one from the Harness UI to continue."
             );
             return;
         }

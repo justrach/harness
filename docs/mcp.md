@@ -2,11 +2,11 @@
 
 `zeron mcp` serves the Model Context Protocol on stdin/stdout and proxies every
 tool into the running engine's localhost IPC (`ws://127.0.0.1:$ZERON_IPC_PORT`,
-default 27654) — the same `zeron_rpc` surface the headed app and `zeron sync`
+default 27654) — the same `harness_rpc` surface the headed app and `zeron sync`
 dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
 install, a few MB resident.
 
-Crate: `crates/mcp` (`zeron-mcp`). The protocol layer is hand-rolled
+Crate: `crates/mcp` (`harness-mcp`). The protocol layer is hand-rolled
 (`initialize`, `ping`, `tools/list`, `tools/call`; newline-delimited JSON-RPC
 2.0) — the repo already owns JSON-RPC framing for the Codex and ACP drivers and
 the stdio tool-server subset is tiny, so no SDK dependency was taken.
@@ -99,5 +99,5 @@ BIN=target/debug/zeron
 
 `create_chat` with `"prompt": "Reply with exactly the word pong", "wait": true`
 against a live daemon returns the assistant's `pong` in a few seconds; archive
-the chat afterwards with `archive_chat`. Unit tests (`cargo test -p zeron-mcp`)
+the chat afterwards with `archive_chat`. Unit tests (`cargo test -p harness-mcp`)
 drive the whole tool set against an in-memory stub `RpcService`.

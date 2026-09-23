@@ -9,7 +9,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use zeron_harness::{AcpHarness, Harness as _};
+use harness_adapters::{AcpHarness, Harness as _};
 
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -54,7 +54,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::remove_var("ZERON_NO_LOGIN_SHELL");
     }
 
-    let snapshot = zeron_harness::shell_env::login_shell_path().expect("snapshot captured");
+    let snapshot = harness_adapters::shell_env::login_shell_path().expect("snapshot captured");
     let snapshot = snapshot.to_string_lossy();
     assert!(
         snapshot.starts_with(&format!("{}:", shell_bin.display())),
@@ -66,7 +66,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     // proving resolution consulted the login-shell snapshot.
     // Native drivers consult the same snapshot for the agent CLI itself.
     assert!(
-        zeron_harness::ClaudeHarness::new().installed(),
+        harness_adapters::ClaudeHarness::new().installed(),
         "claude resolves via login-shell PATH"
     );
     let devin = AcpHarness::devin()

@@ -400,7 +400,7 @@ impl CustomThemeLibrary {
         let editable_dir = data_dir.join("custom-themes");
         fs::create_dir_all(&editable_dir)
             .with_context(|| format!("could not create {}", editable_dir.display()))?;
-        let path = editable_dir.join(format!("{new_id}.zeron-theme.json"));
+        let path = editable_dir.join(format!("{new_id}.harness-theme.json"));
         replace_file_recoverably(&path, &serde_json::to_vec_pretty(&family)?)?;
 
         let selected_variant_ids = family

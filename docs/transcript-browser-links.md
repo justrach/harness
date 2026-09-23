@@ -20,9 +20,9 @@ The fixture uses synthetic chat data, temporary app storage, and a local HTTP se
 - [Native scenario](../crates/ui/examples/browser-fixture/transcript_links.rs)
 
 ```sh
-cargo test -p zeron-ui
+cargo test -p harness-ui
 cargo build -p zeron
-cargo build -p zeron-ui --example browser-fixture --features browser-fixture
+cargo build -p harness-ui --example browser-fixture --features browser-fixture
 ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY=1 \
   BROWSER_FIXTURE_BINARY=target/debug/examples/browser-fixture \
   scripts/test-linux-browser.sh /tmp/zeron-transcript-links
@@ -44,7 +44,7 @@ Native runtime-failure validation can be run on Linux by placing an empty `libwe
 
 ## Validation recorded for this change
 
-- `cargo test -p zeron-ui`: 916 tests passed, plus doc tests.
+- `cargo test -p harness-ui`: 916 tests passed, plus doc tests.
 - `cargo build -p zeron`: passed.
 - `cargo check -p zeron`: passed.
 - Rustfmt checks passed for the modified library modules and the new native scenario; shell syntax and whitespace checks passed. The existing browser fixture's formatting was preserved.

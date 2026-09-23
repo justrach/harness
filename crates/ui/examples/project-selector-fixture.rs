@@ -1,7 +1,7 @@
 //! Native project selector review fixture, with isolated synthetic data.
 //! Run under a desktop/Xvfb, then click the sidebar's "All projects" selector.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
-use zeron_ui::*;
+use harness_ui::*;
 
 fn main() {
     tracing_subscriber::fmt().with_env_filter("warn").init();
@@ -26,8 +26,8 @@ fn main() {
         app_menus::init(cx);
         let state = cx.new(|_| {
             let mut s = state::AppState::new();
-            s.connection = zeron_proto::view::ConnectionStatus::Ready;
-            s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+            s.connection = harness_proto::view::ConnectionStatus::Ready;
+            s.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
             s.local_device_id = Some("local".into());
             s.devices = serde_json::from_value(serde_json::json!([
                 {"id":"local","name":"Studio Mac","platform":"macos","lastSeenAt":null},

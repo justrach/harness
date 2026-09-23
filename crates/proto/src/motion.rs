@@ -1,7 +1,7 @@
 //! Loader motion — the pure math behind zeron's loading indicators.
 //!
 //! These are the curves and constants the gpui viewport animates with
-//! (`zeron-ui/src/motion.rs`, `zeron-ui/src/loaders.rs`), lifted here so any
+//! (`harness-ui/src/motion.rs`, `harness-ui/src/loaders.rs`), lifted here so any
 //! surface animates the *same* loaders rather than inventing its own spinner.
 //! A loading indicator is a brand surface; two of them that disagree read as
 //! two products.

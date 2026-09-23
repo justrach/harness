@@ -1125,7 +1125,7 @@ fn commands_map_from_wire() {
 
 #[test]
 fn canonical_command_removed_after_discovery_is_not_downgraded_to_prompt_text() {
-    use zeron_proto::invocation::{Invocation, harness_prompt};
+    use harness_proto::invocation::{Invocation, harness_prompt};
 
     let discovered = commands_from_wire(&json!([{
         "name": "project-review",
@@ -2174,7 +2174,7 @@ async fn v2_spawn_names_bind_child_traffic_to_the_parent_chip() {
 
 #[test]
 fn native_skill_catalog_rejects_unrepresentable_commands() {
-    use zeron_proto::invocation::{Invocation, Skill, invocation_links};
+    use harness_proto::invocation::{Invocation, Skill, invocation_links};
     let mut skills = vec![Skill {
         name: "review[ui]".into(),
         path: "/repo/é skill/SKILL.md".into(),

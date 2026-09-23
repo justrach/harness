@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake ACP agent for zeron-harness tests.
+# Fake ACP agent for harness-adapters tests.
 #
 # Speaks scripted JSON-RPC 2.0 over stdio: initialize handshake, session
 # new/load, then a scenario picked from the session/prompt text. Driven by
@@ -27,10 +27,17 @@ has "$line" '"method":"initialize"' || exit 1
 has "$line" '"protocolVersion":1' || exit 1
 has "$line" '"name":"zeron"' || exit 1
 has "$line" '"readTextFile":false' || exit 1
-emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"_meta\":{\"steering\":{\"supported\":true}}}}"
+emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"authMethods\":[{\"id\":\"grok.com\",\"name\":\"Grok\"}],\"_meta\":{\"steering\":{\"supported\":true}}}}"
+
+# Grok attaches CLI login on every stdio spawn before session/new.
+read -r line || exit 1
+if has "$line" '"method":"authenticate"'; then
+  has "$line" '"methodId":"grok.com"' || exit 1
+  emit "{\"id\":$(rid "$line"),\"result\":{}}"
+  read -r line || exit 1
+fi
 
 # ---- session new / load ----------------------------------------------------
-read -r line || exit 1
 SID="s-1"
 MODEL_API=0
 if has "$line" '"sessionId":"existing-grok-session"'; then
@@ -193,8 +200,8 @@ case "$promptline" in
   # Non-text content chunks map to nothing.
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"image","data":"x","mimeType":"image/png"}}'
   # Execute tool: pending call, then completed update with output content.
-  update '{"sessionUpdate":"tool_call","toolCallId":"t1","title":"cargo test -p zeron-harness","kind":"execute","status":"pending","rawInput":{"command":"cargo test -p zeron-harness"}}'
-  update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"   Compiling zeron-harness v0.1.21\n    Finished `dev` profile [unoptimized] in 2.41s\n     Running tests/acp.rs\n\nrunning 13 tests\ntest result: ok. 13 passed; 0 failed; 0 ignored"}}]}'
+  update '{"sessionUpdate":"tool_call","toolCallId":"t1","title":"cargo test -p harness-adapters","kind":"execute","status":"pending","rawInput":{"command":"cargo test -p harness-adapters"}}'
+  update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"   Compiling harness-adapters v0.1.21\n    Finished `dev` profile [unoptimized] in 2.41s\n     Running tests/acp.rs\n\nrunning 13 tests\ntest result: ok. 13 passed; 0 failed; 0 ignored"}}]}'
   # Edit tool resolved in one shot with an inline diff (real hunk: context,
   # line numbers, rust syntax for the transcript's diff component).
   update '{"sessionUpdate":"tool_call","toolCallId":"t2","title":"edit resolve.rs","kind":"edit","status":"completed","content":[{"type":"diff","path":"/w/src/resolve.rs","oldText":"use std::path::PathBuf;\n\n/// Locate the agent binary.\nfn resolve(exe: &str) -> Option<PathBuf> {\n    std::env::var_os(\"PATH\")\n        .map(PathBuf::from)\n        .filter(|p| p.exists())\n}\n","newText":"use std::path::PathBuf;\n\n/// Locate the agent binary.\nfn resolve(exe: &str) -> Option<PathBuf> {\n    let dirs = std::env::split_paths(&std::env::var_os(\"PATH\")?);\n    dirs.map(|d| d.join(exe)).find(|p| p.exists())\n}\n"}]}'

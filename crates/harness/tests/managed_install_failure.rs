@@ -13,8 +13,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use zeron_harness::{AcpHarness, Harness, HarnessError, RunControls};
-use zeron_proto::{RunRequest, SandboxLevel};
+use harness_adapters::{AcpHarness, Harness, HarnessError, RunControls};
+use harness_proto::{RunRequest, SandboxLevel};
 
 #[tokio::test]
 async fn silent_npm_enoent_death_surfaces_decoded_error() {

@@ -520,7 +520,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
 ///
 /// Colors live here rather than in the viewport because the *meaning* of a
 /// dot is part of the protocol, not the presentation — a given status must
-/// read the same on every surface. `zeron-ui` has the oklch→sRGB math.
+/// read the same on every surface. `harness-ui` has the oklch→sRGB math.
 pub mod dot {
     /// Running. Pink, not amber: the harsh yellow read as a warning, and running
     /// is routine (user request).

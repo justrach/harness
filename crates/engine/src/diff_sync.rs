@@ -44,7 +44,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use zeron_proto::{Chat, CheckoutDiff, DiffFileSummary};
+use harness_proto::{Chat, CheckoutDiff, DiffFileSummary};
 
 use crate::EngineError;
 use crate::doc_host::EdgeConfig;
@@ -93,7 +93,7 @@ pub struct DiffSidecar {
 /// One bounded atomic snapshot of a checkout's working tree.
 #[derive(Debug, Clone)]
 pub struct DiffSnapshot {
-    pub git_status: Option<(Vec<zeron_proto::GitFileStatus>, bool)>,
+    pub git_status: Option<(Vec<harness_proto::GitFileStatus>, bool)>,
     pub branch: String,
     pub head_sha: Option<String>,
     pub patch: String,
@@ -164,7 +164,7 @@ struct DiffSyncInner {
     /// How long an entry may sit chat-less before reconcile removes it.
     orphan_grace: Duration,
     diffs_tx: watch::Sender<Vec<CheckoutDiff>>,
-    statuses_tx: watch::Sender<Vec<zeron_proto::CheckoutGitStatus>>,
+    statuses_tx: watch::Sender<Vec<harness_proto::CheckoutGitStatus>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
     /// The tasks hold `Weak` refs, but an in-flight iteration holds an
@@ -252,7 +252,7 @@ impl CheckoutDiffSync {
     }
 
     /// Consumers filter this shared cache; subscribing never starts another Git scan.
-    pub fn watch_git_statuses(&self) -> watch::Receiver<Vec<zeron_proto::CheckoutGitStatus>> {
+    pub fn watch_git_statuses(&self) -> watch::Receiver<Vec<harness_proto::CheckoutGitStatus>> {
         self.inner.statuses_tx.subscribe()
     }
 

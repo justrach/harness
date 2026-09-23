@@ -1,6 +1,6 @@
 //! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use zeron_ui::*;
+use harness_ui::*;
 
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
         let project_path = data.join("fieldnotes");
         std::fs::create_dir_all(project_path.join("public")).unwrap();
         std::fs::write(project_path.join("public/favicon.svg"), r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#668cf5"/><path d="M7 6h11v3h-8v3h6v3h-6v4H7Z" fill="white"/></svg>"##).unwrap();
-        settings.surface = zeron_theme::SurfacePreference::Frosted;
+        settings.surface = harness_theme::SurfacePreference::Frosted;
         settings.save(&data).unwrap();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
@@ -32,12 +32,12 @@ fn main() -> anyhow::Result<()> {
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
         let state = cx.new(|_| {
             let mut s = state::AppState::new();
-            s.connection = zeron_proto::view::ConnectionStatus::Ready;
-            s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+            s.connection = harness_proto::view::ConnectionStatus::Ready;
+            s.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
             if std::env::var_os("ZERON_SIDEBAR_ACCOUNT").is_some() {
-                s.workspace_scope = Some(zeron_proto::WorkspaceScope::Synced);
-                s.auth = Some(zeron_proto::AuthState::SignedIn {
-                    user: zeron_proto::UserProfile { id: "fixture-user".into(), email: "alex@example.test".into(), name: Some("Alex".into()) },
+                s.workspace_scope = Some(harness_proto::WorkspaceScope::Synced);
+                s.auth = Some(harness_proto::AuthState::SignedIn {
+                    user: harness_proto::UserProfile { id: "fixture-user".into(), email: "alex@example.test".into(), name: Some("Alex".into()) },
                     org_id: Some("fixture-org".into()),
                 });
             }
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
                 chat.id = format!("chat-{ix}");
                 chat.title = Some((*title).into());
                 chat.branch = Some(format!("fieldnotes/{}", title.to_lowercase().replace(' ', "-")));
-                chat.source_context = Some(zeron_proto::ConversationSourceContext {
+                chat.source_context = Some(harness_proto::ConversationSourceContext {
                     checkout_id: "fixture-checkout".into(), repo_root: "/tmp/fieldnotes".into(),
                     cwd: "/tmp/fieldnotes".into(), branch: chat.branch.clone().unwrap(),
                     head_sha: None, observed_at: chrono::Utc::now(),
@@ -70,9 +70,9 @@ fn main() -> anyhow::Result<()> {
             for ix in [1, 2, 4, 8] {
                 let chat = s.chats[ix].clone();
                 let source = chat.source_context.as_ref().unwrap();
-                s.fixture_sidebar_change_request(zeron_proto::CheckoutChangeRequestStatus {
+                s.fixture_sidebar_change_request(harness_proto::CheckoutChangeRequestStatus {
                     checkout_id: source.checkout_id.clone(), device_id: chat.device_id.clone(), cwd: source.repo_root.clone(), branch: source.branch.clone(), updated_at: chrono::Utc::now(),
-                    change_request: Some(zeron_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: zeron_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
+                    change_request: Some(harness_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: harness_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
                 });
             }
             s.chats[4].last_message_at = Some(chrono::Utc::now());

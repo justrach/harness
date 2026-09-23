@@ -9,7 +9,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use zeron_engine::ChangeRequestResolver;
+use harness_engine::ChangeRequestResolver;
 
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();

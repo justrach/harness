@@ -159,7 +159,7 @@ async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Strin
             stdin.flush().await
         };
         if let Err(e) = write.await {
-            tracing::debug!(target: "zeron_harness::rpc", "stdin write failed (tolerated): {e}");
+            tracing::debug!(target: "harness_adapters::rpc", "stdin write failed (tolerated): {e}");
             return;
         }
     }
@@ -228,7 +228,7 @@ async fn read_loop(
             continue;
         }
         let Ok(mut msg) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(target: "zeron_harness::rpc", "non-JSON stdout line (skipped)");
+            tracing::debug!(target: "harness_adapters::rpc", "non-JSON stdout line (skipped)");
             continue;
         };
         if !msg.is_object() || msg.get("jsonrpc").is_some_and(|version| version != "2.0") {

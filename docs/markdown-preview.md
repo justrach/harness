@@ -44,11 +44,11 @@ The implementation was checked on Linux with the following commands:
 
 | Command | Result |
 | --- | --- |
-| `cargo test --release --locked -p zeron-ui --lib -- --test-threads=1` | 762 passed |
-| `cargo test --release --locked -p zeron-engine --lib` | 161 passed |
-| `cargo test --release --locked -p zeron-proto -p zeron-rpc` | 47 passed, 1 previously ignored |
-| `cargo test --release --locked -p zeron-engine --test workspace_files` | 3 passed |
-| `cargo test --release --locked -p zeron-engine --test device_routing workspace_file_surface_proxies_over_the_relay` | 1 passed |
+| `cargo test --release --locked -p harness-ui --lib -- --test-threads=1` | 762 passed |
+| `cargo test --release --locked -p harness-engine --lib` | 161 passed |
+| `cargo test --release --locked -p harness-proto -p harness-rpc` | 47 passed, 1 previously ignored |
+| `cargo test --release --locked -p harness-engine --test workspace_files` | 3 passed |
+| `cargo test --release --locked -p harness-engine --test device_routing workspace_file_surface_proxies_over_the_relay` | 1 passed |
 | `cargo check --locked -p zeron` | Passed |
 
 The UI tests cover unsaved content without extra saves, independent selection surfaces, pointer opening and Escape dismissal of the lightbox, obsolete work, media limits and image invalidation. The relay test runs two engines through a test relay and checks remote image reads and checkout identity. The Mermaid corpus produces twenty-four SVG and PNG pairs across light/dark themes and Geist/Geist Mono. Prepared ER (light) and sequence (light/dark) PNGs with Geist Mono were inspected visually after fixing font resolution. Regression tests first reproduced zero visible text pixels with Geist Mono and an unavailable family, then passed after the fix.
@@ -57,4 +57,4 @@ Formatting checks pass for all changed Rust files, and `git diff --check` passes
 
 ### Browser link follow-up
 
-The file preview's session Browser routing was checked on Linux with `cargo test -p zeron-ui -- --test-threads=1` (918 passed), `cargo build -p zeron`, Rustfmt for changed modules, and `git diff --check`. New tests cover the preview-to-Files event, source-session ownership, complete destinations and clipboard content, rejected URLs, mail handling, preview suspension, and the Shell subscriptions for both Files and standalone file tabs. The first parallel suite run failed the existing `active_reply_text_selection_survives_streaming_and_completion` test; it passed in isolation and in the complete sequential run. This follow-up did not repeat native visual verification on Linux or macOS.
+The file preview's session Browser routing was checked on Linux with `cargo test -p harness-ui -- --test-threads=1` (918 passed), `cargo build -p zeron`, Rustfmt for changed modules, and `git diff --check`. New tests cover the preview-to-Files event, source-session ownership, complete destinations and clipboard content, rejected URLs, mail handling, preview suspension, and the Shell subscriptions for both Files and standalone file tabs. The first parallel suite run failed the existing `active_reply_text_selection_survives_streaming_and_completion` test; it passed in isolation and in the complete sequential run. This follow-up did not repeat native visual verification on Linux or macOS.

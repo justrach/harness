@@ -57,6 +57,11 @@ const PULSE_TICK: Duration = Duration::from_millis(33);
 /// the view drops off, letting the clock park.
 const PULSE_LEASE: Duration = Duration::from_millis(300);
 
+/// While no window of the app is focused, only every Nth tick is delivered
+/// (30Hz → 10Hz). Small enough that even a 15Hz loader's delivered ticks
+/// (every 2·N ticks) land inside [`PULSE_LEASE`] and keep it renewed.
+const BACKGROUND_TICK_DIVISOR: u64 = 3;
+
 struct PulseClock {
     epoch: Instant,
     leases: HashMap<EntityId, PulseLease>,
@@ -130,6 +135,12 @@ pub fn pulse_lease(view: EntityId, cx: &mut App) {
     pulse_lease_every(view, 1, cx);
 }
 
+/// [`pulse_lease`] at 15Hz, for soft, slow cosmetic motion (the running tool
+/// title shimmer) that holds frames for as long as an agent works.
+pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
+    pulse_lease_every(view, 2, cx);
+}
+
 fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if cx.reduce_motion() {
         return;
@@ -183,6 +194,16 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
                     }
                     clock.tick = clock.tick.wrapping_add(1);
                     let tick = clock.tick;
+                    // Nobody is looking closely at an unfocused window: run its
+                    // loaders at a third of the rate. Each tick redraws the
+                    // whole window, so this is most of the background cost of
+                    // a long agent run.
+                    if cx.active_window().is_none()
+                        && !tick.is_multiple_of(BACKGROUND_TICK_DIVISOR)
+                    {
+                        return false;
+                    }
+                    let clock = cx.default_global::<PulseClock>();
                     let views: Vec<EntityId> = clock
                         .leases
                         .iter_mut()
@@ -582,9 +603,9 @@ where
 // ---------------------------------------------------------------------------
 
 /// Zeron-pulse floor opacity.
-// The loader constants and math live in `zeron_proto::motion` (pure phase
+// The loader constants and math live in `harness_proto::motion` (pure phase
 // functions); this crate animates them with gpui.
-pub use zeron_proto::motion::{
+pub use harness_proto::motion::{
     PULSE_MIN_OPACITY, PULSE_MIN_SCALE, PULSE_STAGGER, gspin_opacity, pulse_opacity, pulse_scale,
     pulse_wave, staggered_phase,
 };
@@ -639,13 +660,13 @@ struct FadeEntry {
 }
 
 impl FadeEntry {
-    fn value(&self, now: Instant, duration: Duration) -> f32 {
+    fn value(&self, now: Instant, duration: Duration, curve: CubicBezier) -> f32 {
         let elapsed = now.saturating_duration_since(self.started);
         if duration.is_zero() || elapsed >= duration {
             return self.target;
         }
         let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
-        lerp(self.origin, self.target, HOVER_FADE.curve.eval(raw))
+        lerp(self.origin, self.target, curve.eval(raw))
     }
 
     fn settled(&self, now: Instant, duration: Duration) -> bool {
@@ -655,26 +676,49 @@ impl FadeEntry {
 
 /// Per-key hover progress store. Pure core (explicit `now`) — unit-testable;
 /// the thread-local wrappers below feed it wall time.
-#[derive(Default)]
 pub struct HoverFades {
     entries: HashMap<String, FadeEntry>,
     frame: u64,
+    spec: MotionSpec,
+    /// Drop entries unread for a frame (unmounted mid-hover). Off for
+    /// reveals read inside cached views, which skip frames while hovered.
+    prune_unread: bool,
+}
+
+impl Default for HoverFades {
+    fn default() -> Self {
+        Self::with_spec(HOVER_FADE)
+    }
 }
 
 impl HoverFades {
-    fn duration() -> Duration {
-        HOVER_FADE.total().mul_f32(speed_scale())
+    pub fn with_spec(spec: MotionSpec) -> Self {
+        Self {
+            entries: HashMap::new(),
+            frame: 0,
+            spec,
+            prune_unread: true,
+        }
+    }
+
+    fn keep_unread(mut self) -> Self {
+        self.prune_unread = false;
+        self
+    }
+
+    fn duration(&self) -> Duration {
+        self.spec.total().mul_f32(speed_scale())
     }
 
     /// Pointer entered (`hovered`) or left the element behind `key`. Reduced
     /// motion snaps straight to the endpoint.
     pub fn set_at(&mut self, key: &str, hovered: bool, reduced: bool, now: Instant) {
         let target = if hovered { 1.0 } else { 0.0 };
-        let duration = Self::duration();
+        let duration = self.duration();
         let current = self
             .entries
             .get(key)
-            .map(|e| e.value(now, duration))
+            .map(|e| e.value(now, duration, self.spec.curve))
             .unwrap_or(0.0);
         if target == 0.0 && !self.entries.contains_key(key) {
             return; // never-hovered element reporting a leave — nothing to do
@@ -695,10 +739,11 @@ impl HoverFades {
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
         let frame = self.frame;
+        let (duration, curve) = (self.duration(), self.spec.curve);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.seen = frame;
-                entry.value(now, Self::duration())
+                entry.value(now, duration, curve)
             }
             None => 0.0,
         }
@@ -710,12 +755,13 @@ impl HoverFades {
     pub fn tick_at(&mut self, now: Instant) -> bool {
         self.frame += 1;
         let frame = self.frame;
-        let duration = Self::duration();
+        let duration = self.duration();
+        let prune_unread = self.prune_unread;
         let mut active = false;
         self.entries.retain(|_, entry| {
             // Unread through the whole previous frame: the element unmounted
             // (its leave event will never come) — drop the entry.
-            if entry.seen + 1 < frame {
+            if prune_unread && entry.seen + 1 < frame {
                 return false;
             }
             let settled = entry.settled(now, duration);
@@ -729,8 +775,41 @@ impl HoverFades {
     }
 }
 
+/// Hover-driven reveals (the split sidebar's sections easing open): slower
+/// and softer than a color wash, so the growing list reads as motion.
+pub const HOVER_REVEAL: MotionSpec = MotionSpec::new(320, EASE_OUT_QUINT);
+
 thread_local! {
     static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
+    static HOVER_REVEALS: RefCell<HoverFades> = RefCell::new(HoverFades::with_spec(HOVER_REVEAL).keep_unread());
+}
+
+/// Reveal progress (0..1) for `key` this frame, on [`HOVER_REVEAL`] timing.
+pub fn reveal_t(key: &str) -> f32 {
+    HOVER_REVEALS.with(|reveals| reveals.borrow_mut().value_at(key, Instant::now()))
+}
+
+/// Snap a reveal shut (its element is going away without a hover-out).
+pub fn reveal_reset(key: &str) {
+    HOVER_REVEALS.with(|reveals| {
+        reveals.borrow_mut().entries.remove(key);
+    });
+}
+
+/// An `.on_hover` listener driving the reveal for `key` (see [`reveal_t`]).
+pub fn reveal_listener(
+    key: impl Into<SharedString>,
+) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+    let key = key.into();
+    move |hovered, window, cx| {
+        let reduced = reduced_motion(cx);
+        HOVER_REVEALS.with(|reveals| {
+            reveals
+                .borrow_mut()
+                .set_at(&key, *hovered, reduced, Instant::now())
+        });
+        window.refresh();
+    }
 }
 
 /// Hover progress (0..1) for `key` this frame.
@@ -766,7 +845,9 @@ pub fn hover_listener(
 /// Frame-drive hook: call ONCE per window frame (the shell render tail); true
 /// while any hover fade is mid-flight and frames must keep coming.
 pub fn hover_fades_active() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(Instant::now()))
+    let now = Instant::now();
+    let reveals = HOVER_REVEALS.with(|reveals| reveals.borrow_mut().tick_at(now));
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now)) | reveals
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component

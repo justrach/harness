@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use zeron_harness::{CodexHarness, Harness};
+use harness_adapters::{CodexHarness, Harness};
 
 #[test]
 fn availability_child() {

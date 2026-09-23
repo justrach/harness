@@ -25,10 +25,10 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
-use zeron_rpc::device_room::{
+use harness_rpc::device_room::{
     CLIENT_CLOSED, CLIENT_GONE, HOST_CLOSED, HOST_OFFLINE, NUDGE_KIND, RELAY_KIND,
 };
-use zeron_rpc::{
+use harness_rpc::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     RpcError, RpcReply, RpcService, StaticToken, TokenError, TokenSource, decode_device_frame,
     device_room_ws_url, encode_device_frame, methods,
@@ -334,7 +334,7 @@ fn cache(edge_url: &str) -> Arc<LinkCache> {
     LinkCache::new(config)
 }
 
-fn noop_nudge() -> zeron_rpc::NudgeHandler {
+fn noop_nudge() -> harness_rpc::NudgeHandler {
     Arc::new(|_| {})
 }
 
@@ -732,7 +732,7 @@ async fn nudges_reach_the_host_callback() {
     let relay = FakeRelay::start().await;
     let service = TestService::new("host-a");
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id| {
+    let on_nudge: harness_rpc::NudgeHandler = Arc::new(move |chat_id| {
         let _ = tx.send(chat_id);
     });
     let _host = HostRelay::spawn(relay_config(&relay.edge_url(), 100), service, on_nudge);
@@ -747,7 +747,7 @@ async fn nudges_reach_the_host_callback() {
 }
 
 /// Live-edge variant: run the same host+client path through a real DeviceRoom DO.
-/// `ZERON_EDGE_WS=http://127.0.0.1:26640 cargo test -p zeron-rpc -- --ignored live_edge`
+/// `ZERON_EDGE_WS=http://127.0.0.1:26640 cargo test -p harness-rpc -- --ignored live_edge`
 /// (dev-mode edge; ZERON_EDGE_TOKEN defaults to a fixed dev user id).
 #[tokio::test]
 #[ignore = "needs a running edge (set ZERON_EDGE_WS)"]
@@ -796,7 +796,7 @@ async fn zombie_relay_path_trips_the_echo_deadline() {
     // minutes, retrying frames into the void, until an unrelated host-session
     // cycle exposed it. The app-level echo must rule the link dead within its
     // deadline instead.
-    zeron_rpc::device_room::set_client_liveness_for_tests(
+    harness_rpc::device_room::set_client_liveness_for_tests(
         Duration::from_millis(100),
         Duration::from_millis(600),
     );
@@ -819,5 +819,5 @@ async fn zombie_relay_path_trips_the_echo_deadline() {
         "the zombie path must be ruled dead by the echo deadline"
     );
     // Restore the production clocks for the rest of the process's tests.
-    zeron_rpc::device_room::set_client_liveness_for_tests(Duration::ZERO, Duration::ZERO);
+    harness_rpc::device_room::set_client_liveness_for_tests(Duration::ZERO, Duration::ZERO);
 }

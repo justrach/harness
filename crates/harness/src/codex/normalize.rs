@@ -6,7 +6,7 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
+use harness_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {

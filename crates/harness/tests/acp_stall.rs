@@ -12,8 +12,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls};
-use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
+use harness_adapters::{AcpHarness, CancellationToken, Harness, RunControls};
+use harness_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 fn fixture_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

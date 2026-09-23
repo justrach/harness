@@ -47,7 +47,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, UserInputAnswer, UserInputQuestion,
 };
@@ -433,7 +433,7 @@ impl Harness for ClaudeHarness {
     async fn skills(
         &self,
         cwd: &std::path::Path,
-    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+    ) -> Result<Option<Vec<harness_proto::invocation::Skill>>, HarnessError> {
         let (skills, commands) = tokio::try_join!(
             crate::skills::discover(self.id(), cwd),
             self.workspace_commands
@@ -449,10 +449,10 @@ impl Harness for ClaudeHarness {
                         // Shared files are not Claude command definitions. A
                         // same-named built-in must not replace their identity.
                         Some(skill)
-                    } else if zeron_proto::invocation::valid_skill_command_name(&skill.name)
+                    } else if harness_proto::invocation::valid_skill_command_name(&skill.name)
                         && commands.iter().any(|command| command.name == skill.name)
                     {
-                        skill.command = Some(zeron_proto::invocation::SkillCommand {
+                        skill.command = Some(harness_proto::invocation::SkillCommand {
                             name: skill.name.clone(),
                             harness: self.id(),
                         });
@@ -541,7 +541,7 @@ impl ClaudeHarness {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::claude", "stderr: {line}");
+                    tracing::debug!(target: "harness_adapters::claude", "stderr: {line}");
                     tail.push(&line);
                 }
             });
@@ -644,16 +644,16 @@ async fn load_image_blocks(paths: &[String]) -> Vec<wire::ImageBlock> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(err) => {
-                tracing::warn!(target: "zeron_harness::claude", %path, error = %err, "attachment unreadable; path ref only");
+                tracing::warn!(target: "harness_adapters::claude", %path, error = %err, "attachment unreadable; path ref only");
                 continue;
             }
         };
         if bytes.len() as u64 > MAX_INLINE_IMAGE_BYTES {
-            tracing::debug!(target: "zeron_harness::claude", %path, "attachment over inline cap; path ref only");
+            tracing::debug!(target: "harness_adapters::claude", %path, "attachment over inline cap; path ref only");
             continue;
         }
         let Some(media_type) = image_media_type(std::path::Path::new(path), &bytes) else {
-            tracing::debug!(target: "zeron_harness::claude", %path, "attachment not an inline-supported image; path ref only");
+            tracing::debug!(target: "harness_adapters::claude", %path, "attachment not an inline-supported image; path ref only");
             continue;
         };
         blocks.push(wire::ImageBlock {
@@ -676,7 +676,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Std
                     stdin.flush().await
                 };
                 if let Err(e) = write.await {
-                    tracing::debug!(target: "zeron_harness::claude", "stdin write failed (tolerated): {e}");
+                    tracing::debug!(target: "harness_adapters::claude", "stdin write failed (tolerated): {e}");
                     return;
                 }
             }
@@ -743,7 +743,7 @@ async fn run_session(session: Session) {
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
                         Err(e) => {
-                            tracing::debug!(target: "zeron_harness::claude", "unparseable frame (skipped): {e}");
+                            tracing::debug!(target: "harness_adapters::claude", "unparseable frame (skipped): {e}");
                             continue;
                         }
                     };
@@ -875,7 +875,7 @@ fn handle_control_request(
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
-            target: "zeron_harness::claude",
+            target: "harness_adapters::claude",
             "unhandled control_request subtype: {}", req.request.subtype
         );
         return;

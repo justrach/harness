@@ -1,11 +1,11 @@
 //! Live account catalog and optional ACP run (requires a signed-in graff).
 //!
-//!     cargo run -p zeron-harness --example graff_probe
-//!     cargo run -p zeron-harness --example graff_probe -- gpt-5.6-luna
+//!     cargo run -p harness-adapters --example graff_probe
+//!     cargo run -p harness-adapters --example graff_probe -- gpt-5.6-luna
 
 use futures::StreamExt;
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls};
-use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
+use harness_adapters::{AcpHarness, CancellationToken, Harness, RunControls};
+use harness_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

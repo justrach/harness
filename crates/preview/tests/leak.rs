@@ -25,7 +25,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, protocol::Role},
 };
 use tokio_util::sync::CancellationToken;
-use zeron_preview::{
+use harness_preview::{
     catalog::Catalog,
     discovery::Listener,
     mux::{self, BoxIo, Connector},

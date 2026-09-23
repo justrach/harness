@@ -1,4 +1,4 @@
-//! zeron-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
+//! harness-ui — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
 //! diff pane.
 //!
 //! Design: ARCHITECTURE.md §4; animation catalog docs/research/feature-inventory.md
@@ -67,7 +67,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 pub use state::EngineBootConfig;
-pub use zeron_proto::HarnessId;
+pub use harness_proto::HarnessId;
 
 /// Whether a control whose primary action is click activation may also start
 /// a GPUI drag from the same hitbox. GPUI promotes pointer travel above 2 px
@@ -254,7 +254,7 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
-/// A clicked banner: bring Harnesser forward on that chat through the sidebar's
+/// A clicked banner: bring Harness forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.
 fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
@@ -361,7 +361,7 @@ fn open_main_window(
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Harnesser".into()),
+                    title: cfg!(target_os = "windows").then(|| "Harness".into()),
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.
@@ -440,7 +440,7 @@ fn start_appshot_service(activation_dir: std::path::PathBuf, cx: &mut App) {
             };
             let capture = capture.await;
             // Coalesce presses made while capture was in flight. Delivery
-            // focuses Harnesser; replaying old activations would capture the wrong
+            // focuses Harness; replaying old activations would capture the wrong
             // app or show a misleading self-capture error after success.
             while matches!(shortcuts.next().now_or_never(), Some(Some(()))) {}
             cx.update(|cx| deliver_appshot(capture, cx));
@@ -451,7 +451,7 @@ fn start_appshot_service(activation_dir: std::path::PathBuf, cx: &mut App) {
 
 /// Check viewer focus on the UI thread before any native capture or portal
 /// request. Portals do not identify the source window, so their backends cannot
-/// reject Harnesser after the picker or capture has already started.
+/// reject Harness after the picker or capture has already started.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn start_appshot_capture(
     cx: &mut App,
@@ -483,7 +483,7 @@ mod appshot_activation_tests {
 
     #[gpui::test]
     fn appshot_capture_skips_any_focused_viewer_window(cx: &mut gpui::TestAppContext) {
-        // The guard must cover every Harnesser window, not only a Shell/chat root.
+        // The guard must cover every Harness window, not only a Shell/chat root.
         for _ in 0..2 {
             let window = cx.add_window(|_, _| ViewerWindow);
             window
@@ -549,7 +549,7 @@ fn deliver_appshot(
             }
             tracing::warn!(
                 count,
-                "Appshot captured with no Harnesser window; preserving it for the next delivery"
+                "Appshot captured with no Harness window; preserving it for the next delivery"
             );
         }
         return;

@@ -19,7 +19,7 @@ use gpui::{
     StyledText, TextRun, UnderlineStyle, Window, canvas, div, font, point, prelude::*, px, quad,
     size,
 };
-use zeron_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
+use harness_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
 use crate::theme::Theme;
 
@@ -2690,7 +2690,7 @@ mod tests {
         let theme = Theme::dark();
         let mono = font(theme.font_mono.clone());
         let line = r#"let x = "hi"; // done"#;
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        let document = harness_syntax::highlight(harness_syntax::HighlightRequest {
             source: line,
             path: None,
             fence_tag: Some("rust"),
@@ -2712,7 +2712,7 @@ mod tests {
         let theme = Theme::dark();
         let mono = font(theme.font_mono.clone());
         let line = "let widget = build!(42);";
-        let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        let document = harness_syntax::highlight(harness_syntax::HighlightRequest {
             source: line,
             path: None,
             fence_tag: Some("rust"),
@@ -2770,7 +2770,7 @@ mod tests {
             ),
         ];
         for &(fence_tag, line, required) in cases {
-            let document = zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+            let document = harness_syntax::highlight(harness_syntax::HighlightRequest {
                 source: line,
                 path: None,
                 fence_tag: Some(fence_tag),

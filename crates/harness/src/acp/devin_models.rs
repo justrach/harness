@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use zeron_proto::Model;
+use harness_proto::Model;
 
 use crate::HarnessError;
 use crate::jsonrpc::{Incoming, RpcClient};

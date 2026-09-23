@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use zeron_proto::AgentEvent;
+use harness_proto::AgentEvent;
 
 use super::normalize::{ChildStream, Phase, collab_spawn_child, item_type, map_item};
 

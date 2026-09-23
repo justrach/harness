@@ -80,7 +80,7 @@ pub struct ShortcutsPage {
     capture_access_prompted: bool,
     semantic_access_prompted: bool,
     state: Entity<AppState>,
-    completion_harnesses: popover::Loadable<Vec<zeron_engine::registry::HarnessDescriptor>>,
+    completion_harnesses: popover::Loadable<Vec<harness_engine::registry::HarnessDescriptor>>,
     completion_task: Option<gpui::Task<()>>,
 }
 
@@ -487,7 +487,9 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ToggleTerminal => "Panels",
+        | ShortcutId::ToggleTerminal
+        | ShortcutId::SplitTerminal
+        | ShortcutId::SplitTerminalDown => "Panels",
         ShortcutId::NewProject => "Projects",
         ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
@@ -511,6 +513,10 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
         ShortcutId::ToggleFiles => "Show or hide the files panel for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
+        ShortcutId::SplitTerminal => {
+            "Split the focused terminal to the right, like Ghostty ⌘D."
+        }
+        ShortcutId::SplitTerminalDown => "Split the focused terminal downward.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NewProject => "Open the new project dialog.",
         ShortcutId::OpenModelPicker => "Open the model picker for the current session.",

@@ -105,7 +105,7 @@ impl ImagePreview {
                     Some(id) => id,
                     None => {
                         client
-                            .read_file(zeron_proto::ReadWorkspaceFileRequest {
+                            .read_file(harness_proto::ReadWorkspaceFileRequest {
                                 target: context.target.clone(),
                                 path: path.clone(),
                             })
@@ -254,14 +254,14 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<serde_json::Value, zeron_rpc::RpcError> {
+        ) -> Result<serde_json::Value, harness_rpc::RpcError> {
             std::future::pending().await
         }
         async fn subscribe(
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, zeron_rpc::RpcError> {
+        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, harness_rpc::RpcError> {
             unreachable!()
         }
     }
@@ -269,7 +269,7 @@ mod tests {
         use gpui::AppContext as _;
         cx.new(|cx| {
             let context = FilesRequestContext {
-                target: zeron_proto::WorkspaceTarget {
+                target: harness_proto::WorkspaceTarget {
                     chat_id: Some("remote-chat".into()),
                     space_id: None,
                     checkout_path: None,
@@ -350,7 +350,7 @@ mod tests {
             &self,
             method: &str,
             params: serde_json::Value,
-        ) -> Result<serde_json::Value, zeron_rpc::RpcError> {
+        ) -> Result<serde_json::Value, harness_rpc::RpcError> {
             use base64::Engine as _;
             self.calls
                 .lock()
@@ -359,12 +359,12 @@ mod tests {
             assert_eq!(params["targetDeviceId"], "owner");
             assert_eq!(params["chatId"], "chat");
             assert_eq!(params["path"], "remote.svg");
-            if method == zeron_rpc::methods::READ_WORKSPACE_FILE {
+            if method == harness_rpc::methods::READ_WORKSPACE_FILE {
                 return Ok(
                     serde_json::json!({ "checkoutId": "checkout", "path": "remote.svg", "size": 0, "encoding": "binary", "truncated": false }),
                 );
             }
-            assert_eq!(method, zeron_rpc::methods::READ_WORKSPACE_IMAGE);
+            assert_eq!(method, harness_rpc::methods::READ_WORKSPACE_IMAGE);
             assert_eq!(params["expectedCheckoutId"], "checkout");
             let bytes = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="red"/></svg>"#;
             Ok(
@@ -375,7 +375,7 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, zeron_rpc::RpcError> {
+        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, harness_rpc::RpcError> {
             unreachable!()
         }
     }
@@ -389,7 +389,7 @@ mod tests {
             let transport = Arc::new(ImageTransport::default());
             let view = cx.new(|cx| {
                 let context = FilesRequestContext {
-                    target: zeron_proto::WorkspaceTarget {
+                    target: harness_proto::WorkspaceTarget {
                         chat_id: Some("chat".into()),
                         space_id: None,
                         checkout_path: None,
@@ -413,7 +413,7 @@ mod tests {
             assert_eq!(calls.len(), if legacy { 2 } else { 1 });
             assert_eq!(
                 calls.last().unwrap().0,
-                zeron_rpc::methods::READ_WORKSPACE_IMAGE
+                harness_rpc::methods::READ_WORKSPACE_IMAGE
             );
         }
     }
@@ -435,7 +435,7 @@ mod tests {
                     |window, cx| {
                         cx.new(|cx| {
                             let context = FilesRequestContext {
-                                target: zeron_proto::WorkspaceTarget {
+                                target: harness_proto::WorkspaceTarget {
                                     chat_id: Some("chat".into()),
                                     space_id: None,
                                     checkout_path: None,

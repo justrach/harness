@@ -10,7 +10,7 @@
 use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
 use std::time::{Duration, Instant};
 
-use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
+use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use crate::motion;
 use crate::popover;
@@ -576,7 +576,7 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_doc::MessageStatus;
+    use harness_doc::MessageStatus;
 
     fn entry(id: &str, role: MessageRole, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {

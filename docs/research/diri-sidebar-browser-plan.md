@@ -50,8 +50,8 @@ isolation and input restoration, visibility, resizing/takeover and
 teardown. It is gated behind an opt-in feature and is excluded from app builds.
 
 ```sh
-cargo test --locked -p zeron-ui --lib -- --test-threads=1
-cargo run --release --locked -p zeron-ui --example browser-fixture \
+cargo test --locked -p harness-ui --lib -- --test-threads=1
+cargo run --release --locked -p harness-ui --example browser-fixture \
   --features browser-fixture -- /tmp/browser-captures
 ```
 

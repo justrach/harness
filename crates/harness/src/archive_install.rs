@@ -81,7 +81,7 @@ pub async fn ensure_installed(
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
     tracing::info!(
-        target: "zeron_harness::adapter_install",
+        target: "harness_adapters::adapter_install",
         url = pin.url,
         dir = %tmp_dir.display(),
         "installing {display_name} ACP server"

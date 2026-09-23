@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
-use zeron_proto::{HarnessId, invocation::Skill};
+use harness_proto::{HarnessId, invocation::Skill};
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 
@@ -15,7 +15,7 @@ const MAX_DISCOVERY_ENTRIES: usize = 4096;
 #[derive(Default)]
 pub(crate) struct CommandDiscovery {
     latest:
-        tokio::sync::Mutex<Option<(PathBuf, std::time::Instant, Vec<zeron_proto::SlashCommand>)>>,
+        tokio::sync::Mutex<Option<(PathBuf, std::time::Instant, Vec<harness_proto::SlashCommand>)>>,
 }
 
 impl CommandDiscovery {
@@ -23,9 +23,9 @@ impl CommandDiscovery {
         &self,
         cwd: &Path,
         discover: impl std::future::Future<
-            Output = Result<Vec<zeron_proto::SlashCommand>, HarnessError>,
+            Output = Result<Vec<harness_proto::SlashCommand>, HarnessError>,
         >,
-    ) -> Result<Vec<zeron_proto::SlashCommand>, HarnessError> {
+    ) -> Result<Vec<harness_proto::SlashCommand>, HarnessError> {
         let requested = std::time::Instant::now();
         let mut latest = self.latest.lock().await;
         if let Some((root, completed, commands)) = latest.as_ref()
@@ -64,11 +64,11 @@ pub(crate) fn is_shared_skill(path: &str) -> bool {
 pub(crate) fn attach_advertised_commands(
     harness: HarnessId,
     skills: &mut Vec<Skill>,
-    commands: &[zeron_proto::SlashCommand],
+    commands: &[harness_proto::SlashCommand],
 ) {
-    use zeron_proto::invocation::SkillCommand;
+    use harness_proto::invocation::SkillCommand;
     for command in commands {
-        if !zeron_proto::invocation::valid_skill_command_name(&command.name) {
+        if !harness_proto::invocation::valid_skill_command_name(&command.name) {
             continue;
         }
         let name = if harness == HarnessId::Pi {
@@ -302,7 +302,7 @@ fn scan_root(
                     skill.name = relative.to_string_lossy().replace(['/', '\\'], ":");
                 }
                 skill.name = format!("{namespace}{}", skill.name);
-                if zeron_proto::invocation::valid_invocation_name(&skill.name) {
+                if harness_proto::invocation::valid_invocation_name(&skill.name) {
                     found.insert(skill.name.clone(), skill);
                 }
             }
@@ -374,8 +374,8 @@ fn read_skill(path: &Path) -> Result<Option<Skill>, HarnessError> {
         .and_then(|v| v.as_str())
         .unwrap_or(fallback);
     let path = path.to_string_lossy();
-    if !zeron_proto::invocation::valid_invocation_name(name)
-        || !zeron_proto::invocation::valid_skill_path(&path)
+    if !harness_proto::invocation::valid_invocation_name(name)
+        || !harness_proto::invocation::valid_skill_path(&path)
     {
         return Ok(None);
     }
@@ -407,7 +407,7 @@ mod tests {
         let probe = || async {
             probes.set(probes.get() + 1);
             tokio::task::yield_now().await;
-            Ok(vec![zeron_proto::SlashCommand {
+            Ok(vec![harness_proto::SlashCommand {
                 name: format!("probe-{}", probes.get()),
                 description: String::new(),
                 input_hint: None,
@@ -525,12 +525,12 @@ mod tests {
     #[test]
     fn acp_native_skill_commands_remain_distinct_from_builtin_commands() {
         let commands = vec![
-            zeron_proto::SlashCommand {
+            harness_proto::SlashCommand {
                 name: "skill:review".into(),
                 description: "Review".into(),
                 input_hint: None,
             },
-            zeron_proto::SlashCommand {
+            harness_proto::SlashCommand {
                 name: "compact".into(),
                 description: String::new(),
                 input_hint: None,
@@ -540,13 +540,13 @@ mod tests {
         attach_advertised_commands(HarnessId::Pi, &mut skills, &commands);
         assert_eq!(skills.len(), 1);
         let skill = &skills[0];
-        let invocation = zeron_proto::invocation::Invocation::Skill {
+        let invocation = harness_proto::invocation::Invocation::Skill {
             name: skill.name.clone(),
             path: skill.path.clone(),
             command: skill.command.clone(),
         };
         assert_eq!(
-            zeron_proto::invocation::harness_prompt(
+            harness_proto::invocation::harness_prompt(
                 &format!("{} arguments", invocation.link()),
                 HarnessId::Pi
             ),
@@ -560,7 +560,7 @@ mod tests {
                 enabled: true,
                 command: None,
             }];
-            let command = zeron_proto::SlashCommand {
+            let command = harness_proto::SlashCommand {
                 name: "review".into(),
                 description: String::new(),
                 input_hint: None,
@@ -586,7 +586,7 @@ mod tests {
                 enabled: true,
                 command: None,
             }];
-            let command = |name: &str| zeron_proto::SlashCommand {
+            let command = |name: &str| harness_proto::SlashCommand {
                 name: name.into(),
                 description: String::new(),
                 input_hint: None,
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn advertised_commands_preserve_valid_skill_links() {
-        use zeron_proto::invocation::{Invocation, invocation_links};
+        use harness_proto::invocation::{Invocation, invocation_links};
         let commands = [
             "skill:",
             "skill:two words",
@@ -612,7 +612,7 @@ mod tests {
             "skill:审查-é:ui.v2_test",
         ]
         .into_iter()
-        .map(|name| zeron_proto::SlashCommand {
+        .map(|name| harness_proto::SlashCommand {
             name: name.into(),
             description: String::new(),
             input_hint: None,

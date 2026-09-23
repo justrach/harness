@@ -29,10 +29,10 @@ Watch and acknowledgement revisions are monotonic within an engine attachment, n
 ## Regression commands
 
 ```sh
-cargo test --locked -p zeron-proto --lib
-cargo test --locked -p zeron-doc --lib
-cargo test --locked -p zeron-engine --lib
-cargo test --locked -p zeron-ui --lib -- --test-threads=1
+cargo test --locked -p harness-proto --lib
+cargo test --locked -p harness-doc --lib
+cargo test --locked -p harness-engine --lib
+cargo test --locked -p harness-ui --lib -- --test-threads=1
 cd edge && npm run typecheck && npm test
 ```
 

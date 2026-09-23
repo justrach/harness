@@ -298,7 +298,7 @@ impl AccentPreset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Harnesser",
+            Self::Zeron => "Harness",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -400,8 +400,8 @@ pub struct ThemeSelection {
 impl Default for ThemeSelection {
     fn default() -> Self {
         Self {
-            light: "harnesser-light".into(),
-            dark: "harnesser-dark".into(),
+            light: "codegraff-light".into(),
+            dark: "codegraff-dark".into(),
         }
     }
 }
@@ -816,9 +816,11 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 20);
         assert!(registry.variant("harnesser-light").is_some());
         assert!(registry.variant("harnesser-dark").is_some());
+        assert!(registry.variant("codegraff-light").is_some());
+        assert!(registry.variant("codegraff-dark").is_some());
         let errors: Vec<_> = registry
             .validate()
             .into_iter()
@@ -835,7 +837,7 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 30);
-        assert_eq!(variants * VisualFixture::ALL.len(), 300);
+        assert_eq!(variants, 32);
+        assert_eq!(variants * VisualFixture::ALL.len(), 320);
     }
 }

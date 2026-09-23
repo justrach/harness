@@ -563,8 +563,8 @@ fn reinstall_theme(cx: &mut App) {
     crate::theme::Theme::install_selection(
         appearance,
         themes.variant_id(match appearance {
-            crate::theme::Appearance::Dark => zeron_theme::Appearance::Dark,
-            crate::theme::Appearance::Light => zeron_theme::Appearance::Light,
+            crate::theme::Appearance::Dark => harness_theme::Appearance::Dark,
+            crate::theme::Appearance::Light => harness_theme::Appearance::Light,
         }),
         crate::appearance::accent(cx),
         crate::appearance::surface(cx),

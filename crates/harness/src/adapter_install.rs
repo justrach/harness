@@ -82,26 +82,44 @@ fn adapters_root_with(
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
     };
-    if let Some(dir) = value("ZERON_ADAPTERS_DIR") {
+    if let Some(dir) = value("HARNESS_ADAPTERS_DIR").or_else(|| value("ZERON_ADAPTERS_DIR")) {
         return Some(dir);
     }
-    if let Some(dir) = value("ZERON_DATA_DIR") {
+    if let Some(dir) = value("HARNESS_DATA_DIR").or_else(|| value("ZERON_DATA_DIR")) {
         return Some(dir.join("adapters"));
     }
     if platform == crate::executable::Platform::Windows {
         value("LOCALAPPDATA")
-            .map(|dir| dir.join("Zeron").join("adapters"))
             .or_else(|| {
-                value("USERPROFILE").map(|home| {
-                    home.join("AppData")
-                        .join("Local")
-                        .join("Harnesser")
-                        .join("adapters")
-                })
+                value("USERPROFILE").map(|home| home.join("AppData").join("Local"))
+            })
+            .map(|local| {
+                first_existing_dir([
+                    local.join("Harness"),
+                    local.join("Harnesser"),
+                    local.join("Zeron"),
+                ])
+                .join("adapters")
             })
     } else {
-        value("HOME").map(|home| home.join(".harnesser").join("adapters"))
+        value("HOME").map(|home| {
+            first_existing_dir([home.join(".harness"), home.join(".harnesser")]).join("adapters")
+        })
     }
+}
+
+fn first_existing_dir(candidates: impl IntoIterator<Item = PathBuf>) -> PathBuf {
+    let mut iter = candidates.into_iter();
+    let first = iter.next().expect("adapter dir candidates");
+    if first.exists() {
+        return first;
+    }
+    for path in iter {
+        if path.exists() {
+            return path;
+        }
+    }
+    first
 }
 
 fn install_dir_in(root: &Path, pin: &NpmPin) -> PathBuf {
@@ -523,7 +541,7 @@ async fn install_into(
     // A bare manifest keeps npm from walking up into a user project.
     std::fs::write(tmp_dir.join("package.json"), "{\"private\":true}\n")?;
     tracing::info!(
-        target: "zeron_harness::adapter_install",
+        target: "harness_adapters::adapter_install",
         package = %pin.spec(),
         dir = %tmp_dir.display(),
         "installing ACP adapter"
@@ -720,7 +738,7 @@ mod tests {
                 &env(&[("LOCALAPPDATA", local.clone().into_os_string())]),
                 crate::executable::Platform::Windows,
             ),
-            Some(local.join("Zeron").join("adapters"))
+            Some(local.join("Harness").join("adapters"))
         );
         assert_eq!(
             adapters_root_with(
@@ -731,7 +749,7 @@ mod tests {
                 profile
                     .join("AppData")
                     .join("Local")
-                    .join("Zeron")
+                    .join("Harness")
                     .join("adapters")
             )
         );

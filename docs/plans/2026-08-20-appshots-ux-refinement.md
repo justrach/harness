@@ -13,7 +13,7 @@
    checklist. Do not request permissions merely because the feature toggle was
    enabled, and label Accessibility as optional.
 4. Update pure layout tests and permission-facing copy. Validate with
-   `cargo test -p zeron-ui --lib`, `cargo check -p zeron-ui`,
+   `cargo test -p harness-ui --lib`, `cargo check -p harness-ui`,
    `cargo build -p zeron`, and `git diff --check`.
 
 ## Composer visual normalization follow-up
@@ -28,5 +28,5 @@
    horizontally scrolling tray. Capture, removal, preview, persistence,
    transport, and permission controls remain unchanged.
 4. Add dimension-parser and landscape/portrait/square sizing tests, run the
-   `zeron-ui` test suite and macOS build checks, then inspect the result in the
+   `harness-ui` test suite and macOS build checks, then inspect the result in the
    signed `Zeron Dev.app`.

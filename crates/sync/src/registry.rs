@@ -4,7 +4,7 @@
 //! reconnect with exponential backoff.
 //!
 //! The client owns no row semantics: everything applies through the shared
-//! [`zeron_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
+//! [`harness_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
 //! byte-compatible with `edge/src/registry-room.ts`.
 //!
 //! Liveness discipline is inherited from `room.rs` and its incidents: the
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use zeron_doc::{PendingBatch, RegistryDoc, RegistryRow, StateOutcome};
+use harness_doc::{PendingBatch, RegistryDoc, RegistryRow, StateOutcome};
 
 use crate::types::{RoomStatsSnapshot, StaticUrl, SyncError, UrlProvider};
 
@@ -91,7 +91,7 @@ enum ClientFrame<'a> {
     },
     Push {
         batch: &'a str,
-        ops: &'a [zeron_doc::RowOp],
+        ops: &'a [harness_doc::RowOp],
     },
     Presence {
         at: i64,

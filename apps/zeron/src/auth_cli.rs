@@ -10,7 +10,7 @@
 
 use std::io::IsTerminal;
 
-use zeron_engine::{AuthState, Engine, EngineConfig, InstanceLock, WorkspaceScope};
+use harness_engine::{AuthState, Engine, EngineConfig, InstanceLock, WorkspaceScope};
 
 #[derive(Debug, PartialEq, Eq)]
 struct AccountStatus {
@@ -101,7 +101,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("zeron login needs an interactive terminal");
     }
-    zeron_engine::terminal_sign_in(&auth).await?;
+    harness_engine::terminal_sign_in(&auth).await?;
     match auth.state() {
         AuthState::SignedIn { user, org_id } => {
             println!(
@@ -112,7 +112,7 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             println!(
-                "Sync is ready. Start or restart Harnesser to open the synced workspace; existing local sessions will stay local."
+                "Sync is ready. Start or restart Harness to open the synced workspace; existing local sessions will stay local."
             );
         }
         // terminal_sign_in only returns Ok once signed in; keep an honest fallback.
@@ -194,14 +194,14 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
 /// derivation is correct when no engine is listening and tolerant of old
 /// daemons that predate EngineInfo.
 async fn live_engine_scope(ipc_port: u16) -> Option<WorkspaceScope> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+    let client = harness_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .ok()?;
     let value = client
-        .call(zeron_rpc::methods::ENGINE_INFO, serde_json::json!({}))
+        .call(harness_rpc::methods::ENGINE_INFO, serde_json::json!({}))
         .await
         .ok()?;
-    serde_json::from_value::<zeron_engine::EngineInfo>(value)
+    serde_json::from_value::<harness_engine::EngineInfo>(value)
         .ok()
         .map(|info| info.workspace_scope)
 }
@@ -214,7 +214,7 @@ fn engine_lock(config: &EngineConfig, verb: &str) -> anyhow::Result<InstanceLock
     InstanceLock::acquire(&config.data_dir).map_err(|err| {
         anyhow::anyhow!(
             "{err}\nCannot {verb} while an engine is running — stop it first \
-             (`zeron daemon stop`, or quit the Harnesser app), or use the running UI instead."
+             (`zeron daemon stop`, or quit the Harness app), or use the running UI instead."
         )
     })
 }
@@ -222,7 +222,7 @@ fn engine_lock(config: &EngineConfig, verb: &str) -> anyhow::Result<InstanceLock
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_engine::{AuthUser, HarnessId};
+    use harness_engine::{AuthUser, HarnessId};
 
     fn config(data_dir: &std::path::Path) -> EngineConfig {
         EngineConfig {

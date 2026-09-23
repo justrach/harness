@@ -24,12 +24,12 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use zeron_doc::{
+use harness_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage};
-use zeron_proto::{
+use harness_adapters::{CancellationToken, Harness, RunControls, SteerMessage};
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
     UserInputQuestion,
 };
@@ -75,12 +75,12 @@ struct HarnessSessionRef {
 struct RuntimeConfig {
     harness_id: HarnessId,
     model: Option<String>,
-    reasoning: Option<zeron_proto::ReasoningLevel>,
+    reasoning: Option<harness_proto::ReasoningLevel>,
     model_options: serde_json::Map<String, serde_json::Value>,
     cwd: String,
-    sandbox: zeron_proto::SandboxLevel,
+    sandbox: harness_proto::SandboxLevel,
     auto_approve: bool,
-    worktree: Option<zeron_proto::WorktreeSpec>,
+    worktree: Option<harness_proto::WorktreeSpec>,
 }
 
 impl RuntimeConfig {
@@ -363,7 +363,7 @@ impl SessionsEngine {
         request.cwd = expand_home(&request.cwd);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
-        zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
+        harness_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
         // Every dispatched prompt is a turn — routed steer or fresh run alike.
         self.note_turn_start(chat_id, &request.cwd);
@@ -389,7 +389,7 @@ impl SessionsEngine {
                     prompt: if harness_id == HarnessId::Opencode {
                         request.prompt.clone()
                     } else {
-                        zeron_proto::invocation::harness_prompt(&request.prompt, harness_id)
+                        harness_proto::invocation::harness_prompt(&request.prompt, harness_id)
                     },
                     message_id: Some(user_id.clone()),
                 };
@@ -564,14 +564,14 @@ impl SessionsEngine {
         let Some((run_id, harness_id, steer_tx, ledger)) = target else {
             return Ok(SteerOutcome::NotSteerable);
         };
-        zeron_proto::invocation::validate_harness_invocations(prompt, harness_id)
+        harness_proto::invocation::validate_harness_invocations(prompt, harness_id)
             .map_err(EngineError::Other)?;
         let user_id = message_id.unwrap_or_else(new_id);
         let message = SteerMessage {
             prompt: if harness_id == HarnessId::Opencode {
                 prompt.to_owned()
             } else {
-                zeron_proto::invocation::harness_prompt(prompt, harness_id)
+                harness_proto::invocation::harness_prompt(prompt, harness_id)
             },
             message_id: Some(user_id.clone()),
         };
@@ -773,7 +773,7 @@ impl SessionsEngine {
                             reasoning: None,
                             model_options: Default::default(),
                             cwd,
-                            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                            sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
                             auto_approve: false,
                             attachments: Vec::new(),
                             resume: None,
@@ -1298,7 +1298,7 @@ impl SubagentSink {
         if let Err(err) = finished {
             tracing::warn!(doc = %self.doc_id, error = %err, "subagent sink finish failed");
         }
-        let entries = zeron_doc::join_continuation_entries(self.doc.read_entries().ok()?);
+        let entries = harness_doc::join_continuation_entries(self.doc.read_entries().ok()?);
         serde_json::to_string(&entries).ok()
     }
 }
@@ -1444,7 +1444,7 @@ fn cursor_unstarted_history(
     // Convert each message before JSON encoding. Rewriting canonical chips in
     // the encoded envelope can introduce unescaped quotes or newlines and can
     // cause Cursor's current message to be converted twice.
-    let prompt = zeron_proto::invocation::harness_prompt(prompt, HarnessId::Cursor);
+    let prompt = harness_proto::invocation::harness_prompt(prompt, HarnessId::Cursor);
     let entries = doc.read_entries()?;
     let preceding: Vec<_> = entries
         .iter()
@@ -1486,7 +1486,7 @@ fn cursor_unstarted_history(
                 .join("\n")
         })
         .filter(|text| !text.is_empty())
-        .map(|text| zeron_proto::invocation::harness_prompt(&text, HarnessId::Cursor))
+        .map(|text| harness_proto::invocation::harness_prompt(&text, HarnessId::Cursor))
         .collect();
     if previous.is_empty() {
         return Ok(prompt);
@@ -1536,7 +1536,7 @@ async fn drive_run(
             request.resume.is_some(),
         )
         .map(|prompt| request.prompt = prompt)
-        .map_err(|e| zeron_harness::HarnessError::Protocol(e.to_string()))
+        .map_err(|e| harness_adapters::HarnessError::Protocol(e.to_string()))
     } else {
         Ok(())
     };
@@ -1545,7 +1545,7 @@ async fn drive_run(
             let mut wire_request = request;
             if !matches!(harness_id, HarnessId::Cursor | HarnessId::Opencode) {
                 wire_request.prompt =
-                    zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
+                    harness_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
             }
             harness.run(wire_request, controls).await
         }
@@ -1806,7 +1806,7 @@ async fn drive_run(
                     && steerable
                     && !folded.iter().any(|p| match p {
                         MessagePart::Tool { id, resolved: false, .. } => {
-                            id != zeron_proto::LIVE_PLAN_TOOL_ID
+                            id != harness_proto::LIVE_PLAN_TOOL_ID
                         }
                         MessagePart::Input { resolved: false, .. } => true,
                         _ => false,
@@ -1922,7 +1922,7 @@ async fn drive_run(
                         }
                     }
                 }
-                zeron_doc::fold_event_into_parts(&mut folded, &event);
+                harness_doc::fold_event_into_parts(&mut folded, &event);
                 if !dirty {
                     dirty = true;
                     flush_at = tokio::time::Instant::now()
@@ -1973,7 +1973,7 @@ async fn drive_run(
                     sink.push_user(&device_id, text);
                     continue;
                 }
-                zeron_doc::fold_event_into_parts(&mut sink.folded, sub_event);
+                harness_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
                 if !chip_streaming && done {
                     // In-place chip refresh on lifecycle transitions only —
@@ -2009,7 +2009,7 @@ async fn drive_run(
                     {
                         host.upload_tool_sidecar(
                             &chat_id,
-                            zeron_doc::SidecarPayload {
+                            harness_doc::SidecarPayload {
                                 part_id: doc_id,
                                 output: Some(json),
                                 diff: None,
@@ -2091,7 +2091,7 @@ async fn drive_run(
                 ) || matches!(
                     &event,
                     AgentEvent::ToolCall { id, .. }
-                        if id == zeron_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
+                        if id == harness_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
                 ));
             if self_continued {
                 tracing::info!(
@@ -2160,8 +2160,8 @@ async fn drive_run(
             // treating its reappearance after a park/steer reset as a stale
             // echo dropped the todo list for the rest of the run — from the
             // first boundary on, plans never rendered again.
-            AgentEvent::ToolCall { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
-            AgentEvent::ToolResult { id, .. } if id == zeron_proto::LIVE_PLAN_TOOL_ID => {}
+            AgentEvent::ToolCall { id, .. } if id == harness_proto::LIVE_PLAN_TOOL_ID => {}
+            AgentEvent::ToolResult { id, .. } if id == harness_proto::LIVE_PLAN_TOOL_ID => {}
             AgentEvent::ToolCall { id, .. } => {
                 if !in_segment(&folded, id) && seen_tools.contains(id) {
                     continue;
@@ -2306,7 +2306,7 @@ async fn drive_run(
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run
-            // journal. To reintroduce: `zeron_doc::sidecar_payload(&event)`
+            // journal. To reintroduce: `harness_doc::sidecar_payload(&event)`
             // → `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`, all
             // still in place and tested.
         }
@@ -2423,7 +2423,7 @@ async fn drive_run(
         {
             host.upload_tool_sidecar(
                 &chat_id,
-                zeron_doc::SidecarPayload {
+                harness_doc::SidecarPayload {
                     part_id: doc_id,
                     output: Some(json),
                     diff: None,
@@ -2492,18 +2492,18 @@ async fn drive_run(
 mod tests {
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
-        let doc = zeron_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
-        let skill = zeron_proto::invocation::Invocation::Skill {
+        let doc = harness_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
+        let skill = harness_proto::invocation::Invocation::Skill {
             name: "review \"quoted\"".into(),
             path: "/repo/quoted \"path\"/SKILL.md".into(),
             command: None,
         }
         .link();
         let previous = format!("Previous {skill}\nSecond line with \\ and \"quotes\"");
-        doc.push_message(&zeron_doc::SessionMessageEntry {
+        doc.push_message(&harness_doc::SessionMessageEntry {
             id: "u1".into(),
-            role: zeron_doc::MessageRole::User,
-            parts: vec![zeron_doc::MessagePart::Text {
+            role: harness_doc::MessageRole::User,
+            parts: vec![harness_doc::MessagePart::Text {
                 id: "u1-text".into(),
                 text: previous.clone(),
             }],
@@ -2520,31 +2520,31 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         assert_eq!(
             parsed["currentUserMessage"],
-            zeron_proto::invocation::harness_prompt(&current, zeron_proto::HarnessId::Cursor)
+            harness_proto::invocation::harness_prompt(&current, harness_proto::HarnessId::Cursor)
         );
         assert_eq!(
             parsed["previousUserMessages"][0],
-            zeron_proto::invocation::harness_prompt(&previous, zeron_proto::HarnessId::Cursor)
+            harness_proto::invocation::harness_prompt(&previous, harness_proto::HarnessId::Cursor)
         );
     }
 
     #[test]
     fn cursor_without_a_session_id_retains_only_preceding_user_messages() {
-        let doc = zeron_doc::SessionDoc::init("cursor-unstarted").unwrap();
+        let doc = harness_doc::SessionDoc::init("cursor-unstarted").unwrap();
         for (id, role, text) in [
             (
                 "u1",
-                zeron_doc::MessageRole::User,
+                harness_doc::MessageRole::User,
                 "first interrupted request",
             ),
-            ("a1", zeron_doc::MessageRole::Assistant, "partial output"),
-            ("u2", zeron_doc::MessageRole::User, "current request"),
-            ("u3", zeron_doc::MessageRole::User, "future pending request"),
+            ("a1", harness_doc::MessageRole::Assistant, "partial output"),
+            ("u2", harness_doc::MessageRole::User, "current request"),
+            ("u3", harness_doc::MessageRole::User, "future pending request"),
         ] {
-            doc.push_message(&zeron_doc::SessionMessageEntry {
+            doc.push_message(&harness_doc::SessionMessageEntry {
                 id: id.into(),
                 role,
-                parts: vec![zeron_doc::MessagePart::Text {
+                parts: vec![harness_doc::MessagePart::Text {
                     id: format!("{id}-text"),
                     text: text.into(),
                 }],
@@ -2582,7 +2582,7 @@ mod tests {
     }
 
     use super::{RuntimeConfig, subagent_doc_id};
-    use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+    use harness_proto::{HarnessId, RunRequest, SandboxLevel};
 
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {
@@ -2613,7 +2613,7 @@ mod tests {
             &mut parts,
             &AgentEvent::ToolCall {
                 id: "i".into(),
-                call: zeron_proto::ToolCall::Unknown {
+                call: harness_proto::ToolCall::Unknown {
                     name: "Generate image".into(),
                     input: None,
                 },
@@ -2651,7 +2651,7 @@ mod tests {
             prompt: "first".into(),
             harness: None,
             model: Some("grok-4.6".into()),
-            reasoning: Some(zeron_proto::ReasoningLevel::High),
+            reasoning: Some(harness_proto::ReasoningLevel::High),
             model_options: serde_json::Map::new(),
             cwd: "/tmp".into(),
             sandbox: SandboxLevel::WorkspaceWrite,
@@ -2676,7 +2676,7 @@ mod tests {
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
         follow_up.model = initial.model.clone();
 
-        follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
+        follow_up.reasoning = Some(harness_proto::ReasoningLevel::Medium);
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
         follow_up.reasoning = initial.reasoning;
 

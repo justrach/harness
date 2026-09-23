@@ -23,9 +23,9 @@ use gpui::{
 };
 
 use gpui_tokio::Tokio;
-use zeron_engine::InstanceLock;
-use zeron_proto::{AuthState, WorkspaceScope};
-use zeron_rpc::methods;
+use harness_engine::InstanceLock;
+use harness_proto::{AuthState, WorkspaceScope};
+use harness_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
@@ -54,12 +54,17 @@ use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
-use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
+use crate::terminal::panel::{
+    CloseSplit, SplitAxis, SplitDown, SplitRight, TerminalPanel, ToggleTerminal,
+    clamp_terminal_height,
+};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
+mod chat_split;
+mod codegraff_account;
 mod command_palette;
 mod files_panel;
 mod project_icon;
@@ -84,7 +89,23 @@ actions!(
         OpenSettings,
         NextSession,
         PrevSession,
-        ArchiveSession
+        ArchiveSession,
+        // Ghostty-style split chat panes (`shell/chat_split.rs`).
+        SplitChatRight,
+        SplitChatDown,
+        FocusNextChatPane,
+        FocusPrevChatPane,
+        FocusChatPaneLeft,
+        FocusChatPaneRight,
+        FocusChatPaneUp,
+        FocusChatPaneDown,
+        ResizeChatPaneLeft,
+        ResizeChatPaneRight,
+        ResizeChatPaneUp,
+        ResizeChatPaneDown,
+        EqualizeChatPanes,
+        ToggleChatPaneZoom,
+        FocusComposer
     ]
 );
 
@@ -331,13 +352,17 @@ pub fn apply_keymap(
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
-    // rebuilding Harnesser's bindings so the file editor keymap remains active.
+    // rebuilding Harness's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
     crate::composer::init(cx, composer_send_behavior);
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
+    // Split chat panes, bound before the terminal's scoped ⌘D/⌘⇧D below: a
+    // context-less binding ties a "Terminal" one on depth and gpui breaks
+    // the tie toward the later binding, so a focused terminal keeps ⌘D.
+    cx.bind_keys(chat_split::chat_split_bindings(cfg!(target_os = "macos")));
     cx.bind_keys([
         KeyBinding::new(
             &valid_or_default(&keymap.save_file, "mod-s"),
@@ -363,6 +388,31 @@ pub fn apply_keymap(
             &valid_or_default(&keymap.toggle_terminal, "mod-j"),
             ToggleTerminal,
             None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.split_terminal,
+                crate::settings::ShortcutId::SplitTerminal.default_combo(),
+            ),
+            SplitRight,
+            Some("Terminal"),
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.split_terminal_down,
+                crate::settings::ShortcutId::SplitTerminalDown.default_combo(),
+            ),
+            SplitDown,
+            Some("Terminal"),
+        ),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-shift-w"
+            } else {
+                "ctrl-shift-w"
+            },
+            CloseSplit,
+            Some("Terminal"),
         ),
         KeyBinding::new(
             &valid_or_default(&keymap.new_session, "mod-n"),
@@ -1530,6 +1580,24 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
+    /// Split chat panes (`shell/chat_split.rs`); `None` = one column.
+    chat_split: Option<chat_split::ChatSplit>,
+    /// The selection the split last saw, to tell outside picks from its own.
+    chat_split_selected: Option<String>,
+    /// Live read-only transcripts for unfocused panes, keyed by chat id.
+    peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
+    /// Which pane card the sidebar strip last had under the pointer.
+    pane_strip_hovered: usize,
+    /// A split divider being dragged, and the split root's measured bounds.
+    chat_split_drag: Option<chat_split::DividerDrag>,
+    /// Launch restored (or deliberately skipped) the previous chat + layout;
+    /// until then nothing is saved over them.
+    boot_restored: bool,
+    /// "Sign in with Codegraff" state (`shell/codegraff_account.rs`).
+    codegraff: Option<codegraff_account::CodegraffStatus>,
+    codegraff_flow: Option<Task<()>>,
+    codegraff_status_task: Option<Task<()>>,
+    chat_split_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
     browser_seq: u64,
@@ -1628,7 +1696,7 @@ pub struct Shell {
     update_dismissed: Option<String>,
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
-    install: zeron_update::InstallKind,
+    install: harness_update::InstallKind,
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
@@ -1828,8 +1896,8 @@ impl Shell {
                             // same per-second refresh while degraded.
                             || matches!(
                                 s.connectivity.state,
-                                zeron_proto::ConnectivityState::Offline
-                                    | zeron_proto::ConnectivityState::Reconnecting
+                                harness_proto::ConnectivityState::Offline
+                                    | harness_proto::ConnectivityState::Reconnecting
                             )
                     };
                     // Relative sidebar times still advance when unchanged
@@ -1941,6 +2009,16 @@ impl Shell {
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
+            chat_split: None,
+            chat_split_selected: None,
+            peer_chat_views: std::collections::HashMap::new(),
+            pane_strip_hovered: 0,
+            chat_split_drag: None,
+            boot_restored: false,
+            codegraff: None,
+            codegraff_flow: None,
+            codegraff_status_task: None,
+            chat_split_bounds: Default::default(),
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
             browser_seq: 0,
@@ -2002,7 +2080,7 @@ impl Shell {
             update_flow: UpdateFlow::Idle,
             update_task: None,
             update_dismissed: None,
-            install: zeron_update::detect_install(),
+            install: harness_update::detect_install(),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -2122,6 +2200,7 @@ impl Shell {
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
+        self.chat_split_on_state_changed(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -2205,10 +2284,10 @@ impl Shell {
                     "Here is the screenshot of the bug.",
                     std::slice::from_ref(&pending_path),
                 );
-                let echo = zeron_doc::SessionMessageEntry {
+                let echo = harness_doc::SessionMessageEntry {
                     id: "demo-upload-echo".into(),
-                    role: zeron_doc::MessageRole::User,
-                    parts: vec![zeron_doc::MessagePart::Text {
+                    role: harness_doc::MessageRole::User,
+                    parts: vec![harness_doc::MessagePart::Text {
                         id: "t0".into(),
                         text,
                     }],
@@ -2264,9 +2343,9 @@ impl Shell {
                 )
             };
             // Background-only banners: `active_window()` is app-level (any
-            // Harnesser window being key), so a ping for a *background chat* in a
+            // Harness window being key), so a ping for a *background chat* in a
             // focused app still stays a chime — you're already looking at
-            // Harnesser; the sidebar dot carries the rest.
+            // Harness; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
             for (chat_id, status, send_pending, title) in sessions {
                 let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
@@ -2311,8 +2390,8 @@ impl Shell {
                     && !(self.settings.notifications_background_only && app_focused)
                 {
                     let body = match connectivity {
-                        zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Harnesser is trying to reconnect",
+                        harness_proto::ConnectivityState::Offline => "Your device is offline",
+                        _ => "Harness is trying to reconnect",
                     };
                     crate::notify::post("Connection unavailable", body, None);
                 }
@@ -2359,9 +2438,17 @@ impl Shell {
                 self.schedule_save(cx);
             }
         }
-        // Boot landing: the most recent session once the first chats frame
-        // syncs (manual selection wins).
+        // Boot landing: the chat (and split) open at quit, else the most
+        // recent session, once the first chats frame syncs (manual wins).
         self.boot_select_chat(cx);
+        // Remember the open chat for the next launch.
+        {
+            let selected = state.read(cx).selected_chat.clone();
+            if self.boot_restored && selected != self.settings.last_chat_id {
+                self.settings.last_chat_id = selected;
+                self.schedule_save(cx);
+            }
+        }
         // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
         // fall back to "All" rather than filtering everything out.
         if state.read(cx).spaces_synced
@@ -3130,7 +3217,7 @@ impl Shell {
     /// (user request).
     fn add_commit_diff_surface(
         &mut self,
-        commit: zeron_proto::GitHistoryCommit,
+        commit: harness_proto::GitHistoryCommit,
         cx: &mut Context<Self>,
     ) {
         let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), commit, cx));
@@ -3288,17 +3375,17 @@ impl Shell {
                 .background_executor()
                 .spawn(async move {
                     let value = reply.ok()?;
-                    let entries: Vec<zeron_doc::SessionMessageEntry> =
+                    let entries: Vec<harness_doc::SessionMessageEntry> =
                         serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = zeron_doc::TranscriptUpdate {
-                        replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
-                        frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
+                    let update = harness_doc::TranscriptUpdate {
+                        replay_baseline: Some(harness_doc::TranscriptBaseline::capture(&entries)),
+                        frame: harness_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
                     };
                     let prepared = crate::transcript::TranscriptPreparation::default()
                         .prepare(&update)
                         .ok()?;
-                    let zeron_doc::TranscriptFrame::Reset { reset } = update.frame else {
+                    let harness_doc::TranscriptFrame::Reset { reset } = update.frame else {
                         unreachable!()
                     };
                     Some((reset, prepared))
@@ -3579,6 +3666,33 @@ impl Shell {
         cx.notify();
     }
 
+    fn split_terminal(
+        &mut self,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_open(cx) {
+            self.toggle_terminal(window, cx);
+        }
+        let panel = self.terminal_panel(cx);
+        panel.update(cx, |panel, cx| {
+            panel.split_active(axis, cx);
+            panel.request_focus(cx);
+        });
+        window.focus(&panel.read(cx).focus_handle(), cx);
+        cx.notify();
+    }
+
+    fn close_terminal_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_open(cx) {
+            return;
+        }
+        let panel = self.terminal_panel(cx);
+        panel.update(cx, |panel, cx| panel.close_focused_split(window, cx));
+        cx.notify();
+    }
+
     fn on_terminal_drag(
         &mut self,
         event: &gpui::DragMoveEvent<TerminalResize>,
@@ -3781,7 +3895,7 @@ impl Shell {
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
-            self.sidebar_notice = Some("Harnesser conversation link copied".into());
+            self.sidebar_notice = Some("Harness conversation link copied".into());
         } else {
             self.sidebar_notice = Some("Conversation link is not ready yet".into());
         }
@@ -4275,7 +4389,7 @@ impl Shell {
             Err("Pins are still syncing")
         } else {
             let current = self.active_sidebar_pins(cx);
-            zeron_proto::validate_sidebar_pin_update(&current, pins)
+            harness_proto::validate_sidebar_pin_update(&current, pins)
         };
         if let Err(message) = result {
             self.sidebar_notice = Some(message.into());
@@ -4288,7 +4402,7 @@ impl Shell {
     fn apply_sidebar_pin_change(
         &mut self,
         profile_key: String,
-        change: zeron_proto::SidebarPinChange,
+        change: harness_proto::SidebarPinChange,
         cx: &mut Context<Self>,
     ) -> bool {
         let mut pinned_session_ids = self.raw_sidebar_pins(cx);
@@ -4344,13 +4458,13 @@ impl Shell {
             return;
         }
         let change = if pinned {
-            zeron_proto::SidebarPinChange::Pin {
+            harness_proto::SidebarPinChange::Pin {
                 session_id: chat_id.clone(),
                 after: pins.last().cloned(),
                 before: None,
             }
         } else {
-            zeron_proto::SidebarPinChange::Unpin {
+            harness_proto::SidebarPinChange::Unpin {
                 session_id: chat_id.clone(),
             }
         };
@@ -4869,7 +4983,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Harnesser."
+                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Harness."
                         ).into());
                         cx.notify();
                     }
@@ -5393,7 +5507,7 @@ impl Shell {
         )
     }
 
-    /// Native Windows caption controls integrated into Harnesser's unified
+    /// Native Windows caption controls integrated into Harness's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
     /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
@@ -5513,7 +5627,7 @@ impl Shell {
         )
     }
 
-    /// Harnesser-drawn Linux caption controls, one overlay per populated side.
+    /// Harness-drawn Linux caption controls, one overlay per populated side.
     /// Shell-level chrome like the Windows cluster: mounted at the root so
     /// they stay above the splash and every auth/org/error gate.
     fn render_linux_caption_controls(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
@@ -5723,7 +5837,7 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        // The sidebar is part of the resolved theme. A second fixed-Harnesser
+        // The sidebar is part of the resolved theme. A second fixed-Harness
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
         let inner = self.sidebar_pane.clone().cached(
@@ -5880,9 +5994,9 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
-        change_request: Option<zeron_proto::ChangeRequestSummary>,
-        harness: Option<zeron_proto::HarnessId>,
-        status: zeron_proto::ChatIndicator,
+        change_request: Option<harness_proto::ChangeRequestSummary>,
+        harness: Option<harness_proto::HarnessId>,
+        status: harness_proto::ChatIndicator,
         selected: bool,
         archived: bool,
         preview: bool,
@@ -5957,16 +6071,16 @@ impl Shell {
             Some("Queued")
         } else {
             match status {
-                zeron_proto::ChatIndicator::Working => Some("Working"),
-                zeron_proto::ChatIndicator::AwaitingInput => Some("Input"),
-                zeron_proto::ChatIndicator::Errored => Some("Failed"),
-                zeron_proto::ChatIndicator::Completed => Some("Done"),
-                zeron_proto::ChatIndicator::Idle => None,
+                harness_proto::ChatIndicator::Working => Some("Working"),
+                harness_proto::ChatIndicator::AwaitingInput => Some("Input"),
+                harness_proto::ChatIndicator::Errored => Some("Failed"),
+                harness_proto::ChatIndicator::Completed => Some("Done"),
+                harness_proto::ChatIndicator::Idle => None,
             }
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
-        let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
+        let working = status == harness_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
             let glyph = if working {
                 loaders::mini_glyph_spinner(
@@ -5977,7 +6091,7 @@ impl Shell {
                     cx,
                 )
                 .into_any_element()
-            } else if status == zeron_proto::ChatIndicator::Completed && !queued && !undelivered {
+            } else if status == harness_proto::ChatIndicator::Completed && !queued && !undelivered {
                 icon(icons::CHECK)
                     .size(px(11.0))
                     .text_color(status_color)
@@ -6086,7 +6200,7 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if status == harness_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -6554,7 +6668,7 @@ impl Shell {
     /// reconnecting; an amber dot only when the OS says offline. The
     /// transport error belongs in logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use zeron_proto::ConnectivityState as S;
+        use harness_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             S::Disabled | S::Connected => return None,
@@ -6952,6 +7066,8 @@ impl Shell {
         // rode the previous frame's offset, so the last frame of a content
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
+        // A chat split adds a strip of pane cards above the list.
+        let pane_strip = self.render_pane_strip(theme, cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
@@ -7010,6 +7126,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
+            .children(pane_strip)
             .child(filter_row)
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
@@ -7132,7 +7249,7 @@ impl Shell {
         }
     }
 
-    /// Fetch the manifest and stage the new Harnesser desktop bundle under the data dir
+    /// Fetch the manifest and stage the new Harness desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
         let edge_url = self.boot.edge_url.clone();
@@ -7140,7 +7257,7 @@ impl Shell {
         let install = self.install.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
+            let manifest = harness_update::fetch_latest(&edge_url).await?;
             install.stage_desktop(&edge_url, &manifest, &data_dir).await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
@@ -7194,7 +7311,13 @@ impl Shell {
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow)
+            // Cloud sync sign-in is parked for now: `HARNESS_ENABLE_SYNC=1`
+            // brings "Enable sync" (and its browser login) back.
+            .filter(|action| {
+                !matches!(action, AccountMenuAction::EnableSync)
+                    || std::env::var("HARNESS_ENABLE_SYNC").is_ok_and(|v| v == "1")
+            });
         // Only the compact avatar button is interactive; footer whitespace is not.
         let initial: SharedString = user_line
             .trim()
@@ -7242,6 +7365,7 @@ impl Shell {
                     this.close_user_menu(cx);
                 } else {
                     this.user_menu.open(());
+                    this.refresh_codegraff_status(cx);
                 }
                 cx.notify();
             }))
@@ -7264,6 +7388,7 @@ impl Shell {
             );
         if self.user_menu.get().is_some() {
             let closing = self.user_menu.closing_since();
+            let codegraff_rows = self.render_codegraff_menu_rows(theme, cx);
             let menu = popover::popover_card(theme)
                 .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -7282,6 +7407,8 @@ impl Shell {
                         .truncate()
                         .child(menu_identity),
                 )
+                .children(codegraff_rows)
+                .child(popover::menu_separator())
                 .when_some(action, |menu, action| {
                     let row = match action {
                         AccountMenuAction::EnableSync => {
@@ -7378,7 +7505,7 @@ impl Shell {
         } else if remote_engine {
             "Stop daemon and quit"
         } else {
-            "Quit Harnesser"
+            "Quit Harness"
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -7403,7 +7530,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Harnesser will keep using this local workspace until you quit and reopen.",
+                        "Finish signing in in your browser. Harness will keep using this local workspace until you quit and reopen.",
                     )),
                 )
                 .child(
@@ -7447,14 +7574,14 @@ impl Shell {
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Harnesser can switch to your synced workspace now."
+                        "You're signed in as {email}. Harness can switch to your synced workspace now."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
                         "Bring {phrase} from this device into your synced workspace, or start it fresh."
                     )
                     .into(),
-                    (None, None) => "Harnesser can switch to your synced workspace now.".into(),
+                    (None, None) => "Harness can switch to your synced workspace now.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -7643,9 +7770,9 @@ impl Shell {
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
                         if remote_engine {
-                            "Harnesser is using a background daemon. Stop it and quit Harnesser, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Harness is using a background daemon. Stop it and quit Harness, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         } else {
-                            "Quit and reopen Harnesser to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Quit and reopen Harness to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         },
                     )),
                 )
@@ -7690,7 +7817,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Harnesser will remove your credentials, close the synced workspace, and continue in local mode.",
+                        "Harness will remove your credentials, close the synced workspace, and continue in local mode.",
                     )),
                 )
                 .child(
@@ -8005,7 +8132,7 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Harnesser conversation link")),
+                            .child(SharedString::from("Harness conversation link")),
                     )
                     .when_some(harness_link, |menu, link| {
                         menu.child(
@@ -8406,7 +8533,7 @@ impl Shell {
                         .items_center()
                         .child(
                             icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
+                                .w(px(48.0))
                                 .h(px(48.0))
                                 .text_color(theme.text.opacity(0.09)),
                         )
@@ -9162,7 +9289,7 @@ impl Shell {
             .text_center()
             .child(
                 icon(icons::ZERON_LOGO)
-                    .w(px(31.4))
+                    .w(px(36.0))
                     .h(px(36.0))
                     .text_color(theme.text),
             )
@@ -9182,7 +9309,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Harnesser removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "Harness removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.runtime_change_error.clone(), |card, error| {
@@ -9349,7 +9476,7 @@ impl Shell {
                         .read(cx)
                         .sub_transcript(&tab.doc_id)
                         .last()
-                        .is_some_and(|e| e.status == Some(zeron_doc::MessageStatus::Streaming))
+                        .is_some_and(|e| e.status == Some(harness_doc::MessageStatus::Streaming))
                 }),
                 _ => false,
             };
@@ -9796,7 +9923,7 @@ impl Shell {
                 )
                 .into_any_element(),
             // Login card (zeron App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Harnesser", copy, full-width white Log in button.
+            // logo, "Log in to Harness", copy, full-width white Log in button.
             _ => div()
                 .w(px(360.0))
                 .px(px(32.0))
@@ -9812,7 +9939,7 @@ impl Shell {
                 .text_center()
                 .child(
                     icon(icons::ZERON_LOGO)
-                        .w(px(31.4))
+                        .w(px(36.0))
                         .h(px(36.0))
                         .text_color(theme.text),
                 )
@@ -9822,7 +9949,7 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Harnesser")),
+                        .child(SharedString::from("Log in to Harness")),
                 )
                 .child(
                     div()
@@ -9977,11 +10104,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Harnesser is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "Harness is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Harnesser is organized around workspaces — create one for yourself or your team."
+                "Harness is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };
@@ -9996,10 +10123,10 @@ impl Shell {
             .shadow_lg()
             .flex()
             .flex_col()
-            .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(24.4))
-                    .h(px(28.0))
+                .child(
+                    icon(icons::ZERON_LOGO)
+                        .w(px(28.0))
+                        .h(px(28.0))
                     .text_color(theme.text),
             )
             .child(
@@ -10688,6 +10815,66 @@ impl Render for Shell {
                     this.toggle_terminal(window, cx)
                 }
             }))
+            .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+                if matches!(this.route, Route::Chat) {
+                    this.split_terminal(SplitAxis::Horizontal, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                if matches!(this.route, Route::Chat) {
+                    this.split_terminal(SplitAxis::Vertical, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitChatRight, window, cx| {
+                this.split_chat(SplitAxis::Horizontal, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitChatDown, window, cx| {
+                this.split_chat(SplitAxis::Vertical, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextChatPane, window, cx| {
+                this.cycle_chat_pane(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevChatPane, window, cx| {
+                this.cycle_chat_pane(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusChatPaneLeft, window, cx| {
+                this.focus_chat_pane_toward(chat_split::PaneDirection::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusChatPaneRight, window, cx| {
+                this.focus_chat_pane_toward(chat_split::PaneDirection::Right, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusChatPaneUp, window, cx| {
+                this.focus_chat_pane_toward(chat_split::PaneDirection::Up, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusChatPaneDown, window, cx| {
+                this.focus_chat_pane_toward(chat_split::PaneDirection::Down, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizeChatPaneLeft, _, cx| {
+                this.resize_chat_pane(chat_split::PaneDirection::Left, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizeChatPaneRight, _, cx| {
+                this.resize_chat_pane(chat_split::PaneDirection::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizeChatPaneUp, _, cx| {
+                this.resize_chat_pane(chat_split::PaneDirection::Up, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResizeChatPaneDown, _, cx| {
+                this.resize_chat_pane(chat_split::PaneDirection::Down, cx)
+            }))
+            .on_action(cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)))
+            .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
+                if matches!(this.route, Route::Chat) {
+                    window.focus(&this.composer.focus_handle(cx), cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| {
+                this.toggle_chat_pane_zoom(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
+                if matches!(this.route, Route::Chat) {
+                    this.close_terminal_split(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
                     let file = match this.resolved_right_active(cx) {
@@ -10834,11 +11021,14 @@ impl Render for Shell {
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let main_target_width = conversation_width(
+                let split_total_width = conversation_width(
                     viewport - self.files_reserved_width(cx),
                     self.sidebar_target(),
                     right_target_width,
                 );
+                // A side-by-side chat split gives the focused column its
+                // share; the peers take the rest (`render_chat_split`).
+                let main_target_width = split_total_width * self.focused_chat_pane_share();
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -10929,6 +11119,22 @@ impl Render for Shell {
                         .into_any_element()
                 } else {
                     main
+                };
+                let main = self.render_chat_split(main, split_total_width, cx);
+                // Drag a sidebar session onto the chat area to split it open.
+                let drop_zones = self.render_split_drop_zones(&Theme::of(cx).clone(), cx);
+                let main = if drop_zones.is_empty() {
+                    main
+                } else {
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .child(main)
+                        .children(drop_zones)
+                        .into_any_element()
                 };
                 let card: AnyElement = div()
                     .flex_1()
@@ -11515,7 +11721,7 @@ mod tests {
             edge_token: None,
             org_id: None,
             workos_client_id: Some("client_test".into()),
-            default_harness: zeron_proto::HarnessId::Mock,
+            default_harness: harness_proto::HarnessId::Mock,
         };
         let synced = crate::state::EngineHandle::bootstrap(boot.clone())
             .await
@@ -11595,7 +11801,7 @@ mod tests {
     #[test]
     fn local_sign_in_offers_the_in_place_switch() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: harness_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -11707,7 +11913,7 @@ mod tests {
     #[test]
     fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: harness_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -11750,7 +11956,7 @@ mod tests {
     #[test]
     fn switch_lifecycle_survives_the_runtime_replacement_window() {
         let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: harness_proto::UserProfile {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
                 name: None,
@@ -11785,7 +11991,7 @@ mod tests {
     #[test]
     fn synced_sign_out_blocks_every_viewport_and_cannot_switch_accounts() {
         let signed_in_as_another_user = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: harness_proto::UserProfile {
                 id: "user-2".into(),
                 email: "other@example.com".into(),
                 name: None,
@@ -12207,7 +12413,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12279,7 +12485,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12383,7 +12589,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12429,7 +12635,7 @@ mod exit_regressions {
                         settings.code_font_size = code_size;
                         settings.transcript_width = transcript_width;
                         settings.skill_completion_by_harness.insert(
-                            zeron_proto::HarnessId::ClaudeCode,
+                            harness_proto::HarnessId::ClaudeCode,
                             settings::SkillCompletionSettings {
                                 dollar: open_links_in_zeron,
                                 separate_from_slash: true,
@@ -12452,13 +12658,13 @@ mod exit_regressions {
                         assert_eq!(current.transcript_width, transcript_width);
                         assert_eq!(
                             current
-                                .skill_completion(zeron_proto::HarnessId::ClaudeCode)
+                                .skill_completion(harness_proto::HarnessId::ClaudeCode)
                                 .dollar,
                             open_links_in_zeron
                         );
                         assert!(
                             current
-                                .skill_completion(zeron_proto::HarnessId::ClaudeCode)
+                                .skill_completion(harness_proto::HarnessId::ClaudeCode)
                                 .separate_from_slash
                         );
                     }
@@ -12508,7 +12714,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12561,7 +12767,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12646,7 +12852,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12724,7 +12930,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12732,7 +12938,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
-                    state.apply_spaces(vec![zeron_proto::Space {
+                    state.apply_spaces(vec![harness_proto::Space {
                         id: "repo".into(),
                         device_id: "local".into(),
                         path: "/repo".into(),
@@ -12789,7 +12995,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -12917,7 +13123,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -13013,7 +13219,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -13091,7 +13297,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -13155,7 +13361,7 @@ mod exit_regressions {
                     edge_token: None,
                     org_id: None,
                     workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
+                    default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
             )
@@ -13334,7 +13540,7 @@ mod right_tab_mouse_regressions {
                         edge_token: None,
                         org_id: None,
                         workos_client_id: None,
-                        default_harness: zeron_proto::HarnessId::Mock,
+                        default_harness: harness_proto::HarnessId::Mock,
                     },
                     cx,
                 );

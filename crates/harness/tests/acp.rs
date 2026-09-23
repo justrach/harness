@@ -9,11 +9,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::acp::SignInProgress;
-use zeron_harness::{
+use harness_adapters::acp::SignInProgress;
+use harness_adapters::{
     AcpHarness, CancellationToken, Harness, HarnessError, RunControls, SteerMessage,
 };
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
     TodoItem, ToolCall, UserInputAnswer,
 };
@@ -145,7 +145,7 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
     assert!(events.contains(&AgentEvent::ToolCall {
         id: "t1".into(),
         call: ToolCall::Exec {
-            command: "cargo test -p zeron-harness".into()
+            command: "cargo test -p harness-adapters".into()
         },
     }));
     let exec_output = events
@@ -160,7 +160,7 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
             _ => None,
         })
         .expect("exec output present");
-    assert!(exec_output.starts_with("   Compiling zeron-harness"));
+    assert!(exec_output.starts_with("   Compiling harness-adapters"));
     assert_eq!(exec_output.lines().count(), 6, "{exec_output:?}");
 
     // Edit tool: single-shot completed call carries the inline diff.
@@ -223,7 +223,7 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
 async fn config_options_apply_requested_model_and_effort() {
     let (controls, _steer, _token) = controls();
     let mut req = request("scenario:config");
-    req.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
+    req.reasoning = Some(harness_proto::ReasoningLevel::Medium);
     let events = run_to_end(&harness(), req, controls).await;
     // The fixture answers refusal unless BOTH set_config_option calls
     // (model grok-4.5, effort medium) arrived before the prompt.
@@ -505,9 +505,10 @@ fn descriptor_surface_matches_registry_expectations() {
     assert_eq!(
         harness.reasoning_levels(),
         &[
-            zeron_proto::ReasoningLevel::Low,
-            zeron_proto::ReasoningLevel::Medium,
-            zeron_proto::ReasoningLevel::High,
+            harness_proto::ReasoningLevel::Low,
+            harness_proto::ReasoningLevel::Medium,
+            harness_proto::ReasoningLevel::High,
+            harness_proto::ReasoningLevel::XHigh,
         ]
     );
 }
@@ -524,9 +525,9 @@ async fn models_are_discovered_from_the_acp_session() {
     assert_eq!(
         models[0].reasoning_levels,
         vec![
-            zeron_proto::ReasoningLevel::Low,
-            zeron_proto::ReasoningLevel::Medium,
-            zeron_proto::ReasoningLevel::High,
+            harness_proto::ReasoningLevel::Low,
+            harness_proto::ReasoningLevel::Medium,
+            harness_proto::ReasoningLevel::High,
         ],
         "{models:?}"
     );
@@ -578,7 +579,7 @@ async fn missing_override_is_not_installed_and_fails_discovery() {
     assert!(!harness.installed());
     let err = harness.models().await.expect_err("missing override");
     assert!(
-        matches!(err, zeron_harness::HarnessError::NotInstalled(_)),
+        matches!(err, harness_adapters::HarnessError::NotInstalled(_)),
         "{err:?}"
     );
 }
@@ -636,12 +637,12 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(
         pi.reasoning_levels(),
         &[
-            zeron_proto::ReasoningLevel::Minimal,
-            zeron_proto::ReasoningLevel::Low,
-            zeron_proto::ReasoningLevel::Medium,
-            zeron_proto::ReasoningLevel::High,
-            zeron_proto::ReasoningLevel::XHigh,
-            zeron_proto::ReasoningLevel::Max,
+            harness_proto::ReasoningLevel::Minimal,
+            harness_proto::ReasoningLevel::Low,
+            harness_proto::ReasoningLevel::Medium,
+            harness_proto::ReasoningLevel::High,
+            harness_proto::ReasoningLevel::XHigh,
+            harness_proto::ReasoningLevel::Max,
         ]
     );
 }
@@ -1000,7 +1001,7 @@ async fn grok_subagent_lifecycle_tails_the_disk_transcript_into_tagged_events() 
     let tool = pos(&|e| {
         matches!(
             e,
-            AgentEvent::ToolCall { id, call: zeron_proto::ToolCall::Exec { command } }
+            AgentEvent::ToolCall { id, call: harness_proto::ToolCall::Exec { command } }
                 if id == "call-1-0" && command == "ls"
         )
     })
@@ -1804,7 +1805,7 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
             };
             if trigger && let Some(sender) = steer.take() {
                 sender
-                    .send(zeron_harness::SteerMessage {
+                    .send(harness_adapters::SteerMessage {
                         prompt: "second".into(),
                         message_id: None,
                     })
@@ -1975,7 +1976,7 @@ async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
 
 #[tokio::test]
 async fn shared_acp_skills_require_explicit_native_command_classification() {
-    use zeron_proto::invocation::{Invocation, harness_prompt};
+    use harness_proto::invocation::{Invocation, harness_prompt};
     for h in [
         AcpHarness::devin(),
         AcpHarness::grok(),

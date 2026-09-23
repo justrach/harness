@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeron_proto::{
+use harness_proto::{
     ProjectAction, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, ProjectActionsSnapshot,
 };
 
@@ -900,12 +900,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn project_actions_rpc_does_not_block_async_worker() {
-        use zeron_rpc::{RpcService, methods};
+        use harness_rpc::{RpcService, methods};
         let temp = tempfile::tempdir().unwrap();
         let core = crate::EngineCore::assemble(
             temp.path(),
             Arc::new(crate::HarnessRegistry::new()),
-            zeron_proto::HarnessId::Mock,
+            harness_proto::HarnessId::Mock,
             None,
         )
         .unwrap();

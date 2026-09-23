@@ -9,8 +9,8 @@ use gpui::{
 };
 use std::time::Duration;
 
-use zeron_proto::WorkspaceScope;
-use zeron_rpc::methods;
+use harness_proto::WorkspaceScope;
+use harness_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;

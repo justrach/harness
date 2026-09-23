@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Harnesser
+Name=Harness
 GenericName=Coding Agent Controller
 Comment=Multi-device controller for coding agents
-Exec=zeron %u
-TryExec=zeron
+Exec=harness %u
+TryExec=harness
 Icon=zeron
 Terminal=false
 Categories=Development;Utility;

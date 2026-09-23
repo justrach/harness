@@ -5,7 +5,7 @@
 //! (experimentalApi). This snapshot is the failure/offline fallback, kept in
 //! newest-first order so a picker remains useful when discovery cannot run.
 
-use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
+use harness_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
 
 /// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
 /// on the wire — see [`to_effort`]).
@@ -131,6 +131,42 @@ fn model(
 /// app server reports them. Daybreak Blue reports NO service tiers, so it
 /// carries no trait — sending `serviceTier: priority` for it would be
 /// rejected. The live `model/list` remains authoritative whenever available.
+fn model_family(id: &str) -> &str {
+    let name = id.rsplit_once('/').map_or(id, |(_, model)| model);
+    let mut parts = name.split('-');
+    let Some(first) = parts.next() else {
+        return name;
+    };
+    match (parts.next(), parts.next()) {
+        (Some(_second), Some(_)) => name
+            .rsplit_once('-')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(name),
+        _ => first,
+    }
+}
+
+/// Default first, then the rest of that family (`gpt-5.6-sol` beside
+/// `gpt-5.6-terra`), then whatever the app server returned.
+pub(crate) fn promote_default_family(models: &mut Vec<Model>, default_id: Option<&str>) {
+    let Some(default_id) = default_id
+        .filter(|id| models.iter().any(|model| model.id == *id))
+        .or_else(|| models.first().map(|model| model.id.as_str()))
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let family = model_family(&default_id).to_owned();
+    let order: Vec<_> = models.iter().map(|model| model.id.clone()).collect();
+    models.sort_by_key(|model| {
+        (
+            model.id != default_id,
+            model_family(&model.id) != family,
+            order.iter().position(|id| id == &model.id).unwrap_or(usize::MAX),
+        )
+    });
+}
+
 pub(crate) fn static_models() -> Vec<Model> {
     vec![
         model(
@@ -229,6 +265,22 @@ mod tests {
                 assert!(tier.is_some(), "{} missing serviceTier", m.id);
             }
         }
+    }
+
+    #[test]
+    fn promote_default_family_keeps_sol_with_its_generation() {
+        let mut models = vec![
+            model("gpt-6-astra", "Astra", "", ULTRA_LADDER, vec![]),
+            model("gpt-5.6-terra", "Terra", "", ULTRA_LADDER, vec![]),
+            model("gpt-5.6-sol", "Sol", "", ULTRA_LADDER, vec![]),
+            model("gpt-5.5", "5.5", "", XHIGH_LADDER, vec![]),
+        ];
+        promote_default_family(&mut models, Some("gpt-5.6-sol"));
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.5"]
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use zeron_proto::AgentEvent;
+use harness_proto::AgentEvent;
 
 use crate::HarnessError;
 

@@ -25,7 +25,7 @@ use gpui::{
 
 use crate::state::EngineHandle;
 use crate::theme::ink;
-use zeron_rpc::methods;
+use harness_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
@@ -1382,15 +1382,15 @@ mod generated_image_tests {
     }
 
     #[async_trait::async_trait]
-    impl zeron_rpc::RpcService for ImageRpc {
+    impl harness_rpc::RpcService for ImageRpc {
         async fn handle(
             &self,
             method: &str,
             params: serde_json::Value,
-        ) -> Result<zeron_rpc::RpcReply, zeron_rpc::RpcError> {
+        ) -> Result<harness_rpc::RpcReply, harness_rpc::RpcError> {
             assert_eq!(method, methods::READ_ATTACHMENT_CHUNK);
             self.calls.lock().unwrap().push(params);
-            zeron_rpc::RpcReply::value(
+            harness_rpc::RpcReply::value(
                 &serde_json::json!({"name":"generated.png", "mimeType":"image/png", "data":BASE64.encode(&self.bytes), "nextOffset": self.bytes.len(), "done":true}),
             )
         }
@@ -1411,7 +1411,7 @@ mod generated_image_tests {
                 .unwrap();
             let calls = Arc::new(Mutex::new(vec![]));
             let engine =
-                EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(ImageRpc {
+                EngineHandle::from_test_client(harness_rpc::memory_client(Arc::new(ImageRpc {
                     calls: calls.clone(),
                     bytes: png.into_inner(),
                 })));

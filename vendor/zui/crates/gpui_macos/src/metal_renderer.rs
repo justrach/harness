@@ -49,6 +49,55 @@ const PATH_SAMPLE_COUNT: u32 = 4;
 /// few seconds of activity reclaims the memory.
 const SCRATCH_RELEASE_AFTER_FRAMES: u32 = 30;
 
+/// `ZERON_GPU_STATS=1` logs, once per second, the frames submitted, mean GPU
+/// time per frame (command-buffer GPUStartTime→GPUEndTime), GPU busy share
+/// and backdrop-blur passes per frame. Off by default: nothing is registered.
+mod gpu_stats {
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    pub fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var("ZERON_GPU_STATS").is_ok_and(|v| !v.is_empty() && v != "0")
+        })
+    }
+
+    struct Window {
+        start: Instant,
+        frames: u32,
+        gpu_secs: f64,
+        blurs: u32,
+    }
+
+    static WINDOW: Mutex<Option<Window>> = Mutex::new(None);
+
+    pub fn record(gpu_secs: f64, blurs: u32) {
+        let mut window = WINDOW.lock();
+        let w = window.get_or_insert_with(|| Window {
+            start: Instant::now(),
+            frames: 0,
+            gpu_secs: 0.0,
+            blurs: 0,
+        });
+        w.frames += 1;
+        w.gpu_secs += gpu_secs.max(0.0);
+        w.blurs += blurs;
+        let elapsed = w.start.elapsed().as_secs_f64();
+        if elapsed >= 1.0 {
+            log::warn!(
+                "gpu frame stats: fps={:.1} gpu_ms_per_frame={:.2} gpu_busy_pct={:.1} blurs_per_frame={:.1}",
+                w.frames as f64 / elapsed,
+                1000.0 * w.gpu_secs / w.frames as f64,
+                100.0 * w.gpu_secs / elapsed,
+                w.blurs as f64 / w.frames as f64,
+            );
+            *window = None;
+        }
+    }
+}
+
 pub(crate) type Context = Arc<Mutex<InstanceBufferPool>>;
 pub(crate) type Renderer = MetalRenderer;
 
@@ -608,9 +657,16 @@ impl MetalRenderer {
                 Ok(command_buffer) => {
                     let instance_buffer_pool = self.instance_buffer_pool.clone();
                     let instance_buffer = Cell::new(Some(instance_buffer));
-                    let block = ConcreteBlock::new(move |_| {
+                    let blur_count = scene.backdrop_blurs.len() as u32;
+                    let block = ConcreteBlock::new(move |buffer: &metal::CommandBufferRef| {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
+                        }
+                        if gpu_stats::enabled() {
+                            let (start, end): (f64, f64) = unsafe {
+                                (msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime])
+                            };
+                            gpu_stats::record(end - start, blur_count);
                         }
                     });
                     let block = block.copy();

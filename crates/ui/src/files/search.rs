@@ -6,7 +6,7 @@ use std::{
 use gpui::{
     AnyElement, Context, ListSizingBehavior, SharedString, Task, Window, div, list, prelude::*, px,
 };
-use zeron_proto::{
+use harness_proto::{
     ListWorkspaceDirectoryRequest, SearchWorkspaceFilesRequest, WorkspaceEntryKind,
     WorkspaceFileSearchMatch,
 };
@@ -812,7 +812,7 @@ mod reveal_tests {
 
     fn context(checkout: &str) -> FilesRequestContext {
         FilesRequestContext {
-            target: zeron_proto::WorkspaceTarget {
+            target: harness_proto::WorkspaceTarget {
                 chat_id: Some("chat".into()),
                 space_id: None,
                 checkout_path: None,

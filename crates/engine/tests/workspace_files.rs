@@ -5,11 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_proto::{
+use harness_engine::{EngineCore, HarnessRegistry};
+use harness_proto::{
     WorkspaceDirectoryPage, WorkspaceFileChanges, WorkspaceFileText, WriteWorkspaceFileOutcome,
 };
-use zeron_rpc::methods;
+use harness_rpc::methods;
 
 async fn git(cwd: &Path, args: &[&str]) {
     let output = tokio::process::Command::new("git")
@@ -45,7 +45,7 @@ fn assemble(data_dir: &Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(
         data_dir,
         Arc::new(HarnessRegistry::new()),
-        zeron_proto::HarnessId::Mock,
+        harness_proto::HarnessId::Mock,
         None,
     )
     .expect("engine assembles")
@@ -69,7 +69,7 @@ async fn workspace_file_rpcs_list_search_read_write_and_watch() {
     core.workspace
         .create_chat("chat-files", Some("space-files"), None, None, None)
         .expect("chat");
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
 
     let root = client
         .call(
@@ -301,7 +301,7 @@ async fn workspace_file_rpcs_preserve_plain_folder_search_support() {
             false,
         )
         .expect("plain space");
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
 
     let legacy = client
         .call(
@@ -350,7 +350,7 @@ async fn write_rejects_changed_checkout_even_when_contents_match() {
     core.workspace
         .create_chat("chat-files", Some("space-files"), None, None, None)
         .unwrap();
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
     let read = client
         .call(
             methods::READ_WORKSPACE_FILE,

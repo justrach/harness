@@ -39,7 +39,7 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
         let bytes = std::fs::File::open(&path).ok().and_then(|file| {
             use std::io::Read;
             let mut bytes = Vec::new();
-            file.take(zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
+            file.take(harness_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
                 .ok()?;
             Some(bytes)
@@ -150,7 +150,7 @@ impl ProjectIcon {
                 for path in ICON_PATHS {
                     // This also resolves the current checkout identity on the owning host.
                     let file = match client
-                        .read_file(zeron_proto::ReadWorkspaceFileRequest {
+                        .read_file(harness_proto::ReadWorkspaceFileRequest {
                             target: context.target.clone(),
                             path: (*path).into(),
                         })
@@ -301,7 +301,7 @@ impl Shell {
             .map(|space| space.path.clone())
             .unwrap_or_else(|| "home".into());
         let context = space.map(|space| FilesRequestContext {
-            target: zeron_proto::WorkspaceTarget {
+            target: harness_proto::WorkspaceTarget {
                 chat_id: None,
                 space_id: Some(space.id.clone()),
                 checkout_path: None,

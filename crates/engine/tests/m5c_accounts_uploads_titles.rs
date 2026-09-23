@@ -13,16 +13,16 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 
-use zeron_engine::{
+use harness_engine::{
     AgentAccounts, AgentAccountsConfig, EngineCore, HarnessRegistry, Repos, Uploads,
     worktree_branch_from_title,
 };
-use zeron_harness::mock::MockHarness;
-use zeron_proto::{
+use harness_adapters::mock::MockHarness;
+use harness_proto::{
     AgentAccountsSnapshot, AgentEvent, AgentLoginMode, AgentLoginStatus, DoneStatus, HarnessId,
     SandboxLevel,
 };
-use zeron_rpc::methods;
+use harness_rpc::methods;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -676,7 +676,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .set_chat_branch(chat_id, &worktree.branch)
         .expect("set branch");
 
-    let request = zeron_proto::RunRequest {
+    let request = harness_proto::RunRequest {
         prompt: "please fix the login flow".into(),
         harness: None,
         model: None,
@@ -721,7 +721,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     core.workspace
         .rename_chat(chat_id, "My Custom Name")
         .expect("rename");
-    let request = zeron_proto::RunRequest {
+    let request = harness_proto::RunRequest {
         prompt: "another request".into(),
         harness: None,
         model: None,
@@ -818,7 +818,7 @@ async fn rename_worktree_branch_guards_and_collisions() {
 async fn rpc_dispatch_for_m5c_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let core = assemble_with_mock(&tmp.path().join("data"), Vec::new());
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
 
     // Uploads: chunk → commit → readback over the wire.
     let payload = b"fake png bytes".to_vec();

@@ -51,10 +51,10 @@ replacement, history/live animation boundaries, cached navigation, streaming,
 folds, selection and stale subscriptions.
 
 ```sh
-cargo test -p zeron-ui --lib -- --test-threads=1
+cargo test -p harness-ui --lib -- --test-threads=1
 ZERON_WHALE_SNAPSHOT=/path/to/private-copy.bin \
-  cargo --config 'profile.test.package.zeron-ui.opt-level=2' \
-  test -p zeron-ui --lib prepared_whale_open_and_revisit -- --nocapture
+  cargo --config 'profile.test.package.harness-ui.opt-level=2' \
+  test -p harness-ui --lib prepared_whale_open_and_revisit -- --nocapture
 ```
 
 Measured on Linux with the actual 21,628,288-byte snapshot and optimized UI
@@ -65,7 +65,7 @@ measurements from work-laptop.
 
 The timing probe measures foreground state installation and transcript `sync`,
 not an end-to-end painted frame or input latency on macOS. Its optimized run
-optimizes `zeron-ui` only; dependencies keep the test profile. A fresh laptop
+optimizes `harness-ui` only; dependencies keep the test profile. A fresh laptop
 build is still needed to confirm the reported 300–700 ms pause is gone there.
 
 This is a desktop UI change. It requires updating the laptop application, with

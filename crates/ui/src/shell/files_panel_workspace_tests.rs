@@ -109,10 +109,10 @@ fn files_panel_workspace_navigation_and_external_updates() {
     std::fs::write(project.join("src/new.rs"), "// new file\n").unwrap();
     let core = runtime
         .block_on(async {
-            zeron_engine::EngineCore::assemble(
+            harness_engine::EngineCore::assemble(
                 &directory.path().join("engine"),
-                Arc::new(zeron_engine::default_registry()),
-                zeron_proto::HarnessId::Mock,
+                Arc::new(harness_engine::default_registry()),
+                harness_proto::HarnessId::Mock,
                 None,
             )
         })
@@ -144,7 +144,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let _ipc = runtime
-        .block_on(zeron_engine::serve_ipc(port, core.rpc_service()))
+        .block_on(harness_engine::serve_ipc(port, core.rpc_service()))
         .unwrap();
     let output = std::env::var_os("ZERON_FILES_CAPTURES").map(PathBuf::from);
     let application = if output.is_some() {
@@ -196,7 +196,7 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 edge_token: None,
                 org_id: None,
                 workos_client_id: None,
-                default_harness: zeron_proto::HarnessId::Mock,
+                default_harness: harness_proto::HarnessId::Mock,
             };
             let state = cx.new(|_| AppState::new());
             let window = cx

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode,
     UserInputQuestion,
 };
@@ -284,7 +284,7 @@ impl Harness for MockHarness {
                     },
                     AgentEvent::ToolCall {
                         id: "mock-think-tool".into(),
-                        call: zeron_proto::ToolCall::Exec {
+                        call: harness_proto::ToolCall::Exec {
                             command: "rg -n walletInsufficient apps/word/src | wc -l".into(),
                         },
                     },
@@ -318,7 +318,7 @@ impl Harness for MockHarness {
                     id: id.into(),
                     // The claude-driver spawn shape: `Agent: {description}`
                     // with the task in the input (names the chip AND the tab).
-                    call: zeron_proto::ToolCall::Unknown {
+                    call: harness_proto::ToolCall::Unknown {
                         name: format!("Agent: {description}"),
                         input: Some(serde_json::json!({
                             "description": description,
@@ -376,7 +376,7 @@ impl Harness for MockHarness {
                         "mock-sub-1",
                         AgentEvent::ToolCall {
                             id: "sub1-grep".into(),
-                            call: zeron_proto::ToolCall::Exec {
+                            call: harness_proto::ToolCall::Exec {
                                 command: "grep -rn fold_event_into_parts crates".into(),
                             },
                         },
@@ -418,8 +418,8 @@ impl Harness for MockHarness {
                         "mock-sub-2",
                         AgentEvent::ToolCall {
                             id: "sub2-burst".into(),
-                            call: zeron_proto::ToolCall::Exec {
-                                command: "cargo test -p zeron-doc cadence_burst -- --nocapture".into(),
+                            call: harness_proto::ToolCall::Exec {
+                                command: "cargo test -p harness-doc cadence_burst -- --nocapture".into(),
                             },
                         },
                     ),
@@ -450,8 +450,8 @@ impl Harness for MockHarness {
                         "mock-sub-2",
                         AgentEvent::ToolCall {
                             id: "sub2-steer-burst".into(),
-                            call: zeron_proto::ToolCall::Exec {
-                                command: "cargo test -p zeron-doc cadence_steer -- --nocapture"
+                            call: harness_proto::ToolCall::Exec {
+                                command: "cargo test -p harness-doc cadence_steer -- --nocapture"
                                     .into(),
                             },
                         },
@@ -487,7 +487,7 @@ impl Harness for MockHarness {
                 [
                     AgentEvent::ToolCall {
                         id: "mock-code-tool".into(),
-                        call: zeron_proto::ToolCall::Exec {
+                        call: harness_proto::ToolCall::Exec {
                             command: "set -e\nfixture_in_original=0\ngrep -rn \"veil\" crates/ui/src | wc -l".into(),
                         },
                     },

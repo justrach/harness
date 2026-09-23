@@ -24,17 +24,17 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Request as WsRequest, Response as WsResponse,
 };
 
-use zeron_doc::SessionCommandPayload;
-use zeron_engine::{
+use harness_doc::SessionCommandPayload;
+use harness_engine::{
     BranchHeadContext, ChangeRequestError, CheckoutChangeRequestLookup, CheckoutChangeRequests,
     CheckoutSourceContext, EngineCore, HarnessRegistry,
 };
-use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::{
+use harness_adapters::{Harness, HarnessError, RunControls};
+use harness_proto::{
     AgentEvent, ChangeRequestState, ChangeRequestSummary, DoneStatus, HarnessId, Model,
     ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
 };
-use zeron_rpc::{
+use harness_rpc::{
     DeviceFrameHeader, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig, RpcError, RpcReply,
     RpcService, StaticToken, decode_device_frame, encode_device_frame, methods,
 };
@@ -411,7 +411,7 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
     let lookup = change_request_lookup(&checkout);
     core_b.change_requests =
         CheckoutChangeRequests::new(core_b.repos.clone(), "device-b", lookup.clone());
-    let local_client = zeron_rpc::memory_client(core_b.rpc_service());
+    let local_client = harness_rpc::memory_client(core_b.rpc_service());
     let rejected = match local_client
         .subscribe_checked(
             methods::WATCH_CHECKOUT_CHANGE_REQUEST,
@@ -438,7 +438,7 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core_a.set_links(LinkCache::new(link_config));
-    let client = zeron_rpc::memory_client(core_a.rpc_service());
+    let client = harness_rpc::memory_client(core_a.rpc_service());
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut remote = loop {
@@ -534,7 +534,7 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
         LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core.set_links(LinkCache::new(link_config));
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
 
     // The host can take a moment to attach to the room. Once attached, an old
     // host rejects only the capability added by this version.
@@ -609,7 +609,7 @@ async fn git_status_is_computed_on_the_checkout_host_through_the_relay() {
         .create_chat("remote-chat", Some("remote-space"), None, None, None)
         .unwrap();
     host.diff_sync.reconcile_now().await;
-    let local_client = zeron_rpc::memory_client(host.rpc_service());
+    let local_client = harness_rpc::memory_client(host.rpc_service());
     let mut local = local_client
         .subscribe_checked(
             methods::WATCH_WORKSPACE_GIT_STATUS,
@@ -636,7 +636,7 @@ async fn git_status_is_computed_on_the_checkout_host_through_the_relay() {
     let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
     config.probe_timeout = Duration::from_secs(5);
     consumer.set_links(LinkCache::new(config));
-    let client = zeron_rpc::memory_client(consumer.rpc_service());
+    let client = harness_rpc::memory_client(consumer.rpc_service());
     // The consumer has no corresponding space/chat: resolving locally must fail.
     assert!(
         client
@@ -698,7 +698,7 @@ async fn target_device_id_routes_over_the_relay() {
         .write_user_message("m-b-1", "hello from B", 1_000)
         .expect("write user message");
 
-    let client = zeron_rpc::memory_client(core_a.rpc_service());
+    let client = harness_rpc::memory_client(core_a.rpc_service());
 
     // Our own id in targetDeviceId: handled locally, no forward.
     let local = client
@@ -743,7 +743,7 @@ async fn target_device_id_routes_over_the_relay() {
         .uploads
         .import_generated_image(&source, &generated_root, "chat-remote\0image")
         .unwrap();
-    let local_b = zeron_rpc::memory_client(core_b.rpc_service());
+    let local_b = harness_rpc::memory_client(core_b.rpc_service());
     let local_image = local_b
         .call(
             methods::READ_ATTACHMENT_CHUNK,
@@ -1198,7 +1198,7 @@ async fn terminal_stream_proxies_over_the_relay() {
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core_a.set_links(LinkCache::new(link_config));
-    let client = zeron_rpc::memory_client(core_a.rpc_service());
+    let client = harness_rpc::memory_client(core_a.rpc_service());
 
     // OpenTerminal forwards to B once the relay session is up.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -1310,7 +1310,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core_a.set_links(LinkCache::new(link_config));
-    let client = zeron_rpc::memory_client(core_a.rpc_service());
+    let client = harness_rpc::memory_client(core_a.rpc_service());
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let listing = loop {
@@ -1406,7 +1406,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
 
     let large_svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><!--{}--><rect width="20" height="20" fill="red"/></svg>"#,
-        " ".repeat(zeron_proto::WORKSPACE_IMAGE_CHUNK_BYTES)
+        " ".repeat(harness_proto::WORKSPACE_IMAGE_CHUNK_BYTES)
     );
     std::fs::write(repo_b.join("remote-image.svg"), &large_svg).unwrap();
     let image_request = serde_json::json!({
@@ -1524,7 +1524,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
 async fn remote_target_without_links_fails_clearly() {
     let dirs = tempfile::tempdir().expect("tempdir");
     let core = assemble(&dirs.path().join("solo"), "device-solo");
-    let client = zeron_rpc::memory_client(core.rpc_service());
+    let client = harness_rpc::memory_client(core.rpc_service());
     for (method, params) in [
         (
             methods::LIST_PROJECT_ACTIONS,
@@ -1629,8 +1629,8 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
         LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
     link_config.probe_timeout = Duration::from_secs(5);
     core_a.set_links(LinkCache::new(link_config));
-    let remote_client = zeron_rpc::memory_client(core_a.rpc_service());
-    let local_client = zeron_rpc::memory_client(core_b.rpc_service());
+    let remote_client = harness_rpc::memory_client(core_a.rpc_service());
+    let local_client = harness_rpc::memory_client(core_b.rpc_service());
 
     // The opening stream frame is the authoritative whole-list snapshot a
     // remote Desktop/iOS client uses to repair or initialize its queue.

@@ -645,7 +645,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
         ..ImportReport::default()
     };
     report.fallbacks.push(
-        "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harnesser surface preference can override it"
+        "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it"
             .into(),
     );
     macro_rules! apply {
@@ -659,7 +659,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
                 });
             } else {
                 report.fallbacks.push(format!(
-                    "{} retained the Harnesser {} fallback",
+                    "{} retained the Harness {} fallback",
                     $role,
                     if options.appearance.is_dark() {
                         "dark"
@@ -838,7 +838,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     } else {
         report
             .fallbacks
-            .push("accent.* retained the Harnesser fallback; curate a native accent".into());
+            .push("accent.* retained the Harness fallback; curate a native accent".into());
     }
 
     apply!(

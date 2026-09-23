@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
-use zeron_proto::{AuthState, WorkspaceScope};
+use harness_proto::{AuthState, WorkspaceScope};
 
 pub mod accounts;
 pub mod appearance;
@@ -65,7 +65,7 @@ const NEW_THREAD_BACKGROUND_DIR: &str = "new-thread-backgrounds";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewThreadComposerBackground {
-    /// Managed copy inside Harnesser's device-local data directory.
+    /// Managed copy inside Harness's device-local data directory.
     pub path: String,
     /// Original file name shown in Appearance settings.
     pub name: String,
@@ -308,7 +308,7 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
-/// Copy a selected image into Harnesser's device-local data directory and make it
+/// Copy a selected image into Harness's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
 pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
@@ -321,7 +321,7 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Harnesser and try again.".to_string())?;
+        .ok_or_else(|| "Unable to save the image. Restart Harness and try again.".to_string())?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
         "Unable to save the image. Check folder permissions and try again.".to_string()
@@ -374,7 +374,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart Harnesser and try again.".to_string())?;
+        .ok_or_else(|| "Unable to remove the image. Restart Harness and try again.".to_string())?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     if previous.is_none() {
@@ -634,8 +634,8 @@ pub struct SkillCompletionSettings {
 }
 
 impl SkillCompletionSettings {
-    pub fn for_harness(harness: zeron_proto::HarnessId) -> Self {
-        let native_dollar = harness == zeron_proto::HarnessId::Codex;
+    pub fn for_harness(harness: harness_proto::HarnessId) -> Self {
+        let native_dollar = harness == harness_proto::HarnessId::Codex;
         Self {
             dollar: native_dollar,
             separate_from_slash: native_dollar,
@@ -643,18 +643,30 @@ impl SkillCompletionSettings {
     }
 }
 
-pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
-    (zeron_proto::HarnessId::Antigravity, "Antigravity"),
-    (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
-    (zeron_proto::HarnessId::Codex, "Codex"),
-    (zeron_proto::HarnessId::Cursor, "Cursor"),
-    (zeron_proto::HarnessId::Devin, "Devin"),
-    (zeron_proto::HarnessId::Grok, "Grok"),
-    (zeron_proto::HarnessId::Hermes, "Hermes"),
-    (zeron_proto::HarnessId::Graff, "graff"),
-    (zeron_proto::HarnessId::Pi, "Pi"),
-    (zeron_proto::HarnessId::Opencode, "OpenCode"),
+pub const SKILL_COMPLETION_HARNESSES: [(harness_proto::HarnessId, &str); 10] = [
+    (harness_proto::HarnessId::Antigravity, "Antigravity"),
+    (harness_proto::HarnessId::ClaudeCode, "Claude Code"),
+    (harness_proto::HarnessId::Codex, "Codex"),
+    (harness_proto::HarnessId::Cursor, "Cursor"),
+    (harness_proto::HarnessId::Devin, "Devin"),
+    (harness_proto::HarnessId::Grok, "Grok"),
+    (harness_proto::HarnessId::Hermes, "Hermes"),
+    (harness_proto::HarnessId::Graff, "graff"),
+    (harness_proto::HarnessId::Pi, "Pi"),
+    (harness_proto::HarnessId::Opencode, "OpenCode"),
 ];
+
+/// A split chat layout as saved between launches (`shell/chat_split.rs`).
+/// `panes[focus]` is the selected chat's slot (see `lastChatId`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedChatLayout {
+    pub vertical: bool,
+    pub panes: Vec<Option<String>>,
+    pub focus: usize,
+    pub shares: Vec<f32>,
+    pub projects: Vec<Option<String>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -666,7 +678,7 @@ pub struct UiSettings {
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
-        std::collections::HashMap<zeron_proto::HarnessId, SkillCompletionSettings>,
+        std::collections::HashMap<harness_proto::HarnessId, SkillCompletionSettings>,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     /// Legacy: the grouped-by-project toggle predates spaces (which group by
@@ -701,6 +713,12 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// The chat that was open at quit; launch reopens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_chat_id: Option<String>,
+    /// The split chat layout at quit; launch restores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_layout: Option<SavedChatLayout>,
     /// Custom sidebar organization, isolated between account profiles on this device.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
@@ -727,7 +745,7 @@ pub struct UiSettings {
     /// Desktop banner notifications on the same transitions.
     /// `ZERON_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
-    /// Suppress the banner while a Harnesser window is focused (the chime covers
+    /// Suppress the banner while a Harness window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
     pub files_panel_width: f32,
@@ -774,7 +792,7 @@ pub struct UiSettings {
     pub code_font_family: crate::typography::UiFontFamily,
     pub code_font_size: f32,
     /// Independently selected light and dark theme variants.
-    pub theme_selection: zeron_theme::ThemeSelection,
+    pub theme_selection: harness_theme::ThemeSelection,
     /// Changes pane: side-by-side diffs instead of the unified stack.
     pub diff_split: bool,
     /// Changes pane: wrap long source lines instead of scrolling horizontally.
@@ -801,9 +819,9 @@ pub struct UiSettings {
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
     /// Interactive identity overlay; imported themes default to their own accent.
-    pub accent: zeron_theme::AccentSelection,
+    pub accent: harness_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
-    pub surface: zeron_theme::SurfacePreference,
+    pub surface: harness_theme::SurfacePreference,
     /// Optional device-local artwork behind the blank new-thread composer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
@@ -834,6 +852,8 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
+            last_chat_id: None,
+            chat_layout: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -868,7 +888,7 @@ impl Default for UiSettings {
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             code_font_family: crate::typography::UiFontFamily::GeistMono,
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
-            theme_selection: zeron_theme::ThemeSelection::default(),
+            theme_selection: harness_theme::ThemeSelection::default(),
             diff_split: false,
             diff_wrap: false,
             code_fences_fit_content: false,
@@ -879,8 +899,8 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
-            accent: zeron_theme::AccentSelection::default(),
-            surface: zeron_theme::SurfacePreference::default(),
+            accent: harness_theme::AccentSelection::default(),
+            surface: harness_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
             legacy_accent_color: None,
@@ -924,6 +944,8 @@ pub enum ShortcutId {
     ToggleChanges,
     ToggleFiles,
     ToggleTerminal,
+    SplitTerminal,
+    SplitTerminalDown,
     NewSession,
     NewProject,
     OpenModelPicker,
@@ -934,7 +956,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [
+    pub const ALL: [ShortcutId; 15 + JUMP_SLOTS] = [
         ShortcutId::CaptureAppshot,
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
@@ -942,6 +964,8 @@ impl ShortcutId {
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleFiles,
         ShortcutId::ToggleTerminal,
+        ShortcutId::SplitTerminal,
+        ShortcutId::SplitTerminalDown,
         ShortcutId::NewSession,
         ShortcutId::NewProject,
         ShortcutId::OpenModelPicker,
@@ -973,6 +997,8 @@ impl ShortcutId {
             ShortcutId::ToggleChanges => "Toggle right sidebar",
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
+            ShortcutId::SplitTerminal => "Split terminal right",
+            ShortcutId::SplitTerminalDown => "Split terminal down",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
@@ -1000,6 +1026,12 @@ impl ShortcutId {
             ShortcutId::ToggleChanges => "mod-r",
             ShortcutId::ToggleFiles => "mod-e",
             ShortcutId::ToggleTerminal => "mod-j",
+            // Ghostty: ⌘D splits right. Off macOS, Ctrl+D is EOF to the PTY,
+            // so the split uses Shift.
+            ShortcutId::SplitTerminal if mac => "mod-d",
+            ShortcutId::SplitTerminal => "mod-shift-d",
+            ShortcutId::SplitTerminalDown if mac => "mod-shift-d",
+            ShortcutId::SplitTerminalDown => "mod-alt-shift-d",
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
@@ -1047,6 +1079,8 @@ pub struct KeymapConfig {
     pub toggle_changes: String,
     pub toggle_files: String,
     pub toggle_terminal: String,
+    pub split_terminal: String,
+    pub split_terminal_down: String,
     pub new_session: String,
     pub new_project: String,
     pub open_model_picker: String,
@@ -1095,7 +1129,7 @@ pub fn sidebar_pin_profile_key(
             }
             let org_id = token_org_id
                 .or(development_org_id.filter(|org_id| !org_id.is_empty()))
-                .unwrap_or(zeron_engine::DEFAULT_ORG_ID);
+                .unwrap_or(harness_engine::DEFAULT_ORG_ID);
             Some(format!("development:{org_id}:{user_id}"))
         }
     }
@@ -1111,6 +1145,8 @@ impl Default for KeymapConfig {
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_files: ShortcutId::ToggleFiles.default_combo().into(),
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
+            split_terminal: ShortcutId::SplitTerminal.default_combo().into(),
+            split_terminal_down: ShortcutId::SplitTerminalDown.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
             open_model_picker: ShortcutId::OpenModelPicker.default_combo().into(),
@@ -1132,6 +1168,8 @@ impl KeymapConfig {
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleFiles => &self.toggle_files,
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
+            ShortcutId::SplitTerminal => &self.split_terminal,
+            ShortcutId::SplitTerminalDown => &self.split_terminal_down,
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
             ShortcutId::OpenModelPicker => &self.open_model_picker,
@@ -1155,6 +1193,8 @@ impl KeymapConfig {
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleFiles => self.toggle_files = combo,
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
+            ShortcutId::SplitTerminal => self.split_terminal = combo,
+            ShortcutId::SplitTerminalDown => self.split_terminal_down = combo,
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::OpenModelPicker => self.open_model_picker = combo,
@@ -1389,7 +1429,7 @@ impl UiSettings {
             .or_default()
     }
 
-    pub fn skill_completion(&self, harness: zeron_proto::HarnessId) -> SkillCompletionSettings {
+    pub fn skill_completion(&self, harness: harness_proto::HarnessId) -> SkillCompletionSettings {
         self.skill_completion_by_harness
             .get(&harness)
             .copied()
@@ -1580,10 +1620,10 @@ impl UiSettings {
     }
 
     fn migrated(mut self) -> Self {
-        if self.accent == zeron_theme::AccentSelection::ThemeDefault
+        if self.accent == harness_theme::AccentSelection::ThemeDefault
             && let Some(accent) = self.legacy_accent_color.take()
         {
-            self.accent = zeron_theme::AccentSelection::Preset(accent.into());
+            self.accent = harness_theme::AccentSelection::Preset(accent.into());
         }
         self.legacy_accent_color = None;
         self
@@ -1610,7 +1650,7 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
     }
 }
 
-pub use zeron_proto::SidebarSection;
+pub use harness_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {
@@ -1618,7 +1658,7 @@ mod tests {
 
     #[test]
     fn skill_completion_defaults_overrides_and_persistence_are_per_harness() {
-        use zeron_proto::HarnessId;
+        use harness_proto::HarnessId;
         let dir = tempfile::tempdir().unwrap();
         let mut settings = UiSettings::default();
         for (harness, _) in SKILL_COMPLETION_HARNESSES {
@@ -2163,6 +2203,14 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            last_chat_id: Some("b".into()),
+            chat_layout: Some(SavedChatLayout {
+                vertical: false,
+                panes: vec![Some("a".into()), None],
+                focus: 1,
+                shares: vec![0.4, 0.6],
+                projects: vec![Some("space-1".into()), None],
+            }),
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
@@ -2227,7 +2275,7 @@ mod tests {
             git_history_author_display: GitHistoryAuthorDisplay::Name,
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
-            theme_selection: zeron_theme::ThemeSelection {
+            theme_selection: harness_theme::ThemeSelection {
                 light: "catppuccin-latte".into(),
                 dark: "catppuccin-mocha".into(),
             },
@@ -2245,8 +2293,8 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
-            accent: zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan),
-            surface: zeron_theme::SurfacePreference::Frosted,
+            accent: harness_theme::AccentSelection::Preset(harness_theme::AccentPreset::Cyan),
+            surface: harness_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
                 path: "/tmp/zeron/new-thread-background.png".into(),
                 name: "background.png".into(),
@@ -2395,8 +2443,8 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
-        assert_eq!(loaded.accent, zeron_theme::AccentSelection::ThemeDefault);
-        assert_eq!(loaded.surface, zeron_theme::SurfacePreference::ThemeDefault);
+        assert_eq!(loaded.accent, harness_theme::AccentSelection::ThemeDefault);
+        assert_eq!(loaded.surface, harness_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(loaded.sidebar_pinned_session_ids_by_profile.is_empty());
         assert!(!loaded.sound_enabled, "other keys still parse");
@@ -2483,7 +2531,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(
             loaded.accent,
-            zeron_theme::AccentSelection::Preset(zeron_theme::AccentPreset::Cyan)
+            harness_theme::AccentSelection::Preset(harness_theme::AccentPreset::Cyan)
         );
         loaded.save(dir.path()).unwrap();
         let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -2551,7 +2599,7 @@ mod tests {
 
     fn signed_in(user_id: &str, org_id: Option<&str>) -> AuthState {
         AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
+            user: harness_proto::UserProfile {
                 id: user_id.to_string(),
                 email: format!("{user_id}@example.com"),
                 name: None,

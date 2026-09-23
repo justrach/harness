@@ -45,7 +45,7 @@ struct SignInView: View {
                     ZeronMark()
                         .frame(width: 72, height: 72)
                     VStack(spacing: 6) {
-                        Text("Harnesser")
+                        Text("Harness")
                             .font(Theme.sans(28, weight: .semibold))
                             .kerning(-0.5)
                             .foregroundStyle(Theme.text)
@@ -64,7 +64,7 @@ struct SignInView: View {
                                 ProgressView()
                                     .tint(Theme.bg)
                             } else {
-                                Text("Log in to Harnesser")
+                                Text("Log in to Harness")
                                     .font(Theme.sans(15, weight: .semibold))
                                     .foregroundStyle(Theme.bg)
                             }
@@ -235,40 +235,50 @@ struct OrgPickerView: View {
     }
 }
 
-/// The actual zeron mark — the desktop's 34-cell logo
-/// (crates/ui/assets/icons/zeron-logo.svg), cells scaled from its 820×940
-/// viewbox and tinted by `color`.
+/// Compact CodeGraff-aligned mark used in the app's sign-in and session views.
 struct ZeronMark: View {
     var color: Color = Theme.text
-
-    /// (x, y) of each 100×100 rx16 cell in the 820×940 viewbox.
-    static let cells: [(CGFloat, CGFloat)] = [
-        (0, 600), (0, 720), (240, 840), (240, 720), (120, 840), (120, 600),
-        (240, 600), (0, 480), (0, 360), (480, 840), (480, 720), (120, 360),
-        (120, 240), (240, 360), (600, 720), (480, 600), (360, 360), (240, 240),
-        (600, 600), (720, 600), (720, 480), (240, 120), (600, 380), (720, 240),
-        (720, 0), (480, 240), (480, 0), (120, 480), (240, 480), (360, 840),
-        (360, 720), (360, 600), (360, 480), (120, 720),
-    ]
 
     var body: some View {
         ZeronMarkShape()
             .fill(color)
-            .aspectRatio(820 / 940, contentMode: .fit)
+            .aspectRatio(1, contentMode: .fit)
     }
 }
 
 struct ZeronMarkShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let scale = min(rect.width / 820, rect.height / 940)
-        let dx = rect.minX + (rect.width - 820 * scale) / 2
-        let dy = rect.minY + (rect.height - 940 * scale) / 2
-        for (x, y) in ZeronMark.cells {
-            let cell = CGRect(x: dx + x * scale, y: dy + y * scale,
-                              width: 100 * scale, height: 100 * scale)
-            path.addRoundedRect(in: cell, cornerSize: CGSize(width: 16 * scale, height: 16 * scale))
+        var ring = Path()
+        ring.move(to: CGPoint(x: 778, y: 275))
+        ring.addCurve(to: CGPoint(x: 418, y: 205), control1: CGPoint(x: 678, y: 180), control2: CGPoint(x: 545, y: 160))
+        ring.addCurve(to: CGPoint(x: 222, y: 526), control1: CGPoint(x: 272, y: 255), control2: CGPoint(x: 212, y: 389))
+        ring.addCurve(to: CGPoint(x: 531, y: 814), control1: CGPoint(x: 234, y: 700), control2: CGPoint(x: 371, y: 812))
+        ring.addCurve(to: CGPoint(x: 794, y: 722), control1: CGPoint(x: 650, y: 817), control2: CGPoint(x: 733, y: 772))
+        path.addPath(ring.strokedPath(StrokeStyle(lineWidth: 108, lineCap: .round)))
+
+        for points in [
+            [CGPoint(x: 456, y: 457), CGPoint(x: 383, y: 500), CGPoint(x: 456, y: 543)],
+            [CGPoint(x: 536, y: 437), CGPoint(x: 493, y: 563)],
+            [CGPoint(x: 578, y: 457), CGPoint(x: 651, y: 500), CGPoint(x: 578, y: 543)],
+        ] {
+            var glyph = Path()
+            glyph.addLines(points)
+            path.addPath(glyph.strokedPath(StrokeStyle(lineWidth: 31, lineCap: .round, lineJoin: .round)))
         }
-        return path
+
+        let pixels: [(CGFloat, CGFloat, CGFloat)] = [
+            (802, 455, 27), (849, 495, 38), (790, 552, 48),
+            (860, 574, 23), (823, 630, 34), (893, 662, 18),
+        ]
+        for (x, y, size) in pixels {
+            path.addRoundedRect(in: CGRect(x: x, y: y, width: size, height: size),
+                                cornerSize: CGSize(width: size / 7, height: size / 7))
+        }
+
+        let scale = min(rect.width, rect.height) / 1000
+        let dx = rect.minX + (rect.width - 1000 * scale) / 2
+        let dy = rect.minY + (rect.height - 1000 * scale) / 2
+        return path.applying(CGAffineTransform(translationX: dx, y: dy).scaledBy(x: scale, y: scale))
     }
 }

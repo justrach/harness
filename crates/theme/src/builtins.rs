@@ -12,7 +12,12 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
-            family("harnesser", "Harnesser", vec![zeron_light(), zeron_dark()]),
+            family("harnesser", "Harness", vec![zeron_light(), zeron_dark()]),
+            family(
+                "codegraff",
+                "Codegraff",
+                vec![codegraff_light(), codegraff_dark()],
+            ),
             family(
                 "vscode-default",
                 "VS Code Default",
@@ -240,7 +245,7 @@ fn zeron_dark() -> ThemeVariant {
     variant(Seeds {
         id: "harnesser-dark",
         family_id: "harnesser",
-        name: "Harnesser Dark",
+        name: "Harness Dark",
         appearance: Appearance::Dark,
         treatment: SurfaceTreatment::Frosted,
         background: "#060606",
@@ -274,7 +279,7 @@ fn zeron_light() -> ThemeVariant {
     variant(Seeds {
         id: "harnesser-light",
         family_id: "harnesser",
-        name: "Harnesser Light",
+        name: "Harness Light",
         appearance: Appearance::Light,
         treatment: SurfaceTreatment::Frosted,
         background: "#ffffff",
@@ -299,6 +304,80 @@ fn zeron_light() -> ThemeVariant {
             "native",
             "https://github.com/zeronsh/comet",
             "d138049",
+            "MIT",
+        ),
+    })
+}
+
+fn codegraff_dark() -> ThemeVariant {
+    variant(Seeds {
+        id: "codegraff-dark",
+        family_id: "codegraff",
+        name: "Codegraff Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#16140f",
+        shell: "#1f1c16",
+        raised: "#2a261e",
+        card: "#1f1c16",
+        text: "#edeae2",
+        muted: "#9a9384",
+        faint: "#5c564b",
+        accent: "#e8a33d",
+        danger: "#d2674f",
+        warning: "#d9a441",
+        success: "#7fa86b",
+        terminal_background: "#16140f",
+        ansi: [
+            "#16140f", "#d2674f", "#7fa86b", "#d9a441", "#8a9bb0", "#bd80e4", "#7fa86b", "#edeae2",
+            "#5c564b", "#d2674f", "#7fa86b", "#e8a33d", "#8a9bb0", "#bd80e4", "#9a9384", "#faf8f3",
+        ],
+        syntax: [
+            "#5c564b", "#e8a33d", "#7fa86b", "#d9a441", "#edeae2", "#e8a33d", "#edeae2", "#edeae2",
+            "#9a9384", "#d2674f", "#d9a441", "#d2674f",
+        ],
+        source: source(
+            "codegraff-dark",
+            "native",
+            "https://github.com/justrach/codegraff",
+            "20652a1f7587971a07349b2e26ef12aaf2cdf443",
+            "MIT",
+        ),
+    })
+}
+
+fn codegraff_light() -> ThemeVariant {
+    variant(Seeds {
+        id: "codegraff-light",
+        family_id: "codegraff",
+        name: "Codegraff Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Opaque,
+        background: "#faf8f3",
+        shell: "#f0ece3",
+        raised: "#e7e1d5",
+        card: "#f0ece3",
+        text: "#1a1813",
+        muted: "#6b6557",
+        faint: "#a8a090",
+        accent: "#c77d20",
+        danger: "#b14228",
+        warning: "#9a6e1b",
+        success: "#5c7e47",
+        terminal_background: "#faf8f3",
+        ansi: [
+            "#1a1813", "#b14228", "#5c7e47", "#9a6e1b", "#3b6fb0", "#7a4ea3", "#2f8f9d", "#6b6557",
+            "#a8a090", "#b14228", "#5c7e47", "#c77d20", "#3b6fb0", "#7a4ea3", "#2f8f9d", "#1a1813",
+        ],
+        syntax: [
+            "#a8a090", "#c77d20", "#5c7e47", "#9a6e1b", "#1a1813", "#c77d20", "#1a1813", "#1a1813",
+            "#6b6557", "#b14228", "#9a6e1b", "#b14228",
+        ],
+        source: source(
+            "codegraff-light",
+            "native",
+            "https://github.com/justrach/codegraff",
+            "20652a1f7587971a07349b2e26ef12aaf2cdf443",
             "MIT",
         ),
     })

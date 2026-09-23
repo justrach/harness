@@ -1,5 +1,5 @@
 #!/bin/sh
-# fake antigravity acp server for zeron-harness tests.
+# fake antigravity acp server for harness-adapters tests.
 #
 # mirrors the wire shapes of agy_acp_server 1.1.1: effort baked into model
 # ids, a default/auto_edit/yolo mode select, auth_required (-32000) on

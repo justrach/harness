@@ -48,7 +48,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel,
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
 };
@@ -195,6 +195,48 @@ fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
     dirs
 }
 
+fn grok_effort() -> Vec<ReasoningLevel> {
+    vec![
+        ReasoningLevel::Low,
+        ReasoningLevel::Medium,
+        ReasoningLevel::High,
+        ReasoningLevel::XHigh,
+    ]
+}
+
+fn grok_static_models() -> Vec<Model> {
+    vec![
+        Model {
+            id: "grok-4.7".into(),
+            label: "Grok 4.7".into(),
+            description: Some("SpaceXAI's latest frontier model — 500k context".into()),
+            reasoning_levels: grok_effort(),
+            options: Vec::new(),
+        },
+        Model {
+            id: "grok-4.7-build-fast".into(),
+            label: "Grok 4.7 Fast".into(),
+            description: Some("Fast variant of Grok 4.7".into()),
+            reasoning_levels: grok_effort(),
+            options: Vec::new(),
+        },
+        Model {
+            id: "grok-4.6".into(),
+            label: "Grok 4.6".into(),
+            description: Some("xAI's coding model — 500k context".into()),
+            reasoning_levels: grok_effort(),
+            options: Vec::new(),
+        },
+        Model {
+            id: "grok-4.5".into(),
+            label: "Grok 4.5".into(),
+            description: Some("xAI's coding model — 500k context".into()),
+            reasoning_levels: grok_effort(),
+            options: Vec::new(),
+        },
+    ]
+}
+
 fn grok_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = crate::executable::home_dir() {
@@ -231,19 +273,8 @@ fn grok_spec() -> AcpAgentSpec {
              fnm/nvm/volta/pnpm/bun install dirs; install with \
              `curl -fsSL https://x.ai/cli/install.sh | bash` or \
              `npm install -g @xai-official/grok`; set GROK_EXECUTABLE to override)",
-        models: || {
-            vec![Model {
-                id: "grok-4.5".into(),
-                label: "Grok 4.5".into(),
-                description: Some("xAI's coding model — 500k context".into()),
-                reasoning_levels: vec![
-                    ReasoningLevel::Low,
-                    ReasoningLevel::Medium,
-                    ReasoningLevel::High,
-                ],
-                options: Vec::new(),
-            }]
-        },
+        models: grok_static_models,
+
         // No `_session/steering` extension: steers deliver at turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
         // Grok Build's advertised efforts (default high); applied through the
@@ -252,6 +283,7 @@ fn grok_spec() -> AcpAgentSpec {
             ReasoningLevel::Low,
             ReasoningLevel::Medium,
             ReasoningLevel::High,
+            ReasoningLevel::XHigh,
         ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
@@ -264,7 +296,9 @@ fn grok_spec() -> AcpAgentSpec {
              process or a hung startup check; zeron launches it with --no-leader \
              and --no-auto-update to avoid both.",
         effort_in_model_id: false,
-        auth_method: None,
+        // Each stdio spawn is a fresh process. grok.com attaches the existing
+        // `grok login` session; it does not open a browser when already signed in.
+        auth_method: Some("grok.com"),
         skill_dirs: Vec::new,
         hidden_commands: &[],
     }
@@ -441,12 +475,18 @@ fn graff_spec() -> AcpAgentSpec {
         install_hint: "graff (searched PATH, the login shell's PATH, ~/.local/bin, \
              /opt/homebrew/bin, and /usr/local/bin; install codegraff, then \
              `graff login`; set GRAFF_EXECUTABLE to override)",
-        // graff advertises no model config option over ACP; the live catalog
-        // comes from `graff route` + `graff --schema` (see graff_models) and
-        // the pick is applied as `graff acp --model <name>` at launch.
+        // Live catalog is `graff models` (see graff_models). Effort is on
+        // `graff/models` rows, not session/new configOptions yet.
         models: Vec::new,
         steering_mode: SteeringMode::TurnBoundary,
-        reasoning_levels: &[],
+        reasoning_levels: &[
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+            ReasoningLevel::Ultra,
+        ],
         prompt_transform: identity_transform,
         effort_values: default_effort_values,
         ladder_extras: &[],
@@ -869,12 +909,12 @@ pub fn prewarm_managed_adapters() {
         handle.spawn(async move {
             match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
                 Ok(entry) => tracing::info!(
-                    target: "zeron_harness::adapter_install",
+                    target: "harness_adapters::adapter_install",
                     adapter = %entry.display(),
                     "prewarmed {display_name} ACP adapter"
                 ),
                 Err(e) => tracing::warn!(
-                    target: "zeron_harness::adapter_install",
+                    target: "harness_adapters::adapter_install",
                     "prewarm of the {display_name} ACP adapter failed: {e}"
                 ),
             }
@@ -1068,7 +1108,7 @@ impl AcpHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::acp", "sign-in stderr: {line}");
+                    tracing::debug!(target: "harness_adapters::acp", "sign-in stderr: {line}");
                     if let Some(url) = sign_in_url(&line)
                         && !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
                     {
@@ -1266,7 +1306,7 @@ impl AcpHarness {
                             .await
                             {
                                 tracing::warn!(
-                                    target: "zeron_harness::adapter_install",
+                                    target: "harness_adapters::adapter_install",
                                     "background adapter install failed: {e}"
                                 );
                             }
@@ -1351,7 +1391,7 @@ impl AcpHarness {
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
+                    tracing::debug!(target: "harness_adapters::acp", "stderr: {line}");
                     tail.push(&line);
                 }
                 tail.close();
@@ -1438,7 +1478,7 @@ impl AcpHarness {
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
-        let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
+        let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
                 child.shutdown(self.kill_grace).await;
@@ -1449,10 +1489,43 @@ impl AcpHarness {
             client
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
+            // Grok advertises authMethods and rejects session/new until this
+            // process calls authenticate — even when `grok login` already succeeded.
+            if self.spec.id == HarnessId::Grok
+                && let Some(method) = self.spec.auth_method
+                && let Err(error) = request_draining(
+                    &client,
+                    &mut incoming,
+                    "authenticate",
+                    json!({ "methodId": method }),
+                )
+                .await
+            {
+                tracing::debug!(
+                    target: "harness_adapters::acp",
+                    "grok authenticate during model discovery: {error}"
+                );
+                return Ok((self.spec.models)());
+            }
             let cwd = crate::executable::home_or_current_dir();
-            let session = client
-                .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
-                .await?;
+            let session = match request_draining(
+                &client,
+                &mut incoming,
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": [] }),
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(error) if self.spec.id == HarnessId::Grok => {
+                    tracing::debug!(
+                        target: "harness_adapters::acp",
+                        "grok session/new during model discovery: {error}"
+                    );
+                    return Ok((self.spec.models)());
+                }
+                Err(error) => return Err(error),
+            };
             let mut models = models_from_session(&session, &(self.spec.models)());
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -1862,7 +1935,7 @@ impl Harness for AcpHarness {
     async fn skills(
         &self,
         cwd: &std::path::Path,
-    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+    ) -> Result<Option<Vec<harness_proto::invocation::Skill>>, HarnessError> {
         let (mut skills, commands) = tokio::try_join!(
             crate::skills::discover(self.id(), cwd),
             self.workspace_commands
@@ -2009,14 +2082,14 @@ fn initialize_params(harness: HarnessId) -> Value {
         // Devin otherwise exposes only the parent's run_subagent call. This
         // unlocks lifecycle tags plus every nested message, thought, and tool
         // update, all of which DevinTracker can route. Do not advertise the
-        // separate subagentControl extension: Harnesser has no matching UI yet.
+        // separate subagentControl extension: Harness has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
     }
     json!({
         "protocolVersion": 1,
         "clientInfo": {
             "name": "zeron",
-            "title": "Harnesser",
+            "title": "Harness",
             "version": env!("CARGO_PKG_VERSION"),
         },
         // Declined: agents fall back to their own fs/terminal access, which
@@ -2507,7 +2580,7 @@ fn handle_server_request(
             Vec::new()
         }
         _ => {
-            tracing::debug!(target: "zeron_harness::acp", "unhandled server request: {method}");
+            tracing::debug!(target: "harness_adapters::acp", "unhandled server request: {method}");
             client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
             Vec::new()
         }
@@ -2958,6 +3031,22 @@ async fn run_session(session: Session) {
         let init = client
             .request("initialize", initialize_params(harness))
             .await?;
+        if harness == HarnessId::Grok
+            && let Some(method) = auth_method
+        {
+            request_draining(
+                &client,
+                &mut incoming,
+                "authenticate",
+                json!({ "methodId": method }),
+            )
+            .await
+            .map_err(|_| {
+                HarnessError::Protocol(format!(
+                    "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
+                ))
+            })?;
+        }
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
 
@@ -2975,7 +3064,7 @@ async fn run_session(session: Session) {
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
                     tracing::debug!(
-                        target: "zeron_harness::acp",
+                        target: "harness_adapters::acp",
                         "session/load failed (starting fresh): {e}"
                     );
                     let _ = send(&event_tx, AgentEvent::Error {
@@ -3114,7 +3203,7 @@ async fn run_session(session: Session) {
                     )));
                 }
                 tracing::debug!(
-                    target: "zeron_harness::acp",
+                    target: "harness_adapters::acp",
                     "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
                 );
             }
@@ -3163,7 +3252,7 @@ async fn run_session(session: Session) {
                             None => e.to_string(),
                         },
                     };
-                    tracing::warn!(target: "zeron_harness::acp", %error, "agent setup failed");
+                    tracing::warn!(target: "harness_adapters::acp", %error, "agent setup failed");
                     let _ = event_tx
                         .send(Ok(AgentEvent::Done {
                             status: DoneStatus::Errored,
@@ -3654,7 +3743,7 @@ async fn run_session(session: Session) {
                         .to_owned(),
                     Err(e) => {
                         tracing::debug!(
-                            target: "zeron_harness::acp",
+                            target: "harness_adapters::acp",
                             "_session/steering failed (redelivering): {e}"
                         );
                         // Failed calls redeliver like a lost turn-end race.
@@ -3749,7 +3838,7 @@ async fn run_session(session: Session) {
                         == Some("noRunningTurn")
                     {
                         tracing::warn!(
-                            target: "zeron_harness::acp",
+                            target: "harness_adapters::acp",
                             "steering answered noRunningTurn with a prompt \
                              outstanding; arming starved-turn recovery"
                         );
@@ -3851,7 +3940,7 @@ async fn run_session(session: Session) {
             ), if starve_deadline.is_some() && turn.is_some() && !interrupted => {
                 starve_deadline = None;
                 tracing::warn!(
-                    target: "zeron_harness::acp",
+                    target: "harness_adapters::acp",
                     "prompt response missing past turn-end evidence; settling \
                      the dead turn (and promoting any queued steer)"
                 );
@@ -3932,7 +4021,7 @@ async fn run_session(session: Session) {
                         // cancel it rather than prompt into the starve.
                         //
                         tracing::info!(
-                            target: "zeron_harness::acp",
+                            target: "harness_adapters::acp",
                             "steer into a self-continuing session; cancelling \
                              the unowned turn before prompting"
                         );

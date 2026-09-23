@@ -8,8 +8,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering::Relaxed},
 };
 use std::time::{Duration, Instant};
-use zeron_sync::chat_client::{ChatTransport, RowImportOutcome};
-use zeron_sync::{ChatClient, ChatDocSink, CheckpointFetcher, DocsStore, StaticUrl, SyncError};
+use harness_sync::chat_client::{ChatTransport, RowImportOutcome};
+use harness_sync::{ChatClient, ChatDocSink, CheckpointFetcher, DocsStore, StaticUrl, SyncError};
 
 struct Sink {
     doc: Mutex<LoroDoc>,

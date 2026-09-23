@@ -40,8 +40,8 @@
 
 - Pure tests for capability copy, PNG/pixel conversion, bounds, X11 property
   parsing, and activation-path derivation.
-- `cargo fmt --all -- --check`, `cargo test -p zeron-ui --lib`,
-  `cargo check -p zeron-ui`, and `cargo check -p zeron` on macOS.
+- `cargo fmt --all -- --check`, `cargo test -p harness-ui --lib`,
+  `cargo check -p harness-ui`, and `cargo check -p zeron` on macOS.
 - Target checks for Windows and Linux where the local toolchain/sysroot allows;
   otherwise record the exact missing machine dependency and keep all platform
   code target-gated for CI/native validation.

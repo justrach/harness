@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
-use zeron_proto::{ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space};
+use harness_proto::{ChangeRequestSummary, Chat, CheckoutChangeRequestStatus, Space};
 
 use crate::theme::Theme;
 
@@ -38,7 +38,7 @@ pub(crate) struct ChangeRequestBadgeModel {
 
 impl ChangeRequestBadgeModel {
     pub fn from_summary(summary: &ChangeRequestSummary) -> Self {
-        use zeron_proto::ChangeRequestState;
+        use harness_proto::ChangeRequestState;
 
         let (state_label, tone) = match summary.state {
             ChangeRequestState::Open => ("Open", ChangeRequestBadgeTone::Open),
@@ -359,7 +359,7 @@ pub(crate) fn conversation_branch<'a>(chat: &'a Chat, _spaces: &'a [Space]) -> O
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone as _, Utc};
-    use zeron_proto::ChangeRequestState;
+    use harness_proto::ChangeRequestState;
 
     use super::*;
 
@@ -419,7 +419,7 @@ mod tests {
     }
 
     fn with_source(mut chat: Chat, branch: &str) -> Chat {
-        chat.source_context = Some(zeron_proto::ConversationSourceContext {
+        chat.source_context = Some(harness_proto::ConversationSourceContext {
             checkout_id: "checkout".into(),
             repo_root: "/repo".into(),
             cwd: "/repo".into(),

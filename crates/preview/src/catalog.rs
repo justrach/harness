@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
-use zeron_proto::{PREVIEW_PROXY_PORT, PreviewService, PreviewSnapshot};
+use harness_proto::{PREVIEW_PROXY_PORT, PreviewService, PreviewSnapshot};
 
 #[derive(Clone)]
 pub struct Catalog(Arc<Inner>);

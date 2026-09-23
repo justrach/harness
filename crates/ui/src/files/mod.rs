@@ -10,7 +10,7 @@ use gpui::{
     Context, Entity, EventEmitter, FocusHandle, ListAlignment, ListState, Pixels, Point, Render,
     SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
-use zeron_proto::ListWorkspaceDirectoryRequest;
+use harness_proto::ListWorkspaceDirectoryRequest;
 
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},

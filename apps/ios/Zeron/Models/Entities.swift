@@ -120,7 +120,7 @@ struct SessionRow: Hashable {
 
 // MARK: - Checkout change requests
 
-/// Provider-neutral lifecycle state from `zeron-proto`.
+/// Provider-neutral lifecycle state from `harness-proto`.
 enum ChangeRequestState: String, Codable, Hashable {
     case open
     case closed
@@ -301,7 +301,7 @@ struct MessageEntry: Identifiable, Hashable {
 
 // MARK: - Folder browsing (add-space palette data)
 
-/// zeron-proto FolderListing (entities.rs:225): the device's answer to
+/// harness-proto FolderListing (entities.rs:225): the device's answer to
 /// ListFolders. Dotfiles are pre-filtered and entries are capped at 500 by
 /// the engine; the parent path is computed client-side.
 struct FolderEntry: Codable, Hashable {
@@ -330,7 +330,7 @@ enum CheckoutKind {
     case newWorktree
 }
 
-/// zeron-proto RepoRef (entities.rs:193): one selectable ref from ListRefs.
+/// harness-proto RepoRef (entities.rs:193): one selectable ref from ListRefs.
 struct RepoRef: Codable, Hashable, Identifiable {
     var name: String
     var current: Bool = false
@@ -343,7 +343,7 @@ struct RepoRef: Codable, Hashable, Identifiable {
 
 let commandDefaultTtlMs: Int64 = 86_400_000
 
-/// zeron-proto WorktreeSpec (agent.rs, PR #159): a worktree the HOST
+/// harness-proto WorktreeSpec (agent.rs, PR #159): a worktree the HOST
 /// materializes at command-drain time — the client never blocks on a
 /// CreateWorktree relay RPC before a send. Old hosts ignore the field and run
 /// in `cwd` (the repo's main checkout): degraded, never hung.
@@ -352,7 +352,7 @@ struct WorktreeSpec: Codable, Hashable {
     var base: String
 }
 
-/// zeron-proto RunRequest (agent.rs:81). `reasoning` is lowercase
+/// harness-proto RunRequest (agent.rs:81). `reasoning` is lowercase
 /// ("high"/"xhigh"/…), `sandbox` kebab-case ("workspace-write"), harness ids
 /// kebab-case ("claude-code").
 struct RunRequest: Codable {

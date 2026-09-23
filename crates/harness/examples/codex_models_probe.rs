@@ -1,5 +1,5 @@
 //! Read-only model discovery using the same resolver and protocol as the picker.
-use zeron_harness::{CodexHarness, Harness};
+use harness_adapters::{CodexHarness, Harness};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

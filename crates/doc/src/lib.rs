@@ -1,4 +1,4 @@
-//! zeron-doc — session & workspace Loro doc schemas and the typed mirror layer.
+//! harness-doc — session & workspace Loro doc schemas and the typed mirror layer.
 //!
 //! Port of zeron's `packages/session-doc`. The schema SHAPE (container names, part maps with
 //! LoroText bodies, command entries) is kept identical to the TS implementation so the edge's

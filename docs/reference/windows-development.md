@@ -1,7 +1,7 @@
 # Windows development
 
 Windows supports native x64 source builds and portable release ZIPs. Release
-packages offer in-app updates through GitHub; keep `zeron-update.json` beside
+packages offer in-app updates through GitHub; keep `harness-update.json` beside
 `zeron.exe`. Installers and background services are not supported yet.
 
 ## Build and run
@@ -62,9 +62,9 @@ ConPTY, locking, UI behavior, and shader layouts. Shared Rust regressions run
 on Linux and macOS. To run the engine and harness checks locally:
 
 ```powershell
-cargo test --locked -p zeron-engine -p zeron-harness --lib
-cargo test --locked -p zeron-harness --features native-fixture --test codex_availability --test windows_native
-cargo test --locked -p zeron-engine --test codex_catalog --test codex_login_resolution --test auth
+cargo test --locked -p harness-engine -p harness-adapters --lib
+cargo test --locked -p harness-adapters --features native-fixture --test codex_availability --test windows_native
+cargo test --locked -p harness-engine --test codex_catalog --test codex_login_resolution --test auth
 ```
 
 Fixtures use synthetic agents, so these tests do not establish authenticated
@@ -72,7 +72,7 @@ provider compatibility. GUI probes are optional CI dispatch checks and can
 also run on an interactive Windows desktop after building the release app:
 
 ```powershell
-cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
+cargo build --release --locked -p harness-ui --example windows-render-fixture --features windows-render-fixture
 ./scripts/test-windows-lifecycle.ps1 -Runs 5
 ./scripts/test-windows-rendering.ps1
 ```

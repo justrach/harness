@@ -329,7 +329,7 @@ impl Element for LinkRanges {
                         window.refresh();
                     });
                 for (action_ix, (action, label, icon)) in [
-                    (LinkAction::Internal, "Open in Harnesser", icons::GLOBE),
+                    (LinkAction::Internal, "Open in Harness", icons::GLOBE),
                     (
                         LinkAction::External,
                         "Open in external browser",
@@ -375,7 +375,7 @@ impl Element for LinkRanges {
                         false,
                         format!("{}-link-{index}-default-destination", self.id),
                     )
-                    .id("Open links in Harnesser")
+                    .id("Open links in Harness")
                     .child(div().w(px(16.)).flex_none().when(open_in_zeron, |el| {
                         el.child(
                             icons::icon(icons::CHECK)
@@ -383,13 +383,13 @@ impl Element for LinkRanges {
                                 .text_color(theme.text_muted),
                         )
                     }))
-                    .child("Open links in Harnesser")
+                    .child("Open links in Harness")
                     .track_focus(&state.menu_focus[3])
                     .role(Role::Button)
                     .aria_label(if open_in_zeron {
-                        "Open links in Harnesser, checked"
+                        "Open links in Harness, checked"
                     } else {
-                        "Open links in Harnesser, unchecked"
+                        "Open links in Harness, unchecked"
                     })
                     .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
                     .on_click(move |_, window, cx| {
@@ -921,7 +921,7 @@ mod rendered_tests {
                 assert_eq!(log.borrow().len(), 2);
                 assert_eq!(log.borrow()[0].target.original, "https://example.com/one");
                 assert_eq!(log.borrow()[1].target.original, "https://example.org/two");
-                // Menu starts on Open in Harnesser; choose the external action.
+                // Menu starts on Open in Harness; choose the external action.
                 for key in ["down", "enter"] {
                     window.dispatch_event(
                         gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {

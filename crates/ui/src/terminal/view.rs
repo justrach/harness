@@ -359,12 +359,17 @@ impl InputCoalescer {
 /// resizes the emulator immediately and debounces the `ResizeTerminal` RPC.
 pub struct TerminalElement {
     panel: Entity<TerminalPanel>,
+    tab_key: Option<u64>,
     focused: bool,
 }
 
 impl TerminalElement {
-    pub fn new(panel: Entity<TerminalPanel>, focused: bool) -> Self {
-        Self { panel, focused }
+    pub fn new(panel: Entity<TerminalPanel>, tab_key: Option<u64>, focused: bool) -> Self {
+        Self {
+            panel,
+            tab_key,
+            focused,
+        }
     }
 }
 
@@ -464,7 +469,12 @@ impl gpui::Element for TerminalElement {
             bounds.top() + px(TERM_PADDING),
         );
         let snapshot = self.panel.update(cx, |panel, cx| {
+            let key = self.tab_key.or_else(|| panel.focused_tab_key(cx));
+            let Some(key) = key else {
+                return None;
+            };
             panel.on_grid_metrics(
+                key,
                 super::panel::GridGeometry {
                     bounds,
                     origin,
@@ -475,7 +485,7 @@ impl gpui::Element for TerminalElement {
                 },
                 cx,
             );
-            panel.active_grid_snapshot(cx)
+            panel.grid_snapshot(key, cx)
         });
         let Some(snapshot) = snapshot else {
             return TerminalPrepaint {
@@ -957,8 +967,8 @@ mod tests {
         let theme = Theme::for_selection(
             Appearance::Dark,
             "dracula",
-            zeron_theme::AccentSelection::ThemeDefault,
-            zeron_theme::SurfacePreference::ThemeDefault,
+            harness_theme::AccentSelection::ThemeDefault,
+            harness_theme::SurfacePreference::ThemeDefault,
         );
         assert_eq!(terminal_panel_bg(&theme), theme.terminal.background);
         assert_eq!(
@@ -978,20 +988,20 @@ mod tests {
 
     #[test]
     fn every_registered_variant_resolves_all_ansi_slots_from_its_theme() {
-        for variant in zeron_theme::ThemeRegistry::builtin()
+        for variant in harness_theme::ThemeRegistry::builtin()
             .families
             .iter()
             .flat_map(|family| &family.variants)
         {
             let appearance = match variant.appearance {
-                zeron_theme::Appearance::Dark => Appearance::Dark,
-                zeron_theme::Appearance::Light => Appearance::Light,
+                harness_theme::Appearance::Dark => Appearance::Dark,
+                harness_theme::Appearance::Light => Appearance::Light,
             };
             let theme = Theme::for_selection(
                 appearance,
                 &variant.id,
-                zeron_theme::AccentSelection::ThemeDefault,
-                zeron_theme::SurfacePreference::ThemeDefault,
+                harness_theme::AccentSelection::ThemeDefault,
+                harness_theme::SurfacePreference::ThemeDefault,
             );
             for index in 0..16 {
                 assert_eq!(

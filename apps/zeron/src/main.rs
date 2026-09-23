@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Open a Harnesser conversation URL.
+    /// Open a Harness conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
     #[cfg(windows)]
@@ -44,7 +44,7 @@ enum Command {
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
-    /// Serve the Harnesser MCP (Model Context Protocol) server on stdin/stdout,
+    /// Serve the Harness MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
@@ -123,7 +123,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
-        zeron_update::windows::wait_for_exit(pid)?;
+        harness_update::windows::wait_for_exit(pid)?;
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
     // overrides either).
@@ -201,7 +201,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = zeron_engine::Engine::new(engine_config_from_env());
+                let engine = harness_engine::Engine::new(engine_config_from_env());
                 engine.run().await
             })
         }
@@ -223,11 +223,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
+            runtime.block_on(harness_mcp::run(harness_mcp::McpConfig::from_env()))
         }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
-            zeron_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
+            harness_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
                 .map_err(anyhow::Error::msg)
         }
         Some(Command::Update { check }) => {
@@ -246,7 +246,7 @@ fn main() -> anyhow::Result<()> {
             let edge_token = paths::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes HARNESS_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
-            zeron_ui::run_app(zeron_ui::UiConfig {
+            harness_ui::run_app(harness_ui::UiConfig {
                 data_dir: paths::data_dir(),
                 ipc_port: paths::var("ZERON_IPC_PORT")
                     .ok()
@@ -292,10 +292,10 @@ fn attach_parent_console() {
 /// The env-resolved engine configuration shared by `headless`, `login`,
 /// `logout`, and `status` — one resolution so the CLI auth commands always
 /// operate on the exact session the daemon will load.
-fn engine_config_from_env() -> zeron_engine::EngineConfig {
+fn engine_config_from_env() -> harness_engine::EngineConfig {
     // Dev-mode bearer (no WorkOS): an explicit token enables sync.
     let edge_token = paths::var("ZERON_EDGE_TOKEN").ok();
-    zeron_engine::EngineConfig {
+    harness_engine::EngineConfig {
         data_dir: paths::data_dir(),
         edge_url: edge_url_from_env(),
         ipc_port: paths::var("ZERON_IPC_PORT")
@@ -315,18 +315,18 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
 
 /// `HARNESS_HARNESS` / `ZERON_HARNESS` (kebab-case id) picks the default
 /// agent for chats without a config row — `mock` powers the e2e smoke; default `graff`.
-fn harness_from_env() -> zeron_engine::HarnessId {
+fn harness_from_env() -> harness_engine::HarnessId {
     match paths::var("ZERON_HARNESS").ok().as_deref().map(str::trim) {
-        Some("mock") => zeron_engine::HarnessId::Mock,
-        Some("codex") => zeron_engine::HarnessId::Codex,
-        Some("cursor") => zeron_engine::HarnessId::Cursor,
-        Some("devin") => zeron_engine::HarnessId::Devin,
-        Some("grok") => zeron_engine::HarnessId::Grok,
-        Some("hermes") => zeron_engine::HarnessId::Hermes,
-        Some("claude-code") => zeron_engine::HarnessId::ClaudeCode,
-        Some("pi") => zeron_engine::HarnessId::Pi,
-        Some("antigravity") => zeron_engine::HarnessId::Antigravity,
-        _ => zeron_engine::HarnessId::Graff,
+        Some("mock") => harness_engine::HarnessId::Mock,
+        Some("codex") => harness_engine::HarnessId::Codex,
+        Some("cursor") => harness_engine::HarnessId::Cursor,
+        Some("devin") => harness_engine::HarnessId::Devin,
+        Some("grok") => harness_engine::HarnessId::Grok,
+        Some("hermes") => harness_engine::HarnessId::Hermes,
+        Some("claude-code") => harness_engine::HarnessId::ClaudeCode,
+        Some("pi") => harness_engine::HarnessId::Pi,
+        Some("antigravity") => harness_engine::HarnessId::Antigravity,
+        _ => harness_engine::HarnessId::Graff,
     }
 }
 
@@ -334,13 +334,13 @@ fn harness_from_env() -> zeron_engine::HarnessId {
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
-    let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
+    let client = harness_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| {
             anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
         })?;
     let status = client
-        .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))
+        .call(harness_rpc::methods::SYNC_STATUS, serde_json::json!({}))
         .await
         .map_err(|e| anyhow::anyhow!("SyncStatus failed: {e}"))?;
     let now = status.get("nowMs").and_then(|v| v.as_i64()).unwrap_or(0);

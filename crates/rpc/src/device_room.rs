@@ -231,7 +231,7 @@ pub enum TokenError {
     TemporarilyUnavailable(String),
 }
 
-impl From<TokenError> for zeron_sync::SyncError {
+impl From<TokenError> for harness_sync::SyncError {
     fn from(error: TokenError) -> Self {
         match error {
             TokenError::SignedOut => Self::Auth("signed out".into()),
@@ -320,8 +320,8 @@ impl HostRelay {
         on_nudge: NudgeHandler,
     ) -> Self {
         let task = tokio::spawn(async move {
-            let mut wake = zeron_sync::wake::subscribe();
-            let mut online = zeron_sync::wake::subscribe_online();
+            let mut wake = harness_sync::wake::subscribe();
+            let mut online = harness_sync::wake::subscribe_online();
             let mut token_changes = config.token.subscribe();
             // Fast-rejoin bookkeeping: the edge DO periodically ends healthy
             // host sessions (hibernation/deploys). Every second the host is
@@ -470,13 +470,13 @@ async fn host_session(
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
 ) -> Result<(), RpcError> {
-    let ws = zeron_sync::dial::connect_ws(url)
+    let ws = harness_sync::dial::connect_ws(url)
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
-    let transport = zeron_sync::socket::pump_with_timing(
+    let transport = harness_sync::socket::pump_with_timing(
         ws,
         out_rx,
         in_tx,
@@ -592,13 +592,13 @@ pub struct DeviceLink {
 
 impl DeviceLink {
     pub async fn connect(url: &str) -> Result<Self, RpcError> {
-        let ws = zeron_sync::dial::connect_ws(url)
+        let ws = harness_sync::dial::connect_ws(url)
             .await
             .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
         Ok(Self::from_socket(ws))
     }
 
-    fn from_socket<S>(ws: zeron_sync::socket::Connection<S>) -> Self
+    fn from_socket<S>(ws: harness_sync::socket::Connection<S>) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -609,7 +609,7 @@ impl DeviceLink {
         let (closed_tx, closed_rx) = watch::channel::<Option<String>>(None);
 
         let pump = tokio::spawn(async move {
-            let transport = zeron_sync::socket::pump_with_timing(
+            let transport = harness_sync::socket::pump_with_timing(
                 ws,
                 wire_rx,
                 wire_in,
@@ -834,8 +834,8 @@ impl LinkCache {
         if tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cache);
             tokio::spawn(async move {
-                let mut wake = zeron_sync::wake::subscribe();
-                let mut online = zeron_sync::wake::subscribe_online();
+                let mut wake = harness_sync::wake::subscribe();
+                let mut online = harness_sync::wake::subscribe_online();
                 let mut token_changes = weak
                     .upgrade()
                     .and_then(|cache| cache.config.token.subscribe());
@@ -1101,8 +1101,8 @@ mod tests {
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
         let (client, _peer) = tokio::io::duplex(64);
-        let (client, progress) = zeron_sync::socket::ProgressIo::new(client);
-        let socket = zeron_sync::socket::Connection {
+        let (client, progress) = harness_sync::socket::ProgressIo::new(client);
+        let socket = harness_sync::socket::Connection {
             socket: WebSocketStream::from_raw_socket(client, Role::Client, None).await,
             progress,
         };
@@ -1124,8 +1124,8 @@ mod tests {
         use tokio::io::AsyncReadExt;
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
         let (client, mut peer) = tokio::io::duplex(8);
-        let (client, progress) = zeron_sync::socket::ProgressIo::new(client);
-        let socket = zeron_sync::socket::Connection {
+        let (client, progress) = harness_sync::socket::ProgressIo::new(client);
+        let socket = harness_sync::socket::Connection {
             socket: WebSocketStream::from_raw_socket(client, Role::Client, None).await,
             progress,
         };

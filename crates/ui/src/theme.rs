@@ -36,8 +36,8 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gpui::{App, Global, Hsla, SharedString, hsla};
 use serde::{Deserialize, Serialize};
-use zeron_syntax::HighlightKind;
-use zeron_theme::{
+use harness_syntax::HighlightKind;
+use harness_theme::{
     AccentPreset, AccentSelection, Color as ModelColor, SurfacePreference, SurfaceTreatment,
     ThemeRegistry, ThemeVariant,
 };
@@ -74,7 +74,7 @@ impl AccentColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Harnesser",
+            Self::Zeron => "Harness",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -273,10 +273,10 @@ pub(crate) fn bump_style_generation() {
     STYLE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-fn model_appearance(appearance: zeron_theme::Appearance) -> Appearance {
+fn model_appearance(appearance: harness_theme::Appearance) -> Appearance {
     match appearance {
-        zeron_theme::Appearance::Dark => Appearance::Dark,
-        zeron_theme::Appearance::Light => Appearance::Light,
+        harness_theme::Appearance::Dark => Appearance::Dark,
+        harness_theme::Appearance::Light => Appearance::Light,
     }
 }
 

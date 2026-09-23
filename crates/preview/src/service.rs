@@ -129,7 +129,7 @@ impl PreviewService {
             loop {
                 let binding = tokio::select! {
                     _ = proxy_stop.cancelled() => break,
-                    binding = proxy::serve(router.clone(), zeron_proto::PREVIEW_PROXY_PORT, proxy_stop.child_token()) => binding,
+                    binding = proxy::serve(router.clone(), harness_proto::PREVIEW_PROXY_PORT, proxy_stop.child_token()) => binding,
                 };
                 match binding {
                     Ok((port, tasks)) => {
@@ -140,7 +140,7 @@ impl PreviewService {
                         break;
                     }
                     Err(error) => proxy_catalog.set_proxy_status(
-                        zeron_proto::PREVIEW_PROXY_PORT,
+                        harness_proto::PREVIEW_PROXY_PORT,
                         Some(format!(
                             "Local previews could not listen on port 7331: {error}"
                         )),
@@ -174,7 +174,7 @@ impl PreviewService {
                         discovery::listeners()
                             .into_iter()
                             .filter(|l| {
-                                l.address.port() != zeron_proto::PREVIEW_PROXY_PORT
+                                l.address.port() != harness_proto::PREVIEW_PROXY_PORT
                                     && l.pid != std::process::id()
                             })
                             .filter_map(|listener| {

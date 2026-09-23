@@ -1,6 +1,6 @@
 //! chat2 host wiring (docs/chat2-sync.md C3): the engine-side implementations
-//! of [`zeron_sync::chat_client::ChatDocSink`] and
-//! [`zeron_sync::chat_client::CheckpointFetcher`], binding a
+//! of [`harness_sync::chat_client::ChatDocSink`] and
+//! [`harness_sync::chat_client::CheckpointFetcher`], binding a
 //! [`crate::doc_host::ChatDocHandle`]'s live doc to a chat2 room.
 //!
 //! The C2 rule is enforced by the coalescing persister: doc content AND its
@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use zeron_doc::SessionDoc;
-use zeron_sync::chat_client::{ChatDocSink, CheckpointFetcher, RowImportOutcome};
-use zeron_sync::{DocsStore, SyncError};
+use harness_doc::SessionDoc;
+use harness_sync::chat_client::{ChatDocSink, CheckpointFetcher, RowImportOutcome};
+use harness_sync::{DocsStore, SyncError};
 
 use crate::doc_host::EdgeConfig;
 use crate::http_error::describe_http_error;
@@ -132,7 +132,7 @@ impl ChatDocSink for EngineChatSink {
             .map_err(|e| e.to_string())?;
         let mut updates = Vec::new();
         for (id, bytes) in pending {
-            if bytes.len() > zeron_sync::chat_client::MAX_PUSH_BYTES {
+            if bytes.len() > harness_sync::chat_client::MAX_PUSH_BYTES {
                 self.store
                     .reject_chat_update(&self.chat_id, &id)
                     .map_err(|e| e.to_string())?;
@@ -373,7 +373,7 @@ impl EdgeChatTransport {
     }
 }
 
-impl zeron_sync::chat_client::ChatTransport for EdgeChatTransport {
+impl harness_sync::chat_client::ChatTransport for EdgeChatTransport {
     fn fetch_rows(&self, after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
         let http = self.http.clone();
         let edge = self.edge.clone();
@@ -442,7 +442,7 @@ mod frontier_tests {
     #[tokio::test]
     async fn http_sync_and_exhausted_checkpoint_retries_retain_dns_cause() {
         use crate::http_error::test_support::FailingDns;
-        use zeron_sync::chat_client::ChatTransport;
+        use harness_sync::chat_client::ChatTransport;
 
         let dns = Arc::new(FailingDns::default());
         let edge = EdgeConfig::with_static_token("https://edge.invalid", "token-secret");
@@ -570,7 +570,7 @@ pub(crate) fn publication_updates(doc: &loro::LoroDoc) -> Result<Vec<Vec<u8>>, S
                 peer, start, end,
             )]))
             .map_err(|e| e.to_string())?;
-        if bytes.len() <= zeron_sync::chat_client::MAX_PUSH_BYTES || end - start <= 1 {
+        if bytes.len() <= harness_sync::chat_client::MAX_PUSH_BYTES || end - start <= 1 {
             // An indivisible oversized op remains durable until checkpointed.
             out.push(bytes);
         } else {

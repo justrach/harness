@@ -98,34 +98,34 @@ The automated suite requires Node; subprocess catalog fixtures also use a POSIX
 shell. It does not need Cursor credentials or consume provider quota:
 
 ```sh
-cargo test -p zeron-harness -- --nocapture
+cargo test -p harness-adapters -- --nocapture
 ```
 
 The following live probes require an authenticated SDK and consume Cursor quota:
 
 ```sh
-cargo run -p zeron-harness --example cursor_stability_probe -- models 10000
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- sessions 20
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- parked 20
+cargo run -p harness-adapters --example cursor_stability_probe -- models 10000
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p harness-adapters --example cursor_stability_probe -- sessions 20
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p harness-adapters --example cursor_stability_probe -- parked 20
 ```
 
 Rapid live steering and cancellation (each consumes provider quota):
 
 ```sh
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- burst 24
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p zeron-harness --example cursor_stability_probe -- cancel-burst 100
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p harness-adapters --example cursor_stability_probe -- burst 24
+ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo run -p harness-adapters --example cursor_stability_probe -- cancel-burst 100
 ```
 
 To measure the live-catalog outage test (about two minutes, including real TTLs):
 
 ```sh
 cursor_stress_dir=$(mktemp -d)
-cargo run -p zeron-harness --example cursor_stability_probe -- resolve > "$cursor_stress_dir/launch.json"
+cargo run -p harness-adapters --example cursor_stability_probe -- resolve > "$cursor_stress_dir/launch.json"
 CURSOR_SDK_SHIM_EXECUTABLE="$PWD/crates/harness/tests/fixtures/cursor-stress-proxy.py" \
 ZERON_CURSOR_STRESS_LAUNCH="$cursor_stress_dir/launch.json" \
 ZERON_CURSOR_STRESS_COUNTER="$cursor_stress_dir/probes.log" \
 ZERON_CURSOR_STRESS_OUTAGE_FLAG="$cursor_stress_dir/outage" \
-cargo run -p zeron-harness --example cursor_stability_probe -- outage 10000
+cargo run -p harness-adapters --example cursor_stability_probe -- outage 10000
 wc -l "$cursor_stress_dir/probes.log"  # 3: live warm-up, injected failure, live recovery
 ```
 
@@ -134,7 +134,7 @@ To demonstrate the old persistent active-run failure with the same fixture:
 ```sh
 git show 4368e926:crates/harness/src/cursor/shim.mjs > /tmp/cursor-before-stability.mjs
 ZERON_CURSOR_TEST_SHIM=/tmp/cursor-before-stability.mjs \
-cargo test -p zeron-harness --test cursor_shim stress_100_interrupted_sessions -- --nocapture
+cargo test -p harness-adapters --test cursor_shim stress_100_interrupted_sessions -- --nocapture
 # Expected failure on the first recovery. Without the override, all 100 pass.
 ```
 

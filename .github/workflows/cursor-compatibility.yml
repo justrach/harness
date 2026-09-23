@@ -26,12 +26,12 @@ jobs:
       - name: Dependency updater validation
         run: python3 scripts/test-update-cursor-sdk.py
       - name: Harness compatibility, steering, and session recovery
-        run: cargo test --locked -p zeron-harness
+        run: cargo test --locked -p harness-adapters
       - name: Durable commands and engine message delivery
         run: |
-          cargo test --locked -p zeron-doc
-          cargo test --locked -p zeron-engine --test message_queue
-          cargo test --locked -p zeron-engine --lib sessions::tests
+          cargo test --locked -p harness-doc
+          cargo test --locked -p harness-engine --test message_queue
+          cargo test --locked -p harness-engine --lib sessions::tests
       - name: Install the exact SDK selected by this engine
         run: |
           pin=$(python3 -c 'import re; print(re.search(r"const CURSOR_SDK_PIN: &str = \"([^\"]+)\"", open("crates/harness/src/cursor/mod.rs").read())[1])')

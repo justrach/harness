@@ -1,4 +1,4 @@
-//! zeron-harness — one interface over coding agents (plus a mock for tests).
+//! harness-adapters — one interface over coding agents (plus a mock for tests).
 //!
 //! NATIVE DRIVERS speak each agent's own wire directly: Claude Code over
 //! stream-json ([`ClaudeHarness`]), Codex over the app-server JSON-RPC
@@ -19,7 +19,7 @@ use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
-use zeron_proto::{
+use harness_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
 };
@@ -130,7 +130,7 @@ pub trait Harness: Send + Sync {
     async fn skills(
         &self,
         cwd: &std::path::Path,
-    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+    ) -> Result<Option<Vec<harness_proto::invocation::Skill>>, HarnessError> {
         if self.id() == HarnessId::Mock {
             return Ok(None);
         }

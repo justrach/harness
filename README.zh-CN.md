@@ -1,12 +1,12 @@
-# Harnesser
+# Harness
 
 在你自己的机器上管理编码 agent 的原生桌面界面：Claude Code、Codex、Cursor、Devin、Grok、Hermes、graff、Pi、OpenCode、Antigravity。默认纯本地，需要时再打开多设备同步。
 
 *[English](README.md) | 简体中文*
 
-产品名是 **Harnesser**（`harness.codegraff.app`）。命令行二进制是 `harness`。`HARNESS_*` 优先，`ZERON_*` 仍然有效。一个二进制同时覆盖带界面的 GUI 和无界面引擎。
+产品名是 **Harness**（`harness.codegraff.app`）。命令行二进制是 `harness`。`HARNESS_*` 优先，`ZERON_*` 仍然有效。一个二进制同时覆盖带界面的 GUI 和无界面引擎。
 
-新安装默认使用 **Codegraff** 主题（Warm Graphite：浅色是奶油+琥珀，深色是近黑+金）。设置 → 外观里仍有 Harnesser、VS Code 目录，以及 VS Code 主题导入。
+新安装默认使用 **Codegraff** 主题（Warm Graphite：浅色是奶油+琥珀，深色是近黑+金）。设置 → 外观里仍有 Harness、VS Code 目录，以及 VS Code 主题导入。
 
 ## 从源码运行
 
@@ -18,7 +18,7 @@
 ./scripts/run-macos-dev.sh
 ```
 
-脚本会编译 `harness`，放到 `target/macos-dev/Harnesser.app`，再通过 Launch Services 打开，这样 TCC 记在应用上而不是终端上。开发数据在 `target/macos-dev/data`（可用 `HARNESS_DEV_DATA_DIR` 覆盖）；IPC 默认端口 `49777`。重建前先退出应用。
+脚本会编译 `harness`，放到 `target/macos-dev/Harness.app`，再通过 Launch Services 打开，这样 TCC 记在应用上而不是终端上。开发数据在 `target/macos-dev/data`（可用 `HARNESS_DEV_DATA_DIR` 覆盖）；IPC 默认端口 `49777`。重建前先退出应用。
 
 离线看效果、带种子会话：
 
@@ -45,7 +45,7 @@ harness update
 
 ### Windows
 
-解压便携 ZIP，运行 `harness.exe`，把 `zeron-update.json` 放在旁边才能应用内更新。源码构建见 [Windows development](docs/reference/windows-development.md)。
+解压便携 ZIP，运行 `harness.exe`，把 `harness-update.json` 放在旁边才能应用内更新。源码构建见 [Windows development](docs/reference/windows-development.md)。
 
 ```powershell
 cargo run --locked -p harness

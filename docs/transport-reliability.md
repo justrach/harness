@@ -109,10 +109,10 @@ regression, and the final implementation uses byte progress and fragmentation.
 ## Reproduce
 
 ```sh
-cargo test -p zeron-sync -p zeron-rpc --features zeron-sync/mock-server
-cargo test -p zeron-sync --lib socket:: -- --nocapture
-cargo clippy -p zeron-sync -p zeron-rpc --all-targets --features zeron-sync/mock-server
-cargo build -p zeron-sync --example transport_live
+cargo test -p harness-sync -p harness-rpc --features harness-sync/mock-server
+cargo test -p harness-sync --lib socket:: -- --nocapture
+cargo clippy -p harness-sync -p harness-rpc --all-targets --features harness-sync/mock-server
+cargo build -p harness-sync --example transport_live
 
 # Requires authenticated Wrangler and an account with Workers/R2 enabled.
 cd edge

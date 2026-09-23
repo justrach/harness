@@ -186,7 +186,7 @@
     "Cancelling the first turn before a provider checkpoint exists can lose that unfinished turn context on resume; established checkpoint recall passed."
   ],
   "harnessTests": {
-    "command": "cargo test -p zeron-harness",
+    "command": "cargo test -p harness-adapters",
     "passed": 297,
     "failed": 0,
     "ignored": 10

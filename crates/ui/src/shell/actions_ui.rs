@@ -1,6 +1,6 @@
 use super::*;
 
-use zeron_proto::{
+use harness_proto::{
     ProjectAction, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, ProjectActionsSnapshot,
 };
 

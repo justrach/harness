@@ -30,8 +30,8 @@ The `workspace_file_surface_proxies_over_the_relay` integration test runs two en
 Validation commands:
 
 ```sh
-cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
-cargo test --release --locked -p zeron-engine --lib --test workspace_files --test device_routing
+cargo test --release --locked -p harness-ui --lib -- --test-threads=1
+cargo test --release --locked -p harness-engine --lib --test workspace_files --test device_routing
 ```
 
 Automated results recorded on 2026-09-12 (Linux):

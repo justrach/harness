@@ -348,7 +348,7 @@ struct NewSpaceSheet: View {
             Text("No devices yet")
                 .font(Theme.sans(15, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text("Run Harnesser on a computer first — its folders will show up here.")
+            Text("Run Harness on a computer first — its folders will show up here.")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.textMuted)
                 .multilineTextAlignment(.center)

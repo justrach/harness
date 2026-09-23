@@ -2,7 +2,7 @@
 use crate::{HarnessError, ModelContext};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use zeron_proto::HarnessId;
+use harness_proto::HarnessId;
 
 pub(crate) fn root(variable: &str, fallback: PathBuf) -> PathBuf {
     std::env::var_os(variable)

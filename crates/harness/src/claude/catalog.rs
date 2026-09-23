@@ -7,7 +7,7 @@
 //! CLI can under-report supported modes. The shared initialize probe also supplies
 //! slash commands and is cached by credential and binary context.
 
-use zeron_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
+use harness_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
 /// The ultrathink directive rides every user message as a prompt prefix — that
 /// is how the mode actually works in Claude Code (a prompt convention, not an
@@ -16,7 +16,7 @@ pub(crate) const ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
 
 pub(crate) fn apply_ultrathink(reasoning: Option<ReasoningLevel>, text: &str) -> String {
     if reasoning == Some(ReasoningLevel::Ultrathink)
-        && zeron_proto::invocation::leading_command(text).is_none()
+        && harness_proto::invocation::leading_command(text).is_none()
     {
         format!("{ULTRATHINK_PREFIX}{text}")
     } else {

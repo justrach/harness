@@ -1,12 +1,12 @@
 //! Opt-in production engine + Cursor SDK checks. Uses real account quota.
-//! ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p zeron-engine --test cursor_live -- --ignored --nocapture --test-threads=1
+//! ZERON_CURSOR_STATE_DIR=$(mktemp -d) cargo test -p harness-engine --test cursor_live -- --ignored --nocapture --test-threads=1
 use std::{sync::Arc, time::Duration};
-use zeron_doc::{
+use harness_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionMessageEntry,
 };
-use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::CursorHarness;
-use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+use harness_engine::{EngineCore, HarnessRegistry};
+use harness_adapters::CursorHarness;
+use harness_proto::{HarnessId, RunRequest, SandboxLevel};
 
 const CHAT: &str = "cursor-live-audit";
 fn setup(path: &std::path::Path) -> EngineCore {
@@ -129,11 +129,11 @@ async fn remote_steer_batch_reaches_real_muse_with_every_message() {
         .unwrap()
         .as_millis() as i64;
     for (i, token) in tokens.iter().enumerate().skip(1) {
-        handle.doc().queue_command(&zeron_doc::SessionCommandEntry {
+        handle.doc().queue_command(&harness_doc::SessionCommandEntry {
             id: format!("remote-{i}"),
             payload: SessionCommandPayload::Steer {prompt: format!("Remember {token}. Reply with the immediately previous user token and this token. Do not use tools."), message_id: Some(format!("message-{i}"))},
             issued_by: "remote-viewer".into(), issued_at: now + i as i64,
-            based_on: None, expires_at: None, status: zeron_doc::SessionCommandStatus::Pending, resolution: None,
+            based_on: None, expires_at: None, status: harness_doc::SessionCommandStatus::Pending, resolution: None,
         }).unwrap();
     }
     core.doc_host.drain_commands(&handle).await;
@@ -250,7 +250,7 @@ async fn send_now_recall(stage: u8) {
                     .ok()
                     .is_some_and(|(events, _)| {
                         events.iter().any(|e| {
-                            matches!(e.event, zeron_proto::AgentEvent::SessionStarted { .. })
+                            matches!(e.event, harness_proto::AgentEvent::SessionStarted { .. })
                         })
                     })
             },
@@ -321,7 +321,7 @@ async fn startup_steering_burst_retains_all_interrupted_messages() {
                     .unwrap()
                     .0
                     .iter()
-                    .filter(|e| matches!(e.event, zeron_proto::AgentEvent::SessionStarted { .. }))
+                    .filter(|e| matches!(e.event, harness_proto::AgentEvent::SessionStarted { .. }))
                     .count()
                     == i + 1
             },

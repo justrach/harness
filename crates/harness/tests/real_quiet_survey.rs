@@ -2,7 +2,7 @@
 //! once with no orphaned output. Silent gaps are measured for diagnostics;
 //! silence is never proof that an ACP prompt has completed (#296).
 //!
-//! SURVEY_RUNS=3 cargo test -p zeron-harness --test real_quiet_survey -- --ignored --nocapture
+//! SURVEY_RUNS=3 cargo test -p harness-adapters --test real_quiet_survey -- --ignored --nocapture
 //! Uninstalled/unauthenticated agents are skipped. For mandatory live Pi
 //! regression coverage with an injected delay, use real_acp_lifecycle.rs.
 
@@ -11,8 +11,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
-use zeron_proto::{
+use harness_adapters::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use harness_proto::{
     AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
 };
 

@@ -5,8 +5,8 @@
 use futures::StreamExt;
 use std::{path::PathBuf, time::Duration};
 use tokio::sync::{mpsc, oneshot};
-use zeron_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
-use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
+use harness_adapters::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use harness_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 #[tokio::test]
 #[ignore = "requires an isolated real Pi adapter and local mock provider"]

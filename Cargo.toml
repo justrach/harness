@@ -25,18 +25,18 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-zeron-proto = { path = "crates/proto" }
-zeron-preview = { path = "crates/preview" }
-zeron-doc = { path = "crates/doc" }
-zeron-sync = { path = "crates/sync" }
-zeron-harness = { path = "crates/harness" }
-zeron-engine = { path = "crates/engine" }
-zeron-rpc = { path = "crates/rpc" }
-zeron-update = { path = "crates/update" }
-zeron-ui = { path = "crates/ui" }
-zeron-syntax = { path = "crates/syntax" }
-zeron-theme = { path = "crates/theme" }
-zeron-mcp = { path = "crates/mcp" }
+harness-proto = { path = "crates/proto" }
+harness-preview = { path = "crates/preview" }
+harness-doc = { path = "crates/doc" }
+harness-sync = { path = "crates/sync" }
+harness-adapters = { path = "crates/harness" }
+harness-engine = { path = "crates/engine" }
+harness-rpc = { path = "crates/rpc" }
+harness-update = { path = "crates/update" }
+harness-ui = { path = "crates/ui" }
+harness-syntax = { path = "crates/syntax" }
+harness-theme = { path = "crates/theme" }
+harness-mcp = { path = "crates/mcp" }
 
 # CRDT
 loro = "1.13"
@@ -71,7 +71,7 @@ loro-protocol = "0.3"
 # Paint-time rounded image masks (#9), bounded Windows backdrop blur and
 # translucent compositing, plus blur-aware scene batching (#10).
 #
-# Harnesser vendors both forks (Apache-2.0; see vendor/README.md): zui at
+# Harness vendors both forks (Apache-2.0; see vendor/README.md): zui at
 # gaelcado/zui 53869c2 (the text-fade patch zeron pinned on top of
 # zeronsh/zui c2d273d) and gpui-base from zeronsh/gpui-component 03cd994.
 gpui = { path = "vendor/zui/crates/gpui" }
@@ -151,3 +151,12 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.app-dev]
+# The locally run app bundle (scripts/run-macos-dev.sh). Plain `dev` leaves
+# the workspace crates unoptimized, which makes every UI frame (layout,
+# prepaint, paint) several times more expensive: a streaming agent measured
+# 18% CPU there vs ~13% here. Keeps debug assertions and incremental builds.
+inherits = "dev"
+opt-level = 2
+debug = "line-tables-only"

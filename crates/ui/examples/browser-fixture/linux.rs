@@ -2,7 +2,7 @@ use super::*;
 use gpui::{
     AnyWindowHandle, Entity, MouseButton, Pixels, PlatformInput, Point, WindowHandle, point,
 };
-use zeron_ui::browser::BrowserSurface;
+use harness_ui::browser::BrowserSurface;
 
 async fn eval(
     page: &Entity<BrowserSurface>,
@@ -468,7 +468,7 @@ pub async fn exercise(
         page.read_with(cx, |b, _| b.fixture_native_visible()),
         "reopened sidebar lost browser"
     );
-    cx.update(|cx| appearance::set_surface(zeron_theme::SurfacePreference::Frosted, cx));
+    cx.update(|cx| appearance::set_surface(harness_theme::SurfacePreference::Frosted, cx));
     capture(output, "browser-blur-baseline-dark")?;
     window.update(cx, |s, _, cx| s.fixture_browser_menu(true, cx))?;
     pause(cx, 700).await;
@@ -512,7 +512,7 @@ pub async fn exercise(
     .await?;
     pause(cx, 300).await;
     capture(output, "browser-blur-solid-light")?;
-    cx.update(|cx| appearance::set_surface(zeron_theme::SurfacePreference::Opaque, cx));
+    cx.update(|cx| appearance::set_surface(harness_theme::SurfacePreference::Opaque, cx));
     pause(cx, 300).await;
     capture(output, "browser-menu-opaque")?;
     let bounds = page.read_with(cx, |b, _| b.fixture_linux_bounds());
@@ -528,7 +528,7 @@ pub async fn exercise(
     window.update(cx, |s, _, cx| s.fixture_browser_menu(false, cx))?;
     cx.update(|cx| {
         appearance::set_mode(appearance::AppearanceMode::Dark, cx);
-        appearance::set_surface(zeron_theme::SurfacePreference::Frosted, cx);
+        appearance::set_surface(harness_theme::SurfacePreference::Frosted, cx);
     });
     pause(cx, 300).await;
     let frames = eval(&page, "window.browserFrames", cx)

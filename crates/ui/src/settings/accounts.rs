@@ -16,11 +16,11 @@ use gpui::{
 };
 use std::time::Duration;
 
-use zeron_proto::{
+use harness_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
     AgentLoginStatus, HarnessId,
 };
-use zeron_rpc::methods;
+use harness_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
@@ -513,7 +513,7 @@ impl AccountsPage {
             this.update(cx, |page, cx| {
                 match result.and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
-                        .map_err(|e| zeron_rpc::RpcError::Failed(e.to_string()))
+                        .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(start) => {
                         cx.open_url(&start.url);
@@ -699,7 +699,7 @@ impl AccountsPage {
     /// quiet reset time.
     fn render_usage_meter(
         &self,
-        window: &zeron_proto::AgentUsageWindow,
+        window: &harness_proto::AgentUsageWindow,
         theme: &Theme,
         now: DateTime<Utc>,
     ) -> AnyElement {
@@ -1475,7 +1475,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Harnesser \
+                                "The Claude Code, Codex, and Cursor logins on this device. Harness \
                                  detects the live session, keeps each account backed up, and can \
                                  swap between them.",
                             ))

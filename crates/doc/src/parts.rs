@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use zeron_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
+use harness_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -432,7 +432,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         } => {
             let status = match event.as_ref() {
                 AgentEvent::Done { status, .. } => Some(match status {
-                    zeron_proto::DoneStatus::Errored => SubagentStatus::Failed,
+                    harness_proto::DoneStatus::Errored => SubagentStatus::Failed,
                     _ => SubagentStatus::Done,
                 }),
                 // A new assignment reopens a settled chip. Providers may
@@ -802,7 +802,7 @@ mod tests {
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::SessionStarted {
-                harness: zeron_proto::HarnessId::Mock,
+                harness: harness_proto::HarnessId::Mock,
                 model: "m".into(),
                 tools: vec![],
                 cwd: "/".into(),
@@ -1152,7 +1152,7 @@ mod tests {
 
     #[test]
     fn subagent_events_refresh_the_spawn_chip_in_place() {
-        use zeron_proto::DoneStatus;
+        use harness_proto::DoneStatus;
         let mut parts = Vec::new();
         fold_event_into_parts(
             &mut parts,
@@ -1241,7 +1241,7 @@ mod tests {
         // Mis-keyed tagged traffic (claude's background shells settled
         // through the subagent subtype, 2026-08-20) must not stamp lifecycle
         // onto an ordinary tool chip — the genus gate is the CALL.
-        use zeron_proto::DoneStatus;
+        use harness_proto::DoneStatus;
         let mut parts = Vec::new();
         fold_event_into_parts(
             &mut parts,

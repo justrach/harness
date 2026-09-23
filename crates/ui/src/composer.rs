@@ -24,12 +24,12 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
-use zeron_proto::{
+use harness_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
+use harness_proto::{
     FileSearchMatch, HarnessId, RunRequest, SandboxLevel, SlashCommand, UserInputAnswer,
     UserInputQuestion, capabilities,
 };
-use zeron_rpc::{RpcError, methods};
+use harness_rpc::{RpcError, methods};
 
 use crate::appshots::{self, CapturedAppshot};
 use crate::attachments::{self, StagedAttachment};
@@ -866,7 +866,7 @@ const MENTION_TOOLTIP_HEIGHT: f32 = 24.0;
 const MENTION_SIDE_PAD: &str = "\u{00A0}";
 /// A private URI scheme keeps file mentions distinguishable from ordinary
 /// Markdown links pasted into the composer.
-use zeron_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
+use harness_proto::file_mentions::{FILE_MENTION_SCHEME, local_file_link, local_path_is_safe};
 
 /// A restorable point in the input's history: text plus where the caret and
 /// selection sat when the edit landed.
@@ -935,7 +935,7 @@ fn dropped_file_mention(
 }
 
 fn file_mention_links(text: &str) -> Vec<FileMentionLink> {
-    zeron_proto::file_mentions::file_mention_links(text)
+    harness_proto::file_mentions::file_mention_links(text)
         .into_iter()
         .map(|link| FileMentionLink {
             range: link.range,
@@ -1178,7 +1178,7 @@ impl TextProjection {
     fn project(raw: &str, active: Option<Range<usize>>, compact: bool) -> Self {
         let mut links = file_mention_links(raw);
         links.extend(
-            zeron_proto::invocation::invocation_links(raw)
+            harness_proto::invocation::invocation_links(raw)
                 .into_iter()
                 .map(|(range, invocation)| FileMentionLink {
                     range,
@@ -1395,7 +1395,7 @@ pub struct SentMentionSpan {
 /// is safe to call for every user row.
 pub fn sent_mention_display(raw: &str) -> Option<(String, Vec<SentMentionSpan>)> {
     if !raw.contains(FILE_MENTION_SCHEME)
-        && !raw.contains(zeron_proto::invocation::INVOCATION_SCHEME)
+        && !raw.contains(harness_proto::invocation::INVOCATION_SCHEME)
     {
         return None;
     }
@@ -1779,7 +1779,7 @@ pub struct ComposerInput {
     /// Raw Markdown → chip display projection from the last layout pass.
     projection: TextProjection,
     syntax_source: String,
-    syntax_spans: Vec<zeron_syntax::HighlightSpan>,
+    syntax_spans: Vec<harness_syntax::HighlightSpan>,
     syntax_task: Option<Task<()>>,
     /// Inline completion preview: painted in faint ink after the text while
     /// the caret sits at the end (palette tab-completion). Owned by the
@@ -2776,8 +2776,8 @@ impl ComposerInput {
                 continue;
             }
             text.push_str(&self.content[at..link.range.start]);
-            text.push_str(&zeron_proto::invocation::invocation_prompt(
-                &zeron_proto::file_mentions::file_mention_prompt(&self.content[link.range.clone()]),
+            text.push_str(&harness_proto::invocation::invocation_prompt(
+                &harness_proto::file_mentions::file_mention_prompt(&self.content[link.range.clone()]),
             ));
             at = link.range.end;
         }
@@ -4631,7 +4631,7 @@ pub enum ComposerEvent {
     /// chat, even when the user has selected another chat in the meantime.
     WorktreeSetup {
         chat_id: String,
-        setup_action: Option<zeron_proto::ProjectActionRun>,
+        setup_action: Option<harness_proto::ProjectActionRun>,
         setup_error: Option<String>,
         target_device_id: Option<String>,
     },
@@ -4947,7 +4947,7 @@ fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
-/// Commands implemented by Harnesser, independently of the provider protocol.
+/// Commands implemented by Harness, independently of the provider protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceCommand {
     Model,
@@ -4967,27 +4967,27 @@ impl WorkspaceCommand {
             (
                 Self::Model,
                 "model",
-                "Harnesser: choose agent, model, and reasoning",
+                "Harness: choose agent, model, and reasoning",
                 false,
             ),
-            (Self::New, "new", "Harnesser: start a new conversation", false),
+            (Self::New, "new", "Harness: start a new conversation", false),
             (
                 Self::Resume,
                 "resume",
-                "Harnesser: search and open conversations",
+                "Harness: search and open conversations",
                 false,
             ),
-            (Self::Settings, "settings", "Harnesser: open settings", false),
-            (Self::Diff, "diff", "Harnesser: open changes", true),
-            (Self::Files, "files", "Harnesser: open project files", true),
-            (Self::Terminal, "terminal", "Harnesser: open a terminal", true),
+            (Self::Settings, "settings", "Harness: open settings", false),
+            (Self::Diff, "diff", "Harness: open changes", true),
+            (Self::Files, "files", "Harness: open project files", true),
+            (Self::Terminal, "terminal", "Harness: open a terminal", true),
             (
                 Self::Rename,
                 "rename",
-                "Harnesser: rename this conversation",
+                "Harness: rename this conversation",
                 true,
             ),
-            (Self::Stop, "stop", "Harnesser: stop the active run", true),
+            (Self::Stop, "stop", "Harness: stop the active run", true),
         ]
     }
 }
@@ -5001,14 +5001,14 @@ fn with_workspace_commands(
         if needs_chat && !in_chat {
             continue;
         }
-        // Keep provider commands intact. Explicit Harnesser names remain available
+        // Keep provider commands intact. Explicit Harness names remain available
         // when a provider owns the unqualified name.
         let mut name = name.to_string();
         while rows.iter().any(|row| row.name == name) {
             name = format!("zeron:{name}");
         }
         rows.push(InvocationCandidate {
-            invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
+            invocation: harness_proto::invocation::Invocation::Command { name: name.clone() },
             name,
             description: description.into(),
             input_hint: None,
@@ -5038,17 +5038,17 @@ struct InvocationCandidate {
     name: String,
     description: String,
     input_hint: Option<String>,
-    invocation: zeron_proto::invocation::Invocation,
+    invocation: harness_proto::invocation::Invocation,
 }
 
 fn invocation_insertion(
-    invocation: &zeron_proto::invocation::Invocation,
+    invocation: &harness_proto::invocation::Invocation,
     supported: bool,
 ) -> String {
     if !supported
         && matches!(
             invocation,
-            zeron_proto::invocation::Invocation::Command { .. }
+            harness_proto::invocation::Invocation::Command { .. }
         )
     {
         invocation.prompt_text()
@@ -5059,8 +5059,8 @@ fn invocation_insertion(
 
 fn references_require_update(text: &str, supported: bool) -> bool {
     !supported
-        && (!zeron_proto::invocation::invocation_links(text).is_empty()
-            || !zeron_proto::file_mentions::file_mention_links(text).is_empty())
+        && (!harness_proto::invocation::invocation_links(text).is_empty()
+            || !harness_proto::file_mentions::file_mention_links(text).is_empty())
 }
 
 /// Slash-command completion state: like [`FileMentionState`] but the
@@ -5126,9 +5126,9 @@ fn mention_error_message(err: &RpcError) -> SharedString {
 /// A failed command discovery, translated for the popup.
 fn invocation_candidates(
     commands: Vec<SlashCommand>,
-    skills: Vec<zeron_proto::invocation::Skill>,
+    skills: Vec<harness_proto::invocation::Skill>,
 ) -> Vec<InvocationCandidate> {
-    use zeron_proto::invocation::{
+    use harness_proto::invocation::{
         valid_invocation_name, valid_skill_command_name, valid_skill_path,
     };
     // A remote engine may use an older catalog decoder. Every visible choice
@@ -5161,7 +5161,7 @@ fn invocation_candidates(
             input_hint: c.input_hint,
             name: c.name.clone(),
             description: c.description,
-            invocation: zeron_proto::invocation::Invocation::Command { name: c.name },
+            invocation: harness_proto::invocation::Invocation::Command { name: c.name },
         })
         .chain(
             skills
@@ -5171,12 +5171,12 @@ fn invocation_candidates(
                     workspace_command: None,
                     input_hint: None,
                     name: s.name.clone(),
-                    description: if zeron_proto::invocation::native_skill_identity(&s.path) {
+                    description: if harness_proto::invocation::native_skill_identity(&s.path) {
                         s.description.clone()
                     } else {
                         format!("{} — {}", s.description, s.path)
                     },
-                    invocation: zeron_proto::invocation::Invocation::Skill {
+                    invocation: harness_proto::invocation::Invocation::Skill {
                         name: s.name,
                         path: s.path,
                         command: s.command,
@@ -5188,7 +5188,7 @@ fn invocation_candidates(
 
 fn merge_invocation_results(
     commands: Result<Vec<SlashCommand>, RpcError>,
-    skills: Result<Option<Vec<zeron_proto::invocation::Skill>>, RpcError>,
+    skills: Result<Option<Vec<harness_proto::invocation::Skill>>, RpcError>,
     skill_only: bool,
 ) -> Result<(Vec<InvocationCandidate>, bool, Option<SharedString>), RpcError> {
     match (commands, skills) {
@@ -5218,9 +5218,9 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
             if skill {
-                "Skills require an updated engine on the selected device. Restart that device’s Harnesser after updating.".into()
+                "Skills require an updated engine on the selected device. Restart that device’s Harness after updating.".into()
             } else {
-                "Commands require an updated engine on the selected device. Restart that device’s Harnesser after updating.".into()
+                "Commands require an updated engine on the selected device. Restart that device’s Harness after updating.".into()
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
@@ -6402,7 +6402,7 @@ impl Composer {
                         .await
                         .ok()
                         .and_then(|v| {
-                            serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(v)
+                            serde_json::from_value::<Option<Vec<harness_proto::invocation::Skill>>>(v)
                                 .ok()
                         })
                         .flatten()
@@ -6885,7 +6885,7 @@ impl Composer {
                         .client()
                         .call(methods::LIST_SKILLS, params.clone())
                         .await?;
-                    serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
+                    serde_json::from_value::<Option<Vec<harness_proto::invocation::Skill>>>(value)
                         .map_err(|e| RpcError::Failed(e.to_string()))
                 };
                 let (commands, skills) = futures::join!(commands, skills);
@@ -7399,7 +7399,7 @@ impl Composer {
     /// Check before consuming drafts, attachments, or an edited queue row.
     pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if references_require_update(text, self.reference_delivery_supported(cx)) {
-            self.failure = Some("Update the selected device’s Harnesser to send file, command, or skill references. Your draft is preserved.".into());
+            self.failure = Some("Update the selected device’s Harness to send file, command, or skill references. Your draft is preserved.".into());
             self.failure_key = Some(self.current_key.clone());
             cx.notify();
             return false;
@@ -7742,7 +7742,7 @@ impl Composer {
         // so the doc frame dedups it away).
         let echo = SessionMessageEntry {
             id: message_id.clone(),
-            role: zeron_doc::MessageRole::User,
+            role: harness_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
                 id: "t0".into(),
                 text: echo_text.clone(),
@@ -7908,7 +7908,7 @@ impl Composer {
                     if should_publish_optimistic_echo(queue) {
                         let refreshed = SessionMessageEntry {
                             id: message_id.clone(),
-                            role: zeron_doc::MessageRole::User,
+                            role: harness_doc::MessageRole::User,
                             parts: vec![MessagePart::Text {
                                 id: "t0".into(),
                                 text: content.clone(),
@@ -7952,7 +7952,7 @@ impl Composer {
                 // a blocking CreateWorktree relay RPC here: the RPC had no
                 // timeout, so a lost relay frame wedged the send on "Sending…"
                 // forever while the session ran remotely anyway (2026-08-18).
-                let mut run_worktree: Option<zeron_proto::WorktreeSpec> = None;
+                let mut run_worktree: Option<harness_proto::WorktreeSpec> = None;
                 // The picked ref rides createChat so the session footer names
                 // it from the first frame (it read "Select ref" until the
                 // host's diff reconciler got around to stamping the branch).
@@ -7985,7 +7985,7 @@ impl Composer {
                                 // current checkout state.
                                 let base =
                                     base.clone().unwrap_or_else(|| "HEAD".to_string());
-                                run_worktree = Some(zeron_proto::WorktreeSpec {
+                                run_worktree = Some(harness_proto::WorktreeSpec {
                                     repo_path: repo_path.clone(),
                                     base,
                                     space_id: space_id.clone(),
@@ -8693,7 +8693,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        // Harnesser composer-actions.tsx: a size-7 filled circle — up-arrow to
+        // Harness composer-actions.tsx: a size-7 filled circle — up-arrow to
         // send/queue, a dark rounded square on the same light circle to stop.
         match mode {
             SendButtonMode::Stop => div()
@@ -8916,7 +8916,7 @@ impl Render for Composer {
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
         let queue_notice: Option<(SharedString, bool)> = {
-            use zeron_proto::ConnectivityState as S;
+            use harness_proto::ConnectivityState as S;
             let state = self.state.read(cx);
             let degraded = match state.selected_chat.as_deref() {
                 Some(id) => state.chat_delivery_degraded(id),
@@ -10345,13 +10345,13 @@ mod tests {
                         assert_eq!(input.text(), draft, "action removal is undoable");
                     });
                 }
-                let skill = zeron_proto::invocation::Invocation::Skill {
+                let skill = harness_proto::invocation::Invocation::Skill {
                     name: "review".into(),
                     path: "/repo/SKILL.md".into(),
                     command: None,
                 };
                 for invocation in [
-                    zeron_proto::invocation::Invocation::Command {
+                    harness_proto::invocation::Invocation::Command {
                         name: "review".into(),
                     },
                     skill,
@@ -10378,7 +10378,7 @@ mod tests {
                         format!(
                             "café {} after",
                             match &invocation {
-                                zeron_proto::invocation::Invocation::Command { .. } =>
+                                harness_proto::invocation::Invocation::Command { .. } =>
                                     "/review".to_string(),
                                 _ => invocation.link(),
                             }
@@ -10425,7 +10425,7 @@ mod tests {
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        let skill = zeron_proto::invocation::Invocation::Skill {
+        let skill = harness_proto::invocation::Invocation::Skill {
             name: "review".into(),
             path: "/skills/review/SKILL.md".into(),
             command: None,
@@ -10445,7 +10445,7 @@ mod tests {
                 let state = cx.new(|_| AppState::new());
                 state.update(cx, |state, _| {
                     state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                        zeron_rpc::RpcClient::new(out, inbound),
+                        harness_rpc::RpcClient::new(out, inbound),
                     ));
                     state.selected_chat = Some("literal-draft".into());
                 });
@@ -10466,7 +10466,7 @@ mod tests {
                 let mut submitted = None;
                 let mut discarded = false;
                 while let Ok(frame) = requests.try_recv() {
-                    let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                    let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
                     if frame.method.as_deref() == Some(methods::FINISH_QUEUED_MESSAGE_EDIT) {
                         discarded = frame.params["action"] == "discard";
                         submitted = frame.params["text"].as_str().map(str::to_owned);
@@ -10486,8 +10486,8 @@ mod tests {
                 } else {
                     let submitted = submitted.expect("submission must reach the engine RPC");
                     assert_eq!(submitted, raw);
-                    assert!(zeron_proto::invocation::leading_command(&submitted).is_none());
-                    assert!(zeron_proto::invocation::invocation_links(&submitted).is_empty());
+                    assert!(harness_proto::invocation::leading_command(&submitted).is_none());
+                    assert!(harness_proto::invocation::invocation_links(&submitted).is_empty());
                 }
             }
         }
@@ -10509,7 +10509,7 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::RpcClient::new(out, inbound),
+                harness_rpc::RpcClient::new(out, inbound),
             ));
             state.selected_chat = Some("c".into());
             // A send in flight reads as Working — the double-Enter window.
@@ -10534,13 +10534,13 @@ mod tests {
         let raw = format!(
             "{} {} {}",
             local_file_link("src/main.rs", false),
-            zeron_proto::invocation::Invocation::Skill {
+            harness_proto::invocation::Invocation::Skill {
                 command: None,
                 name: "review".into(),
                 path: "/repo/SKILL.md".into(),
             }
             .link(),
-            zeron_proto::invocation::Invocation::Command {
+            harness_proto::invocation::Invocation::Command {
                 name: "help".into()
             }
             .link(),
@@ -10585,7 +10585,7 @@ mod tests {
         let (_dir, handle) = composer_focus_window(cx);
         handle.update(cx, |composer, window, cx| {
             let file = local_file_link("src/composer.rs", false);
-            let skill = zeron_proto::invocation::Invocation::Skill { name: "review-changes".into(), path: "/repo/SKILL.md".into(), command: None }.link();
+            let skill = harness_proto::invocation::Invocation::Skill { name: "review-changes".into(), path: "/repo/SKILL.md".into(), command: None }.link();
             let raw = format!("Review {file} with {skill} and enough trailing prose to need more than one additional row of wrapping.");
             composer.input.update(cx, |input, cx| {
                 input.set_text(&raw, cx);
@@ -10925,7 +10925,7 @@ mod tests {
                     .unwrap(),
                 ];
                 state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                    zeron_rpc::RpcClient::new(out, inbound),
+                    harness_rpc::RpcClient::new(out, inbound),
                 ));
             });
             let composer = cx.new(|cx| Composer::new(state.clone(), cx));
@@ -10944,7 +10944,7 @@ mod tests {
             }
             let mut methods = Vec::new();
             while let Ok(frame) = requests.try_recv() {
-                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
                 assert_eq!(frame.params["targetDeviceId"], "peer");
                 assert!(frame.params.get("cwd").is_none());
                 let value = match frame.method.as_deref() {
@@ -10959,7 +10959,7 @@ mod tests {
                 methods.push(frame.method.unwrap());
                 replies
                     .try_send(
-                        serde_json::to_string(&zeron_rpc::ServerFrame {
+                        serde_json::to_string(&harness_rpc::ServerFrame {
                             id: frame.id,
                             ok: Some(value),
                             ..Default::default()
@@ -10979,7 +10979,7 @@ mod tests {
                 if change_target {
                     assert_eq!(text, raw);
                 } else {
-                    assert_eq!(zeron_proto::invocation::invocation_links(text).len(), 2);
+                    assert_eq!(harness_proto::invocation::invocation_links(text).len(), 2);
                     assert!(text.ends_with(" @README.md"));
                 }
             });
@@ -11031,7 +11031,7 @@ mod tests {
             let raw = format!(
                 "**Check** {} with {}",
                 local_file_link("src/café.rs", false),
-                zeron_proto::invocation::Invocation::Skill {
+                harness_proto::invocation::Invocation::Skill {
                     name: "review".into(),
                     path: "/repo/SKILL.md".into(),
                     command: None
@@ -11172,7 +11172,7 @@ mod tests {
                 assert_eq!(input.text(), raw);
                 let source = raw.replace("@src", "$review");
                 input.set_text(&source, cx);
-                let skill = zeron_proto::invocation::Invocation::Skill {
+                let skill = harness_proto::invocation::Invocation::Skill {
                     name: "review".into(),
                     path: "/repo/SKILL.md".into(),
                     command: None,
@@ -11298,7 +11298,7 @@ mod tests {
 
     #[test]
     fn rich_projection_keeps_unicode_offsets_and_atomic_invocations() {
-        let invocation = zeron_proto::invocation::Invocation::Skill {
+        let invocation = harness_proto::invocation::Invocation::Skill {
             command: None,
             name: "bla-bla:bla-bla".into(),
             path: "/repo/SKILL.md".into(),
@@ -11612,7 +11612,7 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
             state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                zeron_rpc::RpcClient::new(out, inbound),
+                harness_rpc::RpcClient::new(out, inbound),
             ));
             state.chats = crate::settings::SKILL_COMPLETION_HARNESSES
                 .iter()
@@ -11646,7 +11646,7 @@ mod tests {
             cx.run_until_parked();
             let mut batch = Vec::new();
             while let Ok(frame) = requests.try_recv() {
-                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
                 if matches!(
                     frame.method.as_deref(),
                     Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
@@ -11682,7 +11682,7 @@ mod tests {
         cx.run_until_parked();
         let mut current = Vec::new();
         while let Ok(frame) = requests.try_recv() {
-            let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
             if matches!(
                 frame.method.as_deref(),
                 Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
@@ -11692,7 +11692,7 @@ mod tests {
             }
         }
         assert_eq!(current.len(), 2);
-        let respond = |frames: Vec<zeron_rpc::ClientFrame>, name: &str| {
+        let respond = |frames: Vec<harness_rpc::ClientFrame>, name: &str| {
             for frame in frames {
                 let value = if frame.method.as_deref() == Some(methods::LIST_COMMANDS) {
                     serde_json::json!([{ "name": name, "description": "Provider command" }])
@@ -11701,7 +11701,7 @@ mod tests {
                 };
                 replies
                     .try_send(
-                        serde_json::to_string(&zeron_rpc::ServerFrame {
+                        serde_json::to_string(&harness_rpc::ServerFrame {
                             id: frame.id,
                             ok: Some(value),
                             ..Default::default()
@@ -11748,7 +11748,7 @@ mod tests {
         cx.run_until_parked();
         let mut skill_requests = Vec::new();
         while let Ok(frame) = requests.try_recv() {
-            let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
             if matches!(
                 frame.method.as_deref(),
                 Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
@@ -11778,7 +11778,7 @@ mod tests {
             cx.run_until_parked();
             let mut refresh = Vec::new();
             while let Ok(frame) = requests.try_recv() {
-                let frame: zeron_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                let frame: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
                 if matches!(
                     frame.method.as_deref(),
                     Some(methods::LIST_COMMANDS | methods::LIST_SKILLS)
@@ -11841,7 +11841,7 @@ mod tests {
                 let (_incoming, inbound) = tokio::sync::mpsc::channel(4);
                 composer.state.update(cx, |state, _| {
                     state.set_test_engine(crate::state::EngineHandle::from_test_client(
-                        zeron_rpc::RpcClient::new(out, inbound),
+                        harness_rpc::RpcClient::new(out, inbound),
                     ))
                 });
                 assert_ne!(composer.completion_connection_context(cx), context);
@@ -11902,7 +11902,7 @@ mod tests {
             input.enable_mentions();
             for reference in [
                 local_file_link("src/a.rs", false),
-                zeron_proto::invocation::Invocation::Command {
+                harness_proto::invocation::Invocation::Command {
                     name: "review".into(),
                 }
                 .link(),
@@ -12030,7 +12030,7 @@ mod tests {
             let after_link = format!("[label](url) ({prefix}review");
             assert!(token(&after_link, after_link.len()).is_some());
         }
-        let canonical = zeron_proto::invocation::Invocation::Command {
+        let canonical = harness_proto::invocation::Invocation::Command {
             name: "review".into(),
         }
         .link();
@@ -12144,7 +12144,7 @@ mod tests {
 
     #[test]
     fn legacy_host_commands_remain_literal_and_saved_references_need_an_update() {
-        use zeron_proto::invocation::Invocation;
+        use harness_proto::invocation::Invocation;
         let command = Invocation::Command {
             name: "compact".into(),
         };
@@ -12178,7 +12178,7 @@ mod tests {
         let (_dir, handle) = composer_focus_window(cx);
         handle
             .update(cx, |composer, _, cx| {
-                let draft = zeron_proto::invocation::Invocation::Command {
+                let draft = harness_proto::invocation::Invocation::Command {
                     name: "compact".into(),
                 }
                 .link();
@@ -12231,7 +12231,7 @@ mod tests {
             description: String::new(),
             input_hint: None,
         };
-        let skill = zeron_proto::invocation::Skill {
+        let skill = harness_proto::invocation::Skill {
             command: None,
             name: "review".into(),
             path: "/repo/SKILL.md".into(),
@@ -12326,7 +12326,7 @@ mod tests {
 
     #[test]
     fn every_harness_catalog_only_offers_round_trippable_references() {
-        use zeron_proto::invocation::{Skill, SkillCommand, invocation_links};
+        use harness_proto::invocation::{Skill, SkillCommand, invocation_links};
         for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
             let commands = ["review", "bad\ncommand", "two words"]
                 .into_iter()
@@ -12371,7 +12371,7 @@ mod tests {
 
     #[test]
     fn separated_native_skills_are_not_left_in_the_command_catalog() {
-        use zeron_proto::invocation::{Skill, SkillCommand};
+        use harness_proto::invocation::{Skill, SkillCommand};
         for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
             let commands = vec![
                 SlashCommand {
@@ -12410,7 +12410,7 @@ mod tests {
 
     #[test]
     fn combined_invocations_preserve_skill_identity_and_command_collisions() {
-        use zeron_proto::invocation::{Invocation, Skill};
+        use harness_proto::invocation::{Invocation, Skill};
         let commands = vec![SlashCommand {
             name: "review".into(),
             description: "Command".into(),
@@ -13523,7 +13523,7 @@ mod tests {
 
     #[test]
     fn pending_input_detection() {
-        use zeron_doc::MessageStatus;
+        use harness_doc::MessageStatus;
         let input_part = MessagePart::Input {
             id: "in-r1".into(),
             request_id: "r1".into(),

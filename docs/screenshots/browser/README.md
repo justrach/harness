@@ -8,7 +8,7 @@ Native macOS captures come from the `browser-macos-captures` CI artifact.
 Regenerate on macOS with:
 
 ```sh
-cargo run --release --locked -p zeron-ui --example browser-fixture \
+cargo run --release --locked -p harness-ui --example browser-fixture \
   --features browser-fixture -- /tmp/browser-captures
 ```
 

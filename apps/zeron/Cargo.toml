@@ -10,11 +10,11 @@ name = "harness"
 path = "src/main.rs"
 
 [dependencies]
-zeron-engine.workspace = true
-zeron-rpc.workspace = true
-zeron-ui.workspace = true
-zeron-update.workspace = true
-zeron-mcp.workspace = true
+harness-engine.workspace = true
+harness-rpc.workspace = true
+harness-ui.workspace = true
+harness-update.workspace = true
+harness-mcp.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

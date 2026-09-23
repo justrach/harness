@@ -85,19 +85,19 @@ These live checks require a logged-in Cursor account with Muse Spark access and
 consume provider quota. Always set a fresh isolated state directory.
 
 ```sh
-cargo test -p zeron-doc
-cargo test -p zeron-engine --test message_queue
-cargo test -p zeron-harness
+cargo test -p harness-doc
+cargo test -p harness-engine --test message_queue
+cargo test -p harness-adapters
 
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_EARLY_ROUNDS=10 \
-  cargo test -p zeron-engine --test cursor_live -- --ignored --nocapture --test-threads=1
+  cargo test -p harness-engine --test cursor_live -- --ignored --nocapture --test-threads=1
 
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
-  cargo run -p zeron-harness --example cursor_stability_probe -- history 40
+  cargo run -p harness-adapters --example cursor_stability_probe -- history 40
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
-  cargo run -p zeron-harness --example cursor_stability_probe -- sessions 12
+  cargo run -p harness-adapters --example cursor_stability_probe -- sessions 12
 ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
-  cargo run -p zeron-harness --example cursor_stability_probe -- cancel-burst 40
+  cargo run -p harness-adapters --example cursor_stability_probe -- cancel-burst 40
 
 cursor-agent update
 python3 scripts/cursor-cli-history-probe.py

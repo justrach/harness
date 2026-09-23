@@ -37,7 +37,7 @@ not built yet).
 | DataRpc watches + QueueCommand | done | — |
 | Mutate ops | partial | createChat/renameChat/setChatArchived/deleteChat/renameDevice done; markChatSeen accepted as a no-op (unseen markers UI-local); `SetChatConfig` exists on the doc layer but is not yet exposed as a Mutate op. |
 | AuthRpc | done | AuthStatus emits the canonical proto shape (`{"state": "signedIn", …}`); SignIn/SignInHeadless/CompleteSignIn/SignOut/ListOrgs/CreateOrg/SelectOrg. |
-| Wire types | done | `zeron-proto`: AgentEvent, ToolCall kinds, models/options, entities, AuthState. |
+| Wire types | done | `harness-proto`: AgentEvent, ToolCall kinds, models/options, entities, AuthState. |
 
 ## §3 Backend engine
 

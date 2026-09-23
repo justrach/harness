@@ -37,14 +37,29 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set HARNESS_DATA_DIR");
-        local.join("Harnesser")
+        first_existing([local.join("Harness"), local.join("Harnesser")])
     }
     #[cfg(not(windows))]
     {
-        // Harnesser keeps its own data dir so it never shares state with an
+        // Harness keeps its own data dir so it never shares state with an
         // installed zeron.
-        PathBuf::from(env("HOME").expect("HOME not set")).join(".harnesser")
+        let home = PathBuf::from(env("HOME").expect("HOME not set"));
+        first_existing([home.join(".harness"), home.join(".harnesser")])
     }
+}
+
+fn first_existing(candidates: impl IntoIterator<Item = PathBuf>) -> PathBuf {
+    let mut iter = candidates.into_iter();
+    let first = iter.next().expect("data dir candidates");
+    if first.exists() {
+        return first;
+    }
+    for path in iter {
+        if path.exists() {
+            return path;
+        }
+    }
+    first
 }
 
 #[cfg(test)]
@@ -75,12 +90,21 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_default_is_dot_harness() {
+        assert_eq!(
+            resolve(&[("HOME", "/Users/ada")]),
+            PathBuf::from("/Users/ada/.harness"),
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn explorer_launch_without_home_uses_local_app_data() {
         assert_eq!(
             resolve(&[("LOCALAPPDATA", r"C:\Users\Test User\AppData\Local")]),
-            PathBuf::from(r"C:\Users\Test User\AppData\Local\Harnesser"),
+            PathBuf::from(r"C:\Users\Test User\AppData\Local\Harness"),
         );
     }
 
@@ -89,7 +113,7 @@ mod tests {
     fn windows_profile_fallback_handles_unicode_and_apostrophes() {
         assert_eq!(
             resolve(&[("USERPROFILE", r"C:\Users\O'Brien 日本語")]),
-            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Harnesser"),
+            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Harness"),
         );
     }
 
@@ -98,7 +122,7 @@ mod tests {
     fn windows_default_does_not_depend_on_shell_home() {
         assert_eq!(
             resolve(&[("HOME", r"D:\msys-home"), ("LOCALAPPDATA", r"C:\Local")]),
-            PathBuf::from(r"C:\Local\Harnesser"),
+            PathBuf::from(r"C:\Local\Harness"),
         );
     }
 }

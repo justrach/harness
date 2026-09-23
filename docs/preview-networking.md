@@ -92,7 +92,7 @@ independently of edge availability. macOS and Linux currently provide discovery.
 
 ## Validation
 
-`cargo test --locked -p zeron-preview` covers real process/cwd isolation, non-HTTP
+`cargo test --locked -p harness-preview` covers real process/cwd isolation, non-HTTP
 exclusion, live disappearance, persistent aliases, port changes, concurrent
 streams, slow readers, cancellation, large bodies, streaming HTTP headers and
 redirects, WebSocket traffic, and a real WebRTC pair in both directions.
@@ -101,7 +101,7 @@ redirects, WebSocket traffic, and a real WebRTC pair in both directions.
 organization authorization, stamped signaling, disconnect cleanup and binary
 traffic rejection. CI runs networking tests on Linux and macOS.
 
-Build `cargo build -p zeron-ui --example preview-fixture --features browser-fixture`.
+Build `cargo build -p harness-ui --example preview-fixture --features browser-fixture`.
 Run the fixture with an output directory, an available display and `VITE_BINARY`
 pointing to an installed `vite/bin/vite.js`. It starts real Vite/API processes in
 an isolated project, discovers them through daemon RPC and waits for a native
@@ -112,4 +112,4 @@ attachments, not the repository.
 The opt-in `coordinator` integration test connects two authenticated clients to a
 local Worker, advertises a service, pairs over SDP/ICE, then transfers a 4 MiB
 HTTP response through the remote hostname. Run it with
-`ZERON_PREVIEW_TEST_EDGE=http://127.0.0.1:27641 cargo test -p zeron-preview --test coordinator -- --ignored`.
+`ZERON_PREVIEW_TEST_EDGE=http://127.0.0.1:27641 cargo test -p harness-preview --test coordinator -- --ignored`.

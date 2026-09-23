@@ -4,12 +4,12 @@
 //! are report-only.
 
 use anyhow::bail;
-use zeron_update::{InstallKind, current_version, version_newer};
+use harness_update::{InstallKind, current_version, version_newer};
 
 /// `--check` prints the verdict and exits (nonzero when an update is available,
 /// so scripts can gate on it).
 pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
-    let manifest = zeron_update::fetch_latest(edge_url).await?;
+    let manifest = harness_update::fetch_latest(edge_url).await?;
     let current = current_version();
     if !version_newer(&manifest.version, current) {
         println!(
@@ -23,20 +23,20 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    match zeron_update::detect_install() {
+    match harness_update::detect_install() {
         InstallKind::Managed { app_root } => {
             println!(
                 "downloading {}…",
-                zeron_update::headless_artifact(&manifest.version)
+                harness_update::headless_artifact(&manifest.version)
             );
-            zeron_update::stage_headless(edge_url, &manifest, &app_root).await?;
-            zeron_update::apply_headless(&app_root, &manifest.version)?;
+            harness_update::stage_headless(edge_url, &manifest, &app_root).await?;
+            harness_update::apply_headless(&app_root, &manifest.version)?;
             println!(
                 "installed {} (current → {})",
                 app_root.join(&manifest.version).display(),
                 manifest.version
             );
-            match zeron_update::restart_service() {
+            match harness_update::restart_service() {
                 Ok(()) => println!("engine service restarted."),
                 Err(err) => println!(
                     "note: service restart failed ({err:#}) — restart the engine manually to finish."
@@ -47,20 +47,20 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::MacApp { bundle } => {
             println!(
                 "downloading {}…",
-                zeron_update::mac_app_artifact(&manifest.version)
+                harness_update::mac_app_artifact(&manifest.version)
             );
             let data_dir = super::paths::data_dir();
-            let staged = zeron_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
-            zeron_update::apply_mac_app(&staged, &bundle)?;
-            println!("updated {} — relaunch Harnesser to finish.", bundle.display());
+            let staged = harness_update::stage_mac_app(edge_url, &manifest, &data_dir).await?;
+            harness_update::apply_mac_app(&staged, &bundle)?;
+            println!("updated {} — relaunch Harness to finish.", bundle.display());
             Ok(())
         }
         #[cfg(windows)]
         InstallKind::WindowsPortable { directory } => {
-            let staged = zeron_update::windows::stage(edge_url, &manifest, &directory).await?;
-            zeron_update::windows::apply(&staged, &directory, false)?;
+            let staged = harness_update::windows::stage(edge_url, &manifest, &directory).await?;
+            harness_update::windows::apply(&staged, &directory, false)?;
             println!(
-                "updated to {} — relaunch Harnesser to finish.",
+                "updated to {} — relaunch Harness to finish.",
                 manifest.version
             );
             Ok(())
@@ -69,7 +69,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
                  Linux: curl -fsSL https://zeron.sh/install.sh | sh\n\
-                 macOS: download the new Harnesser.app dmg, or rebuild from source.\n\
+                 macOS: download the new Harness.app dmg, or rebuild from source.\n\
                  Windows: use an update-enabled portable package, or rebuild from source."
             )
         }

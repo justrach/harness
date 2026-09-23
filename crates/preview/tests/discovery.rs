@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use zeron_preview::PreviewService;
+use harness_preview::PreviewService;
 /// Every service binds the fixed proxy port, so tests in this binary must
 /// not run concurrently: one test freeing 7331 for its own proxy to reclaim
 /// would otherwise race another test's service for it.

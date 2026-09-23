@@ -1,7 +1,7 @@
 //! Per-section metadata and one placement register per session. Concurrent moves
 //! can never place a session in two sections, or in both a section and Pinned.
 use super::*;
-use zeron_proto::{SidebarSection, SidebarSectionChange};
+use harness_proto::{SidebarSection, SidebarSectionChange};
 
 const SECTIONS: &str = "sidebarSections";
 const LOCATIONS: &str = "sidebarLocations";

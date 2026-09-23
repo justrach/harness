@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use zeron_harness::{Harness, HarnessError, mock::MockHarness};
-use zeron_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use harness_adapters::{Harness, HarnessError, mock::MockHarness};
+use harness_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,7 +282,7 @@ impl HarnessRegistry {
 
     pub fn set_title_settings(&self, mut settings: TitleSettings) -> Result<(), String> {
         if let Some(id) = settings.harness {
-            if !zeron_harness::supports_titles(id) || !self.enabled_set().contains(&id) {
+            if !harness_adapters::supports_titles(id) || !self.enabled_set().contains(&id) {
                 return Err("Choose an enabled harness that supports title generation".into());
             }
         } else if settings.model.is_some() {
@@ -360,7 +360,7 @@ impl HarnessRegistry {
                     None => return None,
                 };
                 descriptor.enabled = Some(enabled.contains(id));
-                descriptor.can_install = zeron_harness::install::can_install(*id);
+                descriptor.can_install = harness_adapters::install::can_install(*id);
                 Some(descriptor)
             })
             .collect()
@@ -368,12 +368,12 @@ impl HarnessRegistry {
 }
 
 /// The production registry: MockHarness (hidden from production pickers) plus a lazy
-/// `claude-code` slot resolved through `zeron_harness` on first use (subprocess
+/// `claude-code` slot resolved through `harness_adapters` on first use (subprocess
 /// discovery only happens when a run/model call actually needs it).
 pub fn default_registry() -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
     // claude/codex resolve doesn't pay the shell-startup latency inline.
-    zeron_harness::shell_env::prewarm();
+    harness_adapters::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness {
         script: vec![
@@ -385,7 +385,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-1".into(),
-                call: zeron_proto::ToolCall::Exec {
+                call: harness_proto::ToolCall::Exec {
                     command: "cargo test --workspace".into(),
                 },
             },
@@ -397,7 +397,7 @@ pub fn default_registry() -> HarnessRegistry {
             },
             AgentEvent::ToolCall {
                 id: "mock-tool-2".into(),
-                call: zeron_proto::ToolCall::Exec {
+                call: harness_proto::ToolCall::Exec {
                     command: "git log -5 --oneline --decorate && git merge-base HEAD origin/main"
                         .into(),
                 },
@@ -420,21 +420,28 @@ pub fn default_registry() -> HarnessRegistry {
         ],
     }));
     // graff over ACP (`graff acp`), registered first so it leads the picker.
-    // Turn-boundary steering, no effort ladder; models are discovered from
-    // `graff route` + `graff --schema` and applied with `--model` at launch.
+    // Turn-boundary steering. Per-model effort comes from the live catalog;
+    // session/new does not yet advertise thought_level.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Graff,
             name: "graff".into(),
             supports_steering: true,
             steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
+            reasoning_levels: vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+                ReasoningLevel::Ultra,
+            ],
             installed: true,
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::graff().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::graff()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::graff().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::graff()) as Arc<dyn Harness>)),
     );
     registry.register_lazy(
         HarnessDescriptor {
@@ -455,14 +462,14 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::ClaudeHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::ClaudeHarness::new()) as Arc<dyn Harness>)),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
     // catalog entry) — "Codex" per the original HARNESS_LABEL, StepBoundary
     // steering via native `turn/steer`, and the unified reasoning ladder from
-    // zeron_harness::codex::catalog. CLI discovery only happens when a
+    // harness_adapters::codex::catalog. CLI discovery only happens when a
     // run/model call actually resolves the slot.
     registry.register_lazy(
         HarnessDescriptor {
@@ -483,8 +490,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::CodexHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::CodexHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::CodexHarness::new()) as Arc<dyn Harness>)),
     );
     // Cursor via the pinned @cursor/sdk shim (NOT ACP — that surface strips
     // subagent transcripts), same lazy pattern: the static descriptor mirrors
@@ -500,8 +507,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::CursorHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::CursorHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::CursorHarness::new()) as Arc<dyn Harness>)),
     );
     // Devin over ACP (`devin acp`), same lazy pattern: the static descriptor
     // mirrors AcpHarness::devin() exactly. No steering extension (turn
@@ -518,8 +525,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::devin().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::devin().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::devin()) as Arc<dyn Harness>)),
     );
     // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
     // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
@@ -540,8 +547,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::grok().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::grok().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::grok()) as Arc<dyn Harness>)),
     );
     // Hermes Agent over ACP (`hermes acp`), same lazy pattern: the static
     // descriptor mirrors AcpHarness::hermes() exactly. No steering extension
@@ -558,8 +565,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::hermes().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
     // pi over ACP (community `pi-acp` adapter), same lazy pattern: the static
     // descriptor mirrors AcpHarness::pi() exactly — turn-boundary steering,
@@ -582,8 +589,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::pi().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::pi().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::pi()) as Arc<dyn Harness>)),
     );
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
@@ -607,8 +614,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::OpencodeHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::OpencodeHarness::new()) as Arc<dyn Harness>)),
     );
     // antigravity over acp (google's agy_acp_server), same lazy pattern: the
     // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
@@ -625,8 +632,8 @@ pub fn default_registry() -> HarnessRegistry {
             can_install: false,
             enabled: None,
         },
-        Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::AcpHarness::antigravity().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
     registry
 }
@@ -731,7 +738,8 @@ mod tests {
             &[
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
-                ReasoningLevel::High
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh
             ]
         );
         // Cursor, Devin, Hermes and Pi mirror their specs the same way.
@@ -975,7 +983,7 @@ mod tests {
         let registry = HarnessRegistry::new();
         let data = tempfile::tempdir().unwrap();
         registry.load_prefs(data.path());
-        registry.register(Arc::new(zeron_harness::AcpHarness::antigravity()));
+        registry.register(Arc::new(harness_adapters::AcpHarness::antigravity()));
         let expected = expected == "true";
         assert_eq!(registry.descriptors()[0].installed, expected);
         assert_eq!(
@@ -1128,7 +1136,7 @@ mod title_tests {
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         registry.register(Arc::new(
-            zeron_harness::ClaudeHarness::new().with_executable(std::env::current_exe().unwrap()),
+            harness_adapters::ClaudeHarness::new().with_executable(std::env::current_exe().unwrap()),
         ));
         let settings = TitleSettings {
             harness: Some(HarnessId::ClaudeCode),

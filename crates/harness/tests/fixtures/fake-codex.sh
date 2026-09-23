@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake Codex app-server for zeron-harness tests.
+# Fake Codex app-server for harness-adapters tests.
 #
 # Speaks scripted JSON-RPC 2.0 over stdio: initialize handshake, thread
 # start/resume, then a scenario picked from the turn/start prompt text. Driven

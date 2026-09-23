@@ -28,13 +28,13 @@ use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
-use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
-use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
-use zeron_proto::{
+use harness_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
+use harness_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
+use harness_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
+use harness_rpc::{RpcClient, RpcError, RpcReply, RpcService, connect_ws, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -49,7 +49,7 @@ struct CachedTranscript {
     prepared: Option<Arc<crate::transcript::PreparedTranscript>>,
     chat_id: String,
     entries: Vec<SessionMessageEntry>,
-    context_usage: Option<zeron_proto::ContextUsage>,
+    context_usage: Option<harness_proto::ContextUsage>,
     bytes: usize,
 }
 
@@ -68,7 +68,7 @@ impl WatchPreparation {
     }
     fn prepare(
         &mut self,
-        update: &zeron_doc::TranscriptUpdate,
+        update: &harness_doc::TranscriptUpdate,
     ) -> Result<Arc<crate::transcript::PreparedTranscript>, TranscriptDesync> {
         self.worker.as_mut().unwrap().prepare(update)
     }
@@ -345,7 +345,7 @@ impl EngineHandle {
         //
         // Best-effort — losing the bind race with another engine costs other
         // viewports, not this one.
-        let ipc_task = match zeron_engine::serve_ipc(engine_config.ipc_port, service).await {
+        let ipc_task = match harness_engine::serve_ipc(engine_config.ipc_port, service).await {
             Ok(task) => Some(task),
             Err(err) => {
                 tracing::warn!(
@@ -570,10 +570,10 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 // ---------------------------------------------------------------------------
 
 // The frontend-agnostic derivations (sort orders, staleness gating, sidebar
-// grouping, the boot gate, relative times) live in `zeron_proto::view`, pure
+// grouping, the boot gate, relative times) live in `harness_proto::view`, pure
 // and with their own test suite. Re-exported here because every call site in
 // this crate reads them as `state::…`.
-pub use zeron_proto::view::{
+pub use harness_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
     parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
@@ -667,7 +667,7 @@ pub struct AppState {
     session_presence_presentation: Vec<Indicator>,
     /// Live edge posture (WatchConnectivity): drives the connection pill,
     /// composer honesty ("will queue"), and the Queued send badges.
-    pub connectivity: zeron_proto::Connectivity,
+    pub connectivity: harness_proto::Connectivity,
     /// Whether this runtime's connectivity watch has delivered its first
     /// frame. The default `Disabled` value is only a placeholder and must not
     /// seed notification decisions before the watch is authoritative.
@@ -709,14 +709,14 @@ pub struct AppState {
     /// The selected chat's pending-message queue — what was typed while the
     /// agent was busy, in the order it will be sent. Device-agnostic: the
     /// chat's doc holds them (every device sees the same queue).
-    pub queue: Vec<zeron_doc::QueuedMessage>,
-    pub context_usage: Option<zeron_proto::ContextUsage>,
+    pub queue: Vec<harness_doc::QueuedMessage>,
+    pub context_usage: Option<harness_proto::ContextUsage>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
-    transcript_baselines: HashMap<String, Arc<zeron_doc::TranscriptBaseline>>,
+    transcript_baselines: HashMap<String, Arc<harness_doc::TranscriptBaseline>>,
     transcript_cache: std::collections::VecDeque<CachedTranscript>,
     pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
     /// Changes only when transcript/optimistic content changes. Presence,
@@ -744,7 +744,7 @@ pub struct AppState {
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
     /// Latest `UpdateStatus` frame — drives the sidebar update strip.
-    pub update: Option<zeron_update::UpdateStatus>,
+    pub update: Option<harness_update::UpdateStatus>,
     /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
@@ -795,7 +795,7 @@ impl AppState {
             devices: Vec::new(),
             device_presentation: None,
             session_presence_presentation: Vec::new(),
-            connectivity: zeron_proto::Connectivity::default(),
+            connectivity: harness_proto::Connectivity::default(),
             connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
@@ -1028,13 +1028,13 @@ impl AppState {
     /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so
     /// the chips update on click; the next chats watch frame carries the same
     /// value once the engine applies the LWW write.
-    pub fn apply_chat_config(&mut self, chat_id: &str, config: zeron_proto::ChatConfig) {
+    pub fn apply_chat_config(&mut self, chat_id: &str, config: harness_proto::ChatConfig) {
         if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.config = Some(config);
         }
     }
 
-    pub fn apply_connectivity(&mut self, connectivity: zeron_proto::Connectivity) {
+    pub fn apply_connectivity(&mut self, connectivity: harness_proto::Connectivity) {
         self.connectivity = connectivity;
         self.connectivity_observed = true;
     }
@@ -1045,7 +1045,7 @@ impl AppState {
     /// chats degrade when the OS says offline, when the chat's own edge room
     /// is down, or when the host device has gone presence-dark.
     pub fn chat_delivery_degraded(&self, chat_id: &str) -> bool {
-        use zeron_proto::ConnectivityState as S;
+        use harness_proto::ConnectivityState as S;
         if self.connectivity.state == S::Disabled {
             return false;
         }
@@ -1174,7 +1174,7 @@ impl AppState {
             .map(|s| s.id.clone())
     }
 
-    pub fn apply_update(&mut self, status: zeron_update::UpdateStatus) {
+    pub fn apply_update(&mut self, status: harness_update::UpdateStatus) {
         self.update = Some(status);
     }
 
@@ -1191,7 +1191,7 @@ impl AppState {
     }
 
     /// The signed-in user, if the engine reports one.
-    pub fn auth_user(&self) -> Option<&zeron_proto::UserProfile> {
+    pub fn auth_user(&self) -> Option<&harness_proto::UserProfile> {
         match self.auth.as_ref()? {
             AuthState::SignedIn { user, .. } | AuthState::NeedsOrganization { user } => Some(user),
             AuthState::SignedOut => None,
@@ -1225,7 +1225,7 @@ impl AppState {
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         let is_reset = matches!(&frame, TranscriptFrame::Reset { .. });
-        zeron_doc::apply_transcript_frame(&mut self.transcript, frame)?;
+        harness_doc::apply_transcript_frame(&mut self.transcript, frame)?;
         if is_reset {
             self.transcript_replayed = true;
         }
@@ -1266,13 +1266,13 @@ impl AppState {
     pub(crate) fn transcript_baseline(
         &self,
         doc_id: &str,
-    ) -> Option<&Arc<zeron_doc::TranscriptBaseline>> {
+    ) -> Option<&Arc<harness_doc::TranscriptBaseline>> {
         self.transcript_baselines.get(doc_id)
     }
 
     pub fn receive_transcript_update(
         &mut self,
-        update: zeron_doc::TranscriptUpdate,
+        update: harness_doc::TranscriptUpdate,
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
         self.receive_transcript_frame(update.frame, cx)?;
@@ -1291,7 +1291,7 @@ impl AppState {
     /// with it, and don't treat it as a full reset for caching/scroll anchors.
     pub(crate) fn receive_opening_transcript_update(
         &mut self,
-        update: zeron_doc::TranscriptUpdate,
+        update: harness_doc::TranscriptUpdate,
         history_pending: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), TranscriptDesync> {
@@ -1353,6 +1353,24 @@ impl AppState {
         self.transcript_baselines.remove(doc_id);
     }
 
+    /// Live read-only feed for a chat shown in an unfocused split pane. The
+    /// same doc watch subagent tabs use (`WatchDocMessages` takes any doc id).
+    pub fn watch_peer_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.watch_subagent_doc(chat_id, cx);
+    }
+
+    /// Drop an unfocused pane's feed. A chat that just became the selected
+    /// one shares its `prepared_transcripts` / baseline keys with the primary
+    /// feed, so those stay; only the peer rows and watch go.
+    pub fn unwatch_peer_chat(&mut self, chat_id: &str) {
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            self.sub_watch_tasks.remove(chat_id);
+            self.sub_transcripts.remove(chat_id);
+        } else {
+            self.unwatch_subagent_doc(chat_id);
+        }
+    }
+
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
     /// watch needed (and any in-flight watch is superseded).
     pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
@@ -1361,7 +1379,7 @@ impl AppState {
         self.sub_watch_tasks.remove(&doc_id);
         self.transcript_baselines.insert(
             doc_id.clone(),
-            Arc::new(zeron_doc::TranscriptBaseline::capture(&entries)),
+            Arc::new(harness_doc::TranscriptBaseline::capture(&entries)),
         );
         self.sub_transcripts.insert(doc_id, entries);
     }
@@ -1461,7 +1479,7 @@ impl AppState {
 
     /// A `WatchTransfers` snapshot: the engine-side relay leg's in-flight
     /// queued-attachment transfers, replacing the whole set each frame.
-    pub fn apply_transfers(&mut self, transfers: Vec<zeron_proto::TransferProgress>) {
+    pub fn apply_transfers(&mut self, transfers: Vec<harness_proto::TransferProgress>) {
         self.transfers = transfers
             .into_iter()
             .map(|t| (t.upload_id, (t.done, t.total)))
@@ -1939,7 +1957,7 @@ impl AppState {
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             if handle
                 .engine_info()
-                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+                .supports(harness_proto::capabilities::MESSAGE_QUEUE_V1)
             {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
             }
@@ -2067,7 +2085,7 @@ impl AppState {
                                         .parts
                                         .iter()
                                         .map(|part| {
-                                            std::mem::size_of::<zeron_doc::MessagePart>()
+                                            std::mem::size_of::<harness_doc::MessagePart>()
                                                 + part.byte_len()
                                         })
                                         .sum::<usize>()
@@ -2114,7 +2132,7 @@ impl AppState {
                     .as_ref()
                     .map(|p| p.navigation_baseline.clone())
                     .unwrap_or_else(|| {
-                        Arc::new(zeron_doc::TranscriptBaseline::capture(&cached.entries))
+                        Arc::new(harness_doc::TranscriptBaseline::capture(&cached.entries))
                     }),
             );
             if let Some(prepared) = cached.prepared {
@@ -2150,7 +2168,7 @@ impl AppState {
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             if handle
                 .engine_info()
-                .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+                .supports(harness_proto::capabilities::MESSAGE_QUEUE_V1)
             {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
             }
@@ -2170,7 +2188,7 @@ impl AppState {
         };
         if handle
             .engine_info()
-            .supports(zeron_proto::capabilities::MESSAGE_QUEUE_V1)
+            .supports(harness_proto::capabilities::MESSAGE_QUEUE_V1)
         {
             self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
         }
@@ -2321,7 +2339,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
     })
 }
 
-pub use zeron_proto::version_triple;
+pub use harness_proto::version_triple;
 
 fn spawn_change_request_watch(
     cx: &mut Context<AppState>,
@@ -2545,7 +2563,7 @@ fn spawn_transcript_watch(
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
-                        let update: zeron_doc::TranscriptUpdate =
+                        let update: harness_doc::TranscriptUpdate =
                             serde_json::from_value(value).map_err(|e| e.to_string())?;
                         let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
                         Ok::<_, String>((update, prepared, preparation))
@@ -2611,7 +2629,7 @@ fn spawn_queue_watch(
     #[derive(serde::Deserialize)]
     struct QueueFrame {
         #[serde(default)]
-        items: Vec<zeron_doc::QueuedMessage>,
+        items: Vec<harness_doc::QueuedMessage>,
     }
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -2691,7 +2709,7 @@ fn spawn_subagent_watch(
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
-                        let update: zeron_doc::TranscriptUpdate =
+                        let update: harness_doc::TranscriptUpdate =
                             serde_json::from_value(value).map_err(|e| e.to_string())?;
                         let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
                         Ok::<_, String>((update, prepared, preparation))
@@ -2713,7 +2731,7 @@ fn spawn_subagent_watch(
                         let frame = update.frame;
                         let text_only = is_text_append(&frame);
                         state.transcript_revision = state.transcript_revision.wrapping_add(1);
-                        if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
+                        if let Err(err) = harness_doc::apply_transcript_frame(rows, frame) {
                             tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
                             desync = true;
                         }
@@ -2755,10 +2773,10 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
     use gpui::AppContext;
-    use zeron_engine::{EngineCore, default_registry};
+    use harness_engine::{EngineCore, default_registry};
     // `SessionStatus` is only needed to build the fixtures below — the module
-    // itself derives everything through `zeron_proto::view`.
-    use zeron_proto::{SessionStatus, UserProfile};
+    // itself derives everything through `harness_proto::view`.
+    use harness_proto::{SessionStatus, UserProfile};
 
     /// A localhost port that was just free (bind :0, read, drop).
     async fn free_port() -> u16 {
@@ -2832,7 +2850,7 @@ mod tests {
     async fn remote_viewport_treats_legacy_daemon_as_ready() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(zeron_rpc::serve_ws_listener(
+        let server = tokio::spawn(harness_rpc::serve_ws_listener(
             listener,
             Arc::new(LegacyIdentityRpc),
         ));
@@ -2900,7 +2918,7 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_reports_local_assembly_failure_before_returning_a_handle() {
         let dir = tempfile::tempdir().unwrap();
-        zeron_engine::EngineProfile::local(dir.path()).unwrap();
+        harness_engine::EngineProfile::local(dir.path()).unwrap();
         std::fs::create_dir(dir.path().join("profiles")).unwrap();
         std::fs::write(dir.path().join("profiles/local"), b"not a directory").unwrap();
         let port = free_port().await;
@@ -2948,14 +2966,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
-        let server = tokio::spawn(zeron_rpc::serve_ws_listener(
+        let server = tokio::spawn(harness_rpc::serve_ws_listener(
             listener,
             Arc::new(DeferredIdentityRpc {
                 engine_info: EngineInfo {
                     device_id: "owner-device".into(),
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
-                    capabilities: zeron_proto::capabilities::current(),
+                    capabilities: harness_proto::capabilities::current(),
                 },
                 state: state_rx,
             }),
@@ -3235,7 +3253,7 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(zeron_rpc::serve_ws_listener(listener, core.rpc_service()));
+        tokio::spawn(harness_rpc::serve_ws_listener(listener, core.rpc_service()));
 
         let ui_dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
@@ -3335,7 +3353,7 @@ mod tests {
     fn user_entry(id: &str) -> SessionMessageEntry {
         SessionMessageEntry {
             id: id.into(),
-            role: zeron_doc::MessageRole::User,
+            role: harness_doc::MessageRole::User,
             parts: Vec::new(),
             created_at: 0,
             device_id: "dev".into(),
@@ -3351,7 +3369,7 @@ mod tests {
     ) {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, cx| {
-            let update = |id: &str| zeron_doc::TranscriptUpdate {
+            let update = |id: &str| harness_doc::TranscriptUpdate {
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
                 replay_baseline: None,
@@ -3401,7 +3419,7 @@ mod tests {
             let entries: Vec<_> = (0..2000)
                 .map(|i| {
                     let mut entry = user_entry(&format!("message-{i}"));
-                    entry.parts.push(zeron_doc::MessagePart::Text {
+                    entry.parts.push(harness_doc::MessagePart::Text {
                         id: "text".into(),
                         text: "x".repeat(2048),
                     });
@@ -3489,7 +3507,7 @@ mod tests {
             state.select_chat(Some("oversize".into()), cx);
             assert!(state.transcript_cache.is_empty());
             let mut entry = user_entry("large");
-            entry.parts.push(zeron_doc::MessagePart::Text {
+            entry.parts.push(harness_doc::MessagePart::Text {
                 id: "text".into(),
                 text: "x".repeat(TRANSCRIPT_CACHE_BYTES + 1),
             });
@@ -3690,7 +3708,7 @@ mod tests {
         let mut s = AppState::new();
         assert_eq!(s.transfer_percent("u1"), None);
 
-        let frame = |id: &str, done, total| zeron_proto::TransferProgress {
+        let frame = |id: &str, done, total| harness_proto::TransferProgress {
             upload_id: id.into(),
             file_name: "a.png".into(),
             done,
@@ -4062,12 +4080,12 @@ mod tests {
     fn apply_chat_config_stamps_the_row() {
         let mut state = AppState::new();
         state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = zeron_proto::ChatConfig {
+        let config = harness_proto::ChatConfig {
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),
-            reasoning: Some(zeron_proto::ReasoningLevel::XHigh),
+            reasoning: Some(harness_proto::ReasoningLevel::XHigh),
             model_options: serde_json::Map::new(),
-            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
         };
         state.apply_chat_config("a", config.clone());
         assert_eq!(
@@ -4086,12 +4104,12 @@ mod tests {
         // Unknown chat: no-op, no panic.
         state.apply_chat_config(
             "missing",
-            zeron_proto::ChatConfig {
+            harness_proto::ChatConfig {
                 harness: HarnessId::ClaudeCode,
                 model: None,
                 reasoning: None,
                 model_options: serde_json::Map::new(),
-                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
             },
         );
     }
@@ -4183,7 +4201,7 @@ mod tests {
         state.selected_chat = Some("c1".into());
         let echo = SessionMessageEntry {
             id: "m1".into(),
-            role: zeron_doc::MessageRole::User,
+            role: harness_doc::MessageRole::User,
             parts: vec![],
             created_at: 0,
             device_id: "local".into(),
@@ -4549,7 +4567,7 @@ mod tests {
                 created_at: None,
                 version: Some("0.2.31".into()),
                 cursor_sdk_version: None,
-                capabilities: vec![zeron_proto::capabilities::MESSAGE_QUEUE_V1.into()],
+                capabilities: vec![harness_proto::capabilities::MESSAGE_QUEUE_V1.into()],
             },
             Device {
                 id: "upstream".into(),
@@ -4563,13 +4581,13 @@ mod tests {
             },
         ];
 
-        assert!(state.device_supports("personal", zeron_proto::capabilities::MESSAGE_QUEUE_V1));
-        assert!(!state.device_supports("upstream", zeron_proto::capabilities::MESSAGE_QUEUE_V1));
+        assert!(state.device_supports("personal", harness_proto::capabilities::MESSAGE_QUEUE_V1));
+        assert!(!state.device_supports("upstream", harness_proto::capabilities::MESSAGE_QUEUE_V1));
     }
 
     #[test]
     fn delivery_degradation_and_queued_sends_tell_the_truth() {
-        use zeron_proto::{ChatConnectivity, ConnectivityState};
+        use harness_proto::{ChatConnectivity, ConnectivityState};
         let now = Utc::now();
         let mut s = AppState::default();
         s.local_device_id = Some("local".into());
@@ -4656,7 +4674,7 @@ impl AppState {
     /// Seed provider metadata for the isolated native sidebar review fixture.
     pub fn fixture_sidebar_change_request(
         &mut self,
-        snapshot: zeron_proto::CheckoutChangeRequestStatus,
+        snapshot: harness_proto::CheckoutChangeRequestStatus,
     ) {
         let key = crate::change_requests::ChangeRequestWatchKey {
             device_id: snapshot.device_id.clone(),

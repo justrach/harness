@@ -110,7 +110,7 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
 
    *Why one registry and not N tiny docs:* the sidebar needs one subscription for the whole list (grouping, resort animations, unseen markers). Its rows contain indexes rather than transcripts, so one local snapshot and, when enabled, one room connection remain bounded and cheap.
 
-3. **Mirror layer** (`zeron-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
+3. **Mirror layer** (`harness-doc` crate) — Rust equivalent of loro-mirror: typed structs for the
    schema, **incremental** application of `doc.subscribe` diffs into cached state (no full
    re-hydration per change — this is also what fixes zeron's known O(transcript) re-projection
    inefficiency, remaining-work item 1a), and a diff-reconcile write path (evaluate `lorosurgeon`
@@ -130,29 +130,29 @@ This is zeron's proven design, kept verbatim.
 zeron/
   Cargo.toml                 # workspace
   crates/
-    proto/        zeron-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
+    proto/        harness-proto    # wire types: AgentEvent, ToolCall, RunRequest, Model,
                                  # entities, RPC envelopes (serde; ndjson framing);
                                  # `view` = the pure derivations both frontends share
                                  # (sort orders, staleness gating, grouping, boot gate)
-    doc/          zeron-doc      # session-doc + workspace-registry schemas, mirror layer,
+    doc/          harness-doc      # session-doc + workspace-registry schemas, mirror layer,
                                  # parts fold, continuations, command ledger, sidecars
-    sync/         zeron-sync     # loro room client (join/VV backfill/fragments/backoff),
+    sync/         harness-sync     # loro room client (join/VV backfill/fragments/backoff),
                                  # ephemeral presence, DocsStore (SQLite snapshots +
                                  # processed-command ledger)
-    harness/      zeron-harness  # Harness trait + claude-code (stream-json subprocess),
+    harness/      harness-adapters  # Harness trait + claude-code (stream-json subprocess),
                                  # codex (app-server JSON-RPC), mock; steering mailbox,
                                  # requestInput, models/reasoning/options catalogs
-    engine/       zeron-engine   # sessions engine (pub/sub, run journal, recovery, stall
+    engine/       harness-engine   # sessions engine (pub/sub, run journal, recovery, stall
                                  # watchdog), doc host + command executor, repos/worktrees,
                                  # checkout-diff sync, terminals (portable-pty), uploads,
                                  # agent accounts (cred swap), auth (WorkOS via edge),
                                  # device-room host/peers, identity
-    rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
+    rpc/          harness-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)
-    theme/        zeron-theme    # source-neutral theme schema + built-in/custom registry,
+    theme/        harness-theme    # source-neutral theme schema + built-in/custom registry,
                                  # validation, provenance, and local VS Code compiler
-    ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
+    ui/           harness-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/
     zeron/                       # the binary (headed default, `headless` subcommand)
@@ -183,7 +183,7 @@ feature spec `docs/research/feature-inventory.md` §1.
   - row height memoization keyed by (row id, content length, width) so a streamed token
     re-measures one row;
   - scroll-anchor absorption for above-viewport height changes.
-- **Markdown** (`zeron-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
+- **Markdown** (`harness-ui::markdown`): `pulldown-cmark` parsing on `background_spawn` with
   coalescing (Zed's proven pattern), block-level incremental re-parse of the streaming tail
   (incremark's O(delta) idea: only re-parse from the last stable block boundary), monochrome
   theme where **numbers drive layout, colors are paint**. Code blocks: monospace, no wrap ⇒
@@ -202,7 +202,7 @@ feature spec `docs/research/feature-inventory.md` §1.
   drag 160px–55vh, 12ms input coalescing / 80ms resize debounce, 1MB replay, detach ≠ close.
 - **Diff pane**: unified-patch parser → virtualized file/hunk/line rows, per-file collapse
   (180ms height tween), time-sliced highlight, 200ms width transition on the pane itself.
-- **Animation kit** (`zeron-ui::motion`): small helpers over gpui `Animation` reproducing the
+- **Animation kit** (`harness-ui::motion`): small helpers over gpui `Animation` reproducing the
   zeron catalog — `fade-in` (0.5s, cubic-bezier(0.16,1,0.3,1), translateY 4→0), `splash-out`,
   `zeron-pulse` staggered cell wave (boot splash + loaders), `gradient-spin-pulse` matrix
   spinner (WorkingIndicator + rotating flavour word), `menu-in`/`dialog-in` scale-fades, 200ms
@@ -268,7 +268,7 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
 
 - ✅ **M0 Scaffold** — workspace builds; `proto`/`doc` crates with ledger + parts + continuation
   unit tests; gpui hello-window runs.
-- ✅ **M1 Doc + sync core** — `zeron-doc` mirror over loro 1.13; room client syncs with the edge
+- ✅ **M1 Doc + sync core** — `harness-doc` mirror over loro 1.13; room client syncs with the edge
   running under `wrangler dev`; Rust⇄edge⇄Rust convergence test (M1 exit: two Rust peers converge
   through a real SessionRoom DO, tail endpoint serves).
 - ✅ **M2 Engine core** — Claude harness end-to-end headless: `zeron headless` + dev auth runs a

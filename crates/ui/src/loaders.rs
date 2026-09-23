@@ -16,9 +16,9 @@ use gpui::{
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, ZERON_PULSE};
 use crate::theme::{GlyphPalette, Theme};
 
-// Shared with the terminal viewport (`zeron_proto::motion`) so both animate the
+// Shared with the terminal viewport (`harness_proto::motion`) so both animate the
 // same loaders from the same numbers.
-pub use zeron_proto::motion::{
+pub use harness_proto::motion::{
     MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, ZERON_CELLS, mark_cell_stagger,
 };
 
@@ -104,7 +104,7 @@ pub fn zeron_loader(
         }))
 }
 
-pub use zeron_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
+pub use harness_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 
 /// The gradient matrix spinner (WorkingIndicator), ported from zeron's
 /// gradient-spin.tsx: a 3×3 grid of round cells tinted per row from the
@@ -246,7 +246,9 @@ fn mini_spinner_cells(
     /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
     const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
     const RING_LEN: f32 = (COLS * ROWS) as f32;
-    let delta = motion::pulse_delta(&GRADIENT_SPIN, view, cx);
+    // 15Hz, like the shell's cell loaders: this snake stays mounted for a
+    // whole agent run, and every tick redraws the entire window.
+    let delta = motion::pulse_delta_slow(&GRADIENT_SPIN, view, cx);
     div()
         .flex()
         .flex_col()
@@ -365,7 +367,7 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
             div()
                 .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_muted.opacity(0.7))
-                .child(SharedString::from("Setting up Harnesser environment")),
+                .child(SharedString::from("Setting up Harness environment")),
         );
     if fading {
         motion::splash_out("boot-splash-out", content).into_any_element()

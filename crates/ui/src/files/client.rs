@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use zeron_proto::{
+use harness_proto::{
     ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceFilesRequest,
     WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceFileSearchMatch,
     WorkspaceFileText, WorkspaceTarget, WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
 };
-use zeron_rpc::{RpcError, methods};
+use harness_rpc::{RpcError, methods};
 
 use crate::state::{AppState, EngineHandle};
 
@@ -182,13 +182,13 @@ impl WorkspaceFilesClient {
         checkout_id: String,
     ) -> Result<(String, Vec<u8>), FilesClientError> {
         use base64::Engine as _;
-        use zeron_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
+        use harness_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
         if checkout_id.is_empty() {
             return Err(FilesClientError::Decode(
                 "Workspace checkout identity unavailable".into(),
             ));
         }
-        let mut request = zeron_proto::ReadWorkspaceImageRequest {
+        let mut request = harness_proto::ReadWorkspaceImageRequest {
             target: self.context.target.clone(),
             path,
             expected_checkout_id: checkout_id,
@@ -199,7 +199,7 @@ impl WorkspaceFilesClient {
         let mut mime = None;
         let mut size = None;
         for _ in 0..=MAX_WORKSPACE_IMAGE_BYTES / WORKSPACE_IMAGE_CHUNK_BYTES {
-            let chunk: zeron_proto::WorkspaceImageChunk =
+            let chunk: harness_proto::WorkspaceImageChunk =
                 self.call(methods::READ_WORKSPACE_IMAGE, &request).await?;
             if chunk.checkout_id != request.expected_checkout_id
                 || chunk.content_hash.is_empty()
@@ -654,8 +654,8 @@ mod tests {
                 path: "src/lib.rs".into(),
                 text: "fn main() {}".into(),
                 expected_content_hash: "hash".into(),
-                encoding: zeron_proto::WorkspaceWritableEncoding::Utf8,
-                line_ending: zeron_proto::WorkspaceWritableLineEnding::Lf,
+                encoding: harness_proto::WorkspaceWritableEncoding::Utf8,
+                line_ending: harness_proto::WorkspaceWritableLineEnding::Lf,
             })
             .await
             .unwrap();
@@ -704,8 +704,8 @@ mod tests {
                 path: "src/lib.rs".into(),
                 text: "changed".into(),
                 expected_content_hash: "hash".into(),
-                encoding: zeron_proto::WorkspaceWritableEncoding::Utf8,
-                line_ending: zeron_proto::WorkspaceWritableLineEnding::Lf,
+                encoding: harness_proto::WorkspaceWritableEncoding::Utf8,
+                line_ending: harness_proto::WorkspaceWritableLineEnding::Lf,
             })
             .await
             .unwrap();
@@ -762,7 +762,7 @@ mod tests {
     }
     fn image_chunk(data: &[u8], end: usize, done: bool) -> Value {
         use base64::Engine as _;
-        serde_json::to_value(zeron_proto::WorkspaceImageChunk {
+        serde_json::to_value(harness_proto::WorkspaceImageChunk {
             checkout_id: "checkout".into(),
             content_hash: "hash".into(),
             mime_type: "image/png".into(),
@@ -832,7 +832,7 @@ mod tests {
     }
     #[tokio::test]
     async fn image_reads_reject_malformed_repeated_and_oversized_chunks() {
-        use zeron_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
+        use harness_proto::{MAX_WORKSPACE_IMAGE_BYTES, WORKSPACE_IMAGE_CHUNK_BYTES};
         let cases = [
             ("data", serde_json::json!("%%%")),
             (

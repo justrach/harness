@@ -23,8 +23,8 @@ use gpui::{
     Subscription, Task, Window, actions, div, prelude::*, px,
 };
 
-use zeron_proto::{TerminalEvent, TerminalSession};
-use zeron_rpc::methods;
+use harness_proto::{TerminalEvent, TerminalSession};
+use harness_rpc::methods;
 
 use crate::motion::{self, AnimationExt as _, TAB_SLIDE};
 use crate::popover::{MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
@@ -43,7 +43,15 @@ pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 
-actions!(terminal, [ToggleTerminal]);
+actions!(
+    terminal,
+    [
+        ToggleTerminal,
+        SplitRight,
+        SplitDown,
+        CloseSplit
+    ]
+);
 
 /// Bind the terminal keymap (global): Cmd+J on macOS, Ctrl+J elsewhere.
 pub fn init(cx: &mut App) {
@@ -135,6 +143,45 @@ pub fn active_after_close(active: usize, closed: usize, len_after: usize) -> usi
         0
     } else {
         shifted.min(len_after - 1)
+    }
+}
+
+/// Index of a surviving tab after `closed` is removed.
+pub fn shift_index_after_close(ix: usize, closed: usize) -> usize {
+    if ix > closed { ix - 1 } else { ix }
+}
+
+/// Ghostty-style split: side-by-side (`Horizontal`) or stacked (`Vertical`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitFocus {
+    First,
+    Second,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TerminalSplit {
+    axis: SplitAxis,
+    first: usize,
+    second: usize,
+    focus: SplitFocus,
+}
+
+impl TerminalSplit {
+    fn contains(self, ix: usize) -> bool {
+        self.first == ix || self.second == ix
+    }
+
+    fn focused(self) -> usize {
+        match self.focus {
+            SplitFocus::First => self.first,
+            SplitFocus::Second => self.second,
+        }
     }
 }
 
@@ -274,6 +321,8 @@ struct TerminalTab {
 struct ChatTabs {
     tabs: Vec<TerminalTab>,
     active: usize,
+    /// At most one split: the focused tab and its neighbor are both visible.
+    split: Option<TerminalSplit>,
 }
 
 /// Drag-reorder state; `epoch` keys the 150 ms slide animation restarts.
@@ -340,8 +389,11 @@ pub struct TerminalPanel {
     tab_seq: u64,
     drag: Option<DragState>,
     last_selected: Option<String>,
-    /// Last reported grid placement; `None` until the first prepaint.
+    /// Last reported grid placement for the focused pane; `None` until the
+    /// first prepaint. Split panes also stash per-tab bounds in `geometries`.
     geometry: Option<GridGeometry>,
+    /// Per-tab grid placement so a split can hit-test and resize each PTY.
+    geometries: HashMap<u64, GridGeometry>,
     /// Left-button gesture in flight, if any.
     selection_drag: Option<SelectionDrag>,
     /// One-shot timer rescheduled only while a live selection remains in an
@@ -375,6 +427,7 @@ impl TerminalPanel {
             drag: None,
             last_selected: None,
             geometry: None,
+            geometries: HashMap::new(),
             selection_drag: None,
             selection_scroll_task: None,
             rail_tab_key: None,
@@ -628,6 +681,10 @@ impl TerminalPanel {
         let chat = self.state.read(cx).selected_chat.clone()?;
         let tabs = self.chats.get(&chat)?;
         tabs.tabs.get(tabs.active)
+    }
+
+    pub(super) fn focused_tab_key(&self, cx: &App) -> Option<u64> {
+        self.active_tab(cx).map(|tab| tab.key)
     }
 
     // ---- open / stream lifecycle ----
@@ -957,11 +1014,14 @@ impl TerminalPanel {
 
     /// Called from element prepaint with the frame's grid placement. Resizes
     /// the emulator immediately; the `ResizeTerminal` RPC debounces 80 ms.
-    pub fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
+    pub fn on_grid_metrics(&mut self, key: u64, geometry: GridGeometry, cx: &mut Context<Self>) {
         // Stash unconditionally, before the early returns below: pointer
         // mapping needs the placement even on frames where nothing resized,
         // which is almost all of them.
-        self.geometry = Some(geometry);
+        self.geometries.insert(key, geometry);
+        if self.active_tab(cx).is_some_and(|tab| tab.key == key) {
+            self.geometry = Some(geometry);
+        }
         if self.resize_suspended {
             return;
         }
@@ -970,19 +1030,16 @@ impl TerminalPanel {
             return;
         };
         let engine = self.engine(cx);
-        let Some(tabs) = self.chats.get_mut(&chat) else {
-            return;
+        let target = {
+            let Some(tab) = self.tab_mut(&chat, key) else {
+                return;
+            };
+            if tab.emulator.cols() == cols as usize && tab.emulator.rows() == rows as usize {
+                return;
+            }
+            tab.emulator.resize(cols, rows);
+            tab.target_device_id.clone()
         };
-        let active = tabs.active;
-        let Some(tab) = tabs.tabs.get_mut(active) else {
-            return;
-        };
-        if tab.emulator.cols() == cols as usize && tab.emulator.rows() == rows as usize {
-            return;
-        }
-        tab.emulator.resize(cols, rows);
-        let key = tab.key;
-        let target = tab.target_device_id.clone();
         if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
             let id = tab.terminal_id.clone();
             tab.resize_task = Some(cx.spawn(async move |this, cx| {
@@ -1018,9 +1075,11 @@ impl TerminalPanel {
         // current frame, which already paints the resized grid.
     }
 
-    /// Snapshot for the paint element.
-    pub fn active_grid_snapshot(&self, cx: &App) -> Option<GridSnapshot> {
-        let tab = self.active_tab(cx)?;
+    /// Snapshot for the paint element of one tab (the focused pane, or a
+    /// split neighbor).
+    pub fn grid_snapshot(&self, key: u64, cx: &App) -> Option<GridSnapshot> {
+        let chat = self.state.read(cx).selected_chat.as_deref()?;
+        let tab = self.chats.get(chat)?.tabs.iter().find(|t| t.key == key)?;
         Some(GridSnapshot {
             lines: tab.emulator.lines(),
             cursor: tab.emulator.cursor(),
@@ -1048,7 +1107,11 @@ impl TerminalPanel {
         position: gpui::Point<Pixels>,
         cx: &App,
     ) -> Option<(GridPoint, Side)> {
+        self.focus_pane_at(position, cx);
         let geometry = self.geometry?;
+        if !geometry.bounds.contains(&position) {
+            return None;
+        }
         let hit = cell_at(
             f32::from(position.x - geometry.origin.x),
             f32::from(position.y - geometry.origin.y),
@@ -1059,6 +1122,40 @@ impl TerminalPanel {
         );
         let point = self.with_active_emulator(cx, |emu| emu.grid_point(hit.row, hit.col))?;
         Some((point, hit.side))
+    }
+
+    fn focus_pane_at(&mut self, position: gpui::Point<Pixels>, cx: &App) {
+        let Some((key, geometry)) = self
+            .geometries
+            .iter()
+            .find(|(_, geometry)| geometry.bounds.contains(&position))
+            .map(|(&key, geometry)| (key, *geometry))
+        else {
+            return;
+        };
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        let Some(tabs) = self.chats.get_mut(&chat) else {
+            return;
+        };
+        let Some(ix) = tabs.tabs.iter().position(|tab| tab.key == key) else {
+            return;
+        };
+        tabs.active = ix;
+        if let Some(split) = tabs.split
+            && split.contains(ix)
+        {
+            tabs.split = Some(TerminalSplit {
+                focus: if ix == split.first {
+                    SplitFocus::First
+                } else {
+                    SplitFocus::Second
+                },
+                ..split
+            });
+        }
+        self.geometry = Some(geometry);
     }
 
     fn on_mouse_down(
@@ -1333,10 +1430,77 @@ impl TerminalPanel {
     fn select_tab(&mut self, chat: &str, ix: usize, cx: &mut Context<Self>) {
         if let Some(tabs) = self.chats.get_mut(chat)
             && ix < tabs.tabs.len()
-            && tabs.active != ix
         {
-            tabs.active = ix;
+            if let Some(split) = tabs.split {
+                if split.contains(ix) {
+                    tabs.split = Some(TerminalSplit {
+                        focus: if ix == split.first {
+                            SplitFocus::First
+                        } else {
+                            SplitFocus::Second
+                        },
+                        ..split
+                    });
+                    tabs.active = ix;
+                    cx.notify();
+                    return;
+                }
+                tabs.split = None;
+            }
+            if tabs.active != ix {
+                tabs.active = ix;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Ghostty ⌘D / ⌘⇧D: open a new PTY beside (or below) the focused tab.
+    /// A second split is a no-op — two panes is the v1 ceiling.
+    pub fn split_active(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+        self.ensure_tab(cx);
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        let first = {
+            let Some(tabs) = self.chats.get(&chat) else {
+                return;
+            };
+            if tabs.split.is_some() || tabs.tabs.is_empty() {
+                return;
+            }
+            tabs.active
+        };
+        self.open_tab(chat.clone(), cx);
+        if let Some(tabs) = self.chats.get_mut(&chat) {
+            let second = tabs.active;
+            if second == first || second >= tabs.tabs.len() {
+                return;
+            }
+            tabs.split = Some(TerminalSplit {
+                axis,
+                first,
+                second,
+                focus: SplitFocus::Second,
+            });
             cx.notify();
+        }
+    }
+
+    /// Close the focused split leaf; the surviving pane fills the dock.
+    pub fn close_focused_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.selected_chat(cx) else {
+            return;
+        };
+        let Some(split) = self.chats.get(&chat).and_then(|tabs| tabs.split) else {
+            return;
+        };
+        let key = self
+            .chats
+            .get(&chat)
+            .and_then(|tabs| tabs.tabs.get(split.focused()))
+            .map(|tab| tab.key);
+        if let Some(key) = key {
+            self.close_tab(&chat, key, window, cx);
         }
     }
 
@@ -1348,9 +1512,31 @@ impl TerminalPanel {
         let Some(ix) = tabs.tabs.iter().position(|t| t.key == key) else {
             return;
         };
+        let mut keep_split_focus = false;
+        if let Some(split) = tabs.split {
+            if split.contains(ix) {
+                let keep = if split.first == ix {
+                    split.second
+                } else {
+                    split.first
+                };
+                tabs.split = None;
+                tabs.active = shift_index_after_close(keep, ix);
+                keep_split_focus = true;
+            } else {
+                tabs.split = Some(TerminalSplit {
+                    first: shift_index_after_close(split.first, ix),
+                    second: shift_index_after_close(split.second, ix),
+                    ..split
+                });
+            }
+        }
         let tab = tabs.tabs.remove(ix);
+        self.geometries.remove(&key);
         let target = tab.target_device_id.clone();
-        tabs.active = active_after_close(tabs.active, ix, tabs.tabs.len());
+        if !keep_split_focus {
+            tabs.active = active_after_close(tabs.active, ix, tabs.tabs.len());
+        }
         let now_empty = tabs.tabs.is_empty();
         self.drag = None;
         // Closing the LAST terminal closes the drawer too — an empty dock is
@@ -1380,6 +1566,13 @@ impl TerminalPanel {
             let active = tabs.active;
             reorder_tabs(&mut tabs.tabs, from, to);
             tabs.active = active_after_reorder(active, from, to);
+            if let Some(split) = tabs.split {
+                tabs.split = Some(TerminalSplit {
+                    first: active_after_reorder(split.first, from, to),
+                    second: active_after_reorder(split.second, from, to),
+                    ..split
+                });
+            }
         }
         self.drag = None;
         cx.notify();
@@ -1418,13 +1611,14 @@ impl TerminalPanel {
             .map(|d| (d.from, d.over, d.epoch, d.prev_over));
         let chat_owned = chat.to_string();
 
+        let visible = tabs.and_then(|t| t.split);
         let tab_elements: Vec<_> = tabs
             .map(|tabs| {
                 tabs.tabs
                     .iter()
                     .enumerate()
                     .map(|(ix, tab)| {
-                        let selected = ix == active;
+                        let selected = ix == active || visible.is_some_and(|s| s.contains(ix));
                         let key = tab.key;
                         // Contextual label (user request): the OSC title —
                         // the shell's own cwd/command name — wins over the
@@ -1628,6 +1822,32 @@ impl TerminalPanel {
                             .text_color(theme.text_muted.opacity(0.6)),
                     ),
             )
+            .child(
+                div()
+                    .id("terminal-split")
+                    .size(px(28.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .bg(motion::hover_blend(
+                        "term-split",
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.05),
+                    ))
+                    .on_hover(motion::hover_listener("term-split"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.split_active(SplitAxis::Horizontal, cx);
+                        this.request_focus(cx);
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::SPLIT_COLUMNS)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted.opacity(0.6)),
+                    ),
+            )
             // Collapse chevron pinned right (zeron "Hide terminal" ⌘J).
             .child(div().flex_1())
             .child(
@@ -1655,6 +1875,68 @@ impl TerminalPanel {
                             .text_color(theme.text_muted.opacity(0.55)),
                     ),
             )
+    }
+
+    fn render_grids(
+        &self,
+        chat: &str,
+        focused: bool,
+        theme: &Theme,
+        cx: &Context<Self>,
+    ) -> gpui::AnyElement {
+        let entity = cx.entity();
+        let active_key = self.active_tab(cx).map(|tab| tab.key);
+        let Some(tabs) = self.chats.get(chat) else {
+            return TerminalElement::new(entity, active_key, focused).into_any_element();
+        };
+        let Some(split) = tabs.split else {
+            return TerminalElement::new(entity, active_key, focused).into_any_element();
+        };
+        let first_key = tabs.tabs.get(split.first).map(|t| t.key);
+        let second_key = tabs.tabs.get(split.second).map(|t| t.key);
+        let (Some(first_key), Some(second_key)) = (first_key, second_key) else {
+            return TerminalElement::new(entity, active_key, focused).into_any_element();
+        };
+        let first_on = focused && split.focus == SplitFocus::First;
+        let second_on = focused && split.focus == SplitFocus::Second;
+        let first_pane = self.render_split_pane(entity.clone(), first_key, first_on, theme);
+        let second_pane = self.render_split_pane(entity, second_key, second_on, theme);
+        let row = split.axis == SplitAxis::Horizontal;
+        div()
+            .id("terminal-split-body")
+            .size_full()
+            .flex()
+            .when(row, |el| el.flex_row())
+            .when(!row, |el| el.flex_col())
+            .child(first_pane)
+            .child(
+                div()
+                    .flex_none()
+                    .when(row, |el| el.w(px(1.0)).h_full())
+                    .when(!row, |el| el.h(px(1.0)).w_full())
+                    .bg(crate::theme::hairline(0.12)),
+            )
+            .child(second_pane)
+            .into_any_element()
+    }
+
+    fn render_split_pane(
+        &self,
+        entity: Entity<Self>,
+        key: u64,
+        focused: bool,
+        theme: &Theme,
+    ) -> gpui::AnyElement {
+        div()
+            .id(("terminal-pane", key))
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .when(focused, |el| el.border_l_2().border_color(theme.accent))
+            .child(TerminalElement::new(entity, Some(key), focused))
+            .into_any_element()
     }
 }
 
@@ -1786,7 +2068,7 @@ impl Render for TerminalPanel {
                         let step = lines.round() as i32;
                         this.scroll_active(step, cx);
                     }))
-                    .child(TerminalElement::new(cx.entity(), focused))
+                    .child(self.render_grids(&chat, focused, &theme, cx))
                     .children(scrollbar),
             )
             .into_any_element()
@@ -1886,6 +2168,13 @@ mod tests {
         reorder_tabs(&mut v, 9, 0);
         reorder_tabs(&mut v, 1, 1);
         assert_eq!(v, ["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn shift_index_after_close_skips_the_removed_slot() {
+        assert_eq!(shift_index_after_close(0, 1), 0);
+        assert_eq!(shift_index_after_close(1, 1), 1);
+        assert_eq!(shift_index_after_close(3, 1), 2);
     }
 
     #[test]

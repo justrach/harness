@@ -17,12 +17,12 @@ The GUI is the shared product. A person's harness is not a fork of it.
 
 - The shell discovers an agent on the device (PATH, plus a documented `*_EXECUTABLE` override) and drives it. Settings → Agents says so, and names the override when the CLI is missing, so a custom build does not require reading the adapter source.
 - A new harness joins by adding an adapter (`HarnessId`, an ACP spec or a native driver, a blurb, and an install one-liner only when that command has been verified). It does not copy the shell, the theme system, or the updater.
-- Display name, bundle id (`harness.codegraff.app`), and conversation links (`harness://`) are Harnesser. The `zeron` binary name, `ZERON_*` variables, and installer roots stay until a migration can read both the old and new locations. That split is what lets the GUI update without breaking a running install.
+- Display name, bundle id (`harness.codegraff.app`), and conversation links (`harness://`) are Harness. The `zeron` binary name, `ZERON_*` variables, and installer roots stay until a migration can read both the old and new locations. That split is what lets the GUI update without breaking a running install.
 - Third-party editor foundations stay vendored and license-tagged in `THIRD_PARTY_NOTICES.md`. They are not rebranded as if they were this product's source.
 
 ## How it stays up to date
 
-1. **GUI.** Ship updates through the existing updater (`Harnesser.app` on macOS; the headless tarball on Linux). The updater still accepts a tarball that contains the old `Zeron.app` name so an install from before the rename can move forward once.
+1. **GUI.** Ship updates through the existing updater (`Harness.app` on macOS; the headless tarball on Linux). The updater still accepts a tarball that contains the old `Zeron.app` name so an install from before the rename can move forward once.
 2. **Someone else's harness.** That CLI updates on its own schedule. The GUI does not pin it. The next probe of PATH (or the `*_EXECUTABLE` override) picks up the new binary. A harness author does not wait on a GUI release to ship their agent, and a GUI release does not require them to rebase a fork.
 3. **Vendored GPUI.** Bump `vendor/zui` and `vendor/gpui-component` on purpose. Re-check that every vendored crate is still Apache-2.0 (no `github-download` feature, no `util` dependency on the GPL `path` crate). Keep `license = "Apache-2.0"` on each crate and refresh the row in `THIRD_PARTY_NOTICES.md` if the source revision changes.
 4. **What not to combine with a GUI refresh.** Do not rename the `zeron` binary, `zeron.service`, or `~/.zeron` installer root in the same release. Those names are the update channel. Change them only with a reader that accepts the old path and a note in the installer.

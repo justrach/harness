@@ -7,16 +7,16 @@
 //! `edge/` with AUTH_MODE=dev). Run with:
 //!
 //! ```sh
-//! ZERON_EDGE_WS=ws://127.0.0.1:27640 cargo test -p zeron-sync --test registry_edge -- --ignored
+//! ZERON_EDGE_WS=ws://127.0.0.1:27640 cargo test -p harness-sync --test registry_edge -- --ignored
 //! ```
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, Session, SessionStatus};
-use zeron_sync::RegistryClient;
+use harness_doc::RegistryDoc;
+use harness_proto::{Chat, Session, SessionStatus};
+use harness_sync::RegistryClient;
 
 fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)

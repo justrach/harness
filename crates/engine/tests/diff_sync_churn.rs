@@ -13,8 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeron_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
-use zeron_proto::CheckoutDiff;
+use harness_engine::{CheckoutDiffSync, EngineCore, HarnessRegistry};
+use harness_proto::CheckoutDiff;
 
 async fn git(cwd: &Path, args: &[&str]) {
     let output = tokio::process::Command::new("git")
@@ -50,7 +50,7 @@ fn assemble(dir: &Path) -> EngineCore {
     EngineCore::assemble(
         dir,
         Arc::new(HarnessRegistry::new()),
-        zeron_proto::HarnessId::Mock,
+        harness_proto::HarnessId::Mock,
         None,
     )
     .expect("engine assembles")

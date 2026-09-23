@@ -2,7 +2,7 @@ These screenshots show the real GPUI shell with isolated sample chats from
 `crates/ui/examples/command-palette-fixture.rs`. The fixture uses temporary
 storage and does not start an engine or connect to an account.
 
-Run `cargo run -p zeron-ui --example command-palette-fixture` on a desktop, then
+Run `cargo run -p harness-ui --example command-palette-fixture` on a desktop, then
 press Cmd+K (Ctrl+K on Linux/Windows). Set `ZERON_PALETTE_LIGHT=1` for light mode.
 
 Verified interactively on Linux/X11:

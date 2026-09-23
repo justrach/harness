@@ -43,6 +43,10 @@ writeFileSync(`${output}/ui/composer-defaults.json`, JSON.stringify({
   } },
   modelLabels: { 'claude-haiku-4-5': 'Haiku' }, reasoning: null,
 }));
+// Optional UI settings (theme, surface, fonts) to profile a specific look.
+if (process.env.ZERON_PROFILE_UI_SETTINGS) {
+  copyFileSync(resolve(process.env.ZERON_PROFILE_UI_SETTINGS), `${output}/ui/ui-settings.json`);
+}
 const server = createServer();
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;

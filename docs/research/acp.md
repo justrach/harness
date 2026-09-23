@@ -190,8 +190,8 @@ code and non-null data, preserving the agent's explanation in the terminal event
 Regression checks:
 
 ```sh
-cargo test -p zeron-harness
-cargo test -p zeron-engine --test acp_lifecycle
+cargo test -p harness-adapters
+cargo test -p harness-engine --test acp_lifecycle
 ```
 
 The stateful Python peer rejects overlapping prompts. Coverage includes quiet
@@ -212,7 +212,7 @@ results or synthesize an ACP completion. Then run:
 PI_CODING_AGENT_DIR=/path/to/isolated/pi-agent \
 PI_ACP_PI_COMMAND=/path/to/pi \
 ACP_TEST_RUNS=3 \
-cargo test -p zeron-harness --test real_acp_lifecycle -- --ignored --nocapture
+cargo test -p harness-adapters --test real_acp_lifecycle -- --ignored --nocapture
 ```
 
 These tests require successful real calls; missing authentication or an unloaded

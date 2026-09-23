@@ -1,6 +1,6 @@
 //! Isolated, offline command palette screenshot fixture. Run on a dedicated display.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use zeron_ui::*;
+use harness_ui::*;
 
 fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
-        settings.surface = zeron_theme::SurfacePreference::Frosted;
+        settings.surface = harness_theme::SurfacePreference::Frosted;
         settings.save(&data).unwrap();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
@@ -24,8 +24,8 @@ fn main() -> anyhow::Result<()> {
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
         let state = cx.new(|_| {
             let mut s = state::AppState::new();
-            s.connection = zeron_proto::view::ConnectionStatus::Ready;
-            s.workspace_scope = Some(zeron_proto::WorkspaceScope::Local);
+            s.connection = harness_proto::view::ConnectionStatus::Ready;
+            s.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
             s.local_device_id = Some("local".into());
             s.devices = vec![serde_json::from_value(serde_json::json!({"id":"local","name":"This device","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];
             s.selected_chat = Some("browser-fixture".into()); s.selected_space = Some("project".into());
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
                 chat.id = format!("chat-{ix}");
                 chat.title = Some((*title).into());
                 chat.branch = Some(format!("fieldnotes/{}", title.to_lowercase().replace(' ', "-")));
-                chat.source_context = Some(zeron_proto::ConversationSourceContext {
+                chat.source_context = Some(harness_proto::ConversationSourceContext {
                     checkout_id: "fixture-checkout".into(), repo_root: "/tmp/fieldnotes".into(),
                     cwd: "/tmp/fieldnotes".into(), branch: chat.branch.clone().unwrap(),
                     head_sha: None, observed_at: chrono::Utc::now(),

@@ -35,7 +35,7 @@ try {
     $stage = Join-Path $out "zeron-$version-windows-x86_64"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath './target/release/harness.exe' -Destination (Join-Path $stage 'harness.exe')
-    @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'zeron-update.json')
+    @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'harness-update.json')
     Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null

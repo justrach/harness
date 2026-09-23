@@ -24,12 +24,12 @@ use gpui::{
 };
 
 use std::time::Duration;
-use zeron_engine::registry::TitleSettings;
-use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
+use harness_engine::registry::TitleSettings;
+use harness_engine::registry::{HarnessDescriptor, descriptor_enabled};
 
-use zeron_proto::Model;
-use zeron_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
-use zeron_rpc::methods;
+use harness_proto::Model;
+use harness_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
+use harness_rpc::methods;
 
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
@@ -79,7 +79,7 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
     };
-    if !can_install && let Some(command) = zeron_harness::install::manual_command(harness) {
+    if !can_install && let Some(command) = harness_adapters::install::manual_command(harness) {
         format!("{hint}. Install with `{command}`")
     } else {
         hint
@@ -459,7 +459,7 @@ impl HarnessesPage {
                             .filter(|h| {
                                 descriptor_enabled(h)
                                     && h.installed
-                                    && zeron_harness::supports_titles(h.id)
+                                    && harness_adapters::supports_titles(h.id)
                                     && h.id != HarnessId::Mock
                             })
                             .map(|h| {
@@ -1250,7 +1250,7 @@ mod tests {
 
     #[test]
     fn custom_build_override_is_advertised_for_bring_your_own_agents() {
-        use zeron_proto::HarnessId;
+        use harness_proto::HarnessId;
         assert_eq!(
             super::executable_override(HarnessId::Graff),
             Some("GRAFF_EXECUTABLE")
@@ -1264,7 +1264,7 @@ mod tests {
 
     #[test]
     fn explicit_sign_in_requires_installed_antigravity() {
-        use zeron_proto::HarnessId;
+        use harness_proto::HarnessId;
         assert!(super::offers_sign_in(HarnessId::Antigravity, true));
         assert!(!super::offers_sign_in(HarnessId::Antigravity, false));
         assert!(!super::offers_sign_in(HarnessId::Codex, true));

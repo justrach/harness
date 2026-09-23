@@ -34,12 +34,12 @@ validation pass.
 
 | Command | Result |
 | --- | --- |
-| `cargo test -p zeron-harness` | 351 passed, 11 ignored, 0 failed |
-| `cargo test -p zeron-engine` | 416 passed, 13 ignored, 0 failed |
-| `cargo test -p zeron-ui --lib pickers::` | 29 passed, 0 ignored, 0 failed; 1125 filtered out |
-| `cargo clippy -p zeron-harness -p zeron-engine -p zeron-ui --all-targets --message-format=json` | Exit 0; no diagnostics intersect added lines. Existing unrelated warnings remain. |
+| `cargo test -p harness-adapters` | 351 passed, 11 ignored, 0 failed |
+| `cargo test -p harness-engine` | 416 passed, 13 ignored, 0 failed |
+| `cargo test -p harness-ui --lib pickers::` | 29 passed, 0 ignored, 0 failed; 1125 filtered out |
+| `cargo clippy -p harness-adapters -p harness-engine -p harness-ui --all-targets --message-format=json` | Exit 0; no diagnostics intersect added lines. Existing unrelated warnings remain. |
 | `git diff --check` | Clean |
-| `cargo test -p zeron-harness --test cursor_shim repeated_startup_failures_retain_all_user_messages_without_nesting_or_duplicates -- --exact` | 1 passed; also passed in the final full suite (all 11 Cursor shim tests passed) |
+| `cargo test -p harness-adapters --test cursor_shim repeated_startup_failures_retain_all_user_messages_without_nesting_or_duplicates -- --exact` | 1 passed; also passed in the final full suite (all 11 Cursor shim tests passed) |
 
 The isolated Cursor failure from the disk-constrained run did not reproduce. The
 solo run completed in 2.67 seconds, below its five-second timeout, and subsequent
@@ -57,7 +57,7 @@ Logs are in `/home/ubuntu/codex-runs/models-scratch/`: `final-harness.log`,
 
 ### Live Codex discovery
 
-`cargo run -p zeron-harness --example codex_models_probe` completed successfully:
+`cargo run -p harness-adapters --example codex_models_probe` completed successfully:
 
 ```text
 binary: /usr/local/lib/node_modules/@openai/codex/bin/codex.js

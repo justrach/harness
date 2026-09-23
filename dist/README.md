@@ -41,12 +41,12 @@ installed builds can update into Zeron. CI runs this on tags
 2. Assemble the bundle:
    ```sh
    mkdir -p Zeron.app/Contents/{MacOS,Resources}
-   cp harness Harnesser.app/Contents/MacOS/harness
+   cp harness Harness.app/Contents/MacOS/harness
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
      dist/macos/Info.plist > Zeron.app/Contents/Info.plist
    ```
 3. Icon: generate `zeron.icns` from `dist/macos/icon-1024.png` (the macOS-shaped
-   variant of the artwork — squircle mask, margins, and shadow pre-baked, since
+   variant of the artwork — squircle mask and margins pre-baked, since
    `sips` can't apply an alpha mask) and place it at
    `Zeron.app/Contents/Resources/zeron.icns`:
    ```sh

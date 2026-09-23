@@ -247,8 +247,30 @@ pub fn match_rank(query: &str, label: &str) -> Option<usize> {
     } else if label.contains(&query) {
         Some(1)
     } else {
-        None
+        // "grok 4.7" → grok-4.7; "sol 6" → GPT-5.6-Sol.
+        let compact_query = compact_alnum(&query);
+        let compact_label = compact_alnum(&label);
+        if !compact_query.is_empty() && compact_label.starts_with(&compact_query) {
+            Some(2)
+        } else if !compact_query.is_empty() && compact_label.contains(&compact_query) {
+            Some(3)
+        } else if query.split_whitespace().any(|t| t.len() > 1)
+            && query.split_whitespace().all(|token| {
+                let token = token.to_lowercase();
+                let compact = compact_alnum(&token);
+                label.contains(&token)
+                    || (!compact.is_empty() && compact_label.contains(&compact))
+            })
+        {
+            Some(4)
+        } else {
+            None
+        }
     }
+}
+
+fn compact_alnum(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
 /// Filter + rank labels for a search query: prefix matches first, then
@@ -2116,6 +2138,10 @@ mod tests {
         assert_eq!(match_rank("lease", "release"), Some(1));
         assert_eq!(match_rank("x", "release"), None);
         assert_eq!(match_rank("", "anything"), Some(1));
+        assert_eq!(match_rank("grok 4.7", "grok-4.7"), Some(2));
+        assert_eq!(match_rank("Grok 4.7", "grok-4.7"), Some(2));
+        assert_eq!(match_rank("sol 6", "gpt-5.6-sol"), Some(4));
+        assert_eq!(match_rank("Sol 6", "GPT-5.6-Sol"), Some(4));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions, div, img, point, px, rgb, size,
 };
 use std::path::PathBuf;
-use zeron_ui::edge_fade::edge_faded;
+use harness_ui::edge_fade::edge_faded;
 
 struct Fixture {
     image: PathBuf,
