@@ -407,6 +407,11 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    /// The agent changed its active effort through ACP configuration (for
+    /// example, a slash command). Updates the chat picker, not the transcript.
+    ReasoningChanged {
+        reasoning: Option<ReasoningLevel>,
+    },
     Error {
         message: String,
     },

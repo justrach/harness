@@ -8,8 +8,8 @@
 //! tagged `sessionUpdate`/snake_case; structs are camelCase; tool kinds and
 //! statuses are snake_case).
 
-use serde_json::Value;
 use harness_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
+use serde_json::Value;
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
 /// fold applies its own (smaller) cap before anything persists; this one only
@@ -439,7 +439,27 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                 Vec::new()
             }
         }
-        "current_mode_update" | "config_option_update" | "session_info_update" => Vec::new(),
+        "config_option_update" => match update.get("configOptions").and_then(Value::as_array) {
+            Some(options) => {
+                let thought = options.iter().find(|option| {
+                    option.get("category").and_then(Value::as_str) == Some("thought_level")
+                });
+                match thought {
+                    None => vec![AgentEvent::ReasoningChanged { reasoning: None }],
+                    Some(option) => option
+                        .get("currentValue")
+                        .and_then(Value::as_str)
+                        .and_then(super::reasoning_from_value)
+                        .map(|reasoning| AgentEvent::ReasoningChanged {
+                            reasoning: Some(reasoning),
+                        })
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            None => Vec::new(),
+        },
+        "current_mode_update" | "session_info_update" => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -501,6 +521,7 @@ pub(crate) fn preferred_allow_option(options: &[Value]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness_proto::ReasoningLevel;
     use serde_json::json;
 
     #[test]
@@ -671,6 +692,34 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn config_update_uses_full_effort_state_without_guessing_unknown_values() {
+        let update = |config_options: Value| {
+            json!({
+                "sessionUpdate": "config_option_update", "configOptions": config_options,
+            })
+        };
+        assert_eq!(
+            map_update(&update(json!([{
+                "category": "thought_level", "currentValue": "high",
+            }]))),
+            vec![AgentEvent::ReasoningChanged {
+                reasoning: Some(ReasoningLevel::High)
+            }]
+        );
+        assert_eq!(
+            map_update(&update(json!([]))),
+            vec![AgentEvent::ReasoningChanged { reasoning: None }]
+        );
+        assert!(
+            map_update(&update(json!([{
+                "category": "thought_level", "currentValue": "future-effort",
+            }])))
+            .is_empty()
+        );
+        assert!(map_update(&json!({"sessionUpdate": "config_option_update"})).is_empty());
     }
 
     #[test]

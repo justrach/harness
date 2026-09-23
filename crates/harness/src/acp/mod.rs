@@ -475,8 +475,8 @@ fn graff_spec() -> AcpAgentSpec {
         install_hint: "graff (searched PATH, the login shell's PATH, ~/.local/bin, \
              /opt/homebrew/bin, and /usr/local/bin; install codegraff, then \
              `graff login`; set GRAFF_EXECUTABLE to override)",
-        // Live catalog is `graff models` (see graff_models). Effort is on
-        // `graff/models` rows, not session/new configOptions yet.
+        // Graff's vendor model catalog advertises per-seat effort ladders;
+        // session effort selection uses the standard ACP thought_level option.
         models: Vec::new,
         steering_mode: SteeringMode::TurnBoundary,
         reasoning_levels: &[
@@ -488,7 +488,7 @@ fn graff_spec() -> AcpAgentSpec {
             ReasoningLevel::Ultra,
         ],
         prompt_transform: identity_transform,
-        effort_values: default_effort_values,
+        effort_values: graff_models::effort_values,
         ladder_extras: &[],
         prompt_complete_extension: false,
         prompt_stall: None,
@@ -1873,6 +1873,11 @@ impl Harness for AcpHarness {
     /// Other ACP agents use a fresh session probe, with the spec's static
     /// catalog as fallback when they advertise nothing or probing fails.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
+        if self.id() == HarnessId::Graff {
+            // An OS keychain account cannot be represented by the file/env
+            // fingerprint. The engine treats None as a live-only catalog.
+            return Ok(None);
+        }
         let binary = match self.resolve_launch()? {
             Launch::Program(path, _) => path,
             Launch::Managed { pin, bin_name, .. } => {
@@ -1900,6 +1905,15 @@ impl Harness for AcpHarness {
         (self.spec.models)()
     }
     async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
+        if self.id() == HarnessId::Graff {
+            // Graff credentials may live in the OS keychain, which the cache
+            // context cannot fingerprint. Never serve another account's rows.
+            let (exe, _) = self.resolve_program(false).await?;
+            return Ok(crate::ModelCatalog {
+                models: graff_models::discover(self, &exe, self.model_discovery_timeout).await?,
+                source: "live",
+            });
+        }
         self.model_context()?.unwrap().log();
         self.models_cache
             .get_with_timeout(
@@ -1912,9 +1926,6 @@ impl Harness for AcpHarness {
                         self.devin_models
                             .refresh(&exe, self.model_discovery_timeout)
                             .await
-                    } else if self.id() == HarnessId::Graff {
-                        let (exe, _) = self.resolve_program(false).await?;
-                        graff_models::discover(&exe, self.model_discovery_timeout).await
                     } else {
                         self.discover_models().await
                     }
@@ -1927,7 +1938,7 @@ impl Harness for AcpHarness {
         match self.model_catalog(true).await {
             Ok(catalog) => Ok(catalog.models),
             Err(error)
-                if self.id() == HarnessId::Devin
+                if matches!(self.id(), HarnessId::Devin | HarnessId::Graff)
                     || !crate::CatalogFailure::classify(&error).allows_stale() =>
             {
                 Err(error)
@@ -2003,8 +2014,9 @@ impl Harness for AcpHarness {
         } else {
             Vec::new()
         };
-        let (scratch, mut child, stderr_tail) =
-            self.spawn_agent(Some(&request.cwd), true, &launch_args).await?;
+        let (scratch, mut child, stderr_tail) = self
+            .spawn_agent(Some(&request.cwd), true, &launch_args)
+            .await?;
         let stdin = child
             .stdin
             .take()
@@ -3170,6 +3182,9 @@ async fn run_session(session: Session) {
         // session's advertised config options. Best-effort for effort and
         // traits: a rejected auxiliary set is logged and the agent default
         // runs.
+        if harness == HarnessId::Graff {
+            graff_models::validate_effort(&session_response, request.reasoning)?;
+        }
         let efforts = effort_values(request.reasoning, request.model.as_deref());
         let session_commands = scan_available_commands(&session_response);
         let init_commands = if session_commands.is_empty() {
@@ -3192,14 +3207,29 @@ async fn run_session(session: Session) {
                     params.insert(k.clone(), v.clone());
                 }
             }
-            if let Err(e) = request_draining(
+            let set_result = request_draining(
                 &client,
                 &mut incoming,
                 "session/set_config_option",
                 Value::Object(params),
             )
-            .await
+            .await;
+            if harness == HarnessId::Graff
+                && request.reasoning.is_some()
+                && graff_models::is_thought_option(&options_snapshot, &config_id)
             {
+                let response = set_result.map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "graff rejected requested thought level: {error}"
+                    ))
+                })?;
+                graff_models::verify_effort_set(
+                    &response,
+                    graff_models::effort_name(request.reasoning.unwrap()),
+                )?;
+                continue;
+            }
+            if let Err(e) = set_result {
                 if matches!(harness, HarnessId::Antigravity | HarnessId::Devin)
                     && requested_model.is_some()
                     && is_model_config_option(&options_snapshot, &config_id)
@@ -4233,7 +4263,12 @@ mod tests {
 
         let mut grok = Command::new("grok");
         AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
-        assert!(!grok.as_std().get_envs().any(|(key, _)| key == "GRAFF_AUTO_ISOLATE"));
+        assert!(
+            !grok
+                .as_std()
+                .get_envs()
+                .any(|(key, _)| key == "GRAFF_AUTO_ISOLATE")
+        );
     }
 
     #[test]

@@ -24,14 +24,14 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use harness_adapters::{CancellationToken, Harness, RunControls, SteerMessage};
 use harness_doc::{
     DocError, MessagePart, MessageRole, MessageStatus, STREAM_COMMIT_MS, SegmentWriter, SessionDoc,
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
-use harness_adapters::{CancellationToken, Harness, RunControls, SteerMessage};
 use harness_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, Session, SessionStatus, UserInputAnswer,
-    UserInputQuestion,
+    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, Session, SessionStatus,
+    UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -1497,6 +1497,24 @@ fn cursor_unstarted_history(
     ))
 }
 
+fn apply_reasoning_update(
+    workspace: &crate::workspace_host::WorkspaceHost,
+    chat_id: &str,
+    harness_id: HarnessId,
+    reasoning: Option<ReasoningLevel>,
+) -> Result<bool, EngineError> {
+    let Some(mut config) = workspace.chat_config(chat_id) else {
+        return Ok(false);
+    };
+    // An old child must not restore its picker state after this chat switches
+    // to another harness.
+    if config.harness != harness_id || config.reasoning == reasoning {
+        return Ok(false);
+    }
+    config.reasoning = reasoning;
+    workspace.set_chat_config(chat_id, &config)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -2056,6 +2074,19 @@ async fn drive_run(
             }
             continue;
         }
+        if let AgentEvent::ReasoningChanged { reasoning } = &event {
+            let current_run = lock(&inner.runs)
+                .get(&chat_id)
+                .is_some_and(|run| run.run_id == run_id);
+            if current_run && let Some(workspace) = inner.workspace() {
+                if let Err(err) =
+                    apply_reasoning_update(&workspace, &chat_id, harness_id, *reasoning)
+                {
+                    tracing::warn!(%chat_id, error = %err, "ACP effort update failed");
+                }
+            }
+            continue;
+        }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
         // re-opens the session; everything else stays gated. The ACP child
         // keeps forwarding `session/update` frames after a turn completes,
@@ -2490,6 +2521,82 @@ async fn drive_run(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn acp_effort_update_persists_and_refreshes_chat_picker_without_cross_harness_clobber() {
+        use super::*;
+        use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+        use harness_proto::{ChatConfig, SandboxLevel};
+        use harness_sync::DocsStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "test".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        let original = ChatConfig {
+            harness: HarnessId::Graff,
+            model: Some("p1/shared".into()),
+            reasoning: Some(ReasoningLevel::High),
+            model_options: serde_json::Map::new(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+        };
+        workspace
+            .create_chat("picker", None, Some("test-device"), Some(original), None)
+            .unwrap();
+        let mut watch = workspace.watch_chats();
+        assert!(
+            apply_reasoning_update(
+                &workspace,
+                "picker",
+                HarnessId::Graff,
+                Some(ReasoningLevel::Low)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            workspace.chat_config("picker").unwrap().reasoning,
+            Some(ReasoningLevel::Low)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), watch.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            watch
+                .borrow_and_update()
+                .iter()
+                .find(|chat| chat.id == "picker")
+                .unwrap()
+                .config
+                .as_ref()
+                .unwrap()
+                .reasoning,
+            Some(ReasoningLevel::Low)
+        );
+
+        let mut switched = workspace.chat_config("picker").unwrap();
+        switched.harness = HarnessId::Grok;
+        workspace.set_chat_config("picker", &switched).unwrap();
+        assert!(
+            !apply_reasoning_update(
+                &workspace,
+                "picker",
+                HarnessId::Graff,
+                Some(ReasoningLevel::High)
+            )
+            .unwrap()
+        );
+        assert_eq!(workspace.chat_config("picker"), Some(switched));
+    }
+
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
         let doc = harness_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
@@ -2539,7 +2646,11 @@ mod tests {
             ),
             ("a1", harness_doc::MessageRole::Assistant, "partial output"),
             ("u2", harness_doc::MessageRole::User, "current request"),
-            ("u3", harness_doc::MessageRole::User, "future pending request"),
+            (
+                "u3",
+                harness_doc::MessageRole::User,
+                "future pending request",
+            ),
         ] {
             doc.push_message(&harness_doc::SessionMessageEntry {
                 id: id.into(),
