@@ -10,11 +10,11 @@ Install stable MSVC Rust, Visual Studio C++ build tools, Windows SDK, CMake,
 and Git for Windows, then run:
 
 ```powershell
-cargo run --locked -p zeron
+cargo run --locked -p harness
 ```
 
 Close the app before rebuilding. For release builds, use
-`cargo build --release --locked -p zeron`. If shader compiler discovery fails,
+`cargo build --release --locked -p harness`. If shader compiler discovery fails,
 set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
 
 ## Configuration and agent support

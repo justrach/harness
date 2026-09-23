@@ -9,7 +9,7 @@
     <key>CFBundleDisplayName</key>
     <string>Harnesser</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>harness</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
     <key>CFBundleIdentifier</key>

@@ -22,6 +22,16 @@ const SYSTEMD_UNIT: &str = "zeron.service";
 /// default PATH won't find); the `ZERON_*`/logging vars only when set.
 const CAPTURED_ENV: &[&str] = &[
     "PATH",
+    "HARNESS_DATA_DIR",
+    "HARNESS_EDGE_URL",
+    "HARNESS_EDGE_TOKEN",
+    "HARNESS_ORG_ID",
+    "HARNESS_WORKOS_CLIENT_ID",
+    "HARNESS_WORKOS_API_BASE",
+    "HARNESS_IPC_PORT",
+    "HARNESS_CALLBACK_PORT",
+    "HARNESS_HARNESS",
+    "HARNESS_DEVICE_NAME",
     "ZERON_DATA_DIR",
     "ZERON_EDGE_URL",
     "ZERON_EDGE_TOKEN",

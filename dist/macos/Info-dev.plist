@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Harnesser</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>harness</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
     <key>CFBundleIdentifier</key>
@@ -40,6 +40,10 @@
          the same isolated development instance. -->
     <key>LSEnvironment</key>
     <dict>
+        <key>HARNESS_DATA_DIR</key>
+        <string>__DATA_DIR__</string>
+        <key>HARNESS_IPC_PORT</key>
+        <string>__IPC_PORT__</string>
         <key>ZERON_DATA_DIR</key>
         <string>__DATA_DIR__</string>
         <key>ZERON_IPC_PORT</key>

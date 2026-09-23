@@ -3,12 +3,24 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+/// `HARNESS_*` wins; `ZERON_*` still works for existing installs and scripts.
+pub fn var(zeron_key: &str) -> Result<String, std::env::VarError> {
+    let harness_key = zeron_key.replacen("ZERON_", "HARNESS_", 1);
+    match std::env::var(&harness_key) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        _ => std::env::var(zeron_key),
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     resolve_data_dir(|name| std::env::var_os(name))
 }
 
 fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
-    if let Some(dir) = env("ZERON_DATA_DIR") {
+    if let Some(dir) = env("HARNESS_DATA_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = env("ZERON_DATA_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);
     }
     #[cfg(windows)]
@@ -24,7 +36,7 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .filter(|value| !value.is_empty())
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
-            .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
+            .expect("LOCALAPPDATA and USERPROFILE not set; set HARNESS_DATA_DIR");
         local.join("Harnesser")
     }
     #[cfg(not(windows))]
@@ -50,8 +62,16 @@ mod tests {
     #[test]
     fn explicit_data_dir_needs_no_home() {
         assert_eq!(
-            resolve(&[("ZERON_DATA_DIR", "custom data")]),
+            resolve(&[("HARNESS_DATA_DIR", "custom data")]),
             PathBuf::from("custom data")
+        );
+    }
+
+    #[test]
+    fn zeron_data_dir_still_works() {
+        assert_eq!(
+            resolve(&[("ZERON_DATA_DIR", "legacy data")]),
+            PathBuf::from("legacy data")
         );
     }
 

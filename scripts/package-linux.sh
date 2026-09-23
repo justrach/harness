@@ -20,11 +20,11 @@ TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p zeron
-  BIN="$ROOT/target/release/zeron"
+  cargo build --release -p harness
+  BIN="$ROOT/target/release/harness"
 else
-  cargo build -p zeron
-  BIN="$ROOT/target/debug/zeron"
+  cargo build -p harness
+  BIN="$ROOT/target/debug/harness"
 fi
 
 rm -rf "$STAGE" "$TARBALL"

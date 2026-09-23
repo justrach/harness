@@ -32,16 +32,16 @@ installed builds can update into Zeron. CI runs this on tags
 
 1. Build the universal (or per-arch) binary:
    ```sh
-   cargo build --release -p zeron --target aarch64-apple-darwin
-   cargo build --release -p zeron --target x86_64-apple-darwin
+   cargo build --release -p harness --target aarch64-apple-darwin
+   cargo build --release -p harness --target x86_64-apple-darwin
    lipo -create -output zeron \
-     target/aarch64-apple-darwin/release/zeron \
-     target/x86_64-apple-darwin/release/zeron
+     target/aarch64-apple-darwin/release/harness \
+     target/x86_64-apple-darwin/release/harness
    ```
 2. Assemble the bundle:
    ```sh
    mkdir -p Zeron.app/Contents/{MacOS,Resources}
-   cp zeron Zeron.app/Contents/MacOS/zeron
+   cp harness Harnesser.app/Contents/MacOS/harness
    sed "s/__VERSION__/$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')/" \
      dist/macos/Info.plist > Zeron.app/Contents/Info.plist
    ```
