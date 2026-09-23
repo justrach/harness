@@ -1330,6 +1330,13 @@ impl AcpHarness {
     }
 
     fn configure_adapter_environment(&self, cmd: &mut Command, executable: &Path) {
+        if self.spec.id == HarnessId::Graff {
+            // The GUI has already selected this checkout as the session
+            // workspace. graff's concurrent-session auto-isolation would
+            // silently chdir into a new worktree, then reject session/load's
+            // original cwd and split the visible chat from its saved context.
+            cmd.env("GRAFF_AUTO_ISOLATE", "0");
+        }
         if self.spec.id == HarnessId::Antigravity
             && let Some(parent) = executable.parent()
         {
@@ -4215,6 +4222,19 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graff_child_keeps_the_selected_acp_workspace() {
+        let mut graff = Command::new("graff");
+        AcpHarness::graff().configure_adapter_environment(&mut graff, Path::new("graff"));
+        assert!(graff.as_std().get_envs().any(|(key, value)| {
+            key == "GRAFF_AUTO_ISOLATE" && value == Some(std::ffi::OsStr::new("0"))
+        }));
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert!(!grok.as_std().get_envs().any(|(key, _)| key == "GRAFF_AUTO_ISOLATE"));
+    }
 
     #[test]
     fn pi_discovery_allows_cold_extension_startup() {
