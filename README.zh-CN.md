@@ -89,4 +89,4 @@ macOS 上用桌面发行包，或者从源码构建 `zeron` 再运行 `zeron dae
 
 ## 许可
 
-[MIT](LICENSE)。
+[MIT](LICENSE)。源自 [Zeron](https://github.com/zeronsh/zeron)（Wing）。

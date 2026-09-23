@@ -89,4 +89,4 @@ On macOS, use the desktop release or build `zeron` and run `zeron daemon install
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Taken from [Zeron](https://github.com/zeronsh/zeron) (Wing).
