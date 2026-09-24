@@ -19,7 +19,7 @@ members = [
 exclude = ["vendor/zui", "vendor/gpui-component"]
 
 [workspace.package]
-version = "0.2.84"
+version = "0.2.85"
 edition = "2024"
 license = "MIT"
 publish = false
