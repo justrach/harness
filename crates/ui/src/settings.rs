@@ -301,6 +301,16 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     });
 }
 
+/// Read the latest settings without cloning them. Render paths read one or
+/// two fields per frame (per code fence, per Shell render); `current` would
+/// deep-clone every map and Vec in `UiSettings` each time.
+pub fn with_current<R>(cx: &App, read: impl FnOnce(&UiSettings) -> R) -> R {
+    match cx.try_global::<SettingsStore>() {
+        Some(store) => read(&store.current),
+        None => read(&UiSettings::default()),
+    }
+}
+
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()

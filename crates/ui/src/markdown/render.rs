@@ -267,7 +267,7 @@ where
         scroll,
         scrollbar,
         toggle_fit: Rc::new(move |_, cx| {
-            let fit = !crate::settings::current(cx).code_fences_fit_content;
+            let fit = !crate::settings::with_current(cx, |s| s.code_fences_fit_content);
             crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
                 settings.code_fences_fit_content = fit
             });

@@ -6807,7 +6807,7 @@ impl Transcript {
         let runtime = self.code_fences.entry(key.clone()).or_default();
         render::code_ui_for(
             key,
-            crate::settings::current(cx).code_fences_fit_content,
+            crate::settings::with_current(cx, |s| s.code_fences_fit_content),
             runtime,
             cx.weak_entity(),
             |transcript| &mut transcript.code_fences,
@@ -9062,6 +9062,82 @@ mod tests {
                 "the steered prompt still takes the viewport"
             );
         });
+    }
+
+    /// Cost probe (run with --ignored --nocapture): per-chunk `sync` and
+    /// frame time while a reply streams at the end of a long chat.
+    #[gpui::test]
+    #[ignore]
+    fn probe_streaming_chunk_cost_in_a_long_chat(cx: &mut gpui::TestAppContext) {
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let body = (0..8)
+            .map(|i| format!("Paragraph {i} explains `code` and **bold** text at some length.\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n"))
+            .collect::<String>();
+        let mut entries = Vec::new();
+        for i in 0..150 {
+            let mut user = assistant(&format!("p{i}"), MessageStatus::Complete, vec![text_part("t", "Please explain this.")]);
+            user.role = MessageRole::User;
+            entries.push(user);
+            entries.push(assistant(&format!("r{i}"), MessageStatus::Complete, vec![
+                tool_part(&format!("tool{i}"), "cargo test"),
+                text_part("t", &body),
+            ]));
+        }
+        let mut live = String::new();
+        let mut push = |live: &str, cx: &mut gpui::TestAppContext| {
+            let mut next = entries.clone();
+            next.push(assistant("live", MessageStatus::Streaming, vec![text_part("t", live)]));
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = next;
+                state.transcript_revision += 1;
+            });
+        };
+        push("", cx);
+        let t = Instant::now();
+        transcript.update(cx, |this, cx| this.sync(cx));
+        eprintln!("PROBE attach sync (main-thread parse, no prepared rows)={:?}", t.elapsed());
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        draw(cx);
+        let (mut sync_total, mut draw_total) = (Duration::ZERO, Duration::ZERO);
+        let chunks = 60;
+        for i in 0..chunks {
+            live.push_str(&format!("Streaming token batch {i} with some words. "));
+            push(&live, cx);
+            let t = Instant::now();
+            transcript.update(cx, |this, cx| this.sync(cx));
+            sync_total += t.elapsed();
+            let t = Instant::now();
+            draw(cx);
+            draw_total += t.elapsed();
+        }
+        let rows = transcript.read_with(cx, |this, _| this.rows.len());
+        eprintln!(
+            "PROBE rows={rows} per-chunk sync={:?} draw={:?}",
+            sync_total / chunks,
+            draw_total / chunks
+        );
     }
 
     use harness_doc::MessagePart;
