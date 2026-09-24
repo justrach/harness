@@ -13,7 +13,7 @@ use harness_engine::{
 fn config(
     data_dir: &Path,
     edge_url: String,
-    workos_client_id: Option<&str>,
+    codegraff_client_id: Option<&str>,
     edge_token: Option<&str>,
 ) -> EngineConfig {
     EngineConfig {
@@ -23,7 +23,7 @@ fn config(
         ipc_port: 0,
         default_harness: HarnessId::Mock,
         org_id: None,
-        workos_client_id: workos_client_id.map(str::to_string),
+        codegraff_client_id: codegraff_client_id.map(str::to_string),
     }
 }
 
