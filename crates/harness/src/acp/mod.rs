@@ -467,7 +467,11 @@ fn graff_spec() -> AcpAgentSpec {
         display_name: "graff",
         executable: "graff",
         env_override: "GRAFF_EXECUTABLE",
-        args: &["acp"],
+        // Harness handles ACP sessions without an interactive approval UI.
+        // Match its auto-accepted permission responses from the first prompt:
+        // graff otherwise tells its root agent that write/bash are denied
+        // and delegates even though this host would approve the requests.
+        args: &["acp", "--yolo"],
         npm_package: None,
         archive: None,
         extra_paths: graff_install_paths,
