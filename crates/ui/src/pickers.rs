@@ -6709,7 +6709,7 @@ mod tests {
 
     #[test]
     fn default_reasoning_prefers_high_then_medium() {
-        use ReasoningLevel::*;
+        use ReasoningLevel::{High, Low, Max, Medium, Minimal, Ultracode, Ultrathink, XHigh};
         // Recommended default is High (user-corrected), even on full ladders.
         assert_eq!(
             default_reasoning(&[Low, Medium, High, XHigh, Max, Ultracode, Ultrathink]),
@@ -6726,7 +6726,7 @@ mod tests {
 
     #[test]
     fn clamp_reasoning_keeps_offered_levels_and_heals_foreign_ones() {
-        use ReasoningLevel::*;
+        use ReasoningLevel::{High, Low, Max, Medium, XHigh};
         let ladder = [Low, Medium, High, Max];
         // A pick the ladder offers survives.
         assert_eq!(clamp_reasoning(Some(Max), &ladder), Some(Max));
