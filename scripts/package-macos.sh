@@ -6,6 +6,7 @@
 #
 # Usage: scripts/package-macos.sh
 # Env:   CODESIGN_IDENTITY="Developer ID Application: …" to sign the bundle.
+#        GRAFF_BINARY=/absolute/path/to/graff to bundle an exact CLI build.
 #        NOTARY_KEY_PATH + NOTARY_KEY_ID + NOTARY_ISSUER_ID — App Store Connect
 #        API key (.p8) for notarization; all three set → notarize + staple the
 #        app and the dmg, which removes the Gatekeeper warning entirely.
@@ -20,6 +21,9 @@ OUT_DIR="$ROOT/target/package"
 APP="$OUT_DIR/Harness.app"
 DMG="$OUT_DIR/zeron-$VERSION-macos-$ARCH.dmg"
 APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
+if [[ -n "${GRAFF_BINARY:-}" ]]; then
+  [[ -x "$GRAFF_BINARY" ]] || { echo "GRAFF_BINARY is not executable" >&2; exit 1; }
+fi
 
 cd "$ROOT"
 cargo build --release -p harness
@@ -28,6 +32,10 @@ rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/harness" "$APP/Contents/MacOS/harness"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+if [[ -n "${GRAFF_BINARY:-}" ]]; then
+  mkdir -p "$APP/Contents/Resources/bin"
+  install -m 755 "$GRAFF_BINARY" "$APP/Contents/Resources/bin/graff"
+fi
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 
@@ -47,6 +55,10 @@ rm -rf "$ICONSET"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.
   # (No --deep: Apple deprecated it; the bundle is a single Mach-O anyway.)
+  if [[ -f "$APP/Contents/Resources/bin/graff" ]]; then
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+      "$APP/Contents/Resources/bin/graff"
+  fi
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
