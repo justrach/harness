@@ -202,7 +202,13 @@ mod tests {
         // The probe must not have stolen the lock from the holder.
         InstanceLock::acquire(dir.path()).expect_err("still held after probe");
         drop(lock);
-        assert_eq!(InstanceLock::holder(dir.path()), None, "released");
+        // A concurrent test may fork while the lock is held. Its inherited fd
+        // keeps flock alive until exec, even after our copy has been dropped.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while let Some(holder) = InstanceLock::holder(dir.path()) {
+            assert!(std::time::Instant::now() < deadline, "released: {holder}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
