@@ -1,4 +1,4 @@
-//! Auth service tests: dev mode, and the WorkOS flows (headless paste-code exchange,
+//! Auth service tests: dev mode, and the Codegraff sign-in flows (headless paste-code exchange,
 //! loopback callback, refresh rotation + revocation, org onboarding) against a stub
 //! edge HTTP server on a plain tokio TcpListener.
 
@@ -161,7 +161,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
     let ttl = state.token_ttl.load(Ordering::SeqCst) as i64;
     match (method.as_str(), path) {
         ("GET", "/health") => {
-            respond(&mut stream, "200 OK", r#"{"ok":true,"auth":"workos"}"#).await;
+            respond(&mut stream, "200 OK", r#"{"ok":true,"auth":"codegraff"}"#).await;
         }
         ("POST", "/auth/exchange") => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -214,7 +214,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                 respond(&mut stream, &format!("{status} Unavailable"), "{}").await;
                 return;
             }
-            if refresh_token == "dead" {
+            if refresh_token == "harness_rt_dead" {
                 respond(&mut stream, "401 Unauthorized", r#"{"error":"revoked"}"#).await;
                 return;
             }
@@ -248,10 +248,11 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn workos_config(edge_url: &str, data_dir: &std::path::Path) -> AuthConfig {
+fn codegraff_config(edge_url: &str, data_dir: &std::path::Path) -> AuthConfig {
     let mut config = AuthConfig::new(edge_url, data_dir);
-    config.workos_client_id = Some("client_test".into());
-    config.workos_api_base = "https://authkit.example".into();
+    config.codegraff_client_id = Some("cg_client_test".into());
+    config.codegraff_api_base = "https://codegraff.example".into();
+    config.callback_port = None;
     config
 }
 
@@ -290,8 +291,8 @@ async fn dev_mode_is_signed_in_with_configured_bearer() {
     let mut config = AuthConfig::new("http://127.0.0.1:1", dir.path());
     config.dev_user_id = "wing-dev".into();
     let auth = Auth::new(config);
-    assert!(!auth.workos_enabled());
-    assert!(!auth.loaded_workos_session());
+    assert!(!auth.codegraff_enabled());
+    assert!(!auth.loaded_codegraff_session());
     assert!(matches!(auth.state(), AuthState::SignedIn { user, .. } if user.id == "wing-dev"));
     assert_eq!(auth.access_token().await.as_deref(), Ok("wing-dev"));
     // Dev sign-in mirrors the TS service: a no-op URL, CompleteSignIn accepted.
@@ -305,9 +306,9 @@ async fn dev_mode_is_signed_in_with_configured_bearer() {
 async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     let edge = StubEdge::start().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
-    assert!(auth.workos_enabled());
-    assert!(!auth.loaded_workos_session());
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
+    assert!(auth.codegraff_enabled());
+    assert!(!auth.loaded_codegraff_session());
     assert_eq!(auth.state(), AuthState::SignedOut);
     assert_eq!(
         auth.access_token().await,
@@ -316,10 +317,10 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     );
 
     let url = auth.start_headless_sign_in();
-    assert!(url.starts_with("https://authkit.example/user_management/authorize?"));
+    assert!(url.starts_with("https://codegraff.example/oauth/authorize?"));
     assert_eq!(
         query_param(&url, "client_id").as_deref(),
-        Some("client_test")
+        Some("cg_client_test")
     );
     let redirect = query_param(&url, "redirect_uri").expect("redirect");
     assert!(
@@ -337,7 +338,7 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
         .await
         .expect("paste-code sign-in");
     assert!(
-        !auth.loaded_workos_session(),
+        !auth.loaded_codegraff_session(),
         "sign-in does not rewrite the startup fact"
     );
     assert_eq!(edge.state.exchanges.load(Ordering::SeqCst), 1);
@@ -404,7 +405,7 @@ async fn short_lived_tokens_refresh_on_demand() {
     edge.state.token_ttl.store(20, Ordering::SeqCst);
     *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
     let dir = tempfile::tempdir().expect("tempdir");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
 
     let url = auth.start_headless_sign_in();
     let state = query_param(&url, "state").expect("state");
@@ -438,21 +439,21 @@ async fn revoked_refresh_token_signs_out() {
     // A persisted session whose refresh token the edge rejects with a definitive 4xx.
     std::fs::write(
         dir.path().join("session.json"),
-        r#"{"refreshToken":"dead","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_dead","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     )
     .expect("seed session");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
     assert!(
         auth.state().is_signed_in(),
         "boots from the persisted session"
     );
-    assert!(auth.loaded_workos_session());
+    assert!(auth.loaded_codegraff_session());
 
     // The refresh is doomed → the session degrades to SignedOut and the file is gone.
     assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
     assert_eq!(auth.state(), AuthState::SignedOut);
     assert!(
-        auth.loaded_workos_session(),
+        auth.loaded_codegraff_session(),
         "revocation must not rewrite the captured startup fact"
     );
     assert!(!dir.path().join("session.json").exists());
@@ -466,10 +467,10 @@ async fn offline_refresh_loop_backs_off_without_revoking_session() {
     let session_file = dir.path().join("session.json");
     std::fs::write(
         &session_file,
-        r#"{"refreshToken":"offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     )
     .expect("seed session");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
 
     let refresh_loop = auth.spawn_refresh_loop();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -487,9 +488,9 @@ async fn offline_refresh_loop_backs_off_without_revoking_session() {
 fn persisted_auth(edge: &StubEdge, dir: &std::path::Path) -> Auth {
     std::fs::write(
         dir.join("session.json"),
-        r#"{"refreshToken":"offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     ).expect("seed session");
-    Auth::new(workos_config(&edge.url(), dir))
+    Auth::new(codegraff_config(&edge.url(), dir))
 }
 
 async fn twenty_consumers(auth: &Auth) -> Vec<Result<String, TokenError>> {
@@ -657,7 +658,7 @@ async fn cancelling_a_consumer_does_not_cancel_the_shared_refresh() {
     assert_eq!(edge.state.refreshes.load(Ordering::SeqCst), 1);
     assert_eq!(
         edge.state.refresh_tokens.lock().unwrap().as_slice(),
-        ["offline"]
+        ["harness_rt_offline"]
     );
 }
 
@@ -737,7 +738,7 @@ async fn loopback_callback_completes_headed_sign_in() {
     let edge = StubEdge::start().await;
     *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
     let dir = tempfile::tempdir().expect("tempdir");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
 
     let url = auth.start_sign_in().await.expect("authorize url");
     let redirect = query_param(&url, "redirect_uri").expect("redirect");
@@ -774,7 +775,7 @@ async fn sign_out_invalidates_pending_and_in_flight_oauth_callbacks() {
     let edge = StubEdge::start().await;
     *edge.state.exchange_org.lock().expect("lock") = "org_1".into();
     let dir = tempfile::tempdir().expect("tempdir");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
+    let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
 
     let first_url = auth.start_sign_in().await.expect("authorize url");
     let callback = query_param(&first_url, "redirect_uri")
@@ -831,10 +832,10 @@ async fn detect_probes_edge_dev_mode() {
         }
     });
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut config = workos_config(&format!("http://127.0.0.1:{port}"), dir.path());
+    let mut config = codegraff_config(&format!("http://127.0.0.1:{port}"), dir.path());
     config.dev_user_id = "dev-w".into();
     let auth = Auth::detect(config).await;
-    assert!(!auth.workos_enabled(), "edge dev mode wins");
+    assert!(!auth.codegraff_enabled(), "edge dev mode wins");
     assert_eq!(auth.access_token().await.as_deref(), Ok("dev-w"));
     task.abort();
 }
