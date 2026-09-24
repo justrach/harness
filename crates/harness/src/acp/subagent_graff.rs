@@ -59,7 +59,7 @@ impl GraffTracker {
         else {
             return Vec::new();
         };
-        if self.settled.contains(id)
+        if id == self.parent_session || self.settled.contains(id)
             || session != self.parent_session && !self.children.contains_key(session)
         {
             return Vec::new();
@@ -254,6 +254,9 @@ mod tests {
     #[test]
     fn correlated_spawn_uses_parent_tool_id_and_preserves_terminal_outcomes() {
         let mut tracker = GraffTracker::new("parent".into());
+        assert!(tracker.map(Some("parent"), &json!({
+            "sessionUpdate": "subagent_update", "subagentSessionId": "parent"
+        })).is_empty());
         let spawn = tracker.map(
             Some("parent"),
             &json!({
