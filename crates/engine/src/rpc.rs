@@ -98,6 +98,14 @@ struct ListModelsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct InstallHarnessParams {
+    harness: HarnessId,
+    #[serde(default)]
+    beta: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetHarnessEnabledParams {
     harness: HarnessId,
     enabled: bool,
@@ -1066,6 +1074,7 @@ impl Installations {
 
 async fn run_requested_install(
     harness: HarnessId,
+    beta: bool,
     cancel: harness_adapters::CancellationToken,
 ) -> Result<(), harness_adapters::HarnessError> {
     #[cfg(test)]
@@ -1074,7 +1083,7 @@ async fn run_requested_install(
     {
         return harness_adapters::install::install_with_command(harness, &script, cancel).await;
     }
-    harness_adapters::install::install_harness(harness, cancel).await
+    harness_adapters::install::install_harness(harness, beta, cancel).await
 }
 
 async fn install_harness_with<F, Fut>(
@@ -1496,10 +1505,10 @@ impl RpcService for EngineRpc {
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),
             methods::INSTALL_HARNESS => {
-                let p: ListModelsParams = parse_params(params)?;
+                let p: InstallHarnessParams = parse_params(params)?;
                 let installing = self.registry.installs.begin(p.harness)?;
                 let descriptors = install_harness_with(&self.registry, p.harness, || {
-                    run_requested_install(p.harness, installing.cancel.clone())
+                    run_requested_install(p.harness, p.beta, installing.cancel.clone())
                 })
                 .await?;
                 RpcReply::value(&descriptors)
