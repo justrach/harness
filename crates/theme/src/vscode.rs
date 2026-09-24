@@ -48,7 +48,7 @@ pub struct ImportReport {
     pub fallbacks: Vec<String>,
     pub dropped: Vec<String>,
     pub warnings: Vec<String>,
-    /// Deterministic repairs made after mapping so the compiled Zeron roles
+    /// Deterministic repairs made after mapping so the compiled Harness roles
     /// remain usable without erasing the source theme's syntax identity.
     #[serde(default)]
     pub adjustments: Vec<ImportAdjustment>,
@@ -62,7 +62,7 @@ pub struct ImportReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportAdjustment {
-    pub zeron_role: String,
+    pub harness_role: String,
     pub original: String,
     pub resolved: String,
     pub reason: String,
@@ -71,7 +71,7 @@ pub struct ImportAdjustment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportMapping {
-    pub zeron_role: String,
+    pub harness_role: String,
     pub vscode_key: String,
     pub value: String,
 }
@@ -625,7 +625,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
     };
     let mut output = registry
         .variant(base_id)
-        .expect("Zeron base theme exists")
+        .expect("Harness base theme exists")
         .clone();
     let fallback_background = output.colors.background;
     output.id = options.id.clone();
@@ -653,7 +653,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
             if let Some((key, value)) = first_color(&theme.colors, $keys, &mut report.warnings) {
                 *$target = value;
                 report.mappings.push(ImportMapping {
-                    zeron_role: $role.into(),
+                    harness_role: $role.into(),
                     vscode_key: key.into(),
                     value: value.to_string(),
                 });
@@ -831,7 +831,7 @@ fn convert(theme: NormalizedTheme, options: ImportOptions) -> Result<ImportResul
         let primary = candidate.value.parse()?;
         output.accent = AccentRoles::derive(primary, options.appearance, output.colors.background);
         report.mappings.push(ImportMapping {
-            zeron_role: "accent.*".into(),
+            harness_role: "accent.*".into(),
             vscode_key: candidate.vscode_key.clone(),
             value: candidate.value.clone(),
         });
@@ -1091,7 +1091,7 @@ fn harden_foreground(
             if let Some(mapping) = report
                 .mappings
                 .iter_mut()
-                .find(|mapping| mapping.zeron_role == role)
+                .find(|mapping| mapping.harness_role == role)
             {
                 mapping.vscode_key = (*key).into();
                 mapping.value = candidate.to_string();
@@ -1198,7 +1198,7 @@ fn record_adjustment(
         return;
     }
     report.adjustments.push(ImportAdjustment {
-        zeron_role: role.into(),
+        harness_role: role.into(),
         original: original.to_string(),
         resolved: resolved.to_string(),
         reason: reason.into(),
@@ -1242,7 +1242,7 @@ fn map_syntax(theme: &NormalizedTheme, output: &mut ThemeVariant, report: &mut I
             if let Some(role) = syntax_role_for_scope(scope) {
                 output.syntax.insert(role.into(), color);
                 report.mappings.push(ImportMapping {
-                    zeron_role: format!("syntax.{role}"),
+                    harness_role: format!("syntax.{role}"),
                     vscode_key: scope.clone(),
                     value: color.to_string(),
                 });
@@ -1268,7 +1268,7 @@ fn map_syntax(theme: &NormalizedTheme, output: &mut ThemeVariant, report: &mut I
         if let Some(role) = syntax_role_for_semantic(selector) {
             output.syntax.insert(role.into(), color);
             report.mappings.push(ImportMapping {
-                zeron_role: format!("syntax.{role}"),
+                harness_role: format!("syntax.{role}"),
                 vscode_key: format!("semantic:{selector}"),
                 value: color.to_string(),
             });
@@ -1431,7 +1431,7 @@ mod tests {
                 >= 4.5
         );
         assert!(imported.report.adjustments.iter().any(|adjustment| {
-            adjustment.zeron_role == "text" && adjustment.reason.contains("editor.foreground")
+            adjustment.harness_role == "text" && adjustment.reason.contains("editor.foreground")
         }));
         assert!(
             imported
@@ -1466,7 +1466,7 @@ mod tests {
             .report
             .adjustments
             .iter()
-            .find(|adjustment| adjustment.zeron_role == "textFaint")
+            .find(|adjustment| adjustment.harness_role == "textFaint")
             .expect("textFaint adjustment is reported");
         assert_eq!(adjustment.original, "#202020");
         assert_eq!(adjustment.resolved, faint.to_string());
@@ -1475,7 +1475,7 @@ mod tests {
             .report
             .mappings
             .iter()
-            .find(|mapping| mapping.zeron_role == "textFaint")
+            .find(|mapping| mapping.harness_role == "textFaint")
             .unwrap();
         assert_eq!(mapping.vscode_key, "descriptionForeground");
         assert_eq!(mapping.value, faint.to_string());
@@ -1593,7 +1593,7 @@ mod tests {
         assert_eq!(imported.theme.colors.background.a, 255);
         assert_eq!(imported.theme.colors.shell.a, 255);
         assert!(imported.report.adjustments.iter().any(|adjustment| {
-            adjustment.zeron_role == "background"
+            adjustment.harness_role == "background"
                 && adjustment.reason.contains("translucent foundational")
         }));
     }

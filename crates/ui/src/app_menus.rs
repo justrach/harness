@@ -1,6 +1,6 @@
 //! Native menu bar + app-level window actions (macOS-first).
 //!
-//! zeron never called `cx.set_menus`, so on macOS `NSApp.mainMenu` stayed nil:
+//! harness never called `cx.set_menus`, so on macOS `NSApp.mainMenu` stayed nil:
 //! no app menu, no ⌘Q quit, and nothing for the auto-hidden system menu bar to
 //! reveal on hover (gpui only calls `setMainMenu_` from `set_menus` —
 //! gpui_macos/src/platform.rs `fn set_menus`). Structure ported from zed's
@@ -19,7 +19,7 @@ use crate::composer;
 use crate::shell;
 
 actions!(
-    zeron,
+    harness,
     [
         About,
         Quit,
@@ -49,7 +49,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    // Window verbs route to the active window. zeron is single-window, so a
+    // Window verbs route to the active window. harness is single-window, so a
     // global handler suffices where zed registers these per-workspace
     // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
@@ -160,7 +160,7 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     bindings
 }
 
-/// The zeron menu bar. macOS renders this natively; mac-only entries are gated
+/// The harness menu bar. macOS renders this natively; mac-only entries are gated
 /// at runtime (`cfg!`) so the whole module compiles and tests on Linux.
 pub fn app_menus() -> Vec<Menu> {
     let macos = cfg!(target_os = "macos");

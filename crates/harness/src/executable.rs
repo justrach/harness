@@ -280,12 +280,26 @@ fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
     String::from_utf8_lossy(bytes)
         .split_whitespace()
         .find_map(|word| {
-            semver::Version::parse(
-                word.trim_matches(|c: char| matches!(c, '(' | ')' | ','))
-                    .trim_start_matches('v'),
-            )
-            .ok()
+            let word = word
+                .trim_matches(|c: char| matches!(c, '(' | ')' | ','))
+                .trim_start_matches('v');
+            semver::Version::parse(word)
+                .ok()
+                .or_else(|| four_part_version(word))
         })
+}
+
+/// graff versions carry a fourth component (`0.0.302.4`). Keep the first
+/// three as the precedence and the fourth as build metadata, so the version
+/// still displays and releases (`0.0.303.x` vs `0.0.302.x`) still compare.
+fn four_part_version(word: &str) -> Option<semver::Version> {
+    let (base, fourth) = word.rsplit_once('.')?;
+    if base.matches('.').count() != 2 || fourth.is_empty() || !fourth.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut version = semver::Version::parse(base).ok()?;
+    version.build = semver::BuildMetadata::new(fourth).ok()?;
+    Some(version)
 }
 
 fn home_dir_with(env: &impl Fn(&str) -> Option<OsString>, platform: Platform) -> Option<PathBuf> {
@@ -548,6 +562,14 @@ mod tests {
             parse_version(b"codex-cli 0.100.0-beta.2").unwrap() < semver::Version::new(0, 100, 0)
         );
         assert!(parse_version(b"unknown").is_none());
+    }
+
+    #[test]
+    fn four_part_graff_versions_parse_and_order_by_release() {
+        let current = parse_version(b"graff 0.0.302.4\n\nWhat's new").unwrap();
+        assert_eq!(current.to_string(), "0.0.302+4");
+        assert!(parse_version(b"graff 0.0.303.0").unwrap() > current);
+        assert!(parse_version(b"1.2.3.4.5").is_none());
     }
     #[cfg(windows)]
     #[test]

@@ -105,22 +105,22 @@ pub(crate) fn new_id() -> String {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Data directory (default `~/.zeron`, dev `~/.zeron-dev`).
+    /// Data directory (default `~/.harness`, dev `~/.harness-dev`).
     pub data_dir: PathBuf,
     /// Edge base URL.
     pub edge_url: String,
-    /// Explicit development bearer for edge room joins. Synced WorkOS runtimes
+    /// Explicit development bearer for edge room joins. Synced CodeGraff runtimes
     /// obtain their bearer from [`Auth`]; development stays offline when this is absent.
     pub edge_token: Option<String>,
     /// Localhost IPC port for the UI.
     pub ipc_port: u16,
     /// Harness for doc-command runs on chats without a workspace `config` row.
     pub default_harness: HarnessId,
-    /// Workspace-doc org (`ws/{orgId}` room). `None` = `$ZERON_ORG_ID` or the dev default.
-    /// In WorkOS mode the signed-in session's org wins.
+    /// Workspace-doc org (`ws/{orgId}` room). `None` = `$HARNESS_ORG_ID` or the dev default.
+    /// In CodeGraff mode the signed-in session's org wins.
     pub org_id: Option<String>,
-    /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
-    pub workos_client_id: Option<String>,
+    /// CodeGraff client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
+    pub codegraff_client_id: Option<String>,
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -160,7 +160,7 @@ pub struct EngineCore {
 impl EngineCore {
     /// Open stores under `data_dir`, wire sessions ⇄ doc host ⇄ workspace host, and
     /// recover stale journals from a previous crash. Identity comes from
-    /// `$ZERON_ORG_ID` / `$ZERON_USER_ID` (dev defaults `dev-org` / `dev-user`);
+    /// `$HARNESS_ORG_ID` / `$HARNESS_USER_ID` (dev defaults `dev-org` / `dev-user`);
     /// use [`Self::assemble_with_identity`] to pass one explicitly.
     pub fn assemble(
         data_dir: &Path,
@@ -168,8 +168,8 @@ impl EngineCore {
         default_harness: HarnessId,
         edge: Option<EdgeConfig>,
     ) -> Result<Self, EngineError> {
-        let org_id = env_or("ZERON_ORG_ID", DEFAULT_ORG_ID);
-        let user_id = env_or("ZERON_USER_ID", DEFAULT_USER_ID);
+        let org_id = env_or("HARNESS_ORG_ID", DEFAULT_ORG_ID);
+        let user_id = env_or("HARNESS_USER_ID", DEFAULT_USER_ID);
         let profile = EngineProfile::development(data_dir, &org_id, &user_id);
         Self::assemble_with_profile(profile, registry, default_harness, edge)
     }
@@ -350,14 +350,14 @@ impl EngineCore {
     }
 
     /// The attached auth service, or a lazily-created dev-mode one (in-process embeds
-    /// that never wired WorkOS still answer AuthStatus honestly).
+    /// that never wired CodeGraff still answer AuthStatus honestly).
     pub fn auth(&self) -> Auth {
         let mut slot = self
             .auth
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         slot.get_or_insert_with(|| {
-            let dev_user = std::env::var("ZERON_EDGE_TOKEN")
+            let dev_user = std::env::var("HARNESS_EDGE_TOKEN")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "dev-user".into());
@@ -542,7 +542,7 @@ pub struct EngineRuntime {
     host_relay: std::sync::Mutex<Option<harness_rpc::HostRelay>>,
 }
 
-/// IPC-only lifecycle control owned by `zeron headless`. The regular
+/// IPC-only lifecycle control owned by `harness headless`. The regular
 /// [`EngineRpc`] deliberately does not expose this method, so a viewport
 /// attached to another headed process cannot shut down that process's engine.
 struct HeadlessRpc {
@@ -608,22 +608,22 @@ impl Engine {
         Self { config }
     }
 
-    /// Resolve the shared dev/WorkOS auth configuration for headed and headless
-    /// modes. A clean WorkOS boot deliberately avoids probing Edge: signed-out
+    /// Resolve the shared dev/CodeGraff auth configuration for headed and headless
+    /// modes. A clean CodeGraff boot deliberately avoids probing Edge: signed-out
     /// installations must be able to start locally without network access.
     pub async fn build_auth(config: &EngineConfig) -> Auth {
         let mut auth_config = AuthConfig::new(config.edge_url.clone(), config.data_dir.clone());
-        auth_config.workos_client_id = config.workos_client_id.clone();
-        if let Ok(base) = std::env::var("ZERON_WORKOS_API_BASE")
+        auth_config.codegraff_client_id = config.codegraff_client_id.clone();
+        if let Ok(base) = std::env::var("HARNESS_CODEGRAFF_API_BASE")
             && !base.trim().is_empty()
         {
-            auth_config.workos_api_base = base;
+            auth_config.codegraff_api_base = base;
         }
         auth_config.callback_port = Some(
-            std::env::var("ZERON_CALLBACK_PORT")
+            std::env::var("HARNESS_CALLBACK_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(27641),
+                .unwrap_or(27643),
         );
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
@@ -633,9 +633,9 @@ impl Engine {
 
     /// Capture the workspace boundary once, before refresh or sign-in can mutate auth.
     pub fn initial_workspace_scope(auth: &Auth) -> WorkspaceScope {
-        if !auth.workos_enabled() {
+        if !auth.codegraff_enabled() {
             WorkspaceScope::Development
-        } else if auth.loaded_workos_session() {
+        } else if auth.loaded_codegraff_session() {
             WorkspaceScope::Synced
         } else {
             WorkspaceScope::Local
@@ -661,10 +661,10 @@ impl Engine {
                     .filter(|org| !org.is_empty());
                 let org_id = dev_token_org
                     .or(config.org_id.clone())
-                    .unwrap_or_else(|| env_or("ZERON_ORG_ID", DEFAULT_ORG_ID));
+                    .unwrap_or_else(|| env_or("HARNESS_ORG_ID", DEFAULT_ORG_ID));
                 let user_id = auth
                     .user_id()
-                    .unwrap_or_else(|| env_or("ZERON_USER_ID", DEFAULT_USER_ID));
+                    .unwrap_or_else(|| env_or("HARNESS_USER_ID", DEFAULT_USER_ID));
                 Ok(Some(EngineProfile::development(
                     &config.data_dir,
                     &org_id,
@@ -740,7 +740,7 @@ impl Engine {
                 // still transitions auth to SignedOut on definitive revocation
                 // (and warms the single-flight refresh every first dial waits
                 // on), but assembly — and the viewport blocked on it — no
-                // longer stalls on a WorkOS round trip that can take seconds
+                // longer stalls on a CodeGraff round trip that can take seconds
                 // on a bad link. Everything shown at boot is local anyway.
                 let auth_probe = auth.clone();
                 tokio::spawn(async move {
@@ -749,8 +749,8 @@ impl Engine {
                 true
             }
             // Dev Auth always exposes `dev_user_id` as its synthetic access
-            // token, including when WorkOS was merely disabled with
-            // ZERON_WORKOS_CLIENT_ID="". Only an explicitly configured,
+            // token, including when CodeGraff was merely disabled with
+            // HARNESS_CODEGRAFF_CLIENT_ID="". Only an explicitly configured,
             // non-empty bearer opts this runtime into Edge rooms and relays.
             WorkspaceScope::Development => config
                 .edge_token
@@ -814,7 +814,7 @@ impl Engine {
             );
         if check_updates {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
-            // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
+            // installs with HARNESS_AUTO_UPDATE=1 apply + restart themselves — gated
             // on quiescence so a restart never lands under a live run or open PTY.
             let quiescent: harness_update::QuiescentCheck = {
                 let sessions = core.sessions.clone();
@@ -865,7 +865,7 @@ impl Engine {
         })
     }
 
-    /// Run until ctrl-c: auth (dev or WorkOS), sessions engine + doc host + command
+    /// Run until ctrl-c: auth (dev or CodeGraff), sessions engine + doc host + command
     /// executor, IPC server, and — when edge+auth are ready — the device-room host
     /// relay + peer link cache (targetDeviceId routing).
     pub async fn run(self) -> anyhow::Result<()> {
@@ -975,11 +975,11 @@ pub async fn serve_ipc(
     )))
 }
 
-/// Block until the WorkOS session is signed in AND org-scoped. On a TTY, print the
+/// Block until the CodeGraff session is signed in AND org-scoped. On a TTY, print the
 /// headless (paste-code) sign-in URL, read the pasted `state.code` from stdin, and
 /// run workspace onboarding (create / auto-join / numbered picker). Off a TTY this
 /// errors immediately — a daemon under systemd/launchd must load the session that
-/// `zeron login` persisted, never wait on a prompt nobody can see.
+/// `harness login` persisted, never wait on a prompt nobody can see.
 pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
     use std::io::IsTerminal;
     let interactive = std::io::stdin().is_terminal();
@@ -999,12 +999,12 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     // No reader tasks have been spawned on this path (both spawns
                     // are TTY-gated), so an early return leaks nothing.
                     return Err(EngineError::Other(format!(
-                        "signed in as {} but no workspace is selected — run `zeron login` on this machine to pick one",
+                        "signed in as {} but no workspace is selected — run `harness login` on this machine to pick one",
                         user.email
                     )));
                 }
                 if org_reader.is_none() {
-                    // Workspace onboarding on the TTY (old zeron's
+                    // Workspace onboarding on the TTY (old harness's
                     // `backend login` flow): create if none, auto-join a
                     // single membership, numbered picker otherwise.
                     println!("Signed in as {}.", user.email);
@@ -1014,7 +1014,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
             AuthState::SignedOut => {
                 if !interactive {
                     return Err(EngineError::Other(
-                        "not signed in — run `zeron login` on this machine first".into(),
+                        "not signed in — run `harness login` on this machine first".into(),
                     ));
                 }
                 if stdin_reader.is_none() {
@@ -1067,7 +1067,7 @@ async fn read_stdin_line() -> Option<String> {
     .flatten()
 }
 
-/// TTY workspace onboarding for an org-less session (ports old zeron's
+/// TTY workspace onboarding for an org-less session (ports old harness's
 /// `backend login` flow): no memberships → prompt a name and create; exactly
 /// one → auto-join; several → numbered picker. Success flips the auth state to
 /// `SignedIn`, which ends [`wait_for_sign_in`]'s wait (and aborts this task).
@@ -1138,7 +1138,7 @@ async fn run_org_onboarding(auth: Auth) {
 fn local_device_name(device_id: &str) -> String {
     select_local_device_name(
         [
-            std::env::var("ZERON_DEVICE_NAME").ok(),
+            std::env::var("HARNESS_DEVICE_NAME").ok(),
             native_friendly_device_name(),
             std::env::var("HOSTNAME").ok(),
             gethostname::gethostname().into_string().ok(),

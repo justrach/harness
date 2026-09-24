@@ -51,4 +51,4 @@ Physical-device validation is separate from these automated tests. This implemen
 - Physical mouse: Ctrl + wheel zooms; unmodified wheel pans; releasing a drag outside the image does not close the lightbox.
 - A second physical remote device: open images, switch files during loading, modify/rename/delete them, and switch workspace/device while requests are pending.
 
-No zui dependency changes are required. Zeron uses `on_pinch` and `on_scroll_wheel` from its existing pinned revision.
+No zui dependency changes are required. Harness uses `on_pinch` and `on_scroll_wheel` from its existing pinned revision.

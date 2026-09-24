@@ -588,6 +588,9 @@ struct MacWindowState {
     overlay_backdrops: Vec<(NonNull<Object>, f32)>,
     overlay_capture_input: Arc<AtomicBool>,
     overlay_size: Option<(Size<Pixels>, f32)>,
+    base_scene: Option<gpui::Scene>,
+    base_scene_size: Option<(Size<Pixels>, f32)>,
+    base_atlas_revision: u64,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1007,6 +1010,9 @@ impl MacWindow {
                 overlay_backdrops: Vec::new(),
                 overlay_capture_input: Arc::new(AtomicBool::new(false)),
                 overlay_size: None,
+                base_scene: None,
+                base_scene_size: None,
+                base_atlas_revision: 0,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -1938,12 +1944,14 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        this.base_scene = None;
         this.renderer.draw(scene);
     }
 
     fn draw_layered(&self, scene: &gpui::Scene, overlay_start: usize, capture_input: bool) {
         let mut state = self.0.lock();
         if state.overlay_renderer.is_none() {
+            state.base_scene = None;
             state.renderer.draw(scene);
             return;
         }
@@ -2034,7 +2042,23 @@ impl PlatformWindow for MacWindow {
         }
         // Keep the Metal blur too: overlapping GPUI popovers still need to
         // blur earlier overlay content, while native effects supply the page.
-        state.renderer.draw(&base);
+        let atlas_revision = state.renderer.sprite_atlas().revision();
+        let base_unchanged = state.base_scene_size == Some((size, scale))
+            && state.base_atlas_revision == atlas_revision
+            && state
+                .base_scene
+                .as_ref()
+                .is_some_and(|previous| base.same_render_content(previous));
+        if !base_unchanged {
+            state.renderer.draw(&base);
+            state.base_scene_size = Some((size, scale));
+            state.base_atlas_revision = atlas_revision;
+            state.base_scene = if base.surfaces.is_empty() {
+                Some(base)
+            } else {
+                None
+            };
+        }
         if visible {
             state.overlay_renderer.as_mut().unwrap().draw(&overlay);
         } else {
@@ -2094,6 +2118,7 @@ impl PlatformWindow for MacWindow {
             state.overlay_view = NonNull::new(view);
             state.overlay_size = Some((size, scale));
             state.overlay_renderer = Some(renderer);
+            state.base_scene = None;
             state.set_presents_with_transaction(true);
         }
         Ok(())
@@ -2750,6 +2775,7 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
 extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let lock = &mut *window_state.lock();
+    lock.base_scene = None;
     unsafe {
         if lock
             .native_window
@@ -2821,6 +2847,7 @@ extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
 // Update the window scale factor and drawable size, and call the resize callback if any.
 fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let mut lock = window_state.as_ref().lock();
+    lock.base_scene = None;
     let scale_factor = lock.scale_factor();
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);

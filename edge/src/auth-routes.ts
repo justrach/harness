@@ -1,32 +1,29 @@
 /**
- * The /auth/* HTTP surface absorbed from zeron's apps/server:
+ * OAuth bridge for the CodeGraff public Harness client:
  *
- *  - POST /auth/exchange     — WorkOS code → tokens (see `workos.ts`).
- *  - POST /auth/refresh      — WorkOS refresh → fresh tokens (org-scopable).
- *  - GET  /auth/orgs         — the caller's active org memberships.
- *  - POST /auth/orgs         — create an org + first (admin) membership.
+ *  - POST /auth/exchange     — CodeGraff code + PKCE → Harness tokens.
+ *  - POST /auth/refresh      — rotate CodeGraff refresh token.
+ *  - GET  /auth/orgs         — the caller's personal workspace.
  *  - GET  /auth/cli/callback — headless sign-in: shows a paste-able code.
+ *  - GET  /auth/ios/callback — forwards the code to the iOS app scheme.
  *
- * Exchange/refresh/callback run BEFORE the bearer gate (the caller has no
- * access token yet); the org routes verify the bearer themselves — the user
- * id is ALWAYS the token's `sub`, never request input: users manage their own
- * memberships and no one else's. Error mapping matches the old server: bad
- * body 400, missing bearer 401, WorkOS-off 501, rejected exchange/refresh 401.
+ * Exchange/refresh/callback run before the bearer gate. The org route uses
+ * the verified Harness JWT's subject; callers cannot choose another identity.
  */
-import { bearerFromRequest, verifyToken } from "./auth";
+import { bearerFromRequest, personalOrgId, verifyToken } from "./auth";
 import type { Env } from "./env";
-import { WorkOsAuthFailed, createOrg, exchange, listOrgs, refresh } from "./workos";
+import { CodegraffAuthFailed, exchange, refresh } from "./codegraff";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json", "cache-control": "no-store" }
   });
 
-const notConfigured = (): Response => json({ error: "workos not configured" }, 501);
+const notConfigured = (): Response => json({ error: "CodeGraff OAuth is not configured" }, 501);
 
 const authFailed = (e: unknown): Response =>
-  json({ error: e instanceof WorkOsAuthFailed ? e.message : "authentication failed" }, 401);
+  json({ error: e instanceof CodegraffAuthFailed ? e.message : "authentication failed" }, 401);
 
 const bodyJson = async <T>(request: Request): Promise<T | undefined> => {
   try {
@@ -44,72 +41,66 @@ export const handleAuthRoute = async (
 ): Promise<Response | undefined> => {
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "auth") return undefined;
-  const apiKey = env.WORKOS_API_KEY;
+  const configured = !!env.CODEGRAFF_OAUTH_CLIENT_ID && !!env.HARNESS_AUTH_SIGNING_KEY;
 
   if (parts[1] === "exchange" && parts.length === 2 && request.method === "POST") {
-    if (!apiKey) return notConfigured();
-    const body = await bodyJson<{ code?: string }>(request);
-    if (typeof body?.code !== "string") return json({ error: "missing code" }, 400);
+    if (!configured) return notConfigured();
+    const body = await bodyJson<{ code?: string; codeVerifier?: string; redirectUri?: string; nonce?: string }>(request);
+    if (typeof body?.code !== "string" || typeof body.codeVerifier !== "string" ||
+        typeof body.redirectUri !== "string" || typeof body.nonce !== "string") {
+      return json({ error: "code, codeVerifier, redirectUri, and nonce are required" }, 400);
+    }
     try {
-      return json(await exchange(env, apiKey, body.code));
+      return json(await exchange(env, body.code, body.codeVerifier, body.redirectUri, body.nonce));
     } catch (e) {
       return authFailed(e);
     }
   }
 
   if (parts[1] === "refresh" && parts.length === 2 && request.method === "POST") {
-    if (!apiKey) return notConfigured();
+    if (!configured) return notConfigured();
     const body = await bodyJson<{ refreshToken?: string; organizationId?: string }>(request);
     if (typeof body?.refreshToken !== "string") return json({ error: "missing refreshToken" }, 400);
     if (body.organizationId !== undefined && typeof body.organizationId !== "string") {
       return json({ error: "missing refreshToken" }, 400);
     }
     try {
-      return json(await refresh(env, apiKey, body.refreshToken, body.organizationId));
+      return json(await refresh(env, body.refreshToken, body.organizationId));
     } catch (e) {
-      // Identify repeat offenders: a client with a rotated-out session
-      // retries every 30s forever and is otherwise anonymous in the tail
-      // (the Worker outcome is "ok" — only the 401 body says it failed).
-      // The token fingerprint is safe: single-use, and this one is dead.
       console.warn(
         "auth/refresh failed",
         request.headers.get("cf-connecting-ip") ?? "unknown-ip",
-        `token:${body.refreshToken.slice(0, 6)}…len${body.refreshToken.length}`,
-        e instanceof WorkOsAuthFailed ? e.message : String(e)
+        e instanceof CodegraffAuthFailed ? e.message : String(e)
       );
       return authFailed(e);
     }
   }
 
   if (parts[1] === "orgs" && parts.length === 2) {
-    if (!apiKey) return notConfigured();
+    if (!configured) return notConfigured();
     const token = bearerFromRequest(request);
     const caller = token ? await verifyToken(env, token) : undefined;
     if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
     if (request.method === "GET") {
-      try {
-        return json({ orgs: await listOrgs(apiKey, caller.userId) });
-      } catch (e) {
-        return authFailed(e);
-      }
+      const org = personalOrgId(caller.userId);
+      return json({ orgs: [{ id: org, organizationId: org, name: "Personal workspace" }] });
     }
-    if (request.method === "POST") {
-      const body = await bodyJson<{ name?: string }>(request);
-      if (typeof body?.name !== "string") return json({ error: "missing name" }, 400);
-      const trimmed = body.name.trim();
-      if (trimmed.length === 0 || trimmed.length > 80) {
-        return json({ error: "name must be 1-80 characters" }, 400);
-      }
-      try {
-        return json(await createOrg(apiKey, caller.userId, trimmed));
-      } catch (e) {
-        return authFailed(e);
-      }
-    }
+    return json({ error: "organization creation is not available" }, 405);
   }
 
   if (parts[1] === "cli" && parts[2] === "callback" && request.method === "GET") {
     return cliCallback(url);
+  }
+
+  if (parts[1] === "ios" && parts[2] === "callback" && request.method === "GET") {
+    const target = new URL("harness://callback");
+    for (const key of ["code", "state", "error", "error_description"]) {
+      const value = url.searchParams.get(key);
+      if (value !== null) target.searchParams.set(key, value);
+    }
+    return new Response(null, { status: 302, headers: {
+      location: target.toString(), "cache-control": "no-store"
+    } });
   }
 
   return undefined;
@@ -119,7 +110,7 @@ export const handleAuthRoute = async (
 // Headless sign-in callback
 // ---------------------------------------------------------------------------
 
-/** Query params land verbatim in the page — escape them. (WorkOS codes/states
+/** Query params land verbatim in the page — escape them. (OAuth codes/states
  * are URL-safe tokens, but this URL accepts anything.) */
 const escapeHtml = (s: string): string =>
   s
@@ -135,7 +126,7 @@ const cliPage = (body: string): string => `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex" />
-<title>Zeron — sign in</title>
+<title>Harness — sign in</title>
 <style>
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
          background: #0a0a0a; color: #ededed;
@@ -156,12 +147,14 @@ const cliPage = (body: string): string => `<!doctype html>
 </html>`;
 
 const html = (body: string, status = 200): Response =>
-  new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+  new Response(body, { status, headers: {
+    "content-type": "text/html; charset=utf-8", "cache-control": "no-store"
+  } });
 
 /**
  * The hosted OAuth callback for headless (paste-code) sign-in. Registered as a
- * WorkOS redirect URI; it does NOT exchange the code — it renders `state.code`
- * for the user to paste into the device that started the flow (`zeron login`),
+ * CodeGraff redirect URI; it does NOT exchange the code — it renders `state.code`
+ * for the user to paste into the device that started the flow (`harness login`),
  * where the exchange runs so the tokens land on that machine. The state half
  * must match the pending sign-in there, so the paste is CSRF-checked at the
  * same point the loopback flow is.

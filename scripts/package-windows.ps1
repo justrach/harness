@@ -25,14 +25,14 @@ try {
             $process.Kill()
             throw 'Executable version probe timed out'
         }
-        $versionMatch = [regex]::Match($stdout.Result.Trim(), '\Azeron (\d+\.\d+\.\d+)\z')
+        $versionMatch = [regex]::Match($stdout.Result.Trim(), '\Aharness (\d+\.\d+\.\d+)\z')
         if ($process.ExitCode -ne 0 -or -not $versionMatch.Success) {
             throw "Cannot read executable version: $($stderr.Result)"
         }
         $version = $versionMatch.Groups[1].Value
     } finally { $process.Dispose() }
     $out = Join-Path $root 'target/package'
-    $stage = Join-Path $out "zeron-$version-windows-x86_64"
+    $stage = Join-Path $out "harness-$version-windows-x86_64"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath './target/release/harness.exe' -Destination (Join-Path $stage 'harness.exe')
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'harness-update.json')
@@ -40,6 +40,8 @@ try {
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
     Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
+    Copy-Item -LiteralPath 'third_party/licenses/Zeron-MIT.txt' -Destination (Join-Path $stage 'licenses')
+    Copy-Item -LiteralPath 'third_party/licenses/CodeGraff-LICENSE.txt' -Destination (Join-Path $stage 'licenses')
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
     Copy-Item -LiteralPath './target/release/harness.exe' -Destination "$stage.exe"
     $file = Split-Path "$stage.exe" -Leaf

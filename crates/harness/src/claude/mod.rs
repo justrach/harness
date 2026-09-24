@@ -11,7 +11,7 @@
 //!   live against 2.1.228: `can_use_tool` control requests arrive and
 //!   allow/deny responses are honored). The alternative channel — an MCP
 //!   permission tool — needs a server process and was rejected. Tool calls
-//!   auto-allow (zeron sessions run unattended, parity with the ACP
+//!   auto-allow (harness sessions run unattended, parity with the ACP
 //!   harness's preferred-allow behavior); `AskUserQuestion` round-trips
 //!   through [`RunControls::request_input`].
 //! - DONE is the CLI's own `result` frame, eagerly: background work (a
@@ -280,7 +280,7 @@ impl ClaudeHarness {
             shutdown_child(&mut child, self.kill_grace).await;
             return Err(HarnessError::Protocol("claude child has no stdio".into()));
         };
-        const PROBE_ID: &str = "zeron-command-probe";
+        const PROBE_ID: &str = "harness-command-probe";
         let discovery = async {
             let request = serde_json::json!({
                 "type": "control_request",

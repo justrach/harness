@@ -28,7 +28,7 @@ existing clients compatible. `ListModels.force` is optional and defaults to fals
 
 Commands use `CARGO_TARGET_DIR=/home/ubuntu/.cache/amber-otter-target`, with
 `TMPDIR=/home/ubuntu/codex-runs/models-scratch` and
-`ZERON_WORKTREES_DIR=/home/ubuntu/codex-runs/models-scratch/worktrees`.
+`HARNESS_WORKTREES_DIR=/home/ubuntu/codex-runs/models-scratch/worktrees`.
 Disk was checked before builds and remained above 71 GB free throughout the final
 validation pass.
 

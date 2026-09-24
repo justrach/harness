@@ -88,7 +88,7 @@ await peer.wait(FRAME.ack);
 const out = execFileSync(
   "cargo",
   ["run", "-q", "-p", "harness-sync", "--example", "chat2_live", "--", base, chat, user, "rust-dev"],
-  { cwd: "/home/ubuntu/GitHub/zeron", encoding: "utf8", timeout: 120000 }
+  { cwd: "/home/ubuntu/GitHub/harness", encoding: "utf8", timeout: 120000 }
 );
 const result = JSON.parse(out.split("\n").find((l) => l.startsWith("RESULT:")).slice(7));
 console.log("rust client:", JSON.stringify(result));

@@ -84,6 +84,14 @@ impl Scene {
         self.paint_operations.len()
     }
 
+    /// Whether two scenes would issue the same drawing operations. Live video
+    /// surfaces can change their pixels without changing their scene entry.
+    pub fn same_render_content(&self, other: &Self) -> bool {
+        self.surfaces.is_empty()
+            && other.surfaces.is_empty()
+            && self.paint_operations == other.paint_operations
+    }
+
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
@@ -241,6 +249,7 @@ pub(crate) enum PrimitiveKind {
     Surface,
 }
 
+#[derive(PartialEq)]
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
     BackdropBlur(BackdropBlur),
@@ -259,6 +268,23 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+}
+
+impl PartialEq for Primitive {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Shadow(a), Self::Shadow(b)) => a == b,
+            (Self::Quad(a), Self::Quad(b)) => a == b,
+            (Self::Path(a), Self::Path(b)) => a == b,
+            (Self::Underline(a), Self::Underline(b)) => a == b,
+            (Self::MonochromeSprite(a), Self::MonochromeSprite(b)) => a == b,
+            (Self::SubpixelSprite(a), Self::SubpixelSprite(b)) => a == b,
+            (Self::PolychromeSprite(a), Self::PolychromeSprite(b)) => a == b,
+            // The contents of a video surface may update in place.
+            (Self::Surface(_), Self::Surface(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 #[expect(missing_docs)]
@@ -607,7 +633,7 @@ pub struct EdgeFadeParams {
     pub band_right: f32,
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Quad {
@@ -628,7 +654,7 @@ impl From<Quad> for Primitive {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Underline {
@@ -652,7 +678,7 @@ impl From<Underline> for Primitive {
 /// rounded bounds (frosted-glass popovers). Supported by macOS Metal,
 /// Windows DirectX, and wGPU — see
 /// [`crate::Window::paint_backdrop_blur`].
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct BackdropBlur {
@@ -663,7 +689,7 @@ pub struct BackdropBlur {
     pub corner_radii: Corners<ScaledPixels>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Shadow {
@@ -800,7 +826,7 @@ impl Default for TransformationMatrix {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct MonochromeSprite {
@@ -820,7 +846,7 @@ impl From<MonochromeSprite> for Primitive {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct SubpixelSprite {
@@ -840,7 +866,7 @@ impl From<SubpixelSprite> for Primitive {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PolychromeSprite {
@@ -874,7 +900,7 @@ pub struct ImageAlphaMask {
 
 /// GPU representation of [`ImageAlphaMask`], in device pixels. Zero feather
 /// disables the entire mask, preserving ordinary image painting exactly.
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct ImageAlphaMaskParams {
@@ -960,7 +986,7 @@ impl From<PaintSurface> for Primitive {
 pub struct PathId(pub usize);
 
 /// A line made up of a series of vertices and control points.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[expect(missing_docs)]
 pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub id: PathId,
@@ -1104,7 +1130,7 @@ impl From<Path<ScaledPixels>> for Primitive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PathVertex<P: Clone + Debug + Default + PartialEq> {
@@ -1127,6 +1153,24 @@ impl PathVertex<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_content_comparison_tracks_base_operations() {
+        let mut previous = Scene::default();
+        let mut current = Scene::default();
+        previous.insert_primitive(shadow(crate::transparent_black()));
+        current.insert_primitive(shadow(crate::transparent_black()));
+        assert!(current.same_render_content(&previous));
+
+        current.insert_backdrop_blur(BackdropBlur {
+            order: 0,
+            blur_radius: ScaledPixels(10.),
+            bounds: bounds(),
+            content_mask: ContentMask { bounds: bounds() },
+            corner_radii: Corners::default(),
+        });
+        assert!(!current.same_render_content(&previous));
+    }
 
     fn bounds() -> Bounds<ScaledPixels> {
         Bounds::new(

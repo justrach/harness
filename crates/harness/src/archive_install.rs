@@ -3,7 +3,7 @@
 //! server.
 //!
 //! same contract as the npm installs in [`crate::adapter_install`]: the pinned
-//! archive lands ONCE in `~/.zeron/adapters/<name>/<version>`, extraction runs
+//! archive lands ONCE in `~/.harness/adapters/<name>/<version>`, extraction runs
 //! in a `.tmp-*` sibling that is renamed into place only after the entry
 //! resolves and the marker is written, so a killed download never passes for
 //! a working install.
@@ -366,7 +366,7 @@ mod tests {
             sha512: "test-digest",
         };
         assert!(installed_entry(&pin).is_none());
-        if std::env::var_os("HOME").is_some() || std::env::var_os("ZERON_ADAPTERS_DIR").is_some() {
+        if std::env::var_os("HOME").is_some() || std::env::var_os("HARNESS_ADAPTERS_DIR").is_some() {
             let expected = entry_path(&pin).unwrap();
             assert!(expected.ends_with("never-installed-acp/0.0.0-test/server"));
         }

@@ -2,7 +2,7 @@
 
 use std::path::{Component, Path};
 
-const FILE_MENTION_SCHEME: &str = "zeron-file:";
+const FILE_MENTION_SCHEME: &str = "harness-file:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceFileLink {
@@ -190,15 +190,15 @@ mod tests {
     #[test]
     fn resolves_canonical_file_mentions() {
         assert_eq!(
-            resolve_workspace_file_link("zeron-file:src/a%20file.rs", "/work/comet"),
+            resolve_workspace_file_link("harness-file:src/a%20file.rs", "/work/comet"),
             Some(WorkspaceFileLink {
                 path: "src/a file.rs".into(),
                 line: None,
                 column: None,
             })
         );
-        assert!(resolve_workspace_file_link("zeron-file:src/%61.rs", "/work/comet").is_none());
-        assert!(resolve_workspace_file_link("zeron-file:src/", "/work/comet").is_none());
+        assert!(resolve_workspace_file_link("harness-file:src/%61.rs", "/work/comet").is_none());
+        assert!(resolve_workspace_file_link("harness-file:src/", "/work/comet").is_none());
     }
 
     #[test]

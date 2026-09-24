@@ -367,7 +367,7 @@ impl Element for LinkRanges {
                         }),
                     );
                 }
-                let open_in_zeron = crate::settings::current(cx).open_web_links_in_zeron;
+                let open_in_harness = crate::settings::current(cx).open_web_links_in_harness;
                 let menu = state.menu.clone();
                 card = card.child(popover::menu_separator()).child(
                     popover::menu_row(
@@ -376,7 +376,7 @@ impl Element for LinkRanges {
                         format!("{}-link-{index}-default-destination", self.id),
                     )
                     .id("Open links in Harness")
-                    .child(div().w(px(16.)).flex_none().when(open_in_zeron, |el| {
+                    .child(div().w(px(16.)).flex_none().when(open_in_harness, |el| {
                         el.child(
                             icons::icon(icons::CHECK)
                                 .size(px(16.))
@@ -386,7 +386,7 @@ impl Element for LinkRanges {
                     .child("Open links in Harness")
                     .track_focus(&state.menu_focus[3])
                     .role(Role::Button)
-                    .aria_label(if open_in_zeron {
+                    .aria_label(if open_in_harness {
                         "Open links in Harness, checked"
                     } else {
                         "Open links in Harness, unchecked"
@@ -397,7 +397,7 @@ impl Element for LinkRanges {
                             crate::settings::SavePolicy::Immediate,
                             cx,
                             |settings| {
-                                settings.open_web_links_in_zeron = !open_in_zeron;
+                                settings.open_web_links_in_harness = !open_in_harness;
                             },
                         );
                         menu.borrow_mut().take();
@@ -852,13 +852,13 @@ mod rendered_tests {
                                 !draw_has_tooltip(window, cx),
                                 "pending hover must not appear over the menu"
                             );
-                            let before = crate::settings::current(cx).open_web_links_in_zeron;
+                            let before = crate::settings::current(cx).open_web_links_in_harness;
                             key(window, "down", cx);
                             key(window, "down", cx);
                             key(window, "down", cx);
                             key(window, "enter", cx);
                             assert_ne!(
-                                crate::settings::current(cx).open_web_links_in_zeron,
+                                crate::settings::current(cx).open_web_links_in_harness,
                                 before,
                                 "the fourth menu row toggles the default destination"
                             );

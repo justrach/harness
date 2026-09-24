@@ -20,11 +20,16 @@ impl MetalAtlas {
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             tiles_by_key: Default::default(),
+            revision: 0,
         }))
     }
 
     pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
         self.0.lock().texture(id).metal_texture.clone()
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.0.lock().revision
     }
 
     /// (live texture count, total texture bytes) — for COMET_GPU_STATS.
@@ -54,6 +59,7 @@ struct MetalAtlasState {
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    revision: u64,
 }
 
 impl PlatformAtlas for MetalAtlas {
@@ -74,6 +80,7 @@ impl PlatformAtlas for MetalAtlas {
                 .context("failed to allocate")?;
             let texture = lock.texture(tile.texture_id);
             texture.upload(tile.bounds, &bytes);
+            lock.revision = lock.revision.wrapping_add(1);
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
         }
@@ -84,6 +91,7 @@ impl PlatformAtlas for MetalAtlas {
         let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        lock.revision = lock.revision.wrapping_add(1);
         let id = tile.texture_id;
 
         let textures = match id.kind {

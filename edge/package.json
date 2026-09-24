@@ -1,11 +1,11 @@
 {
-  "name": "zeron-edge",
+  "name": "harness-edge",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --port 27640 --var AUTH_MODE:dev",
-    "deploy": "wrangler deploy",
+    "deploy": "node -e \"console.error('Deploy Harness edge from /zigrepper/services/harness-edge'); process.exit(1)\"",
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:unit && npm run test:workerd",

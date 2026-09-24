@@ -151,7 +151,7 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert_eq!(branches[0], "main", "default branch first: {branches:?}");
     assert!(branches.contains(&"feature/x".to_string()));
 
-    // Worktree add: zeron/<name> branch, isolated dir under the test root.
+    // Worktree add: harness/<name> branch, isolated dir under the test root.
     let worktree = repos
         .create_worktree(&repo_dir, "main")
         .await
@@ -175,7 +175,7 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert!(branches.contains(&worktree.branch));
 
     // Refs carry checkout state: `main` is current (main folder), the
-    // worktree's zeron/<name> branch maps to its linked-checkout path, and
+    // worktree's harness/<name> branch maps to its linked-checkout path, and
     // a plain branch has neither.
     let refs = repos.refs(&repo_dir).await.expect("refs");
     let by_name = |name: &str| refs.iter().find(|r| r.name == name).expect("ref row");
@@ -210,7 +210,7 @@ async fn repos_round_trip_add_branches_worktrees() {
         .expect("wt identity");
     assert_ne!(main_identity.id, wt_identity.id);
 
-    // Delete: dir removed, zeron branch removed, refs pruned.
+    // Delete: dir removed, harness branch removed, refs pruned.
     repos
         .delete_worktree(&repo_dir, Path::new(&worktree.path))
         .await
@@ -222,7 +222,7 @@ async fn repos_round_trip_add_branches_worktrees() {
         .expect("branches after delete");
     assert!(
         !branches.contains(&worktree.branch),
-        "zeron branch deleted: {branches:?}"
+        "harness branch deleted: {branches:?}"
     );
 
     // CreateRepo: sanitized name, initialized on main.
@@ -983,7 +983,7 @@ async fn diff_capture_truncates_at_patch_cap() {
     let snapshot = capture_diff(&repos, &repo_dir).await.expect("capture");
     assert!(snapshot.truncated, "patch cap hit");
     assert!(snapshot.patch.len() <= 3 * 1024 * 1024 + 64);
-    assert!(snapshot.patch.contains("# Zeron diff truncated"));
+    assert!(snapshot.patch.contains("# Harness diff truncated"));
     let (statuses, complete) = snapshot.git_status.unwrap();
     assert!(complete, "patch truncation must not truncate Git status");
     assert_eq!(statuses.len(), 1);
@@ -1403,7 +1403,7 @@ async fn project_actions_crud_preserves_saved_actions_with_invalid_imports() {
         )
         .unwrap();
     let client = harness_rpc::memory_client(core.rpc_service());
-    let path = project.join("zeron.json");
+    let path = project.join("harness.json");
     // Directories must be reported as an import issue without preventing CRUD.
     std::fs::create_dir(&path).unwrap();
     let listed = client
@@ -1516,8 +1516,8 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
                 name: "Environment".into(),
                 command: concat!(
                     "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" ",
-                    "\"${ZERON_WORKTREE_PATH-unset}\" ",
+                    "\"$HARNESS_PROJECT_ROOT\" ",
+                    "\"${HARNESS_WORKTREE_PATH-unset}\" ",
                     "\"$PWD\""
                 )
                 .into(),
@@ -1690,7 +1690,7 @@ async fn rpc_dispatch_for_m5_methods() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // EngineCore's Repos resolves the worktree root from the env; keep test
     // worktrees out of $HOME. (Process-global — this is the only test that sets it.)
-    unsafe { std::env::set_var("ZERON_WORKTREES_DIR", tmp.path().join("worktrees")) };
+    unsafe { std::env::set_var("HARNESS_WORKTREES_DIR", tmp.path().join("worktrees")) };
     let core = assemble(&tmp.path().join("data"));
     let client = harness_rpc::memory_client(core.rpc_service());
 
@@ -1816,8 +1816,8 @@ async fn rpc_dispatch_for_m5_methods() {
                 command: concat!(
                     "sleep 2; ",
                     "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
-                    "| tee .zeron-setup-env"
+                    "\"$HARNESS_PROJECT_ROOT\" \"$HARNESS_WORKTREE_PATH\" \"$PWD\" ",
+                    "| tee .harness-setup-env"
                 )
                 .into(),
                 icon: ProjectActionIcon::Configure,
@@ -1848,7 +1848,7 @@ async fn rpc_dispatch_for_m5_methods() {
     assert!(worktree.get("setupAction").is_none());
     assert!(
         !PathBuf::from(&worktree_path)
-            .join(".zeron-setup-env")
+            .join(".harness-setup-env")
             .exists()
     );
     let deleted = client
@@ -1922,7 +1922,7 @@ async fn rpc_dispatch_for_m5_methods() {
     assert!(setup_output.contains(&format!("ROOT={}", canonical_repo.display())));
     assert!(setup_output.contains(&format!("WT={}", canonical_worktree.display())));
     assert!(setup_output.contains(&format!("CWD={}", canonical_worktree.display())));
-    assert!(canonical_worktree.join(".zeron-setup-env").exists());
+    assert!(canonical_worktree.join(".harness-setup-env").exists());
     core.terminals
         .close(&setup.terminal.id)
         .expect("close setup terminal");

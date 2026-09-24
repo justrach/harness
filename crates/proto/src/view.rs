@@ -139,7 +139,7 @@ pub fn sort_chats(chats: &mut [Chat]) {
 // Boot gate
 // ---------------------------------------------------------------------------
 
-/// The app gate (zeron's App.tsx phases). Pure.
+/// The app gate (harness's App.tsx phases). Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatePhase {
     /// Booting / probing — splash covers this.
@@ -320,7 +320,7 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
 }
 
 /// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix;
-/// port of zeron's `formatTimeAgo`.
+/// port of harness's `formatTimeAgo`.
 pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let s = now.signed_duration_since(then).num_seconds().max(0);
     // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
@@ -350,7 +350,7 @@ pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{}y", d / 365)
 }
 
-/// Session-row sub-line, "project · branch" (zeron `chatLocation`): the repo
+/// Session-row sub-line, "project · branch" (harness `chatLocation`): the repo
 /// checkout identity. Either part may be missing; empty when both are.
 pub fn chat_location(chat: &Chat) -> Option<String> {
     let project = chat
@@ -395,7 +395,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-/// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
+/// Per-kind chip label + one-line detail. Labels match harness's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
     let (label, detail) = tool_chip_content_raw(call);
@@ -433,6 +433,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         // labels fighting.
         ToolCall::Unknown { name, .. } => match name.strip_prefix("Agent: ") {
             Some(description) => ("Agent", description.to_owned()),
+            None if name.starts_with("Jev: ") => ("Jev", name[5..].to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
             None => ("Tool", name.clone()),
         },
@@ -508,7 +509,7 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
         segments.push(format!("{failed} failed"));
     }
     let mut summary = segments.join(" · ");
-    // Capitalize the first segment only (zeron's style).
+    // Capitalize the first segment only (harness's style).
     if let Some(first) = summary.get(0..1) {
         let upper = first.to_uppercase();
         summary.replace_range(0..1, &upper);
@@ -561,7 +562,7 @@ pub enum CheckoutPlan {
     CurrentCheckout { branch: Option<String> },
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (the engine mints a `zeron/<name>`
+    /// `CreateWorktree` off `base` on send (the engine mints a `harness/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the space
     /// folder rather than failing.
     NewWorktree { base: Option<String> },

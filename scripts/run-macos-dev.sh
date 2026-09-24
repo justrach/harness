@@ -11,8 +11,8 @@ VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 DEV_ROOT="$ROOT/target/macos-dev"
 APP="$DEV_ROOT/Harness.app"
 CONTENTS="$APP/Contents"
-DATA_DIR="${HARNESS_DEV_DATA_DIR:-${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}}"
-IPC_PORT="${HARNESS_DEV_IPC_PORT:-${ZERON_DEV_IPC_PORT:-49777}}"
+DATA_DIR="${HARNESS_DEV_DATA_DIR:-$DEV_ROOT/data}"
+IPC_PORT="${HARNESS_DEV_IPC_PORT:-49777}"
 
 if pgrep -f -x "$CONTENTS/MacOS/harness" >/dev/null 2>&1; then
   echo "Harness is already running. Quit it before rebuilding the signed bundle." >&2
@@ -29,6 +29,8 @@ TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
 install -m 755 "$TARGET_DIR/$PROFILE_DIR/harness" "$CONTENTS/MacOS/harness"
+# Bundle graff like the release does (scripts/package-macos.sh), from
+# GRAFF_BINARY or the graff on PATH, so the bundled/managed path is exercised.
 GRAFF_SRC="${GRAFF_BINARY:-$(command -v graff || true)}"
 if [[ -n "$GRAFF_SRC" ]]; then
   mkdir -p "$CONTENTS/Resources/bin"
@@ -37,8 +39,6 @@ fi
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.HARNESS_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.HARNESS_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
-plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
-plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
 
 if [[ ! -f "$CONTENTS/Resources/harness.icns" || "$ROOT/dist/macos/icon-1024.png" -nt "$CONTENTS/Resources/harness.icns" ]]; then
   ICONSET="$DEV_ROOT/harness-dev.iconset"
@@ -54,9 +54,9 @@ if [[ ! -f "$CONTENTS/Resources/harness.icns" || "$ROOT/dist/macos/icon-1024.png
 fi
 
 # A real Apple Development identity gives TCC a stable signing requirement
-# across rebuilds. Set ZERON_DEV_CODESIGN_IDENTITY explicitly when more than
+# across rebuilds. Set HARNESS_DEV_CODESIGN_IDENTITY explicitly when more than
 # one identity is installed; otherwise fall back to an ad-hoc signature.
-IDENTITY="${HARNESS_DEV_CODESIGN_IDENTITY:-${ZERON_DEV_CODESIGN_IDENTITY:-}}"
+IDENTITY="${HARNESS_DEV_CODESIGN_IDENTITY:-}"
 if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
@@ -67,18 +67,20 @@ else
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
+# Refresh Launch Services after replacing the signed bundle or its icon.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -f "$APP"
+
 echo "running Harness (bundle harness.codegraff.app, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/harness directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
-# isolated data directory (`target/macos-dev/data/logs/zeron-headed.log`).
+# isolated data directory (`target/macos-dev/data/logs/harness-headed.log`).
 OPEN_ENV=(
   --env "HARNESS_DATA_DIR=$DATA_DIR"
   --env "HARNESS_IPC_PORT=$IPC_PORT"
-  --env "ZERON_DATA_DIR=$DATA_DIR"
-  --env "ZERON_IPC_PORT=$IPC_PORT"
 )
-if [[ -n "${HARNESS_OPEN_ROUTE:-${ZERON_OPEN_ROUTE:-}}" ]]; then
-  OPEN_ENV+=(--env "HARNESS_OPEN_ROUTE=${HARNESS_OPEN_ROUTE:-$ZERON_OPEN_ROUTE}")
+if [[ -n "${HARNESS_OPEN_ROUTE:-}" ]]; then
+  OPEN_ENV+=(--env "HARNESS_OPEN_ROUTE=$HARNESS_OPEN_ROUTE")
 fi
 exec open -W "${OPEN_ENV[@]}" "$APP" --args "$@"

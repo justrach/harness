@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         interrupt: CancellationToken::new(),
     };
     let request = RunRequest {
-        prompt: "Reply with exactly: graff over zeron ACP verified. Do not use tools.".into(),
+        prompt: "Reply with exactly: graff over harness ACP verified. Do not use tools.".into(),
         harness: None,
         model: Some(model.clone()),
         reasoning: None,

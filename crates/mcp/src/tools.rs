@@ -1,7 +1,7 @@
 //! The tool catalog and its dispatch.
 //!
 //! Every tool is a thin composition of engine reads/writes from
-//! [`Zeron`]; the only logic that lives here is argument resolution (chat
+//! [`Harness`]; the only logic that lives here is argument resolution (chat
 //! by prefix, project by path), sender attribution, and the "how do I
 //! deliver a message to a chat in this state" choice the composer makes
 //! for humans.
@@ -18,7 +18,7 @@ use harness_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
-use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
+use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
 
 /// Default and ceiling for the blocking waits.
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
@@ -36,7 +36,7 @@ pub struct ToolDef {
 }
 
 pub struct Tools {
-    zeron: Arc<Zeron>,
+    harness: Arc<Harness>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -354,8 +354,8 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
 // ---- dispatch ----------------------------------------------------------------
 
 impl Tools {
-    pub fn new(zeron: Arc<Zeron>) -> Self {
-        Self { zeron }
+    pub fn new(harness: Arc<Harness>) -> Self {
+        Self { harness }
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
@@ -390,14 +390,14 @@ impl Tools {
     }
 
     async fn whoami(&self) -> anyhow::Result<Value> {
-        let origin = self.zeron.origin().clone();
-        let local_device = self.zeron.local_device_id().await?;
-        let engine = self.zeron.engine_info().await.unwrap_or(Value::Null);
+        let origin = self.harness.origin().clone();
+        let local_device = self.harness.local_device_id().await?;
+        let engine = self.harness.engine_info().await.unwrap_or(Value::Null);
         let chat = match origin.chat_id.as_deref() {
-            Some(id) => match self.zeron.resolve_chat(id).await {
+            Some(id) => match self.harness.resolve_chat(id).await {
                 Ok(chat) => {
                     let (spaces, sessions) =
-                        tokio::try_join!(self.zeron.spaces(), self.zeron.sessions())?;
+                        tokio::try_join!(self.harness.spaces(), self.harness.sessions())?;
                     summarize_chat(&chat, &spaces, &sessions)
                 }
                 Err(_) => json!({ "id": id }),
@@ -419,7 +419,7 @@ impl Tools {
 
     async fn list_devices(&self) -> anyhow::Result<Value> {
         let (devices, local) =
-            tokio::try_join!(self.zeron.devices(), self.zeron.local_device_id())?;
+            tokio::try_join!(self.harness.devices(), self.harness.local_device_id())?;
         Ok(json!({
             "devices": devices.iter().map(|d| json!({
                 "id": d.id,
@@ -433,7 +433,7 @@ impl Tools {
     }
 
     async fn list_projects(&self) -> anyhow::Result<Value> {
-        let (spaces, devices) = tokio::try_join!(self.zeron.spaces(), self.zeron.devices())?;
+        let (spaces, devices) = tokio::try_join!(self.harness.spaces(), self.harness.devices())?;
         let device_name = |id: &str| devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
         Ok(json!({
             "projects": spaces.iter().map(|s| json!({
@@ -448,7 +448,7 @@ impl Tools {
     }
 
     async fn list_harnesses(&self) -> anyhow::Result<Value> {
-        let harnesses = self.zeron.harnesses().await?;
+        let harnesses = self.harness.harnesses().await?;
         Ok(json!({
             "harnesses": harnesses.iter().map(|h| json!({
                 "id": h.id,
@@ -464,7 +464,7 @@ impl Tools {
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
         let harness: HarnessId =
             parse_enum("harness", &args.harness).map_err(anyhow::Error::msg)?;
-        let models = self.zeron.models(harness).await?;
+        let models = self.harness.models(harness).await?;
         Ok(json!({
             "harness": harness,
             "models": models.iter().map(|m| json!({
@@ -478,23 +478,23 @@ impl Tools {
 
     async fn list_chats(&self, args: ListChatsArgs) -> anyhow::Result<Value> {
         let (mut chats, spaces, sessions) = tokio::try_join!(
-            self.zeron.chats(),
-            self.zeron.spaces(),
-            self.zeron.sessions()
+            self.harness.chats(),
+            self.harness.spaces(),
+            self.harness.sessions()
         )?;
         if let Some(project) = args.project.as_deref() {
-            let space = self.zeron.resolve_space(project).await?;
+            let space = self.harness.resolve_space(project).await?;
             chats.retain(|c| c.space_id.as_deref() == Some(space.id.as_str()));
         }
         if args.device.is_some() {
-            let device = self.zeron.resolve_device_id(args.device.as_deref()).await?;
+            let device = self.harness.resolve_device_id(args.device.as_deref()).await?;
             chats.retain(|c| c.device_id == device);
         }
         if !args.include_archived {
             chats.retain(|c| !c.archived);
         }
         if let Some(parent) = args.parent.as_deref() {
-            let parent = self.zeron.resolve_chat(parent).await?;
+            let parent = self.harness.resolve_chat(parent).await?;
             chats.retain(|c| c.parent_chat_id.as_deref() == Some(parent.id.as_str()));
         }
         chats.sort_by(|a, b| {
@@ -513,11 +513,11 @@ impl Tools {
     }
 
     async fn get_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
         let (spaces, sessions, entries) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.transcript(&chat.id)
+            self.harness.spaces(),
+            self.harness.sessions(),
+            self.harness.transcript(&chat.id)
         )?;
         let rendered = render_entries(&entries, RenderOptions::default());
         let mut summary = summarize_chat(&chat, &spaces, &sessions);
@@ -528,7 +528,7 @@ impl Tools {
     }
 
     async fn create_chat(&self, args: CreateChatArgs) -> anyhow::Result<Value> {
-        let harnesses = self.zeron.harnesses().await?;
+        let harnesses = self.harness.harnesses().await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
@@ -544,7 +544,7 @@ impl Tools {
             None => default_harness(&harnesses)?,
         };
         if let Some(model) = args.model.as_deref()
-            && let Ok(models) = self.zeron.models(harness).await
+            && let Ok(models) = self.harness.models(harness).await
             && !models.is_empty()
             && !models.iter().any(|m| m.id == model)
         {
@@ -575,13 +575,13 @@ impl Tools {
 
         let (space, device_id) = match args.project.as_deref() {
             Some(project) => {
-                let space = self.zeron.resolve_space(project).await?;
+                let space = self.harness.resolve_space(project).await?;
                 let device_id = space.device_id.clone();
                 (Some(space), device_id)
             }
             None => (
                 None,
-                self.zeron.resolve_device_id(args.device.as_deref()).await?,
+                self.harness.resolve_device_id(args.device.as_deref()).await?,
             ),
         };
 
@@ -593,8 +593,8 @@ impl Tools {
             .map(str::trim)
             .filter(|p| !p.is_empty())
         {
-            Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
-            None => self.zeron.origin().chat_id.clone(),
+            Some(key) => Some(self.harness.resolve_chat(key).await?.id),
+            None => self.harness.origin().chat_id.clone(),
         };
 
         let chat_id = uuid::Uuid::new_v4().to_string();
@@ -621,14 +621,14 @@ impl Tools {
         if let Some(cwd) = args.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             mutate["cwd"] = json!(cwd);
         }
-        self.zeron.mutate(mutate).await?;
+        self.harness.mutate(mutate).await?;
         if let Some(title) = args
             .title
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
         {
-            self.zeron
+            self.harness
                 .mutate(json!({ "op": "renameChat", "chatId": chat_id, "title": title }))
                 .await?;
         }
@@ -686,8 +686,8 @@ impl Tools {
     }
 
     async fn read_chat(&self, args: ReadChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
-        let entries = self.zeron.transcript(&chat.id).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
+        let entries = self.harness.transcript(&chat.id).await?;
         let rendered = render_entries(
             &entries,
             RenderOptions {
@@ -717,17 +717,17 @@ impl Tools {
         if text.is_empty() {
             anyhow::bail!("text is empty");
         }
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
-        if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
+        let chat = self.harness.resolve_chat(&args.chat).await?;
+        if self.harness.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
             anyhow::bail!(
                 "refusing to send a message to your own chat ({})",
                 short(&chat.id)
             );
         }
         let (spaces, sessions, harnesses) = tokio::try_join!(
-            self.zeron.spaces(),
-            self.zeron.sessions(),
-            self.zeron.harnesses()
+            self.harness.spaces(),
+            self.harness.sessions(),
+            self.harness.harnesses()
         )?;
         let space = chat
             .space_id
@@ -759,7 +759,7 @@ impl Tools {
     }
 
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
         let turn = self
             .await_turn(&chat, None, false, wait_duration(args.timeout_secs), 0)
             .await?;
@@ -767,29 +767,29 @@ impl Tools {
     }
 
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
         let archived = args.archived.unwrap_or(true);
-        self.zeron
+        self.harness
             .mutate(json!({ "op": "setChatArchived", "chatId": chat.id, "archived": archived }))
             .await?;
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
     }
 
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
         let command_id = self
-            .zeron
+            .harness
             .queue_command(&chat.id, &SessionCommandPayload::Interrupt {})
             .await?;
         Ok(json!({ "chatId": chat.id, "commandId": command_id }))
     }
 
     async fn respond_to_input(&self, args: RespondArgs) -> anyhow::Result<Value> {
-        let chat = self.zeron.resolve_chat(&args.chat).await?;
+        let chat = self.harness.resolve_chat(&args.chat).await?;
         let request_id = match args.request_id {
             Some(id) => id,
             None => {
-                let entries = self.zeron.transcript(&chat.id).await?;
+                let entries = self.harness.transcript(&chat.id).await?;
                 let rendered = render_entries(&entries, RenderOptions::default());
                 last_pending_input(&rendered)
                     .and_then(|p| {
@@ -814,7 +814,7 @@ impl Tools {
             })
             .collect();
         let command_id = self
-            .zeron
+            .harness
             .queue_command(
                 &chat.id,
                 &SessionCommandPayload::RespondInput {
@@ -832,13 +832,13 @@ impl Tools {
     /// the receiving agent (and the human reading that transcript) can tell
     /// an agent-to-agent message from a typed one.
     async fn attribute(&self, target: &Chat, text: &str) -> String {
-        let Some(origin_id) = self.zeron.origin().chat_id.as_deref() else {
+        let Some(origin_id) = self.harness.origin().chat_id.as_deref() else {
             return text.to_owned();
         };
         if origin_id == target.id {
             return text.to_owned();
         }
-        let title = match self.zeron.resolve_chat(origin_id).await {
+        let title = match self.harness.resolve_chat(origin_id).await {
             Ok(chat) => chat.title,
             Err(_) => None,
         };
@@ -926,7 +926,7 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                 };
-                self.zeron
+                self.harness
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Run {
@@ -937,7 +937,7 @@ impl Tools {
                     .await?
             }
             "steer" => {
-                self.zeron
+                self.harness
                     .queue_command(
                         &chat.id,
                         &SessionCommandPayload::Steer {
@@ -947,7 +947,7 @@ impl Tools {
                     )
                     .await?
             }
-            _ => self.zeron.queue_message(&chat.id, &text).await?,
+            _ => self.harness.queue_message(&chat.id, &text).await?,
         };
         Ok(json!({
             "delivery": chosen,
@@ -967,10 +967,10 @@ impl Tools {
         since_millis: i64,
     ) -> anyhow::Result<Value> {
         let (outcome, session) = self
-            .zeron
+            .harness
             .wait_for_turn(chat, baseline, expect_turn, timeout)
             .await?;
-        let entries = self.zeron.transcript(&chat.id).await.unwrap_or_default();
+        let entries = self.harness.transcript(&chat.id).await.unwrap_or_default();
         let rendered = render_entries(&entries, RenderOptions::default());
         let replies: Vec<&RenderedMessage> = rendered
             .iter()
@@ -1020,7 +1020,7 @@ fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zeron::Origin;
+    use crate::harness::Origin;
     use async_trait::async_trait;
     use futures::StreamExt;
     use std::sync::Mutex;
@@ -1097,7 +1097,7 @@ mod tests {
 
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
         let client = memory_client(world);
-        Tools::new(Arc::new(Zeron::with_client(client, origin)))
+        Tools::new(Arc::new(Harness::with_client(client, origin)))
     }
 
     #[tokio::test]
@@ -1301,7 +1301,7 @@ mod tests {
         )
         .await;
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(init["result"]["serverInfo"]["name"], "zeron");
+        assert_eq!(init["result"]["serverInfo"]["name"], "harness");
         let list =
             crate::jsonrpc::handle_request(&tools, json!(2), "tools/list", Value::Null).await;
         assert!(list["result"]["tools"].as_array().unwrap().len() >= 10);

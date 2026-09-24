@@ -40,7 +40,7 @@ navigates away/back. A thread-local guard makes row construction and tool-summar
 formatting fail if invoked during that foreground work. The test checks shared
 prepared-cache identity and no historical tool entrance timestamps.
 
-The fixture defaults to 5,000 markdown parts. Setting `ZERON_WHALE_SNAPSHOT`
+The fixture defaults to 5,000 markdown parts. Setting `HARNESS_WHALE_SNAPSHOT`
 reads a private local snapshot copy, joins continuation entries exactly as the
 normal transcript does, and exercises the same installation/revisit path. No
 snapshot or transcript content is committed.
@@ -52,7 +52,7 @@ folds, selection and stale subscriptions.
 
 ```sh
 cargo test -p harness-ui --lib -- --test-threads=1
-ZERON_WHALE_SNAPSHOT=/path/to/private-copy.bin \
+HARNESS_WHALE_SNAPSHOT=/path/to/private-copy.bin \
   cargo --config 'profile.test.package.harness-ui.opt-level=2' \
   test -p harness-ui --lib prepared_whale_open_and_revisit -- --nocapture
 ```

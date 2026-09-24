@@ -12,7 +12,7 @@
 2. Add `crates/ui/src/appshots/windows.rs` using `RegisterHotKey`,
    `GetForegroundWindow`, Windows Graphics Capture, bounded UI Automation,
    process metadata, and executable icons. Elevated/protected targets degrade
-   to screenshot-only or a concrete capture error; Zeron does not request
+   to screenshot-only or a concrete capture error; Harness does not request
    `UIAccess`.
 3. Add `crates/ui/src/appshots/linux/{mod,portal,x11,atspi}.rs`. Wayland uses
    the Screenshot portal's Active Window target when advertised, otherwise its
@@ -20,7 +20,7 @@
    advertised portal Active Window target is also preferred before an EWMH
    active window, passive key grab, direct drawable capture, window metadata,
    and `_NET_WM_ICON`. AT-SPI enrichment is bounded and optional for both.
-4. Add a Linux-only `zeron appshot` activation command and local activation
+4. Add a Linux-only `harness appshot` activation command and local activation
    socket for desktops without the Global Shortcuts portal. It activates the
    already-running headed viewport; it never starts a headless capture.
 5. Rework `crates/ui/src/settings/shortcuts.rs` to render capabilities rather
@@ -41,7 +41,7 @@
 - Pure tests for capability copy, PNG/pixel conversion, bounds, X11 property
   parsing, and activation-path derivation.
 - `cargo fmt --all -- --check`, `cargo test -p harness-ui --lib`,
-  `cargo check -p harness-ui`, and `cargo check -p zeron` on macOS.
+  `cargo check -p harness-ui`, and `cargo check -p harness` on macOS.
 - Target checks for Windows and Linux where the local toolchain/sysroot allows;
   otherwise record the exact missing machine dependency and keep all platform
   code target-gated for CI/native validation.

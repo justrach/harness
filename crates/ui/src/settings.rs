@@ -1,5 +1,5 @@
 //! UI settings persisted to a small JSON file in the data dir — pane widths and
-//! collapse flags (zeron persisted the same set in localStorage).
+//! collapse flags (harness persisted the same set in localStorage).
 //!
 //! Loaded once at boot and then owned by [`SettingsStore`], the only production
 //! writer. Frequent geometry changes are debounced; durable choices flush
@@ -733,7 +733,7 @@ pub struct UiSettings {
     /// list. Kept for file compatibility; no longer read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub space_order: Vec<String>,
-    /// Master switch for session notification chimes. `ZERON_DISABLE_SOUND`
+    /// Master switch for session notification chimes. `HARNESS_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
     /// Chime when an agent run completes successfully.
@@ -743,7 +743,7 @@ pub struct UiSettings {
     /// Chime when a run fails or the durable connection state degrades.
     pub sound_attention_enabled: bool,
     /// Desktop banner notifications on the same transitions.
-    /// `ZERON_DISABLE_NOTIFICATIONS` overrides.
+    /// `HARNESS_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
     /// Suppress the banner while a Harness window is focused (the chime covers
     /// the foreground case).
@@ -751,7 +751,7 @@ pub struct UiSettings {
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
-    /// (`shell::SessionPanels`, zeron `sessionPanels` parity). Kept for file
+    /// (`shell::SessionPanels`, harness `sessionPanels` parity). Kept for file
     /// compatibility; no longer read or written by the shell.
     pub right_pane_open: bool,
     pub terminal_height: f32,
@@ -805,7 +805,7 @@ pub struct UiSettings {
     pub transcript_width: f32,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
-    pub open_web_links_in_zeron: bool,
+    pub open_web_links_in_harness: bool,
     /// Compact transcript: a turn's working steps (thinking, tool calls, and
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
@@ -893,7 +893,7 @@ impl Default for UiSettings {
             diff_wrap: false,
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
-            open_web_links_in_zeron: true,
+            open_web_links_in_harness: true,
             transcript_compact_mode: false,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
@@ -987,7 +987,7 @@ impl ShortcutId {
         self != Self::CaptureAppshot || crate::appshots::is_desktop()
     }
 
-    /// Row label (zeron lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
+    /// Row label (harness lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
     pub fn label(self) -> &'static str {
         match self {
             ShortcutId::CaptureAppshot => "Capture Appshot",
@@ -1719,7 +1719,7 @@ mod tests {
 
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
-        assert!(loaded.open_web_links_in_zeron);
+        assert!(loaded.open_web_links_in_harness);
         assert!(loaded.new_thread_composer_background.is_none());
         assert_eq!(
             loaded.new_thread_background_effect,
@@ -2283,7 +2283,7 @@ mod tests {
             diff_wrap: true,
             code_fences_fit_content: true,
             transcript_width: 960.0,
-            open_web_links_in_zeron: false,
+            open_web_links_in_harness: false,
             transcript_compact_mode: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
@@ -2296,7 +2296,7 @@ mod tests {
             accent: harness_theme::AccentSelection::Preset(harness_theme::AccentPreset::Cyan),
             surface: harness_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {
-                path: "/tmp/zeron/new-thread-background.png".into(),
+                path: "/tmp/harness/new-thread-background.png".into(),
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
@@ -2307,7 +2307,7 @@ mod tests {
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
-        assert!(json.contains(r#""openWebLinksInZeron": false"#));
+        assert!(json.contains(r#""openWebLinksInHarness": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
@@ -2846,7 +2846,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_zeron() {
+    fn defaults_match_harness() {
         let d = UiSettings::default();
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);

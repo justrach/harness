@@ -5,12 +5,12 @@
 #   scripts/dev-demo.sh            # build, seed demo data, open the app
 #   scripts/dev-demo.sh --slow     # pace mock streams (~10s) to watch streaming
 #
-# Everything lives under /tmp/zeron-demo-*; re-runs reuse it. Ctrl-C cleans up.
+# Everything lives under /tmp/harness-demo-*; re-runs reuse it. Ctrl-C cleans up.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DAEMON_DIR=/tmp/zeron-demo-daemon
-UI_DIR=/tmp/zeron-demo-ui
+DAEMON_DIR=/tmp/harness-demo-daemon
+UI_DIR=/tmp/harness-demo-ui
 IPC=27921
 DELAY=""
 [[ "${1:-}" == "--slow" ]] && DELAY=350
@@ -19,8 +19,8 @@ echo "▸ building (first run takes a few minutes)…"
 cargo build -p harness -q
 
 echo "▸ starting engine daemon on :$IPC"
-env ZERON_DATA_DIR="$DAEMON_DIR" ZERON_IPC_PORT=$IPC ZERON_HARNESS=mock \
-  ${DELAY:+ZERON_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
+env HARNESS_DATA_DIR="$DAEMON_DIR" HARNESS_IPC_PORT=$IPC HARNESS_PROVIDER=mock \
+  ${DELAY:+HARNESS_MOCK_DELAY_MS=$DELAY} RUST_LOG=warn \
   ./target/debug/harness headless &
 DAEMON_PID=$!
 trap 'kill $DAEMON_PID 2>/dev/null || true' EXIT
@@ -36,7 +36,7 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
   DEV=$(probe LocalDevice '{}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["deviceId"])')
   # One space per demo folder, created up-front (chats join by space id).
   declare -A SPACES=()
-  for project in zeron soccertcg zeron aether; do
+  for project in harness soccertcg harness aether; do
     sid=$(uuidgen | tr 'A-Z' 'a-z')
     probe Mutate "{\"op\":\"createSpace\",\"spaceId\":\"$sid\",\"deviceId\":\"$DEV\",\"path\":\"$HOME/github/$project\"}" >/dev/null
     SPACES[$project]="$sid"
@@ -53,13 +53,13 @@ if [[ ! -f "$DAEMON_DIR/.demo-seeded" ]]; then
     fi
     probe Mutate "{\"op\":\"setChatActivity\",\"chatId\":\"$id\",\"lastMessageAt\":$(( ($(date +%s) - $4*3600) * 1000 ))}" >/dev/null
   }
-  seed "Native Zeron Rust Rewrite"    zeron zeron/main                 0  run
-  seed "Rebalance Player Stats Caps"  soccertcg    zeron/rebalance-player-stat-caps  2  run
-  seed "Craft Premium TCG Experience" soccertcg    zeron/craft-premium-tcg-exp       26 skip
-  seed "Initial Context Exploration"  zeron        zeron/initial-context-exploration 14 skip
+  seed "Native Harness Rust Rewrite"    harness harness/main                 0  run
+  seed "Rebalance Player Stats Caps"  soccertcg    harness/rebalance-player-stat-caps  2  run
+  seed "Craft Premium TCG Experience" soccertcg    harness/craft-premium-tcg-exp       26 skip
+  seed "Initial Context Exploration"  harness        harness/initial-context-exploration 14 skip
   seed "Soccer TCG Repo Creation"     aether       aether/main                       48 skip
   touch "$DAEMON_DIR/.demo-seeded"
 fi
 
-echo "▸ opening zeron (composer is live — type into it; --slow shows streaming)"
+echo "▸ opening harness (composer is live — type into it; --slow shows streaming)"
 HARNESS_DATA_DIR="$UI_DIR" HARNESS_IPC_PORT=$IPC RUST_LOG=warn ./target/debug/harness

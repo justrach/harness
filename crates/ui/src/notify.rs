@@ -19,12 +19,12 @@
 //!   desktop).
 //! - Windows: no-op for now — toasts require a registered AppUserModelID
 //!   (an installer concern); the chime still covers it.
-//! - `ZERON_DISABLE_NOTIFICATIONS` env kill-switch + the
+//! - `HARNESS_DISABLE_NOTIFICATIONS` env kill-switch + the
 //!   `notificationsEnabled` ui-setting (checked by the caller);
 //! - failures are logged and swallowed — a missing notifier must never
 //!   bother the session flow.
 
-const DISABLE_ENV: &str = "ZERON_DISABLE_NOTIFICATIONS";
+const DISABLE_ENV: &str = "HARNESS_DISABLE_NOTIFICATIONS";
 
 /// Post a desktop banner, optionally linked to `chat_id`'s session. Call from the main thread
 /// (the macOS native path talks to AppKit); slow paths (spawning a CLI) hop to
@@ -207,8 +207,8 @@ mod delegate {
     pub(super) fn always_present() -> *mut Object {
         static DELEGATE: OnceLock<usize> = OnceLock::new();
         *DELEGATE.get_or_init(|| unsafe {
-            let mut decl = ClassDecl::new("ZeronNotifyDelegate", class!(NSObject))
-                .expect("ZeronNotifyDelegate registered twice");
+            let mut decl = ClassDecl::new("HarnessNotifyDelegate", class!(NSObject))
+                .expect("HarnessNotifyDelegate registered twice");
             decl.add_method(
                 sel!(userNotificationCenter:shouldPresentNotification:),
                 should_present as extern "C" fn(&Object, Sel, *mut Object, *mut Object) -> BOOL,

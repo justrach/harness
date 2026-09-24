@@ -1,22 +1,22 @@
-//! Auth — the engine owns the WorkOS session for its device (feature-inventory §3.7,
-//! ARCHITECTURE §5). Port of zeron's `apps/backend/src/auth.ts`.
+//! Auth — the engine owns the CodeGraff session for its device (feature-inventory §3.7,
+//! ARCHITECTURE §5). Port of harness's `apps/backend/src/auth.ts`.
 //!
-//! The engine is a public client: it builds the AuthKit authorize URL itself but
-//! delegates the secret-bearing **code exchange** and **refresh** to the edge Worker
-//! (`/auth/exchange`, `/auth/refresh` — the WorkOS API key lives only there).
+//! The engine is a public OAuth client. It builds the CodeGraff authorize URL
+//! with PKCE and delegates code exchange and refresh to the edge Worker
+//! (`/auth/exchange`, `/auth/refresh`).
 //!
 //! Two modes:
-//! - **Dev** (no WorkOS client id configured, or the edge reports `auth: "dev"`): always
+//! - **Dev** (no CodeGraff client id configured, or the edge reports `auth: "dev"`): always
 //!   signed in; the bearer IS the configured user id (current M2/M3 behavior).
-//! - **WorkOS**: authorization-code flow. Headed devices use a loopback callback server
-//!   on an ephemeral port; headless devices use the paste-code flow (the redirect is the
+//! - **CodeGraff**: authorization-code flow. Headed devices use a loopback callback server
+//!   on the registered loopback port; headless devices use the paste-code flow (the redirect is the
 //!   edge's hosted `/auth/cli/callback` page, which shows `state.code` to paste back via
 //!   stdin or the `CompleteSignIn` RPC). The refresh token is persisted 0600 in the data
 //!   dir; access tokens are cached with dual-clock expiry (monotonic AND wall, whichever
 //!   aged more — see [`AccessEntry`]) and refreshed on demand plus by a background loop,
 //!   so the device-room relay and room clients always dial with a live `?token=`, even
-//!   on the first redial after a laptop wakes from sleep. Org onboarding: an org-less session is `NeedsOrganization`; `SelectOrg`
-//!   runs an org-scoped refresh and the state follows the returned token's `org_id`.
+//!   on the first redial after a laptop wakes from sleep. A CodeGraff account gets a personal Harness workspace; `SelectOrg`
+//!   scopes refresh to that workspace.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
@@ -158,11 +160,11 @@ pub struct AuthConfig {
     pub edge_url: String,
     /// Data dir for the persisted session (`session.json`, 0600).
     pub data_dir: PathBuf,
-    /// WorkOS client id; `None` = dev mode.
-    pub workos_client_id: Option<String>,
-    /// WorkOS API base (authorize URL host).
-    pub workos_api_base: String,
-    /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
+    /// CodeGraff client id; `None` = dev mode.
+    pub codegraff_client_id: Option<String>,
+    /// CodeGraff API base (authorize URL host).
+    pub codegraff_api_base: String,
+    /// Dev-mode bearer/user id (mirrors the old `HARNESS_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
@@ -173,10 +175,10 @@ impl AuthConfig {
         Self {
             edge_url: edge_url.into(),
             data_dir: data_dir.into(),
-            workos_client_id: None,
-            workos_api_base: "https://api.workos.com".into(),
+            codegraff_client_id: None,
+            codegraff_api_base: "https://codegraff.com".into(),
             dev_user_id: "dev-user".into(),
-            callback_port: None,
+            callback_port: Some(27643),
         }
     }
 }
@@ -236,11 +238,11 @@ impl AccessEntry {
 
 struct AuthInner {
     config: AuthConfig,
-    /// `Some(client_id)` = WorkOS mode; `None` = dev mode.
-    workos: Option<String>,
-    /// Whether construction loaded a parseable WorkOS session. This is an
+    /// `Some(client_id)` = CodeGraff mode; `None` = dev mode.
+    codegraff: Option<String>,
+    /// Whether construction loaded a parseable CodeGraff session. This is an
     /// immutable startup fact: refresh or sign-out must not rewrite it.
-    loaded_workos_session: bool,
+    loaded_codegraff_session: bool,
     http: reqwest::Client,
     state_tx: watch::Sender<AuthState>,
     token_tx: watch::Sender<u64>,
@@ -249,7 +251,7 @@ struct AuthInner {
     /// Pending OAuth states plus the cancellation generation that fences code
     /// exchanges already in flight when sign-out occurs.
     sign_in: Mutex<SignInLifecycle>,
-    /// Single-flight refresh: WorkOS refresh tokens are single-use (rotated per
+    /// Single-flight refresh: CodeGraff refresh tokens are single-use (rotated per
     /// exchange); two concurrent refreshes would race and could revoke the session.
     refresh_gate: tokio::sync::Mutex<()>,
     refresh_flight: Mutex<Option<RefreshFlight>>,
@@ -264,7 +266,13 @@ struct AuthInner {
 #[derive(Default)]
 struct SignInLifecycle {
     generation: u64,
-    pending: HashMap<String, Instant>,
+    pending: HashMap<String, PendingSignIn>,
+}
+
+struct PendingSignIn {
+    at: Instant,
+    verifier: String,
+    redirect_uri: String,
 }
 
 /// The auth service — cheap to clone by `Arc`.
@@ -274,21 +282,25 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// Build from config: dev mode unless a WorkOS client id is configured.
+    /// Build from config: dev mode unless a CodeGraff client id is configured.
     pub fn new(config: AuthConfig) -> Self {
-        let workos = config
-            .workos_client_id
+        let codegraff = config
+            .codegraff_client_id
             .clone()
             .filter(|s| !s.trim().is_empty());
         let session_file = config.data_dir.join("session.json");
-        let stored: Option<StoredSession> = if workos.is_some() {
+        let stored: Option<StoredSession> = if codegraff.is_some() {
             std::fs::read_to_string(&session_file)
                 .ok()
                 .and_then(|raw| serde_json::from_str(&raw).ok())
+                .filter(|session: &StoredSession| {
+                    !codegraff.as_deref().is_some_and(|id| id.starts_with("cg_client_"))
+                        || session.refresh_token.starts_with("harness_rt_")
+                })
         } else {
             None
         };
-        let initial = match (&workos, &stored) {
+        let initial = match (&codegraff, &stored) {
             (None, _) => AuthState::SignedIn {
                 user: AuthUser {
                     id: config.dev_user_id.clone(),
@@ -300,7 +312,7 @@ impl Auth {
             (Some(_), Some(session)) => state_for(session.user.clone(), session.org_id.clone()),
             (Some(_), None) => AuthState::SignedOut,
         };
-        let loaded_workos_session = workos.is_some() && stored.is_some();
+        let loaded_codegraff_session = codegraff.is_some() && stored.is_some();
         let (state_tx, _) = watch::channel(initial);
         let (token_tx, _) = watch::channel(0);
         let (retry_tx, _) = watch::channel(0);
@@ -311,8 +323,8 @@ impl Auth {
         Self {
             inner: Arc::new(AuthInner {
                 config,
-                workos,
-                loaded_workos_session,
+                codegraff,
+                loaded_codegraff_session,
                 http,
                 state_tx,
                 token_tx,
@@ -332,7 +344,7 @@ impl Auth {
     /// dev auth mode forces dev mode even when a client id is configured (matching the
     /// edge's "bearer = user id" verification).
     pub async fn detect(mut config: AuthConfig) -> Self {
-        if config.workos_client_id.is_some() {
+        if config.codegraff_client_id.is_some() {
             #[derive(Deserialize)]
             struct Health {
                 auth: Option<String>,
@@ -353,20 +365,20 @@ impl Auth {
                 && health.auth.as_deref() == Some("dev")
             {
                 tracing::info!("auth: edge is in dev mode — using dev bearer");
-                config.workos_client_id = None;
+                config.codegraff_client_id = None;
             }
         }
         Self::new(config)
     }
 
-    pub fn workos_enabled(&self) -> bool {
-        self.inner.workos.is_some()
+    pub fn codegraff_enabled(&self) -> bool {
+        self.inner.codegraff.is_some()
     }
 
-    /// True when construction loaded a parseable persisted WorkOS session.
+    /// True when construction loaded a parseable persisted CodeGraff session.
     /// The value stays true even if a later refresh revokes that session.
-    pub fn loaded_workos_session(&self) -> bool {
-        self.inner.loaded_workos_session
+    pub fn loaded_codegraff_session(&self) -> bool {
+        self.inner.loaded_codegraff_session
     }
 
     /// Live auth status (current value + changes).
@@ -381,9 +393,9 @@ impl Auth {
     /// The signed-in user id — the identity that scopes workspace rooms
     /// (`ws3/{orgId}/{userId}`) and local storage (`orgs/{org}/{user}/`).
     /// Dev mode mirrors the edge's dev-bearer parsing (`user@org` → `user`,
-    /// a bare token IS the user id). `None` = signed out (WorkOS only).
+    /// a bare token IS the user id). `None` = signed out (CodeGraff only).
     pub fn user_id(&self) -> Option<String> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             let dev = &self.inner.config.dev_user_id;
             return Some(dev.split('@').next().unwrap_or(dev).to_string());
         }
@@ -392,10 +404,10 @@ impl Auth {
 
     /// Current bearer. Network failures preserve the session and return
     /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
-    /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
+    /// Dev mode: the configured user id. CodeGraff: cached access token, refreshed when
     /// it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(self.inner.config.dev_user_id.clone());
         }
         if let Some(entry) = &*lock(&self.inner.access)
@@ -438,7 +450,7 @@ impl Auth {
     pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {
         let auth = self.clone();
         tokio::spawn(async move {
-            if auth.inner.workos.is_none() {
+            if auth.inner.codegraff.is_none() {
                 return;
             }
             let mut state_rx = auth.watch_state();
@@ -478,7 +490,7 @@ impl Auth {
                     }
                 }
                 if auth.refresh(None).await.is_err() {
-                    // A failed refresh is usually the network, not WorkOS —
+                    // A failed refresh is usually the network, not CodeGraff —
                     // retry the moment connectivity returns (online bus)
                     // instead of always waiting out the full pause.
                     while online.try_recv().is_ok() {}
@@ -501,9 +513,9 @@ impl Auth {
     // -- sign-in flows ------------------------------------------------------
 
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
-    /// loopback callback server (bound lazily on an ephemeral port).
+    /// loopback callback server (bound lazily on the registered loopback port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
         let port = self.ensure_loopback().await?;
@@ -513,7 +525,7 @@ impl Auth {
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
     /// nothing ever redirects to this machine, so the browser can be anywhere.
     pub fn start_headless_sign_in(&self) -> String {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return String::new();
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
@@ -523,7 +535,7 @@ impl Auth {
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
     /// must match a sign-in started HERE (same CSRF discipline as the loopback flow).
     pub async fn complete_sign_in(&self, pasted: &str) -> Result<(), EngineError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(());
         }
         let trimmed = pasted.trim();
@@ -534,13 +546,13 @@ impl Auth {
                     .into(),
             ));
         }
-        let Some(generation) = self.take_pending(state) else {
+        let Some((generation, pending)) = self.take_pending(state) else {
             return Err(EngineError::Other(
                 "invalid or expired sign-in code — start sign-in again and paste the full code"
                     .into(),
             ));
         };
-        let result = self.exchange_code(code).await?;
+        let result = self.exchange_code(code, &pending, state).await?;
         self.finish_sign_in(result, generation)
     }
 
@@ -565,7 +577,7 @@ impl Auth {
     // -- organizations ------------------------------------------------------
 
     pub async fn list_orgs(&self) -> Result<Vec<OrgMembership>, EngineError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(Vec::new());
         }
         #[derive(Deserialize)]
@@ -581,7 +593,7 @@ impl Auth {
 
     /// Create an org (the edge makes us its first admin member) and scope to it.
     pub async fn create_org(&self, name: &str) -> Result<(), EngineError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(());
         }
         #[derive(Deserialize)]
@@ -602,7 +614,7 @@ impl Auth {
     /// Scope the session to an org: one refresh with `organizationId`; the state follows
     /// the returned token's `org_id` claim.
     pub async fn select_org(&self, organization_id: &str) -> Result<(), EngineError> {
-        if self.inner.workos.is_none() {
+        if self.inner.codegraff.is_none() {
             return Ok(());
         }
         let token = self.refresh(Some(organization_id)).await?;
@@ -623,37 +635,49 @@ impl Auth {
 
     fn begin_sign_in(&self, redirect_uri: &str) -> String {
         let state = uuid::Uuid::new_v4().to_string();
+        let verifier = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()));
         {
             let mut sign_in = lock(&self.inner.sign_in);
             let cutoff = Instant::now();
             sign_in
                 .pending
-                .retain(|_, at| cutoff.duration_since(*at) < SIGN_IN_TTL);
-            sign_in.pending.insert(state.clone(), cutoff);
+                .retain(|_, pending| cutoff.duration_since(pending.at) < SIGN_IN_TTL);
+            sign_in.pending.insert(state.clone(), PendingSignIn {
+                at: cutoff,
+                verifier,
+                redirect_uri: redirect_uri.to_owned(),
+            });
         }
-        let client_id = self.inner.workos.clone().unwrap_or_default();
+        let client_id = self.inner.codegraff.clone().unwrap_or_default();
         format!(
-            "{}/user_management/authorize?response_type=code&client_id={}&redirect_uri={}&provider=authkit&state={}",
-            self.inner.config.workos_api_base.trim_end_matches('/'),
+            "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20offline_access&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
+            self.inner.config.codegraff_api_base.trim_end_matches('/'),
             url_encode(&client_id),
             url_encode(redirect_uri),
-            state
+            state,
+            state,
+            challenge
         )
     }
 
     /// Consume a pending sign-in state and capture its cancellation generation.
     /// `None` means unknown/expired (CSRF check).
-    fn take_pending(&self, state: &str) -> Option<u64> {
+    fn take_pending(&self, state: &str) -> Option<(u64, PendingSignIn)> {
         let mut sign_in = lock(&self.inner.sign_in);
         let now = Instant::now();
         sign_in
             .pending
-            .retain(|_, at| now.duration_since(*at) < SIGN_IN_TTL);
-        sign_in.pending.remove(state)?;
-        Some(sign_in.generation)
+            .retain(|_, pending| now.duration_since(pending.at) < SIGN_IN_TTL);
+        Some((sign_in.generation, sign_in.pending.remove(state)?))
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<SignInResult, EngineError> {
+    async fn exchange_code(&self, code: &str, pending: &PendingSignIn, nonce: &str) -> Result<SignInResult, EngineError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WireUser {
@@ -679,7 +703,12 @@ impl Auth {
             .inner
             .http
             .post(&url)
-            .json(&serde_json::json!({ "code": code }))
+            .json(&serde_json::json!({
+                "code": code,
+                "codeVerifier": pending.verifier,
+                "redirectUri": pending.redirect_uri,
+                "nonce": nonce
+            }))
             .send()
             .await
             .map_err(|e| {
@@ -748,7 +777,7 @@ impl Auth {
         Ok(())
     }
 
-    /// Refresh the session (single-flight). `organization_id` migrates the WorkOS
+    /// Refresh the session (single-flight). `organization_id` migrates the CodeGraff
     /// session to that org; routine refreshes keep the current scope. Returns the new
     /// access token, `None` when signed out / the refresh could not run.
     async fn refresh(&self, organization_id: Option<&str>) -> Result<Option<String>, EngineError> {
@@ -1059,7 +1088,7 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
 #[async_trait::async_trait]
 impl harness_rpc::TokenSource for Auth {
     async fn token(&self) -> Result<String, TokenError> {
-        if self.inner.workos.is_some() && !self.state().is_signed_in() {
+        if self.inner.codegraff.is_some() && !self.state().is_signed_in() {
             return Err(TokenError::SignedOut);
         }
         self.access_token().await
@@ -1130,7 +1159,7 @@ async fn handle_loopback_conn(
         };
         match (code, state) {
             (Some(code), Some(state)) => match auth.take_pending(state) {
-                Some(generation) => match auth.exchange_code(code).await {
+                Some((generation, pending)) => match auth.exchange_code(code, &pending, state).await {
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
@@ -1299,7 +1328,7 @@ mod tests {
             r#"{"refreshToken":"refresh-secret","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
         ).unwrap();
         let mut config = AuthConfig::new("https://edge.invalid", dir.path());
-        config.workos_client_id = Some("client_test".into());
+        config.codegraff_client_id = Some("client_test".into());
         let mut auth = Auth::new(config);
         let dns = Arc::new(FailingDns::default());
         Arc::get_mut(&mut auth.inner).unwrap().http = dns.client();

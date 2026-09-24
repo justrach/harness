@@ -1607,7 +1607,7 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .children(report.adjustments.iter().map(|adjustment| {
             div().mt(px(4.0)).child(SharedString::from(format!(
                 "Adjusted · {} {} → {} · {}",
-                adjustment.zeron_role, adjustment.original, adjustment.resolved, adjustment.reason
+                adjustment.harness_role, adjustment.original, adjustment.resolved, adjustment.reason
             )))
         }))
         .children(report.fallbacks.iter().map(|message| {
@@ -1634,7 +1634,7 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .children(report.mappings.iter().map(|mapping| {
             div().mt(px(4.0)).child(SharedString::from(format!(
                 "{} ← {}",
-                mapping.zeron_role, mapping.vscode_key
+                mapping.harness_role, mapping.vscode_key
             )))
         }))
 }

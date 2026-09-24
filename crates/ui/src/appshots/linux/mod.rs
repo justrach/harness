@@ -158,8 +158,8 @@ mod tests {
     #[test]
     fn activation_path_stays_inside_data_directory() {
         assert_eq!(
-            activation_socket_path(Path::new("/tmp/zeron-test")),
-            Path::new("/tmp/zeron-test/appshot-activation.sock")
+            activation_socket_path(Path::new("/tmp/harness-test")),
+            Path::new("/tmp/harness-test/appshot-activation.sock")
         );
     }
 }

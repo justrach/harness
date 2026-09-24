@@ -1242,7 +1242,7 @@ fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
         .current_dir(parent_cwd.path())
         .env("HOME", child_home.path())
         .env("GEMINI_HOME", "relative-gemini-home")
-        .env("ZERON_TEST_EXPECTED_GEMINI_HOME", &gemini_home)
+        .env("HARNESS_TEST_EXPECTED_GEMINI_HOME", &gemini_home)
         .output()
         .unwrap();
     assert!(
@@ -1255,7 +1255,7 @@ fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
 
 #[tokio::test]
 async fn antigravity_auth_path_subprocess() {
-    if std::env::var_os("ZERON_TEST_EXPECTED_GEMINI_HOME").is_none() {
+    if std::env::var_os("HARNESS_TEST_EXPECTED_GEMINI_HOME").is_none() {
         return;
     }
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1883,8 +1883,8 @@ fn antigravity_detection_and_missing_server_never_install() {
             .env("HOME", dir.path())
             .env("PATH", &bin)
             .env("SHELL", "/nonexistent-shell")
-            .env("ZERON_ADAPTERS_DIR", &adapters)
-            .env("ZERON_TEST_DETECTION", scenario)
+            .env("HARNESS_ADAPTERS_DIR", &adapters)
+            .env("HARNESS_TEST_DETECTION", scenario)
             .env_remove("ANTIGRAVITY_ACP_EXECUTABLE");
         if scenario == "override" {
             child.env("ANTIGRAVITY_ACP_EXECUTABLE", &exe);
@@ -1905,7 +1905,7 @@ fn antigravity_detection_and_missing_server_never_install() {
 
 #[tokio::test]
 async fn antigravity_detection_subprocess() {
-    let Ok(scenario) = std::env::var("ZERON_TEST_DETECTION") else {
+    let Ok(scenario) = std::env::var("HARNESS_TEST_DETECTION") else {
         return;
     };
     let harness = AcpHarness::antigravity();
@@ -1940,7 +1940,7 @@ async fn antigravity_detection_subprocess() {
         harness.run(request("hello"), ctl).await,
         Err(HarnessError::NotInstalled(_))
     ));
-    let adapters = PathBuf::from(std::env::var_os("ZERON_ADAPTERS_DIR").unwrap());
+    let adapters = PathBuf::from(std::env::var_os("HARNESS_ADAPTERS_DIR").unwrap());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         std::fs::read_dir(adapters)
@@ -1986,13 +1986,13 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
     ] {
         let h = h.with_executable(fixture_path());
         let cwd = tempfile::tempdir().unwrap();
-        let skill_dir = cwd.path().join(".agents/skills/zeron-fixture-review");
+        let skill_dir = cwd.path().join(".agents/skills/harness-fixture-review");
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: zeron-fixture-review\ndescription: Review changes\n---\nReview the changes.").unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: harness-fixture-review\ndescription: Review changes\n---\nReview the changes.").unwrap();
         let command_name = if h.id() == HarnessId::Pi {
-            "skill:zeron-fixture-review"
+            "skill:harness-fixture-review"
         } else {
-            "zeron-fixture-review"
+            "harness-fixture-review"
         };
         std::fs::write(cwd.path().join(".command-fixture"), command_name).unwrap();
         let skills = h
@@ -2002,7 +2002,7 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
             .unwrap();
         let skill = skills
             .into_iter()
-            .find(|s| s.name == "zeron-fixture-review")
+            .find(|s| s.name == "harness-fixture-review")
             .unwrap();
         assert_eq!(skill.command.is_some(), h.id() == HarnessId::Pi);
         let invocation = Invocation::Skill {

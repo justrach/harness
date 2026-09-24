@@ -14,7 +14,7 @@
    enabled, and label Accessibility as optional.
 4. Update pure layout tests and permission-facing copy. Validate with
    `cargo test -p harness-ui --lib`, `cargo check -p harness-ui`,
-   `cargo build -p zeron`, and `git diff --check`.
+   `cargo build -p harness`, and `git diff --check`.
 
 ## Composer visual normalization follow-up
 
@@ -29,4 +29,4 @@
    transport, and permission controls remain unchanged.
 4. Add dimension-parser and landscape/portrait/square sizing tests, run the
    `harness-ui` test suite and macOS build checks, then inspect the result in the
-   signed `Zeron Dev.app`.
+   signed `Harness Dev.app`.

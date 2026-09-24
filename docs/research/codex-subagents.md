@@ -24,7 +24,7 @@ transcript merging is performed.
   its card to running without fabricating user text. Actual child user messages
   are still persisted when supplied by the provider.
 - On `thread/resume`, stored parent spawn items rebuild the child ownership
-  table without replaying cards or content into Zeron's existing documents.
+  table without replaying cards or content into Harness's existing documents.
 - Root self-activity never registers a child or produces a spawn card.
 
 ## Offline regression coverage

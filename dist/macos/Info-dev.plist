@@ -44,9 +44,9 @@
         <string>__DATA_DIR__</string>
         <key>HARNESS_IPC_PORT</key>
         <string>__IPC_PORT__</string>
-        <key>ZERON_DATA_DIR</key>
+        <key>HARNESS_DATA_DIR</key>
         <string>__DATA_DIR__</string>
-        <key>ZERON_IPC_PORT</key>
+        <key>HARNESS_IPC_PORT</key>
         <string>__IPC_PORT__</string>
     </dict>
     <key>NSHighResolutionCapable</key>

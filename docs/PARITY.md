@@ -43,12 +43,12 @@ not built yet).
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| 3.1 Lifecycle | partial | Device registration, presence heartbeat (ephemeral, 15s), stale-session recovery, host-only doc executor with steer→new-turn fallback, single-instance data-dir lock. CLI auth decoupled from the daemon: `zeron login`/`logout`/`status` work on the persisted session and exit; headless TTY sign-in remains, and off-TTY (systemd/launchd) headless fails fast with "run `zeron login` first"; `zeron daemon install/start/stop/restart/status/uninstall` manages launchd / systemd `--user` units (install-time PATH captured into the unit for harness CLIs). Gaps: login-shell PATH capture for the headed app, crash shield, parent-PID watchdog. |
+| 3.1 Lifecycle | partial | Device registration, presence heartbeat (ephemeral, 15s), stale-session recovery, host-only doc executor with steer→new-turn fallback, single-instance data-dir lock. CLI auth decoupled from the daemon: `harness login`/`logout`/`status` work on the persisted session and exit; headless TTY sign-in remains, and off-TTY (systemd/launchd) headless fails fast with "run `harness login` first"; `harness daemon install/start/stop/restart/status/uninstall` manages launchd / systemd `--user` units (install-time PATH captured into the unit for harness CLIs). Gaps: login-shell PATH capture for the headed app, crash shield, parent-PID watchdog. |
 | 3.2 Sessions engine | partial | Run journal on disk with crash recovery (aborted stamps), steering mailbox at step boundaries, doc hooks at boundaries, streamed part folding at STREAM_COMMIT_MS. Gaps: idle reaper + 10-min stall watchdog for persistent harness sessions. |
 | 3.3 Session-docs host | done | docs.sqlite snapshots + processed-command ledger, mark-BEFORE-execute, room join per open chat, diff sidecar publish, cold-chat delivery both directions (nudge POST on queue for remote-hosted chats + warm-open on nudge receipt). Gap (minor): no boot-time warm-open of recent chats (14d/30) — cold chats rely on nudges. |
 | 3.4 Terminals | done | PTYs, 1MB bounded replay + `afterSeq` resume, 32 max, exited 30-min TTL, live shells survive detach. |
 | 3.5 Repos/diffs | done | list/add/clone/create, branches, worktrees, checkout identity; CheckoutDiffSync (fs watchers + repair pass, name-status+numstat+patch incl. untracked, 3MiB cap, sha256, sidecar publish); chat.branch upkeep from HEAD watch; folder listing with timeout. |
-| 3.7 Auth / uploads / accounts / device-room | done | WorkOS code+loopback and paste-code flows, refresh persistence (0600), org gate, dev mode; chunked uploads; claude/codex credential swap with usage probes and OAuth flows; host relay (virtual sockets over `{s,k,to,from}` frames) + peer link cache. |
+| 3.7 Auth / uploads / accounts / device-room | done | CodeGraff OAuth code+loopback and paste-code flows, refresh persistence (0600), org gate, dev mode; chunked uploads; claude/codex credential swap with usage probes and OAuth flows; host relay (virtual sockets over `{s,k,to,from}` frames) + peer link cache. |
 
 ## §4 Harness
 
@@ -78,7 +78,7 @@ not built yet).
 | Item | Status | Notes |
 | --- | --- | --- |
 | Worker routes | done | health, session ws/tail/stats/diff/snapshot/append, workspace rooms, device ws/sidecar/status/nudge. |
-| Auth at edge | done | WorkOS JWKS verify; dev mode `user@org` bearers; DOs see Worker-stamped identity; claim-on-first-join ownership. |
+| Auth at edge | done | Harness JWT verify; dev mode `user@org` bearers; DOs see Worker-stamped identity; claim-on-first-join ownership. |
 | SessionRoom DO | done | Hibernatable WS, update log + snapshot, lazy tail, two-level compaction, daily alarm checkpoint/trim/R2 backup, VV backfill, fragment reassembly. |
 | DeviceRoom DO | done | Byte-pipe frames, single host socket + supersede, relay control frames, durable nudges (replay on join, cap), sidecar slots. |
 
@@ -86,7 +86,7 @@ not built yet).
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| WorkOS exchange/refresh, org list/create at edge | done | `/auth/*` routes; API key stays edge-side. |
+| CodeGraff exchange/refresh, personal workspace lookup at edge | done | `/auth/*` routes; the CodeGraff identity is verified at the edge. |
 | Postgres/signaling dropped | done | Nothing depends on them. |
 
 ## §8 Exclusions
@@ -98,7 +98,7 @@ not built yet).
 ## Deferred (cross-cutting)
 
 - **Mobile app** — out of scope for the native rewrite so far.
-- **E2EE** — transport is TLS + WorkOS bearers; end-to-end encryption of doc
+- **E2EE** — transport is TLS + Harness bearers; end-to-end encryption of doc
   contents not designed.
 - **macOS packaging execution** — config + steps in `dist/` only (needs a Mac).
 - **Engine hardening**: single-instance lock, parent-PID watchdog, crash

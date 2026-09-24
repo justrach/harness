@@ -1077,7 +1077,7 @@ pub struct Row {
     pub turn_start: bool,
     pub kind: RowKind,
     /// The owning message entry — hover anywhere on the entry's rows reveals
-    /// its timestamp strip (zeron chat-view.tsx `group`/`group-hover`).
+    /// its timestamp strip (harness chat-view.tsx `group`/`group-hover`).
     pub entry_id: SharedString,
     /// Epoch-ms for the 16px hover-timestamp strip UNDER this row: set on the
     /// LAST row of a completed entry (user rows always; assistant rows only
@@ -1719,13 +1719,13 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
     }
 }
 
-/// `ZERON_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
+/// `HARNESS_FRAME_STATS=1` logs live-row render-cost percentiles (p50/p95 µs
 /// over rolling windows of [`FRAME_STATS_WINDOW`] samples) at `warn` level —
 /// the smoothness measurement knob. Off by default; zero cost when off.
 fn frame_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
-        .get_or_init(|| std::env::var("ZERON_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
+        .get_or_init(|| std::env::var("HARNESS_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 const FRAME_STATS_WINDOW: usize = 240;
@@ -1758,12 +1758,12 @@ pub(crate) fn record_view_frame(view: &'static str) -> bool {
     })
 }
 
-/// `ZERON_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
+/// `HARNESS_NO_RENDER_CACHE=1` bypasses the cross-frame flatten cache — the
 /// A/B knob for the frame-cost measurement above.
 fn render_cache_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DISABLED.get_or_init(|| {
-        std::env::var("ZERON_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
+        std::env::var("HARNESS_NO_RENDER_CACHE").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -3191,7 +3191,7 @@ pub struct Transcript {
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
-    /// strip (zeron chat-view.tsx `group-hover`; the rows report hover
+    /// strip (harness chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
@@ -5341,7 +5341,7 @@ impl Transcript {
     }
 
     /// Devices that may own a user message's attachment files: the chat's host
-    /// device (uploads targeted it) plus this device (zeron's
+    /// device (uploads targeted it) plus this device (harness's
     /// `uniqueIds([attachmentDeviceId, m.device_id])`).
     fn attachment_device_ids(&self, cx: &Context<Self>) -> Vec<String> {
         // `selected_chat_row` belongs to the PRIMARY transcript's chat — an
@@ -6024,7 +6024,7 @@ impl Transcript {
                             // so the overlay stays live even once the trailer's
                             // 30s pending-send bridge has lapsed.
                             let pulse = motion::pulse_wave(motion::pulse_delta(
-                                &motion::ZERON_PULSE,
+                                &motion::HARNESS_PULSE,
                                 cx.entity_id(),
                                 cx,
                             ));
@@ -6068,7 +6068,7 @@ impl Transcript {
                     .opacity(
                         0.35 + 0.4
                             * motion::pulse_wave(motion::pulse_delta(
-                                &motion::ZERON_PULSE,
+                                &motion::HARNESS_PULSE,
                                 cx.entity_id(),
                                 cx,
                             )),
@@ -7205,7 +7205,7 @@ impl Transcript {
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
-            // chips (destructive tint, zeron tool-chip.tsx) and in the
+            // chips (destructive tint, harness tool-chip.tsx) and in the
             // summary's "· N failed" count.
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
@@ -7651,12 +7651,12 @@ fn user_bubble_text(
 }
 
 /// The transcript ErrorChip — the shared [`notice_chip`] in its tile
-/// treatment (a port of zeron chat-view.tsx `ErrorChip`, restacked for long
+/// treatment (a port of harness chat-view.tsx `ErrorChip`, restacked for long
 /// payloads: header row with the red-washed tile and the medium "Error"
 /// label, then the human message below). Unlike the web port, the message
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
-/// zeronsh/comet#95 undiagnosable from the screenshot.
+/// the upstream adapter failure undiagnosable from the screenshot.
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
@@ -7733,9 +7733,9 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
         .into_any_element()
 }
 
-/// A small glyph standing in for the tool's icon (zeron uses an icon set; a
+/// A small glyph standing in for the tool's icon (harness uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
-/// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
+/// The glyph for a tool call (harness tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
@@ -9156,7 +9156,7 @@ mod tests {
     #[gpui::test]
     fn prepared_whale_open_and_revisit_do_not_build_rows_on_ui(cx: &mut gpui::TestAppContext) {
         let (update, prepared, preparation_ms) = std::thread::spawn(|| {
-            let entries = if let Ok(path) = std::env::var("ZERON_WHALE_SNAPSHOT") {
+            let entries = if let Ok(path) = std::env::var("HARNESS_WHALE_SNAPSHOT") {
                 let doc = harness_doc::SessionDoc::init("fixture").unwrap();
                 doc.doc().import(&std::fs::read(path).unwrap()).unwrap();
                 harness_doc::join_continuation_entries(doc.read_entries().unwrap())
@@ -13201,7 +13201,7 @@ mod tests {
     /// the RAW text either way, so projection never perturbs the diff key.
     #[test]
     fn user_rows_project_file_mentions_into_chips() {
-        let raw = "look at [composer.rs](zeron-file:crates/ui/src/composer.rs) please";
+        let raw = "look at [composer.rs](harness-file:crates/ui/src/composer.rs) please";
         let mut entry = assistant("u3", MessageStatus::Complete, vec![]);
         entry.role = MessageRole::User;
         entry.status = None;
@@ -13211,7 +13211,7 @@ mod tests {
             panic!("expected a user row");
         };
         assert!(
-            !text.contains("zeron-file:"),
+            !text.contains("harness-file:"),
             "raw link left visible: {text}"
         );
         assert!(text.contains("composer.rs"));
@@ -13617,12 +13617,12 @@ mod tests {
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Mcp {
             server: "gh".into(),
             tool: "issues".into(),
-            input: Some(serde_json::json!({"repo": "zeron"})),
+            input: Some(serde_json::json!({"repo": "harness"})),
         }) else {
             panic!("expected an output block")
         };
         assert_eq!(lines[0].as_ref(), "gh · issues");
-        assert!(lines.iter().any(|l| l.contains("\"repo\": \"zeron\"")));
+        assert!(lines.iter().any(|l| l.contains("\"repo\": \"harness\"")));
 
         // Todos list one item per line with checkbox state.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {

@@ -1,5 +1,5 @@
 //! CheckoutDiffSync — checkout-scoped working-tree diff production (feature-inventory
-//! §3.5; port of zeron's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
+//! §3.5; port of harness's `checkout-diff-sync.ts` + `git-metadata-sync.ts`).
 //!
 //! Chats do not own working-tree state: a concrete Git checkout does. This service
 //! groups this device's chats by their canonical checkout identity (`chat.cwd` →
@@ -1194,7 +1194,7 @@ pub async fn capture_diff_against(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Zeron diff truncated\n");
+        patch.push_str("\n# Harness diff truncated\n");
     }
 
     // `?? path` records; rename records (`R  new\0old`) consume their extra field.
@@ -1432,7 +1432,7 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
 /// capture already does.
 pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
     let index = std::env::temp_dir().join(format!(
-        "zeron-turn-index-{}-{}",
+        "harness-turn-index-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_micros()
     ));
@@ -1543,7 +1543,7 @@ pub async fn capture_turn_diff(
     if tracked.truncated {
         let boundary = patch.rfind('\n').unwrap_or(0);
         patch.truncate(boundary);
-        patch.push_str("\n# Zeron diff truncated\n");
+        patch.push_str("\n# Harness diff truncated\n");
     }
 
     let additions: u32 = files.iter().map(|f| f.additions).sum();

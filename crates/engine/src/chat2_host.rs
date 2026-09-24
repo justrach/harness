@@ -472,7 +472,7 @@ mod frontier_tests {
     /// containment.
     #[test]
     fn encoded_empty_frontier_is_not_contained() {
-        let dir = std::env::temp_dir().join(format!("zeron-frontier2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harness-frontier2-{}", std::process::id()));
         let store = Arc::new(DocsStore::open(&dir).expect("store opens"));
         let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
         let sink = EngineChatSink::new(&doc, store, "frontier-test-2");
@@ -486,7 +486,7 @@ mod frontier_tests {
 
     #[test]
     fn empty_frontier_is_not_contained() {
-        let dir = std::env::temp_dir().join(format!("zeron-frontier-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("harness-frontier-test-{}", std::process::id()));
         let store = Arc::new(DocsStore::open(&dir).expect("store opens"));
         let doc = Arc::new(SessionDoc::from_doc(loro::LoroDoc::new()));
         let sink = EngineChatSink::new(&doc, store, "frontier-test");

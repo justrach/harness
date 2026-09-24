@@ -25,7 +25,7 @@ xnotify() { # $1 = update json object body — grok's extension channel (the
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"protocolVersion":1' || exit 1
-has "$line" '"name":"zeron"' || exit 1
+has "$line" '"name":"harness"' || exit 1
 has "$line" '"readTextFile":false' || exit 1
 emit "{\"id\":$(rid "$line"),\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"_meta\":{\"availableCommands\":[{\"name\":\"compact\",\"description\":\"Compact the session\"},{\"name\":\"goal\",\"description\":\"Set a goal\",\"input\":{\"hint\":\"the goal\"}}]}},\"authMethods\":[{\"id\":\"grok.com\",\"name\":\"Grok\"}],\"_meta\":{\"steering\":{\"supported\":true}}}}"
 
@@ -161,7 +161,7 @@ case "$promptline" in
   # prompt) must not settle the live turn; the real response follows.
   emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"stale-p0\",\"stopReason\":\"cancelled\",\"agentResult\":null}}"
   # A completion for ANOTHER session is equally inert.
-  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"other\",\"promptId\":\"zeron-p1\",\"stopReason\":\"cancelled\",\"agentResult\":null}}"
+  emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"other\",\"promptId\":\"harness-p1\",\"stopReason\":\"cancelled\",\"agentResult\":null}}"
   sleep 1
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"real answer"}}'
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\",\"_meta\":{\"inputTokens\":9,\"outputTokens\":4}}}"

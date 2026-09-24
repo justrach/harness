@@ -13,7 +13,7 @@ members = [
     "crates/ui",
     "crates/syntax",
     "crates/mcp",
-    "apps/zeron",
+    "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
 exclude = ["vendor/zui", "vendor/gpui-component"]
@@ -45,7 +45,7 @@ loro = "1.13"
 # frames, cross-checked by its js_snapshots tests).
 loro-protocol = "0.3"
 
-# gpui — zeronsh/zui, extracted from wingleeio/zed e2ddcc6 with identical
+# gpui — vendored Zui, extracted from wingleeio/zed e2ddcc6 with identical
 # crate sources; adds bounded blur passes and shared Gaussian weights.
 # Removes GPL tracing crates and composites deferred GPUI content above native macOS views.
 # Preserved fork history: upstream f14fea9 + commits on
@@ -57,7 +57,7 @@ loro-protocol = "0.3"
 # sidebar); a6c1ad5 adds BackdropBlur + horizontal EdgeFade + glass fixes;
 # 9b672fa bounds renderer GPU memory (region-sized backdrop blur scratch,
 # idle release of blur/path intermediates, instance pool shrink,
-# ZERON_GPU_STATS=1 diagnostics); b687328 adds ImageSource::evict (frees
+# HARNESS_GPU_STATS=1 diagnostics); b687328 adds ImageSource::evict (frees
 # sprite-atlas tiles — remove_asset alone leaked them, see
 # attachments::flush_evicted); ac135eb adds device memory to the stats line;
 # f596cde fixes destination alpha on transparent windows (Porter-Duff OVER,
@@ -72,8 +72,8 @@ loro-protocol = "0.3"
 # translucent compositing, plus blur-aware scene batching (#10).
 #
 # Harness vendors both forks (Apache-2.0; see vendor/README.md): zui at
-# gaelcado/zui 53869c2 (the text-fade patch zeron pinned on top of
-# zeronsh/zui c2d273d) and gpui-base from zeronsh/gpui-component 03cd994.
+# gaelcado/zui 53869c2 (the text-fade patch harness pinned on top of
+# the pinned Zui revision c2d273d) and gpui-base from the pinned gpui-component revision 03cd994.
 gpui = { path = "vendor/zui/crates/gpui" }
 gpui_platform = { path = "vendor/zui/crates/gpui_platform", features = [
     "wayland",

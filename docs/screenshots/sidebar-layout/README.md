@@ -3,10 +3,10 @@ chats, icons and PR metadata are synthetic; no engine or account is connected.
 
 ```sh
 cargo run -p harness-ui --example sidebar-fixture --features project-palette-fixture
-ZERON_SIDEBAR_COMPACT=1 cargo run -p harness-ui --example sidebar-fixture --features project-palette-fixture
+HARNESS_SIDEBAR_COMPACT=1 cargo run -p harness-ui --example sidebar-fixture --features project-palette-fixture
 ```
 
-Set `ZERON_SIDEBAR_HIDE_LABEL=1` to start with the project/device label hidden.
+Set `HARNESS_SIDEBAR_HIDE_LABEL=1` to start with the project/device label hidden.
 The sidebar view menu persists all three display preferences and project grouping.
 Ungrouped rows live in a collapsible Sessions accordion; project/device groups
 remain separate accordions. All sidebar accordion headers have no divider rules.

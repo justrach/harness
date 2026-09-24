@@ -4,7 +4,7 @@
 //! ## EngineHandle
 //! The UI talks the same typed RPC whether the engine is in-process or a separate
 //! daemon (ARCHITECTURE §1). [`EngineHandle::bootstrap`] probes the localhost IPC
-//! port, mirroring zeron: if an engine is listening it connects over WebSocket
+//! port, mirroring harness: if an engine is listening it connects over WebSocket
 //! ([`RemoteEngine`]); otherwise it embeds one via [`EngineCore::assemble`] and an
 //! in-memory RPC transport ([`InProcessEngine`]) — same envelopes, same dispatch.
 //!
@@ -91,7 +91,7 @@ impl Drop for WatchPreparation {
 /// Everything needed to reach (or start) an engine.
 #[derive(Debug, Clone)]
 pub struct EngineBootConfig {
-    /// Data directory for the embedded engine (`~/.zeron`).
+    /// Data directory for the embedded engine (`~/.harness`).
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe / serve.
     pub ipc_port: u16,
@@ -101,8 +101,8 @@ pub struct EngineBootConfig {
     pub edge_token: Option<String>,
     /// Workspace org override for explicit dev-mode runs.
     pub org_id: Option<String>,
-    /// WorkOS client id for production authentication.
-    pub workos_client_id: Option<String>,
+    /// CodeGraff client id for production authentication.
+    pub codegraff_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
 }
@@ -296,7 +296,7 @@ impl EngineHandle {
             ipc_port: config.ipc_port,
             default_harness: config.default_harness,
             org_id: config.org_id,
-            workos_client_id: config.workos_client_id,
+            codegraff_client_id: config.codegraff_client_id,
         };
 
         // Own the data dir before opening anything under it or binding IPC —
@@ -704,6 +704,9 @@ pub struct AppState {
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
+    /// A folder handed over by `harness <dir>`; the shell turns it into a
+    /// project once spaces and the local device are known.
+    pub pending_open_folder: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat's pending-message queue — what was typed while the
@@ -837,6 +840,7 @@ impl AppState {
             spaces_synced: false,
             pending_deep_link: None,
             deep_link_notice: None,
+            pending_open_folder: None,
         }
     }
 
@@ -1568,7 +1572,7 @@ impl AppState {
     // ---- queries ----
 
     /// Non-archived, top-level chats in sidebar order. Chats spawned by
-    /// another chat (`parent_chat_id`, the Zeron MCP's orchestration link)
+    /// another chat (`parent_chat_id`, the Harness MCP's orchestration link)
     /// are the parent's workers, not sessions the user started: they stay
     /// reachable by id/deep link but never take a sidebar row or jump slot.
     pub fn visible_chats(&self) -> impl Iterator<Item = &Chat> {
@@ -2005,7 +2009,15 @@ impl AppState {
     }
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
-        match crate::links::parse_zeron_conversation_link(url) {
+        if url.starts_with("harness://open/folder?") {
+            match crate::links::parse_folder_open_link(url) {
+                Ok(path) => self.pending_open_folder = Some(path),
+                Err(error) => self.deep_link_notice = Some(error.to_string()),
+            }
+            cx.notify();
+            return;
+        }
+        match crate::links::parse_harness_conversation_link(url) {
             Ok(link) => {
                 self.pending_deep_link = Some(link);
                 self.apply_pending_deep_link(cx);
@@ -2861,7 +2873,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2891,7 +2903,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2929,7 +2941,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: Some("client_test".into()),
+            codegraff_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2986,7 +2998,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3024,7 +3036,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3066,7 +3078,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None, // offline
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         };
         let (a, b) = tokio::join!(
@@ -3126,7 +3138,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3153,7 +3165,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: Some("client_test".into()),
+            codegraff_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3204,7 +3216,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: Some("client_test".into()),
+            codegraff_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3242,7 +3254,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_connects_when_daemon_is_listening() {
-        // Stand in for `zeron headless`: an engine served over the WS IPC port.
+        // Stand in for `harness headless`: an engine served over the WS IPC port.
         let daemon_dir = tempfile::tempdir().unwrap();
         let core = EngineCore::assemble(
             daemon_dir.path(),
@@ -3262,7 +3274,7 @@ mod tests {
             edge_url: "http://127.0.0.1:1".into(),
             edge_token: None,
             org_id: None,
-            workos_client_id: None,
+            codegraff_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -4385,8 +4397,8 @@ mod tests {
 
     #[test]
     fn project_labels_from_cwd() {
-        assert_eq!(project_label(Some("/home/w/dev/zeron")), "zeron");
-        assert_eq!(project_label(Some("/home/w/dev/zeron/")), "zeron");
+        assert_eq!(project_label(Some("/home/w/dev/harness")), "harness");
+        assert_eq!(project_label(Some("/home/w/dev/harness/")), "harness");
         assert_eq!(project_label(None), "No project");
         assert_eq!(project_label(Some("~")), "No project");
         assert_eq!(project_label(Some("~/")), "No project");
@@ -4398,22 +4410,22 @@ mod tests {
     fn grouped_sidebar_preserves_recency_order() {
         // Input is sidebar-sorted (most recent first).
         let chats = [
-            chat_with_cwd("a", 9, Some("/dev/zeron")),
+            chat_with_cwd("a", 9, Some("/dev/harness")),
             chat_with_cwd("b", 8, Some("/dev/zed")),
-            chat_with_cwd("c", 7, Some("/dev/zeron")),
+            chat_with_cwd("c", 7, Some("/dev/harness")),
             chat_with_cwd("d", 6, None),
         ];
         let groups = group_chats(chats.iter());
         let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
         // Groups ordered by their most recent chat; rows keep order.
-        assert_eq!(labels, ["zeron", "zed", "No project"]);
-        let zeron_ids: Vec<&str> = groups[0].chats.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(zeron_ids, ["a", "c"]);
+        assert_eq!(labels, ["harness", "zed", "No project"]);
+        let harness_ids: Vec<&str> = groups[0].chats.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(harness_ids, ["a", "c"]);
         assert!(group_chats(std::iter::empty()).is_empty());
     }
 
     #[test]
-    fn relative_times_match_zeron_format() {
+    fn relative_times_match_harness_format() {
         let now = Utc::now();
         let ago = |secs: i64| now - chrono::Duration::seconds(secs);
         assert_eq!(format_time_ago(ago(0), now), "now");
@@ -4438,10 +4450,10 @@ mod tests {
     #[test]
     fn chat_location_joins_project_and_branch() {
         let mut c = chat_with_cwd("x", 1, Some("/home/w/dev/soccertcg"));
-        c.branch = Some("zeron/rebalance".into());
+        c.branch = Some("harness/rebalance".into());
         assert_eq!(
             chat_location(&c).as_deref(),
-            Some("soccertcg · zeron/rebalance")
+            Some("soccertcg · harness/rebalance")
         );
         c.branch = None;
         assert_eq!(chat_location(&c).as_deref(), Some("soccertcg"));

@@ -12,7 +12,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| ThemeRegistry {
         families: vec![
-            family("harnesser", "Harness", vec![zeron_light(), zeron_dark()]),
+            family("harnesser", "Harness", vec![harness_light(), harness_dark()]),
             family(
                 "codegraff",
                 "Codegraff",
@@ -57,11 +57,6 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
             ),
             family("palenight", "Palenight", vec![palenight()]),
             family("synthwave-84", "SynthWave '84", vec![synthwave_84()]),
-            family(
-                "shades-of-purple",
-                "Shades of Purple",
-                vec![shades_of_purple()],
-            ),
             family("cobalt2", "Cobalt2", vec![cobalt2()]),
             family("andromeda", "Andromeda", vec![andromeda()]),
         ],
@@ -241,7 +236,7 @@ const ANSI_LIGHT: [&str; 16] = [
     "#71717a", "#b91c1c", "#15803d", "#92400e", "#1d4ed8", "#7e22ce", "#155e75", "#18181b",
 ];
 
-fn zeron_dark() -> ThemeVariant {
+fn harness_dark() -> ThemeVariant {
     variant(Seeds {
         id: "harnesser-dark",
         family_id: "harnesser",
@@ -275,7 +270,7 @@ fn zeron_dark() -> ThemeVariant {
     })
 }
 
-fn zeron_light() -> ThemeVariant {
+fn harness_light() -> ThemeVariant {
     variant(Seeds {
         id: "harnesser-light",
         family_id: "harnesser",
@@ -1301,43 +1296,6 @@ fn synthwave_84() -> ThemeVariant {
             "https://github.com/robb0wen/synthwave-vscode",
             "ecfa2fe1279f7233663fa3f98a96e6756000567b",
             "MIT",
-        ),
-    })
-}
-
-fn shades_of_purple() -> ThemeVariant {
-    variant(Seeds {
-        id: "shades-of-purple",
-        family_id: "shades-of-purple",
-        name: "Shades of Purple",
-        appearance: Appearance::Dark,
-        treatment: SurfaceTreatment::Opaque,
-        background: "#2d2b55",
-        shell: "#222244",
-        raised: "#393668",
-        card: "#1e1e3f",
-        text: "#ffffff",
-        muted: "#b8afea",
-        faint: "#8d84c7",
-        accent: "#fad000",
-        danger: "#ec3a37",
-        warning: "#fad000",
-        success: "#3ad900",
-        terminal_background: "#1e1e3f",
-        ansi: [
-            "#000000", "#ec3a37", "#3ad900", "#fad000", "#7857fe", "#ff2c70", "#80fcff", "#ffffff",
-            "#5c5c61", "#ec3a37", "#3ad900", "#fad000", "#6943ff", "#fb94ff", "#80fcff", "#ffffff",
-        ],
-        syntax: [
-            "#b362ff", "#ff628c", "#fb94ff", "#fad000", "#fb94ff", "#fad000", "#fad000", "#9effff",
-            "#fad000", "#fad000", "#ff9d00", "#ec3a37",
-        ],
-        source: source(
-            "shades-of-purple",
-            "vscode",
-            "https://github.com/ahmadawais/shades-of-purple-vscode",
-            "e8eb49f33e5db05ceba6677367b33ddb27ad821c",
-            "MIT with additional upstream condition; see THIRD_PARTY_NOTICES.md",
         ),
     })
 }

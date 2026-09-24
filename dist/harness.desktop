@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Harness
+GenericName=Coding Agent Controller
+Comment=Multi-device controller for coding agents
+Exec=harness %u
+TryExec=harness
+Icon=harness
+Terminal=false
+Categories=Development;Utility;
+Keywords=agent;claude;codex;ai;coding;
+StartupWMClass=harness
+MimeType=x-scheme-handler/harness;

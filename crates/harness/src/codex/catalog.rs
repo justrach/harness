@@ -1,4 +1,4 @@
-//! Model catalog + effort mapping for Codex, ported from zeron's
+//! Model catalog + effort mapping for Codex, ported from harness's
 //! `packages/harness/src/codex.ts`.
 //!
 //! The live catalog comes from the app server's paginated `model/list`
@@ -55,7 +55,7 @@ pub(crate) fn sandbox_policy_type(sandbox: SandboxLevel) -> &'static str {
 }
 
 /// `turn/start`'s full `sandboxPolicy` object. Workspace-write keeps network
-/// access: zeron agents fetch deps and hit APIs unattended, and with the
+/// access: harness agents fetch deps and hit APIs unattended, and with the
 /// approval policy pinned to "never" a network-less sandbox would fail those
 /// commands with no escalation path.
 pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {
@@ -163,7 +163,10 @@ pub(crate) fn promote_default_family(models: &mut Vec<Model>, default_id: Option
         (
             model.id != default_id,
             model_family(&model.id) != family,
-            order.iter().position(|id| id == &model.id).unwrap_or(usize::MAX),
+            order
+                .iter()
+                .position(|id| id == &model.id)
+                .unwrap_or(usize::MAX),
         )
     });
 }
