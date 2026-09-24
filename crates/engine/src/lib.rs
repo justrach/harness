@@ -803,15 +803,10 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
-        // Portable Windows packages explicitly configure an update feed; users
-        // should not need to enable workspace sync to receive application updates.
-        let check_updates = edge_enabled;
-        #[cfg(windows)]
-        let check_updates = check_updates
-            || matches!(
-                harness_update::detect_install(),
-                harness_update::InstallKind::WindowsPortable { .. }
-            );
+        // Installed desktop bundles use a public stable release feed, so
+        // update checks must also run for local-only, signed-out workspaces.
+        let check_updates =
+            edge_enabled || harness_update::detect_install().supports_desktop_update();
         if check_updates {
             // Release checker: polls {edge}/releases on a 6h cadence; headless
             // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated

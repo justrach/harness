@@ -235,12 +235,16 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Some(url) = windows::release_url()? {
         return Ok(url.trim_end_matches('/').to_owned());
     }
+    Ok(default_release_base(edge_url, &detect_install()))
+}
+
+fn default_release_base(edge_url: &str, install: &InstallKind) -> String {
     // The installed desktop GUI follows Harness's stable GitHub releases.
     // Its manifest is attached to the same release as the signed app tarball.
-    if matches!(detect_install(), InstallKind::MacApp { .. }) {
-        return Ok("https://github.com/justrach/harness/releases/latest/download".into());
+    if matches!(install, InstallKind::MacApp { .. }) {
+        return "https://github.com/justrach/harness/releases/latest/download".into();
     }
-    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
+    format!("{}/releases", edge_url.trim_end_matches('/'))
 }
 
 // ---------------------------------------------------------------------------
@@ -527,13 +531,17 @@ pub async fn stage_mac_app(
     // Reject unsupported targets before creating a stage or making a request.
     require_mac_app_update_platform()?;
     let version = &manifest.version;
+    let file = mac_app_artifact(version);
+    anyhow::ensure!(
+        manifest.files.get(&file).and_then(|meta| meta.sha256.as_deref()).is_some(),
+        "stable macOS update is missing the {file} checksum"
+    );
     let dir = data_dir.join("updates").join(version);
     if let Some(staged) = staged_mac_app(&dir) {
         return Ok(staged);
     }
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let file = mac_app_artifact(version);
     let tarball = dir.join(&file);
     download_release_file(edge_url, manifest, &file, &tarball).await?;
     run(
@@ -1043,6 +1051,37 @@ mod tests {
             mac_app_artifact("0.2.0"),
             format!("harness-0.2.0-macos-{arch}-app.tar.gz")
         );
+    }
+
+    #[test]
+    fn installed_mac_app_uses_published_stable_manifest() {
+        let app = InstallKind::MacApp {
+            bundle: PathBuf::from("/Applications/Harness.app"),
+        };
+        assert!(app.supports_desktop_update());
+        assert_eq!(
+            default_release_base("https://example.test", &app),
+            "https://github.com/justrach/harness/releases/latest/download"
+        );
+        assert_eq!(
+            default_release_base("https://example.test/", &InstallKind::Unmanaged),
+            "https://example.test/releases"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mac_app_update_requires_a_manifest_checksum_before_staging() {
+        let data = tempfile::tempdir().unwrap();
+        let manifest = Manifest {
+            version: "0.2.86".into(),
+            files: BTreeMap::new(),
+        };
+        let error = stage_mac_app("https://example.test", &manifest, data.path())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("missing the harness-0.2.86"));
+        assert!(!data.path().join("updates").exists());
     }
 
     #[cfg(windows)]
