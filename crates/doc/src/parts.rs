@@ -145,6 +145,8 @@ pub enum SubagentStatus {
     Running,
     Done,
     Failed,
+    Cancelled,
+    Disconnected,
 }
 
 /// One rendered part of an assistant message.
@@ -505,6 +507,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             let status = match event.as_ref() {
                 AgentEvent::Done { status, .. } => Some(match status {
                     harness_proto::DoneStatus::Errored => SubagentStatus::Failed,
+                    harness_proto::DoneStatus::Cancelled => SubagentStatus::Cancelled,
+                    harness_proto::DoneStatus::Disconnected => SubagentStatus::Disconnected,
                     _ => SubagentStatus::Done,
                 }),
                 // A new assignment reopens a settled chip. Providers may
@@ -534,7 +538,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                         // never regress a terminal state.
                         None if !matches!(
                             subagent_status,
-                            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                            Some(
+                                SubagentStatus::Done
+                                    | SubagentStatus::Failed
+                                    | SubagentStatus::Cancelled
+                                    | SubagentStatus::Disconnected
+                            )
                         ) =>
                         {
                             *subagent_status = Some(SubagentStatus::Running);
@@ -1307,6 +1316,47 @@ mod tests {
         ));
         // Content never leaked into the parent parts.
         assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn subagent_cancelled_and_disconnected_remain_distinct() {
+        for (outcome, expected) in [
+            (
+                harness_proto::DoneStatus::Cancelled,
+                SubagentStatus::Cancelled,
+            ),
+            (
+                harness_proto::DoneStatus::Disconnected,
+                SubagentStatus::Disconnected,
+            ),
+        ] {
+            let mut parts = Vec::new();
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: "spawn".into(),
+                    call: ToolCall::Unknown {
+                        name: "Agent".into(),
+                        input: None,
+                    },
+                },
+            );
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Subagent {
+                    parent_tool_use_id: "spawn".into(),
+                    event: Box::new(AgentEvent::Done {
+                        status: outcome,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }),
+                },
+            );
+            assert!(
+                matches!(&parts[0], MessagePart::Tool { subagent_status: Some(actual), .. } if *actual == expected)
+            );
+        }
     }
 
     #[test]

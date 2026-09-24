@@ -276,6 +276,19 @@ fn typed_call(update: &Value) -> ToolCall {
                 .unwrap_or_else(|| "Agent".into()),
             input: raw.cloned(),
         },
+        _ if update
+            .get("_meta")
+            .and_then(|m| m.get("graff/toolName"))
+            .and_then(Value::as_str)
+            == Some("subagent") =>
+        {
+            ToolCall::Unknown {
+                name: raw_str("description")
+                    .map(|d| format!("Agent: {d}"))
+                    .unwrap_or_else(|| "Agent".into()),
+                input: raw.cloned(),
+            }
+        }
         // Devin's run_subagent tool uses a coarse ACP kind; its private meta
         // field is the stable identity across pending/in-progress frames.
         _ if update
@@ -931,6 +944,19 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn graff_subagent_tool_row_is_a_spawn_chip() {
+        let update = json!({
+            "sessionUpdate": "tool_call", "toolCallId": "tool-1",
+            "kind": "other", "title": "Inspect tests",
+            "rawInput": {"description": "Inspect tests", "prompt": "Find failing tests"},
+            "_meta": {"graff/toolName": "subagent"}
+        });
+        assert!(matches!(map_update(&update).as_slice(),
+            [AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }]
+                if id == "tool-1" && name == "Agent: Inspect tests"));
     }
 
     #[test]

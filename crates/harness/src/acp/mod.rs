@@ -34,6 +34,7 @@ mod graff_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
+mod subagent_graff;
 mod system_message;
 
 use std::collections::VecDeque;
@@ -62,6 +63,7 @@ use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_ch
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
+use subagent_graff::GraffTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2106,7 +2108,15 @@ struct Session {
     stderr_tail: crate::StderrTail,
 }
 
+fn graff_draft_subagents_enabled() -> bool {
+    std::env::var("GRAFF_ACP_DRAFT_SUBAGENTS").is_ok_and(|value| value == "1")
+}
+
 fn initialize_params(harness: HarnessId) -> Value {
+    initialize_params_with_subagents(harness, graff_draft_subagents_enabled())
+}
+
+fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -> Value {
     let mut capabilities = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "terminal": false,
@@ -2117,6 +2127,8 @@ fn initialize_params(harness: HarnessId) -> Value {
         // update, all of which DevinTracker can route. Do not advertise the
         // separate subagentControl extension: Harness has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
+    } else if harness == HarnessId::Graff && graff_subagents {
+        capabilities["subagents"] = json!({});
     }
     json!({
         "protocolVersion": 1,
@@ -2464,6 +2476,7 @@ fn config_option_sets(
 /// [`AgentEvent::Subagent`] contract.
 enum SubagentObserver {
     Devin(DevinTracker),
+    Graff(GraffTracker),
     Grok(SubagentTracker),
 }
 
@@ -2471,6 +2484,7 @@ impl SubagentObserver {
     fn observe(&mut self, update: &Value) {
         match self {
             SubagentObserver::Devin(_) => {}
+            SubagentObserver::Graff(_) => {}
             SubagentObserver::Grok(tracker) => tracker.observe(update),
         }
     }
@@ -2478,6 +2492,7 @@ impl SubagentObserver {
     fn finish_open(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
         match self {
             SubagentObserver::Devin(tracker) => tracker.finish_open(status),
+            SubagentObserver::Graff(tracker) => tracker.finish_open(status),
             SubagentObserver::Grok(_) => Vec::new(),
         }
     }
@@ -2496,10 +2511,27 @@ fn session_update_events(
     subagents: &mut SubagentObserver,
     effort: &mut EffortTracker,
 ) -> Vec<AgentEvent> {
-    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+    let update_session = params.get("sessionId").and_then(Value::as_str);
+    let update = params.get("update").unwrap_or(&Value::Null);
+    if let SubagentObserver::Graff(tracker) = subagents {
+        if method == "session/update" {
+            let events = tracker.map(update_session, update);
+            if update_session != Some(session_id) {
+                return events;
+            }
+            if update.get("sessionUpdate").and_then(Value::as_str) == Some("subagent_update") {
+                return events;
+            }
+            let mut events = events;
+            if let Some(change) = effort.observe(update) {
+                events.push(change);
+            }
+            return events;
+        }
+    }
+    if update_session != Some(session_id) {
         return Vec::new();
     }
-    let update = params.get("update").unwrap_or(&Value::Null);
     let mut events = match method {
         "session/update" => match subagents {
             SubagentObserver::Devin(tracker) => tracker.map(update),
@@ -3505,6 +3537,8 @@ async fn run_session(session: Session) {
     // Grok's subagent lifecycle extension).
     let mut subagents = if harness == HarnessId::Devin {
         SubagentObserver::Devin(DevinTracker::default())
+    } else if harness == HarnessId::Graff && graff_draft_subagents_enabled() {
+        SubagentObserver::Graff(GraffTracker::new(session_id.clone()))
     } else {
         SubagentObserver::Grok(SubagentTracker::new(
             session_id.clone(),
@@ -4720,6 +4754,33 @@ mod tests {
 
         let grok = initialize_params(HarnessId::Grok);
         assert!(grok["clientCapabilities"].get("_meta").is_none());
+
+        let graff = initialize_params_with_subagents(HarnessId::Graff, true);
+        assert_eq!(graff["clientCapabilities"]["subagents"], json!({}));
+        let stable = initialize_params_with_subagents(HarnessId::Graff, false);
+        assert!(stable["clientCapabilities"].get("subagents").is_none());
+        assert!(grok["clientCapabilities"].get("subagents").is_none());
+    }
+
+    #[test]
+    fn graff_child_updates_route_by_announced_session_id() {
+        let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
+        let mut effort = EffortTracker::default();
+        let announced = session_update_events("session/update", &json!({
+            "sessionId": "parent",
+            "update": {"sessionUpdate": "subagent_update", "subagentSessionId": "child", "task": "Inspect"}
+        }), "parent", &mut observer, &mut effort);
+        assert!(matches!(&announced[0], AgentEvent::ToolCall { .. }));
+        let child = session_update_events("session/update", &json!({
+            "sessionId": "child",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Found it"}}
+        }), "parent", &mut observer, &mut effort);
+        assert!(matches!(&child[..], [AgentEvent::Subagent { .. }]));
+        let unrelated = session_update_events("session/update", &json!({
+            "sessionId": "stranger",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Wrong session"}}
+        }), "parent", &mut observer, &mut effort);
+        assert!(unrelated.is_empty());
     }
 
     #[test]
