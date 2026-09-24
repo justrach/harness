@@ -1373,6 +1373,14 @@ impl AcpHarness {
             // silently chdir into a new worktree, then reject session/load's
             // original cwd and split the visible chat from its saved context.
             cmd.env("GRAFF_AUTO_ISOLATE", "0");
+            // graff <= 0.0.302.5 sends its Codex WebSocket prewarm without a
+            // model; the server rejects it, the first real frame gets no
+            // answer, and every new session waits ~7s for the SSE fallback
+            // (codegraff#1250). SSE from the start measured ~2.5s to first
+            // token vs ~11-14s. An explicit user setting still wins.
+            if std::env::var_os("GRAFF_CODEX_WS").is_none() {
+                cmd.env("GRAFF_CODEX_WS", "off");
+            }
             if self.draft_subagents_enabled() {
                 cmd.env("GRAFF_ACP_DRAFT_SUBAGENTS", "1");
             }
@@ -4509,6 +4517,21 @@ mod tests {
                 .get_envs()
                 .any(|(key, _)| key == "GRAFF_AUTO_ISOLATE")
         );
+    }
+
+    #[test]
+    fn graff_child_skips_the_stalled_codex_websocket_prewarm() {
+        let mut graff = Command::new("graff");
+        AcpHarness::graff().configure_adapter_environment(&mut graff, Path::new("graff"));
+        let forced = graff.as_std_mut().get_envs().any(|(key, value)| {
+            key == "GRAFF_CODEX_WS" && value == Some(std::ffi::OsStr::new("off"))
+        });
+        // A user-set GRAFF_CODEX_WS is inherited untouched instead.
+        assert_eq!(forced, std::env::var_os("GRAFF_CODEX_WS").is_none());
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert!(!grok.as_std_mut().get_envs().any(|(key, _)| key == "GRAFF_CODEX_WS"));
     }
 
     #[test]
