@@ -19,7 +19,12 @@ for line in sys.stdin:
         reply(request, {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}})
     elif method == "session/load":
         params = request.get("params", {})
-        if os.environ.get("GRAFF_AUTO_ISOLATE") == "0" and params.get("cwd") == os.getcwd():
+        cwd = params.get("cwd")
+        if (
+            os.environ.get("GRAFF_AUTO_ISOLATE") == "0"
+            and cwd
+            and os.path.samefile(cwd, os.getcwd())
+        ):
             reply(request)
         else:
             reply(request, error={"code": -32602, "message": "Session workspace does not match the selected workspace"})
