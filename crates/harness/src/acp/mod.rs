@@ -2166,6 +2166,7 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
     } else if harness == HarnessId::Graff && graff_subagents {
         capabilities["subagents"] = json!({});
+        capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
     }
     json!({
         "protocolVersion": 1,
@@ -2551,6 +2552,9 @@ fn session_update_events(
     let update_session = params.get("sessionId").and_then(Value::as_str);
     let update = params.get("update").unwrap_or(&Value::Null);
     if let SubagentObserver::Graff(tracker) = subagents {
+        if method == "graff/subagent_event" {
+            return tracker.map_background(params);
+        }
         if method == "session/update" {
             let events = tracker.map(update_session, update);
             if update_session != Some(session_id) {
@@ -4837,8 +4841,13 @@ mod tests {
 
         let graff = initialize_params_with_subagents(HarnessId::Graff, true);
         assert_eq!(graff["clientCapabilities"]["subagents"], json!({}));
+        assert_eq!(
+            graff["clientCapabilities"]["_meta"]["graff/backgroundSubagents"],
+            true
+        );
         let stable = initialize_params_with_subagents(HarnessId::Graff, false);
         assert!(stable["clientCapabilities"].get("subagents").is_none());
+        assert!(stable["clientCapabilities"].get("_meta").is_none());
         assert!(grok["clientCapabilities"].get("subagents").is_none());
     }
 
@@ -4879,6 +4888,58 @@ mod tests {
             &mut effort,
         );
         assert!(unrelated.is_empty());
+    }
+
+    #[test]
+    fn graff_background_notifications_route_after_parent_done() {
+        let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
+        let mut effort = EffortTracker::default();
+        let frame = |seq, event| {
+            json!({
+                "parentSessionId": "parent", "subagentSessionId": "child",
+                "parentToolCallId": "tool-1", "seq": seq, "event": event,
+            })
+        };
+        let spawn = session_update_events(
+            "graff/subagent_event",
+            &frame(
+                0,
+                json!({
+                    "type": "spawn", "name": "Explore", "task": "Inspect"
+                }),
+            ),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(matches!(&spawn[0], AgentEvent::ToolCall { id, .. } if id == "tool-1"));
+        // This is sent after the parent prompt's Done. The parked ACP
+        // session still reads notifications and the engine routes tagged
+        // events into the child doc before its own parked gate.
+        let _parent_done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("parent".into()),
+        };
+        let update = session_update_events(
+            "graff/subagent_event",
+            &frame(
+                1,
+                json!({
+                    "type": "update", "update": {
+                        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Found it"}
+                    }
+                }),
+            ),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(
+            matches!(&update[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+            if parent_tool_use_id == "tool-1" && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "Found it"))
+        );
     }
 
     #[test]
