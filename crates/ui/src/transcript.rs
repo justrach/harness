@@ -1208,6 +1208,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                     Some(SubagentStatus::Running) => 1 << 1,
                     Some(SubagentStatus::Done) => 2 << 1,
                     Some(SubagentStatus::Failed) => 3 << 1,
+                    Some(SubagentStatus::Cancelled) => 4 << 1,
+                    Some(SubagentStatus::Disconnected) => 5 << 1,
                 },
         );
         if let Some(tail) = &t.subagent_tail {
@@ -1724,8 +1726,9 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
 /// the smoothness measurement knob. Off by default; zero cost when off.
 fn frame_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("HARNESS_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
+    *ENABLED.get_or_init(|| {
+        std::env::var("HARNESS_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 const FRAME_STATS_WINDOW: usize = 240;
@@ -7304,7 +7307,12 @@ impl Transcript {
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
-                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                        Some(
+                            SubagentStatus::Done
+                                | SubagentStatus::Failed
+                                | SubagentStatus::Cancelled
+                                | SubagentStatus::Disconnected
+                        )
                     );
                     return subagent_chip(
                         tool,
@@ -7975,11 +7983,23 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, detail) = match tool.kind {
+    let (label, mut detail) = match tool.kind {
         ToolItemKind::Thought => ("Thought process", String::new()),
         ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
+    if is_agent_tool(tool) {
+        if let Some(suffix) = match tool.subagent_status {
+            Some(SubagentStatus::Cancelled) => Some("Cancelled"),
+            Some(SubagentStatus::Disconnected) => Some("Disconnected"),
+            _ => None,
+        } {
+            if !detail.is_empty() {
+                detail.push_str(" · ");
+            }
+            detail.push_str(suffix);
+        }
+    }
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
         ToolCall::ReadFile { path }
@@ -8582,6 +8602,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                         Some(SubagentStatus::Running) => 1 << 1,
                         Some(SubagentStatus::Done) => 2 << 1,
                         Some(SubagentStatus::Failed) => 3 << 1,
+                        Some(SubagentStatus::Cancelled) => 4 << 1,
+                        Some(SubagentStatus::Disconnected) => 5 << 1,
                     },
             );
             if let Some(tail) = subagent_tail {
@@ -9348,7 +9370,9 @@ mod tests {
                         harness_doc::TranscriptUpdate {
                             frame,
                             context_usage: None,
-                            replay_baseline: Some(harness_doc::TranscriptBaseline::capture(&history)),
+                            replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
+                                &history,
+                            )),
                         },
                         cx,
                     )
@@ -11628,9 +11652,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&history),
+                                    ),
                                 },
                                 cx,
                             )
@@ -11658,9 +11682,9 @@ mod tests {
                                     context_usage: None,
                                     // The RPC must retain its opening cutoff when
                                     // publishing subsequent changed-part history.
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &cutoff,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&cutoff),
+                                    ),
                                 },
                                 cx,
                             )
@@ -11711,9 +11735,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&history),
+                                    ),
                                 },
                                 cx,
                             )
@@ -11773,9 +11797,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::diff_transcript(&live, &next),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &next_history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&next_history),
+                                    ),
                                 },
                                 cx,
                             )

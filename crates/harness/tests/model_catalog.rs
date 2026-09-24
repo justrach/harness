@@ -33,7 +33,10 @@ for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request: continue
     method = request['method']
-    if state['fail'] and method != 'initialize':
+    # A failed initialize is shared by all adapters. Grok deliberately falls
+    # back to its curated rows on later auth/session errors, which does not
+    # exercise the last-good cache.
+    if state['fail']:
         response = {'error':{'code':429,'message':state.get('error', 'rate limit')}}
     else:
         result = {}
@@ -58,7 +61,7 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
         assert_eq!(first.models[0].id, "account-model");
         std::fs::write(&state, r#"{"fail":true,"id":"unused"}"#).unwrap();
         let retained = harness.model_catalog(true).await.unwrap();
-        assert_eq!(retained.source, "cache");
+        assert_eq!(retained.source, "cache", "{:?}", harness.id());
         assert_eq!(retained.models, first.models);
         let cold = harnesses(&binary)
             .into_iter()

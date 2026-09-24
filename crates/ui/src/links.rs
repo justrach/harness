@@ -184,11 +184,13 @@ mod tests {
 
     #[test]
     fn folder_link_round_trips_spaces_and_unicode() {
-        let link = folder_open_link("/Users/me/My Projects/café");
-        assert_eq!(
-            parse_folder_open_link(&link).unwrap(),
-            "/Users/me/My Projects/café"
-        );
+        let folder = std::env::current_dir()
+            .unwrap()
+            .join("My Projects")
+            .join("café");
+        let folder = folder.to_str().unwrap();
+        let link = folder_open_link(folder);
+        assert_eq!(parse_folder_open_link(&link).unwrap(), folder);
         assert!(parse_folder_open_link("harness://open/folder?path=relative").is_err());
         assert!(parse_folder_open_link("harness://open/chat/x?workspace=y").is_err());
     }

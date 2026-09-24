@@ -34,10 +34,15 @@ mod graff_models;
 mod normalize;
 mod subagent;
 mod subagent_devin;
+mod subagent_graff;
 mod system_message;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -62,6 +67,7 @@ use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_ch
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
+use subagent_graff::GraffTracker;
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -950,6 +956,7 @@ enum Launch {
 /// fake agent with [`AcpHarness::with_executable`].
 pub struct AcpHarness {
     spec: AcpAgentSpec,
+    graff_draft_subagents: Option<Arc<AtomicBool>>,
     executable: Option<PathBuf>,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
@@ -977,6 +984,7 @@ impl AcpHarness {
     fn with_spec(spec: AcpAgentSpec) -> Self {
         Self {
             spec,
+            graff_draft_subagents: None,
             executable: None,
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
@@ -1013,6 +1021,20 @@ impl AcpHarness {
         Self::with_spec(graff_spec())
     }
 
+    pub fn with_graff_draft_subagents(mut self, enabled: Arc<AtomicBool>) -> Self {
+        self.graff_draft_subagents = Some(enabled);
+        self
+    }
+
+    fn draft_subagents_enabled(&self) -> bool {
+        self.spec.id == HarnessId::Graff
+            && (graff_draft_subagents_enabled()
+                || self
+                    .graff_draft_subagents
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed)))
+    }
+
     /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
     /// pi's RPC mode.
     pub fn pi() -> Self {
@@ -1039,7 +1061,10 @@ impl AcpHarness {
         };
         let flow = async {
             client
-                .request("initialize", initialize_params(self.spec.id))
+                .request(
+                    "initialize",
+                    initialize_params_with_subagents(self.spec.id, self.draft_subagents_enabled()),
+                )
                 .await?;
             request_draining(&client, &mut incoming, "logout", json!({})).await
         };
@@ -1145,7 +1170,10 @@ impl AcpHarness {
         };
         let flow = async {
             let initialized = client
-                .request("initialize", initialize_params(self.spec.id))
+                .request(
+                    "initialize",
+                    initialize_params_with_subagents(self.spec.id, self.draft_subagents_enabled()),
+                )
                 .await?;
             let method =
                 sign_in_auth_method(&initialized, default_method, configured_method.as_ref())?;
@@ -1345,6 +1373,9 @@ impl AcpHarness {
             // silently chdir into a new worktree, then reject session/load's
             // original cwd and split the visible chat from its saved context.
             cmd.env("GRAFF_AUTO_ISOLATE", "0");
+            if self.draft_subagents_enabled() {
+                cmd.env("GRAFF_ACP_DRAFT_SUBAGENTS", "1");
+            }
         }
         if self.spec.id == HarnessId::Antigravity
             && let Some(parent) = executable.parent()
@@ -1437,7 +1468,10 @@ impl AcpHarness {
         };
         let discovery = async {
             let init = client
-                .request("initialize", initialize_params(self.spec.id))
+                .request(
+                    "initialize",
+                    initialize_params_with_subagents(self.spec.id, self.draft_subagents_enabled()),
+                )
                 .await?;
             let mut commands = scan_available_commands(&init);
             {
@@ -1503,7 +1537,10 @@ impl AcpHarness {
         };
         let discovery = async {
             client
-                .request("initialize", initialize_params(self.spec.id))
+                .request(
+                    "initialize",
+                    initialize_params_with_subagents(self.spec.id, self.draft_subagents_enabled()),
+                )
                 .await?;
             // Grok advertises authMethods and rejects session/new until this
             // process calls authenticate — even when `grok login` already succeeded.
@@ -2050,6 +2087,7 @@ impl Harness for AcpHarness {
             controls,
             request,
             harness: self.spec.id,
+            graff_draft_subagents: self.draft_subagents_enabled(),
             agent_name: self.spec.display_name,
             prompt_transform: self.spec.prompt_transform,
             effort_values: self.spec.effort_values,
@@ -2090,6 +2128,7 @@ struct Session {
     controls: RunControls,
     request: RunRequest,
     harness: HarnessId,
+    graff_draft_subagents: bool,
     agent_name: &'static str,
     prompt_complete_extension: bool,
     prompt_stall: Option<Duration>,
@@ -2106,7 +2145,15 @@ struct Session {
     stderr_tail: crate::StderrTail,
 }
 
+fn graff_draft_subagents_enabled() -> bool {
+    std::env::var("GRAFF_ACP_DRAFT_SUBAGENTS").is_ok_and(|value| value == "1")
+}
+
 fn initialize_params(harness: HarnessId) -> Value {
+    initialize_params_with_subagents(harness, graff_draft_subagents_enabled())
+}
+
+fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -> Value {
     let mut capabilities = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "terminal": false,
@@ -2117,6 +2164,9 @@ fn initialize_params(harness: HarnessId) -> Value {
         // update, all of which DevinTracker can route. Do not advertise the
         // separate subagentControl extension: Harness has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
+    } else if harness == HarnessId::Graff && graff_subagents {
+        capabilities["subagents"] = json!({});
+        capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
     }
     json!({
         "protocolVersion": 1,
@@ -2464,6 +2514,7 @@ fn config_option_sets(
 /// [`AgentEvent::Subagent`] contract.
 enum SubagentObserver {
     Devin(DevinTracker),
+    Graff(GraffTracker),
     Grok(SubagentTracker),
 }
 
@@ -2471,6 +2522,7 @@ impl SubagentObserver {
     fn observe(&mut self, update: &Value) {
         match self {
             SubagentObserver::Devin(_) => {}
+            SubagentObserver::Graff(_) => {}
             SubagentObserver::Grok(tracker) => tracker.observe(update),
         }
     }
@@ -2478,6 +2530,7 @@ impl SubagentObserver {
     fn finish_open(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
         match self {
             SubagentObserver::Devin(tracker) => tracker.finish_open(status),
+            SubagentObserver::Graff(tracker) => tracker.finish_open(status),
             SubagentObserver::Grok(_) => Vec::new(),
         }
     }
@@ -2496,10 +2549,30 @@ fn session_update_events(
     subagents: &mut SubagentObserver,
     effort: &mut EffortTracker,
 ) -> Vec<AgentEvent> {
-    if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
+    let update_session = params.get("sessionId").and_then(Value::as_str);
+    let update = params.get("update").unwrap_or(&Value::Null);
+    if let SubagentObserver::Graff(tracker) = subagents {
+        if method == "graff/subagent_event" {
+            return tracker.map_background(params);
+        }
+        if method == "session/update" {
+            let events = tracker.map(update_session, update);
+            if update_session != Some(session_id) {
+                return events;
+            }
+            if update.get("sessionUpdate").and_then(Value::as_str) == Some("subagent_update") {
+                return events;
+            }
+            let mut events = events;
+            if let Some(change) = effort.observe(update) {
+                events.push(change);
+            }
+            return events;
+        }
+    }
+    if update_session != Some(session_id) {
         return Vec::new();
     }
-    let update = params.get("update").unwrap_or(&Value::Null);
     let mut events = match method {
         "session/update" => match subagents {
             SubagentObserver::Devin(tracker) => tracker.map(update),
@@ -3158,6 +3231,7 @@ async fn run_session(session: Session) {
         controls,
         request,
         harness,
+        graff_draft_subagents,
         agent_name,
         prompt_complete_extension,
         prompt_stall,
@@ -3182,7 +3256,10 @@ async fn run_session(session: Session) {
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
         let init = client
-            .request("initialize", initialize_params(harness))
+            .request(
+                "initialize",
+                initialize_params_with_subagents(harness, graff_draft_subagents),
+            )
             .await?;
         if harness == HarnessId::Grok
             && let Some(method) = auth_method
@@ -3505,6 +3582,8 @@ async fn run_session(session: Session) {
     // Grok's subagent lifecycle extension).
     let mut subagents = if harness == HarnessId::Devin {
         SubagentObserver::Devin(DevinTracker::default())
+    } else if harness == HarnessId::Graff && graff_draft_subagents {
+        SubagentObserver::Graff(GraffTracker::new(session_id.clone()))
     } else {
         SubagentObserver::Grok(SubagentTracker::new(
             session_id.clone(),
@@ -4418,7 +4497,7 @@ mod tests {
     fn graff_child_keeps_the_selected_acp_workspace() {
         let mut graff = Command::new("graff");
         AcpHarness::graff().configure_adapter_environment(&mut graff, Path::new("graff"));
-        assert!(graff.as_std().get_envs().any(|(key, value)| {
+        assert!(graff.as_std_mut().get_envs().any(|(key, value)| {
             key == "GRAFF_AUTO_ISOLATE" && value == Some(std::ffi::OsStr::new("0"))
         }));
 
@@ -4426,9 +4505,48 @@ mod tests {
         AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
         assert!(
             !grok
-                .as_std()
+                .as_std_mut()
                 .get_envs()
                 .any(|(key, _)| key == "GRAFF_AUTO_ISOLATE")
+        );
+    }
+
+    #[test]
+    fn graff_draft_subagents_setting_controls_launch_and_capability() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let harness = AcpHarness::graff().with_graff_draft_subagents(flag.clone());
+        if !graff_draft_subagents_enabled() {
+            let mut disabled = Command::new("graff");
+            harness.configure_adapter_environment(&mut disabled, Path::new("graff"));
+            assert!(
+                !disabled
+                    .as_std_mut()
+                    .get_envs()
+                    .any(|(key, _)| key == "GRAFF_ACP_DRAFT_SUBAGENTS")
+            );
+            assert!(!harness.draft_subagents_enabled());
+        }
+
+        flag.store(true, Ordering::Relaxed);
+        let mut enabled = Command::new("graff");
+        harness.configure_adapter_environment(&mut enabled, Path::new("graff"));
+        assert!(enabled.as_std_mut().get_envs().any(|(key, value)| {
+            key == "GRAFF_ACP_DRAFT_SUBAGENTS" && value == Some(std::ffi::OsStr::new("1"))
+        }));
+        assert!(harness.draft_subagents_enabled());
+        let init =
+            initialize_params_with_subagents(HarnessId::Graff, harness.draft_subagents_enabled());
+        assert_eq!(init["clientCapabilities"]["subagents"], json!({}));
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok()
+            .with_graff_draft_subagents(flag)
+            .configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert!(
+            !grok
+                .as_std_mut()
+                .get_envs()
+                .any(|(key, _)| key == "GRAFF_ACP_DRAFT_SUBAGENTS")
         );
     }
 
@@ -4720,6 +4838,108 @@ mod tests {
 
         let grok = initialize_params(HarnessId::Grok);
         assert!(grok["clientCapabilities"].get("_meta").is_none());
+
+        let graff = initialize_params_with_subagents(HarnessId::Graff, true);
+        assert_eq!(graff["clientCapabilities"]["subagents"], json!({}));
+        assert_eq!(
+            graff["clientCapabilities"]["_meta"]["graff/backgroundSubagents"],
+            true
+        );
+        let stable = initialize_params_with_subagents(HarnessId::Graff, false);
+        assert!(stable["clientCapabilities"].get("subagents").is_none());
+        assert!(stable["clientCapabilities"].get("_meta").is_none());
+        assert!(grok["clientCapabilities"].get("subagents").is_none());
+    }
+
+    #[test]
+    fn graff_child_updates_route_by_announced_session_id() {
+        let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
+        let mut effort = EffortTracker::default();
+        let announced = session_update_events(
+            "session/update",
+            &json!({
+                "sessionId": "parent",
+                "update": {"sessionUpdate": "subagent_update", "subagentSessionId": "child", "task": "Inspect"}
+            }),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(matches!(&announced[0], AgentEvent::ToolCall { .. }));
+        let child = session_update_events(
+            "session/update",
+            &json!({
+                "sessionId": "child",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Found it"}}
+            }),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(matches!(&child[..], [AgentEvent::Subagent { .. }]));
+        let unrelated = session_update_events(
+            "session/update",
+            &json!({
+                "sessionId": "stranger",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Wrong session"}}
+            }),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(unrelated.is_empty());
+    }
+
+    #[test]
+    fn graff_background_notifications_route_after_parent_done() {
+        let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
+        let mut effort = EffortTracker::default();
+        let frame = |seq, event| {
+            json!({
+                "parentSessionId": "parent", "subagentSessionId": "child",
+                "parentToolCallId": "tool-1", "seq": seq, "event": event,
+            })
+        };
+        let spawn = session_update_events(
+            "graff/subagent_event",
+            &frame(
+                0,
+                json!({
+                    "type": "spawn", "name": "Explore", "task": "Inspect"
+                }),
+            ),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(matches!(&spawn[0], AgentEvent::ToolCall { id, .. } if id == "tool-1"));
+        // This is sent after the parent prompt's Done. The parked ACP
+        // session still reads notifications and the engine routes tagged
+        // events into the child doc before its own parked gate.
+        let _parent_done = AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some("parent".into()),
+        };
+        let update = session_update_events(
+            "graff/subagent_event",
+            &frame(
+                1,
+                json!({
+                    "type": "update", "update": {
+                        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Found it"}
+                    }
+                }),
+            ),
+            "parent",
+            &mut observer,
+            &mut effort,
+        );
+        assert!(
+            matches!(&update[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
+            if parent_tool_use_id == "tool-1" && matches!(event.as_ref(), AgentEvent::TextDelta { text } if text == "Found it"))
+        );
     }
 
     #[test]

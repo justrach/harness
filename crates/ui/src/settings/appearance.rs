@@ -3480,7 +3480,7 @@ mod tests {
         );
         assert_eq!(
             registry.variants_for(harness_theme::Appearance::Dark).count(),
-            21
+            20
         );
     }
 

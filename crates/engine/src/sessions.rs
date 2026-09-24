@@ -1384,6 +1384,8 @@ fn subagent_chip_update(event: &AgentEvent) -> Option<&'static str> {
     match event {
         AgentEvent::Done { status, .. } => Some(match status {
             DoneStatus::Errored => "failed",
+            DoneStatus::Cancelled => "cancelled",
+            DoneStatus::Disconnected => "disconnected",
             _ => "done",
         }),
         _ => Some("running"),
@@ -2087,6 +2089,10 @@ async fn drive_run(
                             status: DoneStatus::Interrupted,
                             ..
                         } => MessageStatus::Aborted,
+                        AgentEvent::Done {
+                            status: DoneStatus::Cancelled | DoneStatus::Disconnected,
+                            ..
+                        } => MessageStatus::Aborted,
                         _ => MessageStatus::Complete,
                     };
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
@@ -2433,7 +2439,9 @@ async fn drive_run(
                 }
             }
             let message_status = match status {
-                DoneStatus::Interrupted => MessageStatus::Aborted,
+                DoneStatus::Interrupted | DoneStatus::Cancelled | DoneStatus::Disconnected => {
+                    MessageStatus::Aborted
+                }
                 DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
             };
             // No dangling chips: a run that ends for ANY reason (completed,

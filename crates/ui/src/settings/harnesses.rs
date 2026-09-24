@@ -25,9 +25,9 @@ use gpui::{
     px,
 };
 
-use std::time::Duration;
 use harness_engine::registry::TitleSettings;
 use harness_engine::registry::{HarnessDescriptor, default_on, descriptor_enabled};
+use std::time::Duration;
 
 use harness_proto::Model;
 use harness_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
@@ -131,6 +131,9 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
 }
 
 pub struct HarnessesPage {
+    graff_draft_subagents: Loadable<bool>,
+    graff_draft_subagents_task: Option<Task<()>>,
+    graff_draft_subagents_saving: bool,
     title_settings: Loadable<TitleSettings>,
     title_models: Loadable<Vec<Model>>,
     title_menu: Option<bool>, // false = harness, true = model
@@ -201,6 +204,9 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            graff_draft_subagents: Loadable::Idle,
+            graff_draft_subagents_task: None,
+            graff_draft_subagents_saving: false,
             title_settings: Loadable::Idle,
             title_models: Loadable::Idle,
             title_menu: None,
@@ -243,6 +249,9 @@ impl HarnessesPage {
         }
         self.cancel_sign_in(cx);
         self.title_task = None;
+        self.graff_draft_subagents_task = None;
+        self.graff_draft_subagents = Loadable::Idle;
+        self.graff_draft_subagents_saving = false;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
         self.title_menu = None;
@@ -265,6 +274,7 @@ impl HarnessesPage {
         };
         let params = self.with_target(serde_json::json!({}));
         self.load_titles(None, cx);
+        self.load_graff_draft_subagents(None, cx);
         self.harnesses = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
@@ -280,6 +290,68 @@ impl HarnessesPage {
             })
             .ok();
         }));
+    }
+
+    fn load_graff_draft_subagents(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let saving = save.is_some();
+        let method = if saving {
+            methods::SET_GRAFF_DRAFT_SUBAGENTS
+        } else {
+            methods::GET_GRAFF_DRAFT_SUBAGENTS
+        };
+        let params = self.with_target(serde_json::json!({ "enabled": save }));
+        self.graff_draft_subagents_saving = saving;
+        if !saving {
+            self.graff_draft_subagents = Loadable::Loading;
+        }
+        self.graff_draft_subagents_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| serde_json::from_value::<bool>(value).map_err(|e| e.to_string()));
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(enabled) => {
+                        page.graff_draft_subagents = Loadable::Ready(enabled);
+                        page.error = None;
+                    }
+                    Err(error) if saving => page.error = Some(error),
+                    Err(error) => page.graff_draft_subagents = Loadable::Error(error),
+                }
+                page.graff_draft_subagents_saving = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_graff_draft_subagents(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let enabled = matches!(self.graff_draft_subagents, Loadable::Ready(true));
+        let ready = matches!(self.graff_draft_subagents, Loadable::Ready(_));
+        widgets::section_card(theme)
+            .mt(px(20.0))
+            .p(px(16.0))
+            .child(
+                div().flex().items_center().justify_between().gap(px(12.0))
+                    .child(div().flex_1().min_w_0().flex().flex_col()
+                        .child(widgets::row_title(theme, "Experimental Graff ACP child agents"))
+                        .child(widgets::page_subtitle(theme,
+                            "Show live child-agent transcripts, including background agents after the parent turn ends. Requires a Graff build with ACP child events; Graff cannot replay those events after session reload yet.")))
+                    .child(widgets::toggle_switch(theme, enabled)
+                        .id("graff-draft-subagents-toggle")
+                        .when(!ready || self.graff_draft_subagents_saving, |el| el.opacity(0.35))
+                        .when(ready && !self.graff_draft_subagents_saving, |el| {
+                            el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_graff_draft_subagents(Some(!enabled), cx);
+                            }))
+                        })))
+            .into_any_element()
     }
 
     fn load_titles(&mut self, save: Option<TitleSettings>, cx: &mut Context<Self>) {
@@ -1234,6 +1306,7 @@ impl Render for HarnessesPage {
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
@@ -1270,6 +1343,7 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .child(body)
+                            .child(graff_draft_subagents)
                             .child(titles),
                     ),
             )

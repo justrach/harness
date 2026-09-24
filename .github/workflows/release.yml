@@ -55,8 +55,9 @@ jobs:
 
   # Every platform must build before publishing the release and updater manifest.
   #
-  # Signing/notarization (both optional — absent secrets fall back to an
-  # ad-hoc-signed build):
+  # A tag publishes only when both Developer ID and notarization credentials
+  # are configured. Without them, this job succeeds without a macOS artifact;
+  # the release remains for the deliberate locally signed draft path.
   #   MACOS_CERT_P12 / MACOS_CERT_PASSWORD — base64 "Developer ID Application"
   #     certificate + private key (.p12) and its export password.
   #   AC_API_KEY_P8 / AC_API_KEY_ID / AC_API_ISSUER_ID — App Store Connect API
@@ -64,6 +65,8 @@ jobs:
   #     script notarizes and staples the app + dmg (no Gatekeeper warning).
   macos:
     runs-on: macos-latest # Apple silicon
+    outputs:
+      signed: ${{ steps.signing.outputs.enabled }}
     env:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -72,11 +75,24 @@ jobs:
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select signed distribution path
+        id: signing
+        run: |
+          if [[ -n "$MACOS_CERT_P12" && -n "$MACOS_CERT_PASSWORD" && \
+                -n "$AC_API_KEY_P8" && -n "$AC_API_KEY_ID" && \
+                -n "$AC_API_ISSUER_ID" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'macOS publication awaits a locally signed and notarized draft release' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: rust toolchain (rust-toolchain.toml)
+        if: steps.signing.outputs.enabled == 'true'
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        if: steps.signing.outputs.enabled == 'true'
       - name: import Developer ID certificate
-        if: env.MACOS_CERT_P12 != ''
+        if: steps.signing.outputs.enabled == 'true'
         run: |
           keychain="$RUNNER_TEMP/release.keychain-db"
           pass="$(openssl rand -hex 16)"
@@ -96,7 +112,7 @@ jobs:
           [ -n "$identity" ] || { echo "p12 contains no Developer ID Application identity"; exit 1; }
           echo "CODESIGN_IDENTITY=$identity" >>"$GITHUB_ENV"
       - name: notary credentials
-        if: env.AC_API_KEY_P8 != ''
+        if: steps.signing.outputs.enabled == 'true'
         run: |
           printf '%s' "$AC_API_KEY_P8" >"$RUNNER_TEMP/ac_api_key.p8"
           {
@@ -104,22 +120,17 @@ jobs:
             echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
             echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
           } >>"$GITHUB_ENV"
-      - name: require signed stable macOS distribution
-        if: github.event_name == 'push'
-        run: |
-          test -n "${CODESIGN_IDENTITY:-}" || { echo 'Developer ID signing is required for a stable release'; exit 1; }
-          test -n "${NOTARY_KEY_PATH:-}" || { echo 'Notarization is required for a stable release'; exit 1; }
-          test -n "${NOTARY_KEY_ID:-}" || exit 1
-          test -n "${NOTARY_ISSUER_ID:-}" || exit 1
       - name: package dmg
+        if: steps.signing.outputs.enabled == 'true'
         run: scripts/package-macos.sh
       - name: verify signed stable macOS distribution
-        if: github.event_name == 'push'
+        if: steps.signing.outputs.enabled == 'true'
         run: |
           codesign --verify --strict --deep --verbose=2 target/package/Harness.app
           xcrun stapler validate target/package/Harness.app
           xcrun stapler validate target/package/harness-*-macos-arm64.dmg
       - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.enabled == 'true'
         with:
           name: macos-${{ runner.arch }}
           path: |
@@ -155,7 +166,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.macos.outputs.signed == 'true'
     needs: [cursor-compatibility, linux, macos, windows]
     runs-on: ubuntu-latest
     env:
