@@ -1,21 +1,67 @@
-Harness — GNU Affero General Public License, Version 3
+                  codegraff — Modified GNU Affero General
+                     Public License, Version 3 (AGPLv3)
 
-This license applies from the commit that introduces it forward. Earlier
-published versions retain the license terms supplied with those versions.
+Copyright (C) 2026 Rach Pradhan ("justrach") and Yu Xi Lim ("yxlyx").
 
-Copyright (C) 2026 Standard Harness Pte. Ltd. All rights reserved in the
-original Harness contributions owned by the company, subject to the public
-license grant below.
-
-The Harness work is licensed to the public under the GNU Affero General Public
-License, Version 3 (AGPL-3.0-only). The complete, unmodified license text
-follows. The company retains the ability to license material that it owns
-separately. This does not grant the company ownership of, or separate licensing
-rights over, material contributed by others or incorporated under third-party
-licenses. Their copyright and license notices are preserved in
-THIRD_PARTY_NOTICES.md and alongside the relevant sources.
+This program is free software, licensed to the public under the terms of the
+GNU Affero General Public License, Version 3 (AGPL-3.0), the complete and
+unmodified text of which is reproduced below, AS MODIFIED by the Additional
+Terms and Reserved Rights set out in this preamble. These Additional Terms form
+part of this License and, to the extent of any conflict, prevail over the
+AGPL-3.0 text that follows.
 
 --------------------------------------------------------------------------------
+RESERVED COMMERCIAL & CLOUD RIGHTS (Licensor carve-out)
+--------------------------------------------------------------------------------
+
+Notwithstanding anything in the AGPL-3.0 text below, the copyright holders
+Rach Pradhan ("justrach") and Yu Xi Lim ("yxlyx") (each a "Licensor") jointly
+retain and reserve all rights in and to this software,
+including the unrestricted, perpetual, irrevocable, and royalty-free right to
+use, reproduce, modify, prepare derivative works of, sublicense, distribute,
+host, operate, and commercially exploit this software and any modified or
+derivative version of it -- including, without limitation, the right to offer
+this software, or any product or service based on or incorporating it, as a
+private, proprietary, hosted, managed, or cloud offering -- free of, and
+without being bound by, any obligation of the AGPL-3.0 (including, without
+limitation, its copyleft, source-availability, and Section 13
+remote-network-interaction obligations). The Licensors may additionally license
+this software to third parties under separate proprietary or commercial terms
+only by their joint written agreement (see EXERCISE OF RESERVED RIGHTS below);
+no Licensor may grant any such license alone.
+
+This reservation runs solely and personally to the two Licensors named above.
+EVERY OTHER PERSON OR ENTITY receives, copies, runs, modifies, conveys, and
+interacts with this software strictly and only under the AGPL-3.0 as set out
+below -- including its Section 13 obligation to offer the Corresponding Source
+to all users who interact with a modified version remotely over a network.
+Nothing in this carve-out grants any right to anyone other than the two named
+Licensors.
+
+EXERCISE OF RESERVED RIGHTS. The reserved commercial, proprietary, and cloud
+rights set out above are held by the two Licensors JOINTLY, not severally. Any
+exercise of those rights to grant a license to any third party, or to offer this
+software (or any product or service based on or incorporating it) as a private,
+proprietary, hosted, managed, or cloud offering, requires the joint, express,
+written agreement of BOTH Licensors. No Licensor may exercise those rights, or
+grant any such license, alone, independently, or without the consent, signature,
+and joinder of the other Licensor, and there is no sole-authority or
+unavailability fallback: if both Licensors do not agree in writing, the reserved
+rights are not exercised. Any proprietary or commercial permission so granted is
+separate from the AGPL-3.0 license and is revocable by the Licensors at their
+discretion unless its written grant states otherwise; the provision of
+consultancy or other services by either or both Licensors does not, of itself,
+grant any such permission or make one irrevocable. By contrast, each recipient's
+license under the AGPL-3.0 is irrevocable except by reason of that recipient's
+own material breach. Both Licensors have agreed to and signed these Additional
+Terms.
+
+For commercial or proprietary licensing, contact the Licensors.
+
+--------------------------------------------------------------------------------
+The complete text of the GNU Affero General Public License, Version 3 follows.
+--------------------------------------------------------------------------------
+
 
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007

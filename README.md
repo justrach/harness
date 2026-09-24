@@ -89,4 +89,4 @@ On macOS, use the desktop release or build `harness` and run `harness daemon ins
 
 ## License
 
-[MIT](LICENSE). Taken from [Zeron](https://github.com/zeronsh/zeron) (Wing).
+[AGPL-3.0-only](LICENSE). Harness includes work adapted from [Zeron](https://github.com/zeronsh/zeron) under its original MIT license; see [third-party notices](THIRD_PARTY_NOTICES.md).

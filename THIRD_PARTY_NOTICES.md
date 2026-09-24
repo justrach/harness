@@ -1,5 +1,22 @@
 # Third-party notices
 
+## Upstream application and CodeGraff artwork
+
+Harness is adapted from [Zeron](https://github.com/zeronsh/zeron),
+Copyright (c) 2026 Wing. The original MIT license, including its permission
+and warranty notice, is retained verbatim in
+[`third_party/licenses/Zeron-MIT.txt`](third_party/licenses/Zeron-MIT.txt).
+The Harness license does not erase the MIT rights in that upstream material.
+
+CodeGraff visual elements used by the Harness app are derived from
+[justrach/codegraff](https://github.com/justrach/codegraff). CodeGraff is
+Copyright (C) 2026 Rach Pradhan and Yu Xi Lim and is distributed under its
+modified AGPLv3 terms; the complete notice is retained in
+[`third_party/licenses/CodeGraff-LICENSE.txt`](third_party/licenses/CodeGraff-LICENSE.txt).
+These elements are credited to CodeGraff and are not claimed as original
+Harness contributions. The Harness app icon was created for this project with
+its visual language aligned to the CodeGraff emblem.
+
 Harness bundles the following syntax-highlighting components. Unless noted otherwise, their parsers and queries are consumed from the pinned Rust crates listed in `Cargo.lock`. The Kotlin highlight query is maintained as Harness source code and is not attributed to the grammar crate.
 
 | Component | Version | License | Source |
@@ -55,7 +72,6 @@ by Harness. Their names identify the corresponding palette adaptations.
 | Winter is Coming | `260547834cb6ac37dd5b8bb5842cc1c8d3164946` | [MIT](https://github.com/johnpapa/vscode-winteriscoming/blob/260547834cb6ac37dd5b8bb5842cc1c8d3164946/LICENSE.md) |
 | Palenight Theme | `6291efaace90855abe3d79025327ca41b9a3138c` | [MIT](https://github.com/whizkydee/vscode-palenight-theme/blob/6291efaace90855abe3d79025327ca41b9a3138c/license.md) |
 | SynthWave '84 | `ecfa2fe1279f7233663fa3f98a96e6756000567b` | [MIT](https://github.com/robb0wen/synthwave-vscode/blob/ecfa2fe1279f7233663fa3f98a96e6756000567b/LICENSE) |
-| Shades of Purple | `e8eb49f33e5db05ceba6677367b33ddb27ad821c` | [MIT text with an additional “With condition” section](https://github.com/ahmadawais/shades-of-purple-vscode/blob/e8eb49f33e5db05ceba6677367b33ddb27ad821c/LICENSE.md); Harness is MIT-licensed, satisfying the stated condition |
 | Cobalt2 | `c4e9574372b85afad1682ed0fdd1ac0411c62512` | [MIT](https://github.com/wesbos/cobalt2-vscode/blob/c4e9574372b85afad1682ed0fdd1ac0411c62512/LICENSE) |
 | Andromeda | `d1abb48c69493000aa0133a32d594eb25e523d4f` | [MIT](https://github.com/EliverLara/Andromeda/blob/d1abb48c69493000aa0133a32d594eb25e523d4f/LICENSE.md) |
 
@@ -80,7 +96,6 @@ Copyright notices retained from those pinned upstream licenses:
 - Copyright (c) 2015-2017 JohnPapa.net, LLC
 - Copyright (c) 2017-present Olaolu Olawuyi
 - Copyright (c) 2019 Robb Owen
-- Copyright (c) 2015-∞ Ahmad Awais
 - Copyright (c) 2018 Wes Bos, Roberto Achar
 - Copyright (c) 2017 <eliverlara@gmail.com>
 
@@ -103,9 +118,6 @@ The common MIT permission notice for the adaptations above follows:
 > LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
-
-The pinned Shades of Purple license additionally says that anything built with
-it should also be MIT licensed. Harness is distributed under MIT terms.
 
 ## mermaid-rs-renderer
 
