@@ -93,7 +93,7 @@ pub(crate) fn find_on_paths(exe: &str, extra: Vec<PathBuf>) -> Option<PathBuf> {
             false
         },
     );
-    newest_candidate(candidates)
+    newest_candidate(exe, candidates)
 }
 
 pub(crate) fn binary_hint(path: &Path) -> String {
@@ -119,7 +119,7 @@ fn runnable(path: &Path) -> bool {
     }
 }
 
-fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+fn newest_candidate(exe: &str, candidates: Vec<PathBuf>) -> Option<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     let candidates: Vec<_> = candidates
         .into_iter()
@@ -133,7 +133,7 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
             if next.as_ref().is_some_and(|next| {
                 version
                     .as_ref()
-                    .is_none_or(|current| next.cmp_precedence(current).is_gt())
+                    .is_none_or(|current| version_order(exe, next, current).is_gt())
             }) {
                 best = path.clone();
                 version = next;
@@ -141,6 +141,44 @@ fn newest_candidate(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         }
     }
     Some(best)
+}
+
+fn version_order(
+    exe: &str,
+    next: &semver::Version,
+    current: &semver::Version,
+) -> std::cmp::Ordering {
+    if exe == "graff"
+        && (next.major, next.minor, next.patch) == (current.major, current.minor, current.patch)
+    {
+        let fourth = |version: &semver::Version| {
+            version
+                .build
+                .as_str()
+                .split('.')
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let order = fourth(next).cmp(&fourth(current));
+        if !order.is_eq() {
+            return order;
+        }
+        let order = next.cmp_precedence(current);
+        if !order.is_eq() {
+            return order;
+        }
+        let post_tag_distance = |version: &semver::Version| {
+            let mut parts = version.build.as_str().split('.');
+            let _fourth = parts.next();
+            (parts.next() == Some("post"))
+                .then(|| parts.next().and_then(|n| n.parse::<u64>().ok()))
+                .flatten()
+                .unwrap_or(0)
+        };
+        return post_tag_distance(next).cmp(&post_tag_distance(current));
+    }
+    next.cmp_precedence(current)
 }
 
 type VersionKey = (PathBuf, Option<std::time::SystemTime>, u64);
@@ -289,16 +327,32 @@ fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
         })
 }
 
-/// graff versions carry a fourth component (`0.0.302.4`). Keep the first
-/// three as the precedence and the fourth as build metadata, so the version
-/// still displays and releases (`0.0.303.x` vs `0.0.302.x`) still compare.
+/// Graff versions carry a fourth numeric component (`0.0.302.4`). Preserve
+/// it in build metadata for display; `version_order` gives it precedence only
+/// when selecting Graff. Git-describe's commit distance means commits *after*
+/// the tag, so it lives in build metadata and ranks above the exact tag.
+/// Beta tags keep their prerelease suffix and remain below the stable tag.
 fn four_part_version(word: &str) -> Option<semver::Version> {
-    let (base, fourth) = word.rsplit_once('.')?;
-    if base.matches('.').count() != 2 || fourth.is_empty() || !fourth.bytes().all(|b| b.is_ascii_digit()) {
+    let mut parts = word.splitn(4, '.');
+    let (major, minor, patch, tail) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
         return None;
     }
-    let mut version = semver::Version::parse(base).ok()?;
-    version.build = semver::BuildMetadata::new(fourth).ok()?;
+    let (fourth, suffix) = tail.split_at(digits);
+    let described = suffix.rsplit_once("-g").and_then(|(prefix, hash)| {
+        let (tag_suffix, distance) = prefix.rsplit_once('-')?;
+        (distance.bytes().all(|b| b.is_ascii_digit()) && !distance.is_empty() && !hash.is_empty())
+            .then_some((tag_suffix, distance, hash))
+    });
+    let tag_suffix = described.map_or(suffix, |(tag_suffix, _, _)| tag_suffix);
+    let mut version =
+        semver::Version::parse(&format!("{major}.{minor}.{patch}{tag_suffix}")).ok()?;
+    let build = described.map_or_else(
+        || fourth.to_owned(),
+        |(_, distance, hash)| format!("{fourth}.post.{distance}.g{hash}"),
+    );
+    version.build = semver::BuildMetadata::new(&build).ok()?;
     Some(version)
 }
 
@@ -568,8 +622,62 @@ mod tests {
     fn four_part_graff_versions_parse_and_order_by_release() {
         let current = parse_version(b"graff 0.0.302.4\n\nWhat's new").unwrap();
         assert_eq!(current.to_string(), "0.0.302+4");
-        assert!(parse_version(b"graff 0.0.303.0").unwrap() > current);
+        let next = parse_version(b"graff 0.0.302.5").unwrap();
+        assert!(version_order("graff", &next, &current).is_gt());
+        assert!(
+            version_order("graff", &parse_version(b"graff 0.0.302.10").unwrap(), &next).is_gt()
+        );
+        assert!(version_order("graff", &parse_version(b"graff 0.0.303.0").unwrap(), &next).is_gt());
+        let beta = parse_version(b"graff v0.0.302.5-beta.14.1").unwrap();
+        let dev = parse_version(b"graff v0.0.302.5-14-g3b4a0fca").unwrap();
+        assert!(version_order("graff", &beta, &current).is_gt());
+        assert!(version_order("graff", &dev, &current).is_gt());
+        assert!(version_order("graff", &next, &beta).is_gt());
+        assert!(version_order("graff", &dev, &next).is_gt());
+        let later_dev = parse_version(b"graff v0.0.302.5-15-gabcdef00-dirty").unwrap();
+        assert!(version_order("graff", &later_dev, &dev).is_gt());
+        let beta_post = parse_version(b"graff v0.0.302.5-beta.14.1-2-gabcdef00").unwrap();
+        assert!(version_order("graff", &beta_post, &beta).is_gt());
+        assert!(version_order("graff", &next, &beta_post).is_gt());
         assert!(parse_version(b"1.2.3.4.5").is_none());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn newest_graff_binary_uses_numeric_fourth_component() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old/graff");
+        let new = dir.path().join("new/graff");
+        for (path, version) in [(&old, "0.0.302.4"), (&new, "0.0.302.5")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\necho graff {version}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            newest_candidate("graff", vec![old.clone(), new.clone()]),
+            Some(new.clone())
+        );
+        assert_eq!(newest_candidate("graff", vec![new.clone(), old]), Some(new));
+        let stable = dir.path().join("stable/graff");
+        let dev = dir.path().join("dev/graff");
+        let beta = dir.path().join("beta/graff");
+        for (path, version) in [
+            (&stable, "0.0.302.5"),
+            (&dev, "v0.0.302.5-14-g3b4a0fca"),
+            (&beta, "v0.0.302.5-beta.14.1"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\necho graff {version}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            newest_candidate("graff", vec![stable.clone(), dev.clone()]),
+            Some(dev)
+        );
+        assert_eq!(
+            newest_candidate("graff", vec![beta, stable.clone()]),
+            Some(stable)
+        );
     }
     #[cfg(windows)]
     #[test]
@@ -579,7 +687,10 @@ mod tests {
         let second = dir.path().join("new.cmd");
         std::fs::write(&first, "@echo off\r\necho codex-cli 1.0.0\r\n").unwrap();
         std::fs::write(&second, "@echo off\r\necho codex-cli 2.0.0\r\n").unwrap();
-        assert_eq!(newest_candidate(vec![first, second.clone()]), Some(second));
+        assert_eq!(
+            newest_candidate("codex", vec![first, second.clone()]),
+            Some(second)
+        );
     }
 
     #[cfg(unix)]
@@ -630,7 +741,7 @@ mod tests {
         symlink(&second, &alias).unwrap();
         for _ in 0..3 {
             assert_eq!(
-                newest_candidate(vec![first.clone(), second.clone(), alias.clone()]),
+                newest_candidate("codex", vec![first.clone(), second.clone(), alias.clone()]),
                 Some(second.clone())
             );
         }
@@ -640,11 +751,14 @@ mod tests {
         );
         script(&first, "1.200.0");
         assert_eq!(
-            newest_candidate(vec![first.clone(), second.clone()]),
+            newest_candidate("codex", vec![first.clone(), second.clone()]),
             Some(first.clone())
         );
         script(&second, "1.200.0");
-        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+        assert_eq!(
+            newest_candidate("codex", vec![first.clone(), second]),
+            Some(first)
+        );
     }
 
     #[cfg(unix)]
@@ -659,7 +773,10 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert_eq!(binary_version(&first).unwrap().to_string(), "1.0.0+aaa");
-        assert_eq!(newest_candidate(vec![first.clone(), second]), Some(first));
+        assert_eq!(
+            newest_candidate("codex", vec![first.clone(), second]),
+            Some(first)
+        );
     }
 
     #[cfg(unix)]
@@ -674,7 +791,7 @@ mod tests {
             let started = std::time::Instant::now();
             assert_eq!(binary_version(&path), None);
             assert!(started.elapsed() < std::time::Duration::from_secs(3));
-            assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
+            assert_eq!(newest_candidate("codex", vec![path.clone()]), Some(path));
         }
     }
 
