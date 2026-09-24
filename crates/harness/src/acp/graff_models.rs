@@ -528,32 +528,17 @@ fn models_from_seats(
                     Some(context) => format!("{} · {}k context", seat.provider, context / 1000),
                     None => seat.provider.clone(),
                 }),
-                reasoning_levels: effort_levels(&seat.provider, &seat.name),
+                reasoning_levels: Vec::new(),
                 options: Vec::new(),
             }
         })
         .collect()
 }
 
-fn effort_levels(provider: &str, name: &str) -> Vec<ReasoningLevel> {
-    use ReasoningLevel::*;
-    let grok = provider == "xai" || name.starts_with("grok");
-    let openai = provider == "openai"
-        || provider == "codex"
-        || name.starts_with("gpt-")
-        || name.starts_with("openai/gpt-");
-    if grok {
-        vec![Low, Medium, High, XHigh]
-    } else if openai {
-        vec![Low, Medium, High, XHigh, Ultra]
-    } else {
-        vec![Low, Medium, High, XHigh, Max, Ultra]
-    }
-}
-
 /// One entry per bare model name. Session default, then close siblings
 /// (`grok-4.7` next to `grok-4.6`), then the seats `graff route` prints,
 /// with logged-in first-party providers beating OpenRouter aliases.
+#[cfg(test)]
 fn models_from_schema(
     schema: &serde_json::Value,
     providers: &[String],
@@ -601,7 +586,7 @@ fn models_from_schema(
                 Some(context) => format!("{provider} · {}k context", context / 1000),
                 None => provider.to_string(),
             }),
-            reasoning_levels: effort_levels(provider, name),
+            reasoning_levels: Vec::new(),
             options: Vec::new(),
         })
         .collect()
@@ -674,7 +659,7 @@ mod tests {
                 .unwrap()
                 .description
                 .as_deref(),
-            Some("codex · 1050k context")
+            Some("codegraff · 1050k context")
         );
     }
 
@@ -717,10 +702,7 @@ openrouter:\n\
             })
             .expect("codex gpt-6-sol");
         assert_eq!(sol.id, "gpt-6-sol");
-        assert!(
-            sol.reasoning_levels
-                .contains(&harness_proto::ReasoningLevel::Ultra)
-        );
+        assert!(sol.reasoning_levels.is_empty());
         assert!(!models.iter().any(|m| m.label.contains(":batch")));
     }
 

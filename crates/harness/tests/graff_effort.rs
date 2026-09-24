@@ -28,8 +28,9 @@ if 'route' in sys.argv:
     print('p1 login metered shared')
     print()
     sys.exit(0)
-if '--schema' in sys.argv:
-    print(json.dumps({'models':[{'provider':'p1','name':'shared'}]}))
+if 'models' in sys.argv:
+    print('p1:')
+    print('  shared 100000 ctx')
     sys.exit(0)
 for line in sys.stdin:
     request = json.loads(line)
