@@ -59,6 +59,7 @@ harness-theme.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui_tokio.workspace = true
+reqwest.workspace = true
 gpui-base.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -95,7 +96,6 @@ block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = "0.3.2"
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDelegate", "WKNavigationAction", "WKSnapshotConfiguration"] }
-reqwest.workspace = true
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan", "highsierra", "link"] }
 foreign-types = "0.5"
