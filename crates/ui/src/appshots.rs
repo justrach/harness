@@ -144,7 +144,7 @@ impl AppshotCapabilities {
                 "Your desktop portal controls the binding. Confirm changes in its shortcut settings."
             }
             AppshotPlatform::LinuxWayland => {
-                "Bind `zeron appshot` in your desktop's Keyboard Shortcuts settings."
+                "Bind `harness appshot` in your desktop's Keyboard Shortcuts settings."
             }
             AppshotPlatform::Unsupported => "This platform has no Appshot shortcut backend.",
         }
@@ -1223,7 +1223,7 @@ pub(crate) mod tests {
         assert!(
             capabilities
                 .shortcut_description()
-                .contains("zeron appshot")
+                .contains("harness appshot")
         );
         assert!(capabilities.capture_description().contains("each capture"));
         assert!(capabilities.window_capture.is_ready());

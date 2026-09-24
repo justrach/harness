@@ -1955,7 +1955,7 @@ impl Shell {
             Some("signin") => Some(GatePhase::SignIn),
             Some("org") => Some(GatePhase::OrgGate),
             Some("failed") => Some(GatePhase::Failed(
-                "Could not reach the zeron engine on port 27901".into(),
+                "Could not reach the Harness engine on port 27901".into(),
             )),
             _ => None,
         };
@@ -4983,7 +4983,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Harness."
+                            "Could not stop the remote engine: {err}. Run `harness daemon stop`, then quit and reopen Harness."
                         ).into());
                         cx.notify();
                     }
@@ -7190,7 +7190,7 @@ impl Shell {
             }
         } else {
             (
-                format!("Update available — v{latest} · run `zeron update`").into(),
+                format!("Update available — v{latest} · run `harness update`").into(),
                 true,
             )
         };
