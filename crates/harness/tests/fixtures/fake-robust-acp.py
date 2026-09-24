@@ -28,6 +28,9 @@ for line in sys.stdin:
         emit({"id": pending, "result": {"stopReason": "end_turn"}})
     elif method == "initialize":
         emit({"id": ident, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "authenticate":
+        assert frame["params"]["methodId"] == "grok.com", frame
+        emit({"id": ident, "result": {}})
     elif method == "session/new":
         for index in range(40):
             emit({"method": "session/update", "params": {"sessionId": f"foreign-{index}", "update": {
