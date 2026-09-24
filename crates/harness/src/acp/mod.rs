@@ -4274,7 +4274,7 @@ mod tests {
     fn graff_child_keeps_the_selected_acp_workspace() {
         let mut graff = Command::new("graff");
         AcpHarness::graff().configure_adapter_environment(&mut graff, Path::new("graff"));
-        assert!(graff.as_std().get_envs().any(|(key, value)| {
+        assert!(graff.as_std_mut().get_envs().any(|(key, value)| {
             key == "GRAFF_AUTO_ISOLATE" && value == Some(std::ffi::OsStr::new("0"))
         }));
 
@@ -4282,7 +4282,7 @@ mod tests {
         AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
         assert!(
             !grok
-                .as_std()
+                .as_std_mut()
                 .get_envs()
                 .any(|(key, _)| key == "GRAFF_AUTO_ISOLATE")
         );
