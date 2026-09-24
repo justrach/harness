@@ -13,9 +13,9 @@ Cursor, Devin, Grok, Hermes, Pi, OpenCode और Antigravity को साथ �
 
 ## Harness के अंदर
 
-| एजेंट चुनें | दूसरे डिवाइस पर वही सत्र देखें |
+| एजेंट चुनें | graff के साथ काम करें |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Harness की एजेंट सेटिंग" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="सिंक हुआ Harness सत्र" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Codegraff Dark थीम में Harness की वर्तमान एजेंट सेटिंग" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Codegraff Dark थीम में graff का नमूना संवाद" width="520"> |
 
 मॉडल चुनें, बातचीत के साथ बदलाव जाँचें और ऐप में ही फ़ाइलें व ब्राउज़र खोलें।
 डेस्कटॉप ऐप Rust/GPUI पर बना है; iOS साथी ऐप SwiftUI में सिंक हुए सत्र दिखाता है।

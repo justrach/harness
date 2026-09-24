@@ -10,9 +10,9 @@
 
 ## 看看 Harness
 
-| 选择编码 Agent | 跨设备查看同一会话 |
+| 选择编码 Agent | 使用 graff 工作 |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Harness Agent 设置" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="已同步的 Harness 会话" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Codegraff Dark 主题下当前的 Harness Agent 设置" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Codegraff Dark 主题下的 graff 示例会话" width="520"> |
 
 Harness 内置 [CodeGraff](https://github.com/justrach/codegraff) 适配器。下方标志和插画来自 CodeGraff 项目；来源和许可见[第三方声明](THIRD_PARTY_NOTICES.md)。
 

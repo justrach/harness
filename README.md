@@ -26,8 +26,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/registry-sync/03-transcript-synced.png" width="960" alt="A Harness conversation synced to another device">
-  <br><sub>A conversation in Harness, available on another trusted device.</sub>
+  <img src="docs/media/readme/codegraff-chat-dark.png" width="960" alt="Harness conversation with the Codegraff Dark theme and graff agent">
+  <br><sub>Harness with graff selected and the built-in Codegraff Dark theme. Synthetic example conversation.</sub>
 </p>
 
 ## The workspace
@@ -37,10 +37,10 @@ Hermes, Pi, OpenCode, and Antigravity into one desktop app. Pick the agent and
 model for each conversation, keep workspaces and sessions together, and review
 changes beside the chat. Files, a browser, and terminals stay close at hand.
 
-| Choose agents on each device | Follow work across devices |
-| :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" width="480" alt="Harness settings showing available coding agents"> | <img src="apps/landing/public/assets/harness-sync.png" width="480" alt="A synced Harness session in the desktop app"> |
-| Installed agents appear in **Settings → Agents**. | Sign in when you want another trusted device to follow or control a session. |
+<p align="center">
+  <img src="docs/media/readme/codegraff-agents-dark.png" width="960" alt="Current Harness Agents settings in the Codegraff Dark theme, with graff listed first">
+  <br><sub>Installed agents appear in <strong>Settings → Agents</strong>. Sign in when you want another trusted device to follow or control a session.</sub>
+</p>
 
 Harness starts in local mode without an account. The desktop app uses Rust and
 GPUI; its iOS companion is a SwiftUI viewport for synced sessions.

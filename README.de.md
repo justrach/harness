@@ -13,9 +13,9 @@ synchronisieren.
 
 ## Ein Blick in die App
 
-| Agents auswählen | Sitzungen auf anderen Geräten verfolgen |
+| Agents auswählen | Mit graff arbeiten |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Agent-Einstellungen in Harness" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="Synchronisierte Sitzung in Harness" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Aktuelle Agent-Einstellungen im Codegraff-Dark-Design" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Beispielgespräch mit graff im Codegraff-Dark-Design" width="520"> |
 
 Modell und Arbeitsverzeichnis auswählen, Änderungen neben dem Chat prüfen
 und Dateien oder den Browser direkt in Harness öffnen. Die Desktop-App nutzt

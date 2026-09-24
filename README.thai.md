@@ -12,9 +12,9 @@ Hermes, Pi, OpenCode และ Antigravity ไว้ในแอปเดสก�
 
 ## ภายใน Harness
 
-| เลือกเอเจนต์ | ติดตามเซสชันเดียวกันข้ามอุปกรณ์ |
+| เลือกเอเจนต์ | ทำงานกับ graff |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="การตั้งค่าเอเจนต์ใน Harness" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="เซสชัน Harness ที่ซิงก์แล้ว" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="การตั้งค่าเอเจนต์ปัจจุบันของ Harness ในธีม Codegraff Dark" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="บทสนทนาตัวอย่างกับ graff ในธีม Codegraff Dark" width="520"> |
 
 เลือกโมเดล ตรวจการเปลี่ยนแปลงข้างบทสนทนา และเปิดไฟล์หรือเบราว์เซอร์ในแอปได้เลย
 แอปเดสก์ท็อปใช้ Rust/GPUI ส่วนแอป iOS ใช้ SwiftUI เพื่อดูเซสชันที่ซิงก์

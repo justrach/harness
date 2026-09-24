@@ -13,9 +13,9 @@ mengikuti sesi daripada peranti lain yang dipercayai.
 
 ## Di dalam Harness
 
-| Pilih ejen | Ikuti sesi yang sama pada peranti lain |
+| Pilih ejen | Bekerja dengan graff |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Tetapan ejen Harness" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="Sesi Harness yang disegerakkan" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Tetapan ejen Harness terkini dalam tema Codegraff Dark" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Perbualan contoh dengan graff dalam tema Codegraff Dark" width="520"> |
 
 Pilih model, semak perubahan di sisi perbualan, serta buka fail dan pelayar
 tanpa meninggalkan aplikasi. Desktop menggunakan Rust/GPUI; aplikasi iOS

@@ -13826,6 +13826,10 @@ mod shortcut_focus_regressions {
 /// Native visual QA uses the production shell with isolated fixture data.
 #[cfg(feature = "appshots-fixture")]
 impl Shell {
+    pub fn fixture_readme_agents_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Harnesses, cx);
+    }
+
     pub fn fixture_appshots_settings(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
             self.open_settings(SettingsSection::Appshots, cx);

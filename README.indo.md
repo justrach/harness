@@ -13,9 +13,9 @@ sesi dari perangkat lain yang tepercaya.
 
 ## Di dalam Harness
 
-| Pilih agen | Ikuti sesi yang sama di perangkat lain |
+| Pilih agen | Bekerja dengan graff |
 | :---: | :---: |
-| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Pengaturan agen Harness" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="Sesi Harness yang tersinkron" width="520"> |
+| <img src="docs/media/readme/codegraff-agents-dark.png" alt="Pengaturan agen Harness terbaru dalam tema Codegraff Dark" width="520"> | <img src="docs/media/readme/codegraff-chat-dark.png" alt="Contoh percakapan graff dalam tema Codegraff Dark" width="520"> |
 
 Pilih model, tinjau perubahan di samping percakapan, serta buka berkas dan
 peramban tanpa meninggalkan aplikasi. Desktop memakai Rust/GPUI; pendamping
