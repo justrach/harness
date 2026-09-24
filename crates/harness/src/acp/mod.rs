@@ -2008,10 +2008,14 @@ impl Harness for AcpHarness {
 
     async fn run(
         &self,
-        request: RunRequest,
+        mut request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let launch_args = if self.id() == HarnessId::Graff {
+            request.model = request
+                .model
+                .take()
+                .map(|id| graff_models::normalize_legacy_id(&id).into_owned());
             graff_models::launch_args(request.model.as_deref())
         } else {
             Vec::new()

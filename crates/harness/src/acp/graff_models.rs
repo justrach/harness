@@ -3,6 +3,7 @@
 //! row ids pin the provider at launch. Older binaries that lack the extension
 //! retain the route/schema catalog without invented effort support.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
@@ -17,18 +18,38 @@ use crate::{CatalogFailure, CatalogFailureCode, HarnessError, HarnessId};
 
 pub(super) fn launch_args(model: Option<&str>) -> Vec<String> {
     match model.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(model) => vec!["--model".into(), seat_name(model).into()],
+        Some(model) => vec!["--model".into(), normalize_legacy_id(model).into_owned()],
         None => Vec::new(),
     }
 }
 
-fn seat_name(id: &str) -> &str {
-    id.split_once(':')
-        .filter(|(provider, name)| {
-            !provider.is_empty() && !name.is_empty() && !provider.contains('/')
-        })
-        .map(|(_, name)| name)
-        .unwrap_or(id)
+/// Older duplicate-seat picker ids used `provider:model`. Keep the selected
+/// provider when launching a saved chat. A bare id has no reliable provenance.
+pub(super) fn normalize_legacy_id(id: &str) -> Cow<'_, str> {
+    let Some((provider, name)) = id.split_once(':') else {
+        return Cow::Borrowed(id);
+    };
+    if name.is_empty()
+        || !matches!(
+            provider,
+            "anthropic"
+                | "codegraff"
+                | "codex"
+                | "deepseek"
+                | "openai"
+                | "cerebras"
+                | "kimi"
+                | "xai"
+                | "xiaomi"
+                | "openrouter"
+                | "fugu"
+                | "mlx"
+                | "lmstudio"
+        )
+    {
+        return Cow::Borrowed(id);
+    }
+    Cow::Owned(format!("{provider}/{name}"))
 }
 
 fn effort_value(level: ReasoningLevel) -> &'static str {
@@ -668,9 +689,17 @@ mod tests {
         assert_eq!(launch_args(Some("k3")), vec!["--model", "k3"]);
         assert_eq!(
             launch_args(Some("codex:gpt-6-sol")),
-            vec!["--model", "gpt-6-sol"]
+            vec!["--model", "codex/gpt-6-sol"]
+        );
+        assert_eq!(
+            launch_args(Some("codegraff:gpt-6-sol")),
+            vec!["--model", "codegraff/gpt-6-sol"]
         );
         assert_eq!(launch_args(Some("kimi/k3")), vec!["--model", "kimi/k3"]);
+        assert_eq!(
+            launch_args(Some("gpt-6-sol:batch")),
+            vec!["--model", "gpt-6-sol:batch"]
+        );
         assert!(launch_args(Some(" ")).is_empty());
         assert!(launch_args(None).is_empty());
     }

@@ -66,6 +66,11 @@ for line in sys.stdin:
             result = {'current':{'provider':'xiaomi','model':'mimo-v2.6-flash','effort':'high'},
                       'models':[{'provider':'xiaomi','name':'mimo-v2.6-flash',
                                  'authenticated':True,'effortLevels':['none','high']}]}
+        if mode.startswith('legacy-codex'):
+            result = {'current':{'provider':'codegraff' if mode.endswith('mismatch') else 'codex',
+                                 'model':'gpt-6-sol','effort':'high'},
+                      'models':[{'provider':'codex','name':'gpt-6-sol',
+                                 'authenticated':True,'effortLevels':['low','high']}]}
         if mode == 'no-auth': result['models'] = []
     elif method == 'session/set_config_option':
         if mode == 'reject':
@@ -403,6 +408,40 @@ async fn resumed_session_never_prompts_on_a_different_provider_than_qualified_pi
         );
         assert_eq!(
             wire(root.path())
+                .iter()
+                .any(|entry| entry["method"] == "session/prompt"),
+            expected == DoneStatus::Completed
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_provider_qualified_chat_preserves_route_on_resume() {
+    for (mode, expected) in [
+        ("legacy-codex-match", DoneStatus::Completed),
+        ("legacy-codex-mismatch", DoneStatus::Errored),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fake_agent(root.path());
+        std::fs::write(root.path().join("mode"), mode).unwrap();
+        let mut selected = request(root.path(), ReasoningLevel::High);
+        selected.model = Some("codex:gpt-6-sol".into());
+        selected.resume = Some("fixture".into());
+        let events = run_selected(root.path(), selected).await;
+        assert!(
+            events.iter().any(|event| matches!(event,
+            AgentEvent::Done { status, .. } if *status == expected)),
+            "{mode}: {events:?}"
+        );
+        let entries = wire(root.path());
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["argv"]
+                    == serde_json::json!(["acp", "--model", "codex/gpt-6-sol"]))
+        );
+        assert_eq!(
+            entries
                 .iter()
                 .any(|entry| entry["method"] == "session/prompt"),
             expected == DoneStatus::Completed
