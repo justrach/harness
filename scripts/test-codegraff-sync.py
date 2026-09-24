@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 
-spec = importlib.util.spec_from_file_location("codegraff_beta", Path(__file__).with_name("codegraff-beta.py"))
+spec = importlib.util.spec_from_file_location("codegraff_sync", Path(__file__).with_name("codegraff-sync.py"))
 beta = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(beta)
 
@@ -38,6 +38,24 @@ class BetaSelectionTest(unittest.TestCase):
             "head\trefs/tags/v1.2.3-beta.1.1^{}",
         ])
         self.assertEqual(beta.select_beta(heads, tags, [release("v1.2.3-beta.1.1")])["sha"], "head")
+
+    def test_stable_ignores_draft_prerelease_and_incomplete_assets(self):
+        tags = {"v0.0.9": "old", "v0.0.10": "current", "v0.0.11": "next",
+                "v0.0.12": "draft", "v0.0.13": "missing"}
+        releases = [
+            {**release("v0.0.9"), "prerelease": False},
+            {**release("v0.0.10"), "prerelease": False},
+            release("v0.0.11"),
+            {**release("v0.0.12"), "draft": True, "prerelease": False},
+            {**release("v0.0.13", ("SHA256SUMS",)), "prerelease": False},
+        ]
+        self.assertEqual(beta.select_stable(tags, releases), {
+            "branch": "", "sha": "current", "tag": "v0.0.10"})
+
+    def test_stable_numeric_fourth_component(self):
+        tags = {"v0.0.302": "old", "v0.0.302.4": "current", "v0.0.99": "older"}
+        releases = [{**release(tag), "prerelease": False} for tag in tags]
+        self.assertEqual(beta.select_stable(tags, releases)["tag"], "v0.0.302.4")
 
 
 if __name__ == "__main__":

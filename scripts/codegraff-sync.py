@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Select the published beta for the current Codegraff release branch head."""
+"""Select the current published Codegraff CLI release for GUI packaging."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import urllib.request
 REPO = "justrach/codegraff"
 BRANCH = re.compile(r"^refs/heads/release/v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$")
 BETA = re.compile(r"^v(\d+\.\d+\.\d+(?:\.\d+)?)-beta\.(\d+)\.(\d+)$")
+STABLE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$")
 ASSETS = {"graff-aarch64-macos.tar.gz", "SHA256SUMS"}
 
 
@@ -56,6 +58,23 @@ def select_beta(heads, tags, releases):
     return {"branch": branch.removeprefix("refs/heads/"), "sha": commit, "tag": tag}
 
 
+def select_stable(tags, releases):
+    candidates = []
+    for release in releases:
+        tag = release.get("tag_name", "")
+        match = STABLE.fullmatch(tag)
+        if (not match or release.get("draft") or release.get("prerelease")
+                or tag not in tags):
+            continue
+        if not ASSETS.issubset({asset["name"] for asset in release.get("assets", [])}):
+            continue
+        candidates.append((version_key(match), tag))
+    if not candidates:
+        return None
+    _, tag = max(candidates)
+    return {"branch": "", "sha": tags[tag], "tag": tag}
+
+
 def github_releases():
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "harness-beta-sync"}
     if token := os.environ.get("GITHUB_TOKEN"):
@@ -70,22 +89,27 @@ def github_releases():
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--channel", choices=("beta", "stable"), default="beta")
+    args = parser.parse_args()
     refs = subprocess.run(
         ["git", "ls-remote", "--heads", "--tags", f"https://github.com/{REPO}.git"],
         check=True, capture_output=True, text=True,
     ).stdout.splitlines()
     heads, tags = parse_refs(refs)
-    chosen = select_beta(heads, tags, github_releases())
+    releases = list(github_releases())
+    chosen = (select_beta(heads, tags, releases) if args.channel == "beta"
+              else select_stable(tags, releases))
     if not chosen:
-        print("Current release branch has no published beta for its head yet")
+        print(f"No complete published {args.channel} release available")
         return
     expected = {
         "branch": os.environ.get("EXPECTED_BRANCH"),
         "sha": os.environ.get("EXPECTED_SHA"),
         "tag": os.environ.get("EXPECTED_TAG"),
     }
-    if any(expected.values()) and chosen != expected:
-        print("Dispatch does not match the current published beta; skipped")
+    if any(value and chosen[key] != value for key, value in expected.items()):
+        print(f"Dispatch does not match the current published {args.channel} release; skipped")
         return
     for key, value in chosen.items():
         print(f"{key}={value}")

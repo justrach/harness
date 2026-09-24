@@ -1,0 +1,114 @@
+name: Codegraff GUI sync
+
+# The dispatch is an immediate hint. The schedule also picks up releases
+# when the caller has no cross-repository workflow token.
+on:
+  repository_dispatch:
+    types: [codegraff_release_published]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codegraff-gui-sync
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [beta, stable]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select current published release
+        if: github.event_name != 'repository_dispatch' || github.event.client_payload.channel == matrix.channel
+        id: selected
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_BRANCH: ${{ github.event.client_payload.branch }}
+          EXPECTED_SHA: ${{ github.event.client_payload.sha }}
+          EXPECTED_TAG: ${{ github.event.client_payload.tag }}
+        run: python3 scripts/codegraff-sync.py --channel '${{ matrix.channel }}'
+      - name: Check for an existing build
+        if: steps.selected.outputs.tag != ''
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .sync-cache
+          key: codegraff-${{ matrix.channel }}-macos-${{ steps.selected.outputs.tag }}-${{ steps.selected.outputs.sha }}-${{ github.sha }}
+      - name: Download and verify exact CLI
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        id: graff
+        env:
+          RELEASE_TAG: ${{ steps.selected.outputs.tag }}
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          dir="$RUNNER_TEMP/codegraff-$CHANNEL"
+          mkdir -p "$dir"
+          base="https://github.com/justrach/codegraff/releases/download/$RELEASE_TAG"
+          asset=graff-aarch64-macos.tar.gz
+          curl -fsSL "$base/$asset" -o "$dir/$asset"
+          curl -fsSL "$base/SHA256SUMS" -o "$dir/SHA256SUMS"
+          awk -v name="$asset" '$2 == name {print}' "$dir/SHA256SUMS" >"$dir/selected.sha256"
+          test "$(wc -l <"$dir/selected.sha256" | tr -d ' ')" = 1
+          (cd "$dir" && shasum -a 256 -c selected.sha256)
+          tar -xzf "$dir/$asset" -C "$dir"
+          test -x "$dir/graff-aarch64-macos/graff"
+          echo "binary=$dir/graff-aarch64-macos/graff" >>"$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+      - name: Build intermediate GUI
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          GRAFF_BINARY: ${{ steps.graff.outputs.binary }}
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          scripts/package-macos.sh
+          test -f target/package/*-macos-arm64-app.tar.gz
+      - name: Record included revisions
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.selected.outputs.tag }}
+          RELEASE_SHA: ${{ steps.selected.outputs.sha }}
+          RELEASE_BRANCH: ${{ steps.selected.outputs.branch }}
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          printf 'channel=%s\ncodegraff_tag=%s\ncodegraff_sha=%s\ncodegraff_branch=%s\nharness_sha=%s\n' \
+            "$CHANNEL" "$RELEASE_TAG" "$RELEASE_SHA" "$RELEASE_BRANCH" "$GITHUB_SHA" \
+            > target/package/codegraff-release.txt
+      - name: Recheck current release
+        if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        id: fresh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_BRANCH: ${{ steps.selected.outputs.branch }}
+          EXPECTED_SHA: ${{ steps.selected.outputs.sha }}
+          EXPECTED_TAG: ${{ steps.selected.outputs.tag }}
+        run: python3 scripts/codegraff-sync.py --channel '${{ matrix.channel }}'
+      - name: Upload intermediate app only
+        if: steps.fresh.outputs.tag == steps.selected.outputs.tag && steps.selected.outputs.tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.channel }}-macos-${{ steps.selected.outputs.tag }}-${{ steps.selected.outputs.sha }}-${{ github.sha }}
+          path: |
+            target/package/*-macos-arm64-app.tar.gz
+            target/package/codegraff-release.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remember completed build
+        if: steps.fresh.outputs.tag == steps.selected.outputs.tag && steps.selected.outputs.tag != ''
+        run: mkdir -p .sync-cache && printf '%s\n' '${{ steps.selected.outputs.tag }}' >.sync-cache/tag
+      - name: Cache completed build marker
+        if: steps.fresh.outputs.tag == steps.selected.outputs.tag && steps.selected.outputs.tag != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .sync-cache
+          key: codegraff-${{ matrix.channel }}-macos-${{ steps.selected.outputs.tag }}-${{ steps.selected.outputs.sha }}-${{ github.sha }}
