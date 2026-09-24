@@ -460,7 +460,7 @@ mod pinned_session_tests {
     fn sidebar_unconfirmed_write_stops_the_queue_without_overwriting_observed_pins(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let _guard = runtime.enter();
         let (engine, _requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -502,7 +502,7 @@ mod pinned_session_tests {
     fn sidebar_optimistic_writes_preserve_newer_edits_and_watch_state_on_failure(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let _guard = runtime.enter();
         let (engine, mut requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -581,7 +581,7 @@ mod pinned_session_tests {
     fn sidebar_write_acknowledgements_ignore_older_watches_and_previous_operations(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let _guard = runtime.enter();
         let (engine, _requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -622,7 +622,7 @@ mod pinned_session_tests {
     fn sidebar_write_replies_cannot_cross_profile_or_engine_boundaries(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         let window = pin_test_shell(cx, dir.path());
