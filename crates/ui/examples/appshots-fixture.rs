@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
         edge_url: String::new(),
         edge_token: None,
         org_id: None,
-        workos_client_id: None,
+        codegraff_client_id: None,
         default_harness: harness_proto::HarnessId::ClaudeCode,
     };
     let handle = runtime.block_on(state::EngineHandle::bootstrap(boot.clone()))?;
