@@ -43,6 +43,7 @@ mod new_thread_background_image;
 mod new_thread_background_mask;
 mod notice;
 pub mod notify;
+pub mod perf_stats;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
@@ -129,6 +130,7 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
+    perf_stats::mark_process_start();
     // Retain ownership for the whole application lifetime. The bridge's
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
@@ -161,6 +163,7 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        perf_stats::start(data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
@@ -400,6 +403,7 @@ fn open_main_window(
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.
                 appearance::observe_window(window, cx).detach();
+                window.on_next_frame(|_, _| perf_stats::first_window_frame());
                 let shell = cx.new(|cx| {
                     observe_main_window_geometry(window, cx);
                     shell::Shell::new(state, boot, cx)

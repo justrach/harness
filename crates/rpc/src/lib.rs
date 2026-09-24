@@ -389,6 +389,71 @@ mod tests {
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
     }
 
+    /// Tab-freeze regression: a consumer that stops reading one stream must
+    /// not stall unary replies or other streams on the same connection.
+    #[tokio::test]
+    async fn stalled_stream_consumer_does_not_block_calls_or_other_streams() {
+        let client = memory_client(Arc::new(TestService));
+        let stalled = client
+            .subscribe("Count", serde_json::json!({"n": 600}))
+            .await
+            .unwrap();
+        let echoed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.call("Echo", serde_json::json!("still alive")),
+        )
+        .await
+        .expect("a stalled stream must not block unary calls")
+        .unwrap();
+        assert_eq!(echoed, serde_json::json!("still alive"));
+        let mut other = client
+            .subscribe("Count", serde_json::json!({"n": 2}))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), other.recv())
+            .await
+            .expect("a stalled stream must not block other streams");
+        assert_eq!(first, Some(serde_json::json!(0)));
+        drop(stalled);
+    }
+
+    /// A consumer that is merely behind still receives every item, in order.
+    #[tokio::test]
+    async fn backlogged_stream_preserves_order_and_completeness() {
+        let client = memory_client(Arc::new(TestService));
+        let mut items = client
+            .subscribe("Count", serde_json::json!({"n": 900}))
+            .await
+            .unwrap();
+        // Let the producer run well past the consumer queue before reading.
+        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut seen = Vec::new();
+        while let Some(v) = items.recv().await {
+            seen.push(v.as_u64().unwrap());
+        }
+        assert_eq!(seen, (0..900).collect::<Vec<_>>());
+    }
+
+    /// A consumer that never catches up is cut off (and its stream ends) once
+    /// its backlog is full, bounding memory without freezing the connection.
+    #[tokio::test]
+    async fn stuck_stream_is_cancelled_after_its_backlog_fills() {
+        let client = memory_client(Arc::new(TestService));
+        let mut items = client
+            .subscribe("Count", serde_json::json!({"n": 5000}))
+            .await
+            .unwrap();
+        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut seen = Vec::new();
+        while let Some(v) = items.recv().await {
+            seen.push(v.as_u64().unwrap());
+        }
+        assert!(seen.len() < 5000, "stuck stream must be cut off");
+        assert_eq!(seen, (0..seen.len() as u64).collect::<Vec<_>>());
+    }
+
     #[tokio::test]
     async fn checked_stream_acknowledges_support_and_preserves_unknown_method() {
         let client = memory_client(Arc::new(TestService));

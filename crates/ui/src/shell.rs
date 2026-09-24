@@ -2353,6 +2353,7 @@ impl Shell {
                 if let Some(prev) = prev
                     && let Some(sound) = status.sound_since(&prev, send_pending)
                 {
+                    crate::perf_stats::turn_finished(&chat_id, sound == crate::sound::Sound::Done);
                     if self.settings.session_sound_enabled(sound) {
                         let should_play = sound != crate::sound::Sound::Attention
                             || self
@@ -4124,6 +4125,7 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.share_performance_stats,
                             cx,
                         )
                     });
@@ -4138,6 +4140,7 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
+                                performance_stats,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -4145,6 +4148,7 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.share_performance_stats = performance_stats;
                             this.schedule_save(cx);
                             cx.notify();
                         },

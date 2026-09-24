@@ -1433,16 +1433,19 @@ impl TerminalPanel {
         {
             if let Some(split) = tabs.split {
                 if split.contains(ix) {
-                    tabs.split = Some(TerminalSplit {
-                        focus: if ix == split.first {
-                            SplitFocus::First
-                        } else {
-                            SplitFocus::Second
-                        },
-                        ..split
-                    });
-                    tabs.active = ix;
-                    cx.notify();
+                    let focus = if ix == split.first {
+                        SplitFocus::First
+                    } else {
+                        SplitFocus::Second
+                    };
+                    // The right pane re-selects its tab on every render; an
+                    // unconditional notify here re-requested a frame forever
+                    // (a pegged redraw loop while a split terminal was open).
+                    if split.focus != focus || tabs.active != ix {
+                        tabs.split = Some(TerminalSplit { focus, ..split });
+                        tabs.active = ix;
+                        cx.notify();
+                    }
                     return;
                 }
                 tabs.split = None;

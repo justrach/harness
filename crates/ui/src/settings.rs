@@ -748,6 +748,9 @@ pub struct UiSettings {
     /// Suppress the banner while a Harness window is focused (the chime covers
     /// the foreground case).
     pub notifications_background_only: bool,
+    /// Upload anonymous performance histograms (`perf_stats`). On by default;
+    /// `HARNESS_DISABLE_STATS` overrides.
+    pub share_performance_stats: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     /// Legacy: panel *open* flags are session-scoped in-memory state now
@@ -864,6 +867,7 @@ impl Default for UiSettings {
             sound_attention_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
+            share_performance_stats: true,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             right_pane_open: false,
@@ -2233,6 +2237,7 @@ mod tests {
             sound_attention_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
+            share_performance_stats: false,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
             right_pane_open: true,
@@ -2469,6 +2474,10 @@ mod tests {
         assert!(
             loaded.notifications_enabled,
             "pre-banner files default banners on"
+        );
+        assert!(
+            loaded.share_performance_stats,
+            "pre-stats files default sharing on"
         );
         assert!(
             loaded.notifications_background_only,

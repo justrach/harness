@@ -131,6 +131,9 @@ impl ChatSplit {
             | (SplitAxis::Vertical, PaneDirection::Up) => false,
             _ => return false,
         };
+        if self.panes.len() < 2 {
+            return false;
+        }
         // The divider after the focused pane, or before it for the last one.
         let (a, b) = if self.focus + 1 < self.panes.len() {
             (self.focus, self.focus + 1)
@@ -139,7 +142,11 @@ impl ChatSplit {
         };
         let delta = if grow { RESIZE_STEP } else { -RESIZE_STEP };
         let total = self.shares[a] + self.shares[b];
-        let first = (self.shares[a] + delta).clamp(MIN_PANE_SHARE, total - MIN_PANE_SHARE);
+        // Repeated splits halve shares (4 panes: 0.5/0.25/0.125/0.125), so
+        // two neighbors can sum below 2×MIN; an unguarded clamp(min > max)
+        // panicked and took the whole app down. Same guard as drag_divider.
+        let min = MIN_PANE_SHARE.min(total / 2.0);
+        let first = (self.shares[a] + delta).clamp(min, total - min);
         self.shares[a] = first;
         self.shares[b] = total - first;
         self.zoomed = false;
@@ -1163,6 +1170,23 @@ mod chat_split_tests {
         assert!(!split.resize(PaneDirection::Up), "wrong axis");
         split.equalize();
         assert_eq!(split.shares, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn resizing_small_neighbors_after_four_splits_does_not_panic() {
+        let mut split = two("a");
+        for _ in 0..2 {
+            split = ChatSplit::split(Some(split), SplitAxis::Horizontal, None, None).unwrap();
+        }
+        assert_eq!(split.panes.len(), MAX_CHAT_PANES);
+        assert!(split.shares[split.focus] + split.shares[split.focus - 1] < 2.0 * MIN_PANE_SHARE);
+        for direction in [PaneDirection::Left, PaneDirection::Right] {
+            for _ in 0..10 {
+                assert!(split.resize(direction));
+            }
+        }
+        assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(split.shares.iter().all(|&s| s > 0.0));
     }
 
     #[test]

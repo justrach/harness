@@ -3163,6 +3163,11 @@ pub struct Transcript {
     /// Queue rows authored in this window. They become own-turn anchors only
     /// after the host promotes their stable id into a transcript message.
     pending_queued_turns: PendingQueuedTurns,
+    /// A steered/queued prompt that materialized during `sync`, waiting for
+    /// the next post-layout own-turn step to take the viewport. Anchoring
+    /// inside `sync` read the just-spliced (zero-height) tail as a short list
+    /// and snapped a long chat to its top before gliding back down.
+    deferred_own_send: Option<(String, String)>,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -3402,6 +3407,7 @@ impl Transcript {
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
+            deferred_own_send: None,
             own_turn_kick: false,
             own_turn_scheduled: false,
             own_turn_last_tick: None,
@@ -3908,7 +3914,11 @@ impl Transcript {
             return;
         };
         if !attached {
-            self.on_own_send(chat_id, message_id, cx);
+            // Take the viewport after layout has re-measured the tail, never
+            // from inside `sync` (see `deferred_own_send`).
+            self.deferred_own_send = Some((chat_id, message_id));
+            self.own_turn_kick = true;
+            cx.notify();
         }
     }
 
@@ -4049,6 +4059,14 @@ impl Transcript {
             return;
         }
         self.own_turn_kick = false;
+        if let Some((chat_id, message_id)) = self.deferred_own_send.take() {
+            // Post-layout now: the tail heights are real, so the anchor lands
+            // on the visible rows. The glide starts on the next frame.
+            if self.chat_id.as_deref() == Some(chat_id.as_str()) {
+                self.on_own_send(chat_id, message_id, cx);
+            }
+            return;
+        }
         // Layout moves the bottom too (pad refinement, streaming growth):
         // refresh the wheel handler's escape baseline every frame so only a
         // WHEEL's own delta registers as user intent. Without this, the pad
@@ -4487,6 +4505,13 @@ impl Transcript {
                 self.own_turn = None;
                 self.own_turn_kick = false;
                 self.own_turn_last_tick = None;
+            }
+            if self
+                .deferred_own_send
+                .as_ref()
+                .is_some_and(|(chat, _)| selected.as_deref() != Some(chat.as_str()))
+            {
+                self.deferred_own_send = None;
             }
             self.chat_id = selected;
             self.rows.clear();
@@ -8642,6 +8667,20 @@ impl Render for Transcript {
                 "transcript motion state"
             );
         }
+        if self.doc_override.is_none() {
+            // Frame pacing while a reply streams (`perf_stats` frame_ms). Only
+            // the selected chat's view reports, so split panes don't
+            // interleave their frames into one interval series.
+            let state = self.state.read(cx);
+            if state.selected_chat == self.chat_id {
+                crate::perf_stats::transcript_frame(
+                    state
+                        .transcript
+                        .last()
+                        .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
+                );
+            }
+        }
         self.render_cache
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
@@ -8707,7 +8746,7 @@ impl Render for Transcript {
         // resizes and streaming growth re-derive the reservation; the step
         // only notifies on change, so a settled hold schedules no next frame.
         if !self.route_exit_pending(cx)
-            && (self.own_turn.is_some() || self.own_turn_kick)
+            && (self.own_turn.is_some() || self.own_turn_kick || self.deferred_own_send.is_some())
             && !self.own_turn_scheduled
         {
             self.own_turn_scheduled = true;
@@ -8904,6 +8943,127 @@ mod tests {
             });
         });
     }
+    /// Steer regression (user report: "when I steer it goes down all the way
+    /// from the top"). The promotion frame both completes the live reply and
+    /// appends the steered prompt, so the tail is spliced with a different
+    /// row count; anchoring the own turn inside that `sync` read the
+    /// freshly-zeroed heights as a short list and snapped the viewport to
+    /// item 0 before gliding back down. Runs on the portable test platform.
+    #[gpui::test]
+    fn steer_promotion_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        let feed = |entries: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+        };
+        let tick = |cx: &mut gpui::TestAppContext| {
+            transcript.update(cx, |this, cx| {
+                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
+                    this.step_own_turn(cx);
+                }
+                if this.pinned {
+                    this.step_spring(cx);
+                }
+            });
+            draw(cx);
+        };
+        let prompt = |id: &str| {
+            let mut entry = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("text", "Please explain this.")],
+            );
+            entry.role = MessageRole::User;
+            entry
+        };
+        let body = (0..12)
+            .map(|i| format!("Paragraph {i} of a long answer.\n\n"))
+            .collect::<String>();
+        let history = |live: MessageStatus| {
+            let mut entries = Vec::new();
+            for i in 0..20 {
+                entries.push(prompt(&format!("p{i}")));
+                entries.push(assistant(
+                    &format!("r{i}"),
+                    MessageStatus::Complete,
+                    vec![text_part("text", &body)],
+                ));
+            }
+            entries.push(prompt("p-live"));
+            entries.push(assistant(
+                "r-live",
+                live,
+                vec![
+                    reasoning_part("think", "Considering the request."),
+                    text_part("text", &body),
+                ],
+            ));
+            entries
+        };
+
+        feed(history(MessageStatus::Streaming), cx);
+        transcript.update(cx, |this, _| this.rail_enabled = false);
+        for _ in 0..20 {
+            tick(cx);
+        }
+        transcript.update(cx, |this, cx| {
+            assert!(this.pinned, "a followed stream starts pinned");
+            this.on_own_queued_send("chat".into(), "steer".into(), cx);
+        });
+        let mut next = history(MessageStatus::Complete);
+        next.push(prompt("steer"));
+        feed(next, cx);
+        // The state notify renders before any post-layout step runs.
+        draw(cx);
+        let top_floor = transcript.read_with(cx, |this, _| this.rows.len() / 2);
+        let top = transcript.read_with(cx, |this, _| this.list.logical_scroll_top().item_ix);
+        assert!(top >= top_floor, "promotion frame snapped the chat to row {top}");
+        for frame in 0..40 {
+            tick(cx);
+            let (top, rows) = transcript.read_with(cx, |this, _| {
+                (this.list.logical_scroll_top().item_ix, this.rows.len())
+            });
+            assert!(
+                top >= top_floor,
+                "frame {frame}: steer scrolled the chat to row {top} (of {rows})"
+            );
+        }
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.own_turn.as_ref().is_some_and(|t| &*t.message_id == "steer") || this.pinned,
+                "the steered prompt still takes the viewport"
+            );
+        });
+    }
+
     use harness_doc::MessagePart;
 
     fn with_tool_group_navigation(
@@ -11970,7 +12130,7 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
                 this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                if this.own_turn.is_some() {
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
                     this.step_own_turn(cx);
                 }
                 if this.pinned {

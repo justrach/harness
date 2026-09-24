@@ -1,6 +1,6 @@
 //! Client side: request/stream multiplexing over string frames + the WebSocket dialer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -10,19 +10,101 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::{ClientFrame, RpcError, ServerFrame};
 
-/// Per-stream queue depth. Bounded: route_frame awaits a full queue, pausing
-/// the connection reader — transport backpressure instead of unbounded growth
-/// when a consumer stalls behind a fast producer (watch frames every 120ms
-/// during streaming used to pile up whole-transcript payloads here).
+/// Per-stream queue depth seen by the consumer.
 const STREAM_QUEUE_CAP: usize = 256;
+
+/// Items a stream may hold beyond [`STREAM_QUEUE_CAP`] while its consumer is
+/// behind. The connection reader never awaits one stream's consumer: it used
+/// to, and one slow tab's watch (a busy terminal, a background transcript)
+/// paused every other stream AND every unary reply behind it — the whole app
+/// froze once enough tabs were open (user report: "more than 4 tabs open it
+/// just dies"). A consumer this far behind is stuck, not slow: its stream is
+/// cancelled and ends after the queued items drain, so watchers resubscribe
+/// fresh instead of the connection stalling for everyone.
+const STREAM_BACKLOG_CAP: usize = 1024;
 
 enum Pending {
     Call(oneshot::Sender<Result<serde_json::Value, RpcError>>),
-    Stream(mpsc::Sender<serde_json::Value>),
+    Stream(Arc<StreamSink>),
     CheckedStream {
-        items: mpsc::Sender<serde_json::Value>,
+        items: Arc<StreamSink>,
         ready: Option<oneshot::Sender<Result<(), RpcError>>>,
     },
+}
+
+/// One stream's delivery side: the consumer's bounded queue plus an ordered
+/// overflow drained by a per-stream pump task while the queue is full.
+struct StreamSink {
+    tx: mpsc::Sender<serde_json::Value>,
+    backlog: Mutex<Backlog>,
+}
+
+#[derive(Default)]
+struct Backlog {
+    items: VecDeque<serde_json::Value>,
+    pumping: bool,
+}
+
+enum Delivery {
+    Delivered,
+    /// The consumer dropped its receiver.
+    Closed,
+    /// The consumer is [`STREAM_BACKLOG_CAP`] items behind.
+    Stuck,
+}
+
+impl StreamSink {
+    fn new(tx: mpsc::Sender<serde_json::Value>) -> Arc<Self> {
+        Arc::new(Self {
+            tx,
+            backlog: Mutex::new(Backlog::default()),
+        })
+    }
+
+    /// Hand `item` to the consumer without ever waiting on it. Order is kept:
+    /// once anything is backlogged, later items queue behind it.
+    fn deliver(self: &Arc<Self>, item: serde_json::Value) -> Delivery {
+        let mut backlog = self.backlog.lock().unwrap_or_else(PoisonError::into_inner);
+        let item = if backlog.items.is_empty() {
+            match self.tx.try_send(item) {
+                Ok(()) => return Delivery::Delivered,
+                Err(mpsc::error::TrySendError::Closed(_)) => return Delivery::Closed,
+                Err(mpsc::error::TrySendError::Full(item)) => item,
+            }
+        } else if self.tx.is_closed() {
+            return Delivery::Closed;
+        } else if backlog.items.len() >= STREAM_BACKLOG_CAP {
+            return Delivery::Stuck;
+        } else {
+            item
+        };
+        backlog.items.push_back(item);
+        if !backlog.pumping {
+            backlog.pumping = true;
+            let sink = self.clone();
+            tokio::spawn(async move { sink.pump().await });
+        }
+        Delivery::Delivered
+    }
+
+    async fn pump(self: Arc<Self>) {
+        loop {
+            let permit = self.tx.reserve().await;
+            let mut backlog = self.backlog.lock().unwrap_or_else(PoisonError::into_inner);
+            match (permit, backlog.items.pop_front()) {
+                (Ok(permit), Some(item)) => permit.send(item),
+                (Err(_), _) => {
+                    backlog.items.clear();
+                    backlog.pumping = false;
+                    return;
+                }
+                (Ok(_), None) => {
+                    backlog.pumping = false;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 struct Shared {
@@ -180,7 +262,9 @@ impl RpcClient {
     ) -> Result<mpsc::Receiver<serde_json::Value>, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
-        self.shared.lock().insert(id, Pending::Stream(tx));
+        self.shared
+            .lock()
+            .insert(id, Pending::Stream(StreamSink::new(tx)));
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -209,7 +293,7 @@ impl RpcClient {
         self.shared.lock().insert(
             id,
             Pending::CheckedStream {
-                items: items_tx,
+                items: StreamSink::new(items_tx),
                 ready: Some(ready_tx),
             },
         );
@@ -287,19 +371,22 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
         if let Some(ready) = ready {
             let _ = ready.send(Ok(()));
         }
-        // Clone the sender out of the lock: the bounded send must await
-        // (backpressure) without holding `shared`.
-        let tx = match shared.lock().get(&id) {
-            Some(Pending::Stream(tx)) => Some(tx.clone()),
+        let sink = match shared.lock().get(&id) {
+            Some(Pending::Stream(sink)) => Some(sink.clone()),
             Some(Pending::CheckedStream { items, .. }) => Some(items.clone()),
             _ => None,
         };
-        let dead = match tx {
-            Some(tx) => tx.send(item).await.is_err(),
-            None => false,
+        let dead = match sink.map(|sink| sink.deliver(item)) {
+            Some(Delivery::Delivered) | None => false,
+            Some(Delivery::Closed) => true,
+            Some(Delivery::Stuck) => {
+                tracing::warn!(id, "rpc: stream consumer stuck; cancelling its stream");
+                true
+            }
         };
         if dead {
-            // Receiver was dropped — cancel server-side and forget the stream.
+            // Receiver dropped or stuck — cancel server-side and forget the
+            // stream. A stuck consumer still drains its backlog, then ends.
             shared.lock().remove(&id);
             if let Ok(json) = serde_json::to_string(&ClientFrame {
                 id,
