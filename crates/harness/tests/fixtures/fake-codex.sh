@@ -18,7 +18,7 @@ fail_turn() { # $1 = request id, $2 = message
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
 has "$line" '"experimentalApi":true' || exit 1
-has "$line" '"name":"zeron-native"' || exit 1
+has "$line" '"name":"harness-native"' || exit 1
 emit "{\"id\":$(rid "$line"),\"result\":{\"userAgent\":\"fake-codex\"}}"
 
 read -r line || exit 1 # initialized notification (no reply)
@@ -93,7 +93,7 @@ case "$turnline" in
   for want in '"type":"skill"' '"path":"/repo/a b/SKILL.md"' '[lib.rs](src/lib.rs)'; do
     has "$turnline" "$want" || { fail_turn "$tid" "initial native skill or file path missing"; exit 0; }
   done
-  if has "$turnline" 'zeron-invoke:' || has "$turnline" 'zeron-file:'; then
+  if has "$turnline" 'harness-invoke:' || has "$turnline" 'harness-file:'; then
     fail_turn "$tid" "private chip URI leaked"; exit 0
   fi
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"

@@ -1,6 +1,6 @@
-# Zeron for iOS
+# Harness for iOS
 
-A native SwiftUI viewport onto the zeron mesh. The phone is a **peer
+A native SwiftUI viewport onto the Harness sync mesh. The phone is a **peer
 device**: it joins the same Loro CRDT rooms as every other device (workspace
 doc + per-chat session docs over the edge's Durable Objects), renders the
 mirrors, and drives remote engines through the durable command queue. No
@@ -12,15 +12,17 @@ Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs).
 
 ```sh
 cd apps/ios
-xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+xcodebuild -project Harness.xcodeproj -scheme Harness \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
-Or open `Zeron.xcodeproj` in Xcode and run. Dependencies (SPM, resolved
+Or open `Harness.xcodeproj` in Xcode and run. Dependencies (SPM, resolved
 automatically): [loro-swift 1.13.x](https://github.com/loro-dev/loro-swift)
 (matches the engine's loro 1.13), [swift-markdown](https://github.com/swiftlang/swift-markdown)
 (cmark-gfm: tables/strikethrough/tasklists — the same feature set as the
 desktop's pulldown-cmark config).
+
+The Xcode project, scheme, and application use the Harness name.
 
 ## TestFlight release
 
@@ -34,9 +36,9 @@ The workflow uses the `AC_API_KEY_P8`, `AC_API_KEY_ID`, and
 
 ### Connecting
 
-- **WorkOS**: enter the edge URL, open the sign-in page on any device, paste
-  the code it shows (`/auth/exchange`), pick an org (`/auth/refresh` re-scopes
-  the token with the `org_id` claim).
+- **CodeGraff**: the native sign-in button opens CodeGraff OAuth with PKCE.
+  The `harness://callback` response is exchanged at the Harness edge; the
+  account receives a personal sync workspace and short-lived Harness bearer.
 - **Dev**: against an `AUTH_MODE=dev` edge (e.g. `wrangler dev`), enter a user
   id + org id; the bearer is `userId@orgId`.
 - **Demo mode**: fully offline dataset with a scripted streaming reply —
@@ -65,10 +67,10 @@ project filters and the existing project flow). Run on an Xcode 26+ Mac:
 
 ```sh
 cd apps/ios
-xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+xcodebuild -project Harness.xcodeproj -scheme Harness \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
-  -only-testing:ZeronTests/ProjectlessSessionTests \
-  -only-testing:ZeronUITests/ProjectlessSessionUITests test
+  -only-testing:HarnessTests/ProjectlessSessionTests \
+  -only-testing:HarnessUITests/ProjectlessSessionUITests test
 ```
 
 Demo fixtures accept `-no-projects` (empty spaces/chats), `-ios-only` (no

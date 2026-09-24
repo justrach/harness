@@ -117,7 +117,7 @@ cargo build -p harness-sync --example transport_live
 # Requires authenticated Wrangler and an account with Workers/R2 enabled.
 cd edge
 npm ci
-node_modules/.bin/wrangler r2 bucket create zeron-transport-385-20260915
+node_modules/.bin/wrangler r2 bucket create harness-transport-385-20260915
 node_modules/.bin/wrangler deploy --config wrangler.transport-test.jsonc
 cd ..
 
@@ -140,7 +140,7 @@ After testing, delete only the isolated resources:
 ```sh
 cd edge
 node_modules/.bin/wrangler delete --config wrangler.transport-test.jsonc
-node_modules/.bin/wrangler r2 bucket delete zeron-transport-385-20260915
+node_modules/.bin/wrangler r2 bucket delete harness-transport-385-20260915
 ```
 
 ## Scope and remaining limits

@@ -63,14 +63,14 @@ Tier 2: compile and test the affected Rust UI crate, then visually inspect the s
 > for supported platforms, settings, and validation limits.
 
 - Product goal: capture the frontmost application from a global shortcut and
-  stage screenshot plus semantic application context in a Zeron composer.
+  stage screenshot plus semantic application context in a Harness composer.
 - Visible output: a distinct, removable Appshot card in the destination draft;
   the existing paperclip and ordinary attachment flows remain unchanged.
 - Editable entities: global shortcut, destination policy, staged Appshot, and
   the user's accompanying prompt.
 - Required controls: documented by workflow in
   `docs/research/appshots.md#control-section-inventory`.
-- Export behavior: none. A send reuses Zeron's attachment upload and prompt
+- Export behavior: none. A send reuses Harness's attachment upload and prompt
   transport.
 - Persistence: device-local settings; unsent-capture persistence remains an
   explicit product decision.
@@ -91,10 +91,10 @@ Tier 2: compile and test the affected Rust UI crate, then visually inspect the s
   retains a CoreGraphics fallback for macOS 12/13 and transient failures.
 - Window enumeration is no longer restricted to the current Space. Active
   ScreenCaptureKit windows win, followed by on-screen state and window area.
-- Added an isolated `Zeron Dev.app` workflow with bundle ID
-  `sh.zeron.app.dev`, stable Apple Development signing, its own data directory,
+- Added an isolated `Harness Dev.app` workflow with bundle ID
+  `sh.harness.app.dev`, stable Apple Development signing, its own data directory,
   and IPC port. It launches through LaunchServices so TCC attributes capture
-  permissions to Zeron Dev rather than the terminal.
+  permissions to Harness Dev rather than the terminal.
 - The isolated data directory and IPC port are embedded in the development
   bundle's `LSEnvironment`, so macOS privacy's “Quit & Reopen” preserves the
   development instance instead of reopening against personal production data.
@@ -151,7 +151,7 @@ Tier 2: compile and test the affected Rust UI crate, then visually inspect the s
   security-sensitive `UIAccess` privilege.
 - Wayland decision: probe portal versions and advertised targets. Prefer
   Active Window; fall back to the portal window picker. Prefer the Global
-  Shortcuts portal and expose `zeron appshot` for system-managed shortcut
+  Shortcuts portal and expose `harness appshot` for system-managed shortcut
   configuration when the portal is absent.
 - X11 decision: prefer a portal-advertised Active Window target, then use
   `_NET_ACTIVE_WINDOW`, a passive key grab, direct drawable capture, EWMH

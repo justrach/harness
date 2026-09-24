@@ -173,7 +173,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
                 args: vec!["node".into(), "vite".into()],
                 started_at: 1,
                 address: ([127, 0, 0, 1], backend_port).into(),
-                zeron_owned: true,
+                harness_owned: true,
             },
         )])
         .unwrap();

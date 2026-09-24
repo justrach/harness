@@ -70,7 +70,7 @@ pub struct ShortcutsPage {
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
     /// A rejected record attempt ("{Combo} is already assigned to {label}.") —
-    /// conflicts never persist; they're refused at record time, as in zeron.
+    /// conflicts never persist; they're refused at record time, as in harness.
     conflict_notice: Option<SharedString>,
     focus: FocusHandle,
     appshots_enabled: bool,
@@ -245,7 +245,7 @@ impl ShortcutsPage {
                     return;
                 }
                 // A combo already bound elsewhere is REFUSED, naming the owner
-                // (zeron settings.shortcuts.tsx: "… is already assigned to …").
+                // (harness settings.shortcuts.tsx: "… is already assigned to …").
                 if let Some(owner) = conflict_owner(&self.keymap, recording, &combo) {
                     self.conflict_notice = Some(
                         format!(
@@ -282,7 +282,7 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        // zeron settings.shortcuts.tsx row: min-h-[72px] px-5 gap-5.
+        // harness settings.shortcuts.tsx row: min-h-[72px] px-5 gap-5.
         div()
             .min_h(px(72.0))
             .px(px(20.0))
@@ -500,7 +500,7 @@ fn group(id: ShortcutId) -> &'static str {
     }
 }
 
-/// One-line purpose copy per shortcut (zeron lib/shortcuts.ts
+/// One-line purpose copy per shortcut (harness lib/shortcuts.ts
 /// `SHORTCUT_DEFINITIONS` descriptions, verbatim).
 fn description(id: ShortcutId) -> &'static str {
     match id {
@@ -718,7 +718,7 @@ impl Render for ShortcutsPage {
         }
 
         // Helper line stays in the muted tone even for a rejected conflict —
-        // the message names the specific clash (zeron settings.shortcuts.tsx).
+        // the message names the specific clash (harness settings.shortcuts.tsx).
         let helper: SharedString = if recording.is_some() {
             "Press Escape to cancel.".into()
         } else if let Some(notice) = self.conflict_notice.clone() {
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn conflicting_records_are_refused() {
-        // zeron parity: a combo bound elsewhere is refused at record time (the
+        // harness parity: a combo bound elsewhere is refused at record time (the
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
         let RecordOutcome::Set(combo) = record_key("r", false, false, false, true) else {

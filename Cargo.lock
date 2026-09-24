@@ -3713,6 +3713,7 @@ dependencies = [
  "anyhow",
  "clap",
  "embed-resource",
+ "harness-adapters",
  "harness-engine",
  "harness-mcp",
  "harness-rpc",

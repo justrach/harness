@@ -3,7 +3,7 @@
 Appshots capture an application window on the desktop and stage it in a composer
 for review before sending. Enable the feature in **Settings → Appshots**, choose
 a global shortcut and destination, and optionally enable capture sound. Invoke
-the shortcut while another application is focused. Invoking it inside Zeron is
+the shortcut while another application is focused. Invoking it inside Harness is
 ignored. No message is sent automatically.
 
 ## Platforms and permissions

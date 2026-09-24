@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { previewCatalog, previewSignal } from "./preview-room";
-const service = { id: "service", projectId: "project", projectName: "app", projectCwd: "/work/app", deviceId: "device", deviceName: "Laptop", hostname: "laptop.app.localhost", name: "Vite", cwd: "/work/app", port: 5173, pid: 123, startedAt: 1000, zeronOwned: true };
+const service = { id: "service", projectId: "project", projectName: "app", projectCwd: "/work/app", deviceId: "device", deviceName: "Laptop", hostname: "laptop.app.localhost", name: "Vite", cwd: "/work/app", port: 5173, pid: 123, startedAt: 1000, harnessOwned: true };
 describe("preview coordinator admission", () => {
   it("accepts bounded service metadata and strips extra fields", () => {
     expect(previewCatalog([{ ...service, body: "not application traffic" }], "device")).toEqual([service]);

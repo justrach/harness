@@ -1,9 +1,9 @@
-# Zeron MCP server
+# Harness MCP server
 
-`zeron mcp` serves the Model Context Protocol on stdin/stdout and proxies every
-tool into the running engine's localhost IPC (`ws://127.0.0.1:$ZERON_IPC_PORT`,
-default 27654) — the same `harness_rpc` surface the headed app and `zeron sync`
-dial. It is a subcommand of the one `zeron` binary: no Node runtime, no extra
+`harness mcp` serves the Model Context Protocol on stdin/stdout and proxies every
+tool into the running engine's localhost IPC (`ws://127.0.0.1:$HARNESS_IPC_PORT`,
+default 27654) — the same `harness_rpc` surface the headed app and `harness sync`
+dial. It is a subcommand of the one `harness` binary: no Node runtime, no extra
 install, a few MB resident.
 
 Crate: `crates/mcp` (`harness-mcp`). The protocol layer is hand-rolled
@@ -18,12 +18,12 @@ originating chat in the environment:
 
 | Variable          | Meaning                                                       |
 | ----------------- | ------------------------------------------------------------- |
-| `ZERON_IPC_PORT`  | Engine to proxy (default 27654).                              |
-| `ZERON_CHAT_ID`   | The chat whose agent spawned this server.                     |
-| `ZERON_DEVICE_ID` | That chat's host device.                                      |
+| `HARNESS_IPC_PORT`  | Engine to proxy (default 27654).                              |
+| `HARNESS_CHAT_ID`   | The chat whose agent spawned this server.                     |
+| `HARNESS_DEVICE_ID` | That chat's host device.                                      |
 
-When `ZERON_CHAT_ID` is set, every `send_message` is prefixed with a
-`[Message from Zeron chat <title> (<id8>) …]` line so the receiving agent and the
+When `HARNESS_CHAT_ID` is set, every `send_message` is prefixed with a
+`[Message from Harness chat <title> (<id8>) …]` line so the receiving agent and the
 human reading that transcript can tell an agent-to-agent message from a typed
 one, and the server refuses to message its own chat.
 
@@ -32,7 +32,7 @@ one, and the server refuses to message its own chat.
 A chat created through `create_chat` records the creating chat as its parent:
 `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry/workspace chat
 row (`Mutate createChat { parentChatId? }` → `WorkspaceHost::create_chat_with_parent`).
-The default is the origin chat (`ZERON_CHAT_ID`); an explicit `parent` argument
+The default is the origin chat (`HARNESS_CHAT_ID`); an explicit `parent` argument
 (id, prefix, or title) overrides it. `list_chats { parent }` returns a chat's
 children, and every chat summary carries `parentChatId`. The field is additive
 and serde-defaulted: rows written by older engines read as parentless, and a
@@ -91,10 +91,10 @@ done (this was the one bug the first live run found).
 ## Smoke recipe
 
 ```sh
-BIN=target/debug/zeron
+BIN=target/debug/harness
 { echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
   echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_chats","arguments":{"limit":5}}}'
-  sleep 5; } | ZERON_IPC_PORT=27655 $BIN mcp
+  sleep 5; } | HARNESS_IPC_PORT=27655 $BIN mcp
 ```
 
 `create_chat` with `"prompt": "Reply with exactly the word pong", "wait": true`

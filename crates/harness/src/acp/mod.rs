@@ -19,7 +19,7 @@
 //!   turn (`cancelled` → Interrupted, `refusal` → Errored, else Completed).
 //! - `session/update` notifications normalize per [`normalize::map_update`].
 //! - Permission requests auto-accept with the agent's preferred allow option
-//!   (zeron sessions run unattended); question-shaped requests block on the
+//!   (harness sessions run unattended); question-shaped requests block on the
 //!   engine's input bridge.
 //! - Steering: agents advertising `_session/steering` get mid-turn injection;
 //!   others queue steers and deliver them as the next `session/prompt` at the
@@ -162,7 +162,7 @@ fn default_effort_values(
         return Vec::new();
     };
     match level {
-        ReasoningLevel::None => vec!["none"],
+        ReasoningLevel::None => vec!["none", "off"],
         ReasoningLevel::Minimal => vec!["minimal", "low"],
         ReasoningLevel::Low => vec!["low", "minimal"],
         ReasoningLevel::Medium => vec!["medium"],
@@ -262,7 +262,7 @@ fn grok_spec() -> AcpAgentSpec {
         // the `agent` subcommand and starts a fresh agent even when
         // `[cli] use_leader` is set — leader mode ATTACHES `agent stdio` to a
         // shared process via ~/.grok/leader.sock, so a wedged/stale leader
-        // (the user's TUI) reads as total silent non-response in zeron.
+        // (the user's TUI) reads as total silent non-response in harness.
         args: &["--no-auto-update", "agent", "--no-leader", "stdio"],
         npm_package: Some("@xai-official/grok@1.0.4"),
         archive: None,
@@ -294,7 +294,7 @@ fn grok_spec() -> AcpAgentSpec {
         prompt_complete_extension: true,
         prompt_stall: Some(Duration::from_secs(30)),
         stall_hint: "The agent process is likely wedged — a stale shared leader \
-             process or a hung startup check; zeron launches it with --no-leader \
+             process or a hung startup check; harness launches it with --no-leader \
              and --no-auto-update to avoid both.",
         effort_in_model_id: false,
         // Each stdio spawn is a fresh process. grok.com attaches the existing
@@ -453,6 +453,10 @@ fn hermes_spec() -> AcpAgentSpec {
 
 fn graff_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    // The app-managed copy (updated in-app) and the one shipped in the
+    // bundle; a newer graff elsewhere still wins the version comparison.
+    dirs.extend(crate::graff_bundle::managed_path().filter(|path| path.is_file()));
+    dirs.extend(crate::graff_bundle::bundled());
     if let Some(home) = crate::executable::home_dir() {
         dirs.push(home.join(".local").join("bin").join("graff"));
     }
@@ -467,15 +471,19 @@ fn graff_spec() -> AcpAgentSpec {
         display_name: "graff",
         executable: "graff",
         env_override: "GRAFF_EXECUTABLE",
-        args: &["acp"],
+        // Harness handles ACP sessions without an interactive approval UI.
+        // Match its auto-accepted permission responses from the first prompt:
+        // graff otherwise tells its root agent that write/bash are denied
+        // and delegates even though this host would approve the requests.
+        args: &["acp", "--yolo"],
         npm_package: None,
         archive: None,
         extra_paths: graff_install_paths,
         cli_executable: "graff",
         cli_extra_paths: graff_install_paths,
-        install_hint: "graff (searched PATH, the login shell's PATH, ~/.local/bin, \
-             /opt/homebrew/bin, and /usr/local/bin; install codegraff, then \
-             `graff login`; set GRAFF_EXECUTABLE to override)",
+        install_hint: "graff (searched PATH, the login shell's PATH, ~/.harness/bin, \
+             the app bundle, ~/.local/bin, /opt/homebrew/bin, and /usr/local/bin; \
+             install codegraff, then `graff login`; set GRAFF_EXECUTABLE to override)",
         // Graff's vendor model catalog advertises per-seat effort ladders;
         // session effort selection uses the standard ACP thought_level option.
         models: Vec::new,
@@ -514,7 +522,7 @@ fn pi_spec() -> AcpAgentSpec {
         cli_executable: "pi",
         cli_extra_paths: || npm_global_bins("pi"),
         install_hint: "pi-acp (searched PATH, the login shell's PATH, npm global bins, \
-             and fnm/nvm/volta/pnpm/bun install dirs; zeron installs the pinned \
+             and fnm/nvm/volta/pnpm/bun install dirs; harness installs the pinned \
              pi-acp automatically when npm is available — the pi CLI itself is \
              still required, `npm install -g --ignore-scripts \
              @earendil-works/pi-coding-agent`; set PI_ACP_EXECUTABLE to override)",
@@ -539,7 +547,7 @@ fn pi_spec() -> AcpAgentSpec {
         },
         // The adapter has no `_session/steering` extension: turn boundaries.
         steering_mode: SteeringMode::TurnBoundary,
-        // pi's thinking ladder (minimal→max; its extra "off" tier has no zeron
+        // pi's thinking ladder (minimal→max; its extra "off" tier has no harness
         // equivalent and is left to the agent default).
         reasoning_levels: &[
             ReasoningLevel::Minimal,
@@ -1571,10 +1579,10 @@ impl AcpHarness {
     }
 }
 
-/// Map an advertised `thought_level` value id onto zeron's ladder.
+/// Map an advertised `thought_level` value id onto harness's ladder.
 fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     match norm_id(value).as_str() {
-        "none" => Some(ReasoningLevel::None),
+        "none" | "off" => Some(ReasoningLevel::None),
         "minimal" => Some(ReasoningLevel::Minimal),
         "low" => Some(ReasoningLevel::Low),
         "medium" => Some(ReasoningLevel::Medium),
@@ -1747,12 +1755,12 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
 }
 
 /// A session config option surfaced as a Traits-dropdown section. Mode is
-/// zeron's own (forced to the no-prompts choice), model rides the model rows,
+/// harness's own (forced to the no-prompts choice), model rides the model rows,
 /// and thought_level is the Reasoning ladder — everything else the agent
 /// advertises (fast mode, collaboration mode, agent persona, …) passes
 /// through. `currentValue` doubles as the default: it is the state the
 /// session opens in. Booleans render as an off/on select, mirroring the
-/// catalogs (zeron never declares the boolean config capability, so adapters
+/// catalogs (harness never declares the boolean config capability, so adapters
 /// send selects, but handle the shape defensively).
 fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     if matches!(
@@ -2113,12 +2121,12 @@ fn initialize_params(harness: HarnessId) -> Value {
     json!({
         "protocolVersion": 1,
         "clientInfo": {
-            "name": "zeron",
+            "name": "harness",
             "title": "Harness",
             "version": env!("CARGO_PKG_VERSION"),
         },
         // Declined: agents fall back to their own fs/terminal access, which
-        // is what zeron wants — the working tree is the source of truth for
+        // is what harness wants — the working tree is the source of truth for
         // the diff pane, and commands belong to the agent's own sandbox.
         "clientCapabilities": capabilities,
     })
@@ -2486,12 +2494,13 @@ fn session_update_events(
     params: &Value,
     session_id: &str,
     subagents: &mut SubagentObserver,
+    effort: &mut EffortTracker,
 ) -> Vec<AgentEvent> {
     if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
         return Vec::new();
     }
     let update = params.get("update").unwrap_or(&Value::Null);
-    match method {
+    let mut events = match method {
         "session/update" => match subagents {
             SubagentObserver::Devin(tracker) => tracker.map(update),
             _ => {
@@ -2504,6 +2513,125 @@ fn session_update_events(
             Vec::new()
         }
         _ => Vec::new(),
+    };
+    if method == "session/update" {
+        if let Some(change) = effort.observe(update) {
+            events.push(change);
+        }
+    }
+    events
+}
+
+/// Codegraff's Jev result announces a pending choice; the config update is
+/// the confirmation that it actually changed the session's effort. Generic
+/// ACP config changes are deliberately not attributed to Jev.
+#[derive(Default)]
+struct EffortTracker {
+    current: Option<String>,
+    pending_jev: Option<String>,
+    jev_calls: std::collections::HashSet<String>,
+}
+
+fn thought_level_value(options: &Value) -> Option<&str> {
+    options
+        .as_array()?
+        .iter()
+        .find(|option| option.get("category").and_then(Value::as_str) == Some("thought_level"))?
+        .get("currentValue")?
+        .as_str()
+}
+
+fn is_thought_level_config_option(response: &Value, id: &str) -> bool {
+    response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("id").and_then(Value::as_str) == Some(id)
+                    && option.get("category").and_then(Value::as_str) == Some("thought_level")
+            })
+        })
+}
+
+impl EffortTracker {
+    fn finish_turn(&mut self) {
+        self.pending_jev = None;
+        self.jev_calls.clear();
+    }
+
+    fn observe(&mut self, update: &Value) -> Option<AgentEvent> {
+        match update.get("sessionUpdate").and_then(Value::as_str)? {
+            "tool_call" if update.get("title").and_then(Value::as_str) == Some("jev_effort") => {
+                if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                    self.jev_calls.insert(id.to_owned());
+                }
+                None
+            }
+            "tool_call_update"
+                if update.get("status").and_then(Value::as_str) == Some("completed") =>
+            {
+                let id = update.get("toolCallId")?.as_str()?;
+                if !self.jev_calls.remove(id) {
+                    return None;
+                }
+                let output = update
+                    .get("content")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|part| part.get("content")?.get("text")?.as_str())
+                    .find_map(|text| {
+                        text.strip_prefix("reasoning effort selected: ")?
+                            .split_once(';')
+                            .map(|(choice, _)| choice.trim().to_owned())
+                    });
+                self.pending_jev = output;
+                None
+            }
+            "tool_call_update"
+                if update.get("status").and_then(Value::as_str) == Some("failed") =>
+            {
+                if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                    self.jev_calls.remove(id);
+                }
+                None
+            }
+            "config_option_update" => {
+                let options = update.get("configOptions")?;
+                let next = thought_level_value(options)?;
+                let binary = options.as_array().is_some_and(|options| {
+                    options.iter().any(|option| {
+                        option.get("category").and_then(Value::as_str) == Some("thought_level")
+                            && option.get("options").and_then(Value::as_array).is_some_and(
+                                |choices| {
+                                    choices.len() == 2
+                                        && choices.iter().any(|choice| {
+                                            choice.get("value").and_then(Value::as_str)
+                                                == Some("none")
+                                        })
+                                        && choices.iter().any(|choice| {
+                                            choice.get("value").and_then(Value::as_str)
+                                                == Some("high")
+                                        })
+                                },
+                            )
+                    })
+                });
+                let previous = self.current.replace(next.to_owned());
+                if previous.as_deref() == Some(next) {
+                    return None;
+                }
+                // Only emit when a successful Jev result chose this value.
+                if self.pending_jev.take().as_deref() != Some(next) {
+                    return None;
+                }
+                Some(AgentEvent::EffortChanged {
+                    previous,
+                    current: next.to_owned(),
+                    binary,
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -2578,7 +2706,7 @@ fn prompt_turn(
 
 /// Answer a server→client request. Permission requests are auto-accepted with
 /// the agent's preferred allow option — parity with the claude harness's
-/// bypassPermissions and the codex harness's approvalPolicy "never" (zeron
+/// bypassPermissions and the codex harness's approvalPolicy "never" (harness
 /// sessions run unattended). Everything else (fs, terminal, elicitation) was
 /// declined at initialize, so a stray request gets method-not-found rather
 /// than wedging the agent.
@@ -3210,6 +3338,8 @@ async fn run_session(session: Session) {
             session_commands
         };
         let options_snapshot = session_response;
+        let mut initial_effort =
+            thought_level_value(&options_snapshot["configOptions"]).map(str::to_owned);
         for (config_id, payload) in config_option_sets(
             &options_snapshot,
             requested_model.as_deref(),
@@ -3260,15 +3390,21 @@ async fn run_session(session: Session) {
                     target: "harness_adapters::acp",
                     "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
                 );
+            } else if is_thought_level_config_option(&options_snapshot, &config_id) {
+                initial_effort = payload
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
         }
-        Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
+        Ok::<(String, bool, Vec<SlashCommand>, Option<String>), HarnessError>((
             session_id,
             steer_ext,
             init_commands,
+            initial_effort,
         ))
     };
-    let (session_id, steer_ext, init_commands) = tokio::select! {
+    let (session_id, steer_ext, init_commands, initial_effort) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -3376,6 +3512,10 @@ async fn run_session(session: Session) {
             sessions_root,
         ))
     };
+    let mut effort = EffortTracker {
+        current: initial_effort,
+        ..Default::default()
+    };
 
     // ---- main loop --------------------------------------------------------
     // Prompt-completion settlement state (the prompt-complete extension):
@@ -3383,10 +3523,10 @@ async fn run_session(session: Session) {
     // settled ids are remembered so a STALE `prompt_complete` (a late replay
     // of an already-settled prompt) can never settle a newer turn.
     let mut prompt_seq: u64 = 1;
-    let mut current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+    let mut current_prompt_id = prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
     let mut completed_prompts: VecDeque<String> = VecDeque::new();
-    // `ZERON_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
-    let prompt_stall: Option<Duration> = match std::env::var("ZERON_ACP_PROMPT_STALL_MS")
+    // `HARNESS_ACP_PROMPT_STALL_MS` overrides the spec's bound; 0 disables.
+    let prompt_stall: Option<Duration> = match std::env::var("HARNESS_ACP_PROMPT_STALL_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
     {
@@ -3440,7 +3580,7 @@ async fn run_session(session: Session) {
     // Silence is not a turn boundary: completed tools, text, and usage may
     // all precede a slow model request. Keep the prompt future alive until
     // its response (or an authoritative completion extension) arrives.
-    // ZERON_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
+    // HARNESS_ACP_QUIET_SETTLE_MS is intentionally no longer honored (#296).
     let mut last_update_at = tokio::time::Instant::now();
     let mut open_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     // PREVENTION, ahead of all the recovery above: never send a
@@ -3542,7 +3682,7 @@ async fn run_session(session: Session) {
                     match inc {
                         Incoming::Notification { method, params } => {
                             let events =
-                                session_update_events(&method, &params, &session_id, &mut subagents);
+                                session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3594,6 +3734,7 @@ async fn run_session(session: Session) {
                 if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
                     error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
                 }
+                effort.finish_turn();
                 done_current = true;
                 if interrupted {
                     done_after_interrupt = true;
@@ -3635,7 +3776,7 @@ async fn run_session(session: Session) {
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                        prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
@@ -3720,7 +3861,7 @@ async fn run_session(session: Session) {
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events =
-                        session_update_events(&method, &params, &session_id, &mut subagents);
+                        session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
                         if !send(&event_tx, ev).await {
@@ -3766,6 +3907,7 @@ async fn run_session(session: Session) {
                             let _ = send(&event_tx, usage).await;
                         }
                         let (status, error) = stop_outcome(&res, interrupted);
+                        effort.finish_turn();
                         done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
@@ -3831,7 +3973,7 @@ async fn run_session(session: Session) {
                             match inc {
                                 Incoming::Notification { method, params } => {
                                     let events =
-                                        session_update_events(&method, &params, &session_id, &mut subagents);
+                                        session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -3921,7 +4063,7 @@ async fn run_session(session: Session) {
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                        prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
@@ -3970,7 +4112,7 @@ async fn run_session(session: Session) {
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                        prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
@@ -4010,6 +4152,7 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
+                effort.finish_turn();
                 done_current = true;
                 if !send(
                     &event_tx,
@@ -4042,7 +4185,7 @@ async fn run_session(session: Session) {
                     last_update_at = tokio::time::Instant::now();
                     prompt_seq += 1;
                     current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                        prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
@@ -4105,7 +4248,7 @@ async fn run_session(session: Session) {
                         last_update_at = tokio::time::Instant::now();
                         prompt_seq += 1;
                     current_prompt_id =
-                        prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
+                        prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
                     prompt_stall_deadline =
                         prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
@@ -4177,6 +4320,7 @@ async fn run_session(session: Session) {
                     },
                 )
                 .await;
+                effort.finish_turn();
                 done_current = true;
                 let _ = send(
                     &event_tx,
@@ -4549,7 +4693,7 @@ mod tests {
     #[test]
     fn antigravity_unknown_named_home_fails_before_auth_selection() {
         let cwd = tempfile::tempdir().unwrap();
-        let path = PathBuf::from(format!("~zeron-missing-{}", uuid::Uuid::new_v4()));
+        let path = PathBuf::from(format!("~harness-missing-{}", uuid::Uuid::new_v4()));
         assert!(
             antigravity_paths::resolve_home(Some(&path), Some(cwd.path()), cwd.path()).is_err()
         );
@@ -5271,4 +5415,42 @@ fn explicit_program_launches_do_not_get_archive_scratch_roots() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-antigravity-acp.sh"),
     );
     assert!(harness.adapter_scratch().unwrap().is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn jev_effort_change_requires_matching_success_and_live_config() {
+    let mut tracker = EffortTracker {
+        current: Some("high".into()),
+        ..Default::default()
+    };
+    let config = |value| {
+        json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "thought_level", "category": "thought_level", "currentValue": value,
+                "options": [{"value":"none"},{"value":"high"}]
+            }]
+        })
+    };
+    // A manual config change cannot claim Jev attribution.
+    assert_eq!(tracker.observe(&config("none")), None);
+    assert_eq!(
+        tracker
+            .observe(&json!({"sessionUpdate":"tool_call","toolCallId":"j1","title":"jev_effort"})),
+        None
+    );
+    assert_eq!(tracker.observe(&json!({
+        "sessionUpdate":"tool_call_update","toolCallId":"j1","status":"completed",
+        "content":[{"type":"content","content":{"type":"text","text":"reasoning effort selected: high; applies at the next request boundary"}}]
+    })), None);
+    assert_eq!(
+        tracker.observe(&config("high")),
+        Some(AgentEvent::EffortChanged {
+            previous: Some("none".into()),
+            current: "high".into(),
+            binary: true,
+        })
+    );
+    assert_eq!(tracker.observe(&config("none")), None);
 }

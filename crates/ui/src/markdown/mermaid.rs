@@ -162,7 +162,7 @@ mod tests {
                 let ratio = size.width.0 as f32 / size.height.0 as f32;
                 assert!((ratio / (prepared.width / prepared.height) - 1.0).abs() < 0.02);
                 assert_eq!(svg, render(source, &palette).unwrap());
-                if let Ok(dir) = std::env::var("ZERON_MERMAID_ARTIFACTS") {
+                if let Ok(dir) = std::env::var("HARNESS_MERMAID_ARTIFACTS") {
                     std::fs::create_dir_all(&dir).unwrap();
                     std::fs::write(format!("{dir}/{name}-{mode}.svg"), svg).unwrap();
                     let size = prepared_raster.size(0);

@@ -1,5 +1,5 @@
 //! Sticky composer defaults — the new-chat "remember my last picks" store
-//! (zeron parity: localStorage `zeron.composer.defaults:v1`, defaults.ts).
+//! (harness parity: localStorage `harness.composer.defaults:v1`, defaults.ts).
 //!
 //! A small JSON file beside `ui-settings.json` (that file is the shell's and
 //! is saved debounced from its own boot-time copy, so the composer keeps its
@@ -22,7 +22,7 @@ const FILE_NAME: &str = "composer-defaults.json";
 /// Model option picks: option id → choice id (the `ChatConfig` shape).
 pub type ModelOptions = serde_json::Map<String, serde_json::Value>;
 
-/// Remembered model per harness — id plus display label, mirroring zeron's
+/// Remembered model per harness — id plus display label, mirroring harness's
 /// `modelByHarness` storing the full `Model` object "so the pill never flashes
 /// a raw id or 'Default'".
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct ComposerDefaults {
     pub harness: Option<HarnessId>,
     /// Last model picked, per harness (restored on harness switch).
     pub model_by_harness: HashMap<HarnessId, RememberedModel>,
-    /// Last reasoning level picked (global, like zeron's `reasoning` key).
+    /// Last reasoning level picked (global, like harness's `reasoning` key).
     pub reasoning: Option<ReasoningLevel>,
     /// Last non-default model option picks (option id → choice id), per
     /// harness and model id. Model-scoped because each pick was validated
@@ -122,7 +122,7 @@ impl ComposerDefaults {
         self.model_by_harness.get(&harness)
     }
 
-    /// Remember a pick (zeron `saveDefaults({ harness, modelByHarness })`).
+    /// Remember a pick (harness `saveDefaults({ harness, modelByHarness })`).
     pub fn remember_model(&mut self, harness: HarnessId, id: String, label: String) {
         self.harness = Some(harness);
         self.model_by_harness

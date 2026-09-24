@@ -967,7 +967,7 @@ mod tests {
                 branch,
                 Some(&format!("origin/{branch}")),
                 Some("origin"),
-                Some(&format!("https://github.com/{owner}/zeron.git")),
+                Some(&format!("https://github.com/{owner}/harness.git")),
             ),
             default_branch: default_branch.map(str::to_owned),
         }
@@ -983,7 +983,7 @@ mod tests {
         serde_json::json!({
             "number": number,
             "title": format!("Pull request {number}"),
-            "url": format!("https://github.com/acme/zeron/pull/{number}"),
+            "url": format!("https://github.com/acme/harness/pull/{number}"),
             "state": state,
             "baseRefName": "main",
             "headRefName": branch,
@@ -1060,7 +1060,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "https://github.com/acme/zeron.git",
+                "https://github.com/acme/harness.git",
             ],
         );
 
@@ -1074,14 +1074,14 @@ if [ "$GH_PROMPT_DISABLED" != "1" ]; then
   echo "interactive auth was not disabled" >&2
   exit 2
 fi
-printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/zeron/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]'
+printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/harness/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]'
 "##;
         #[cfg(windows)]
         let fake_gh_contents = r##"if ($env:GH_PROMPT_DISABLED -ne '1') {
   [Console]::Error.WriteLine('interactive auth was not disabled')
   exit 2
 }
-[Console]::Out.WriteLine('[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/zeron/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]')
+[Console]::Out.WriteLine('[{"number":90,"title":"Host-resolved pull request","url":"https://github.com/acme/harness/pull/90","state":"OPEN","baseRefName":"main","headRefName":"feature/status","updatedAt":"2026-08-15T12:00:00Z","isCrossRepository":false,"headRepositoryOwner":{"login":"acme"}}]')
 "##;
         std::fs::write(&fake_gh, fake_gh_contents).expect("write fake gh");
         #[cfg(unix)]
@@ -1131,7 +1131,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:contributor/zeron.git",
+                "git@github.com:contributor/harness.git",
             ],
         );
         run_git(
@@ -1140,7 +1140,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
                 "remote",
                 "add",
                 "upstream",
-                "https://github.com/acme/zeron.git",
+                "https://github.com/acme/harness.git",
             ],
         );
 
@@ -1153,7 +1153,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         assert_eq!(source.branch.remote_name.as_deref(), Some("origin"));
         assert_eq!(
             source.branch.remote_url.as_deref(),
-            Some("git@github.com:contributor/zeron.git")
+            Some("git@github.com:contributor/harness.git")
         );
         assert_eq!(source.branch.owner.as_deref(), Some("contributor"));
         assert_eq!(
@@ -1183,7 +1183,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
         );
         run_git(
             &checkout,
-            &["remote", "add", "origin", "git@github.com:acme/zeron.git"],
+            &["remote", "add", "origin", "git@github.com:acme/harness.git"],
         );
         // A repository-controlled transport command: any Git subcommand that
         // touches the remote (such as the former `ls-remote` default-branch
@@ -1462,7 +1462,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             [
                 "repo",
                 "view",
-                "github.com/acme/zeron",
+                "github.com/acme/harness",
                 "--json",
                 "defaultBranchRef"
             ]
@@ -1517,7 +1517,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             command_success("feature/status\n"),
             command_success("fork/published-status\n"),
             command_success("fork\n"),
-            command_success("git@github.com:contributor/zeron.git\n"),
+            command_success("git@github.com:contributor/harness.git\n"),
             command_success("fork/main\n"),
         ]);
         let inspector = GitCheckoutInspector::new(runner.clone());
@@ -1595,12 +1595,12 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             "local-name",
             Some("fork/published-name"),
             Some("fork"),
-            Some("git@github.com:contributor/zeron.git"),
+            Some("git@github.com:contributor/harness.git"),
         );
 
         assert_eq!(context.host.as_deref(), Some("github.com"));
         assert_eq!(context.owner.as_deref(), Some("contributor"));
-        assert_eq!(context.repository.as_deref(), Some("zeron"));
+        assert_eq!(context.repository.as_deref(), Some("harness"));
         assert_eq!(context.head_branch, "published-name");
         assert_eq!(
             context.head_selectors,
@@ -1614,7 +1614,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             "feature/local",
             None,
             Some("origin"),
-            Some("https://github.com/acme/zeron.git"),
+            Some("https://github.com/acme/harness.git"),
         );
 
         assert_eq!(context.head_branch, "feature/local");
@@ -1630,7 +1630,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             "feature/shared",
             Some("refs/remotes/origin/feature/shared"),
             Some("origin"),
-            Some("https://github.com/acme/zeron"),
+            Some("https://github.com/acme/harness"),
         );
 
         assert_eq!(context.remote_name.as_deref(), Some("origin"));

@@ -1,12 +1,12 @@
 //! Repos — this device's git repositories, branches, worktrees, and the folder
-//! browser (feature-inventory §3.5; port of zeron's `repos.ts` + `folder-lister.ts`).
+//! browser (feature-inventory §3.5; port of harness's `repos.ts` + `folder-lister.ts`).
 //!
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
 //! created under `~/.harness/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `harness/<name>` branch. `HARNESS_WORKTREES_DIR` / `ZERON_WORKTREES_DIR`
+//! matching `harness/<name>` branch. `HARNESS_WORKTREES_DIR`
 //! override the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
@@ -54,7 +54,7 @@ const ADJECTIVES: &[&str] = &[
     "sharp", "gentle", "vivid", "amber", "cobalt",
 ];
 const NOUNS: &[&str] = &[
-    "otter", "harbor", "falcon", "cedar", "meadow", "zeron", "delta", "ember", "lynx", "maple",
+    "otter", "harbor", "falcon", "cedar", "meadow", "harness", "delta", "ember", "lynx", "maple",
     "onyx", "quartz", "raven", "summit", "willow", "aspen",
 ];
 
@@ -84,13 +84,13 @@ pub(crate) fn home_dir() -> PathBuf {
 
 /// Where new worktrees live. Deliberately NOT under the backend data dir —
 /// worktrees are user-facing working checkouts. `HARNESS_WORKTREES_DIR` /
-/// `ZERON_WORKTREES_DIR` override (test isolation); empty reads as unset.
+/// `HARNESS_WORKTREES_DIR` override (test isolation); empty reads as unset.
 fn default_worktrees_root() -> PathBuf {
     std::env::var_os("HARNESS_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("ZERON_WORKTREES_DIR")
+            std::env::var_os("HARNESS_WORKTREES_DIR")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
         })
@@ -140,7 +140,7 @@ impl Repos {
     }
 
     /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
-    /// comes from `$ZERON_WORKTREES_DIR` or `~/.zeron/worktrees`.
+    /// comes from `$HARNESS_WORKTREES_DIR` or `~/.harness/worktrees`.
     pub fn new(data_dir: &Path, device_id: &str) -> Self {
         Self::with_worktrees_root(data_dir, device_id, default_worktrees_root())
     }
@@ -1066,7 +1066,7 @@ impl Repos {
     // ── worktrees ───────────────────────────────────────────────────────────
 
     /// `git worktree add` an isolated checkout under
-    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `zeron/<name>`
+    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `harness/<name>`
     /// branch off `branch`.
     pub async fn create_worktree(
         &self,
@@ -1144,10 +1144,10 @@ impl Repos {
         .is_ok()
     }
 
-    /// Rename a zeron-created worktree branch after its chat's generated title
-    /// (port of zeron's `renameWorktreeBranch`). Guards:
+    /// Rename a harness-created worktree branch after its chat's generated title
+    /// (port of harness's `renameWorktreeBranch`). Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
-    ///   on `expected_branch` AND that branch is the original `zeron/<folderName>`;
+    ///   on `expected_branch` AND that branch is the original `harness/<folderName>`;
     /// - a title-slug collision gets a stable 6-hex suffix (hash of the worktree
     ///   path); a collision on THAT too fails.
     ///
@@ -1193,7 +1193,7 @@ impl Repos {
     }
 
     /// Best-effort worktree removal (if it still exists), then prune stale refs.
-    /// Deletes the worktree's branch ONLY when zeron created it (`zeron/…`) — the
+    /// Deletes the worktree's branch ONLY when harness created it (`harness/…`) — the
     /// user may have checked out their own branch inside the worktree.
     pub async fn delete_worktree(
         &self,
@@ -1298,7 +1298,7 @@ impl Repos {
     /// The walk runs on a DETACHED OS thread (not the tokio blocking pool): a
     /// readdir wedged in the kernel can't be cancelled, and a poisoned blocking
     /// pool — or a runtime shutdown waiting on it — must never be possible. On
-    /// timeout the thread is simply abandoned (the zeron backend's disposable
+    /// timeout the thread is simply abandoned (the harness backend's disposable
     /// worker, minus the terminate()).
     #[doc(hidden)]
     pub async fn list_folders_with(
@@ -1983,11 +1983,11 @@ fn rank_file_matches(
 }
 
 /// Turn a generated chat title into the semantic portion of a Harness branch
-/// (port of zeron's `worktreeBranchFromTitle`). Harness NFKD-normalizes accented
+/// (port of harness's `worktreeBranchFromTitle`). Harness NFKD-normalizes accented
 /// letters first; native keeps it ASCII-only (generated titles are Title Case
 /// English), so non-ASCII characters collapse into the `-` separator.
 pub const OWN_BRANCH_PREFIX: &str = "harness/";
-const LEGACY_BRANCH_PREFIX: &str = "zeron/";
+const LEGACY_BRANCH_PREFIX: &str = "harness/";
 
 pub fn is_own_branch(branch: &str) -> bool {
     branch.starts_with(OWN_BRANCH_PREFIX) || branch.starts_with(LEGACY_BRANCH_PREFIX)

@@ -1,12 +1,14 @@
-//! "Sign in with Codegraff" in the account menu. The engine owns the OAuth
-//! flow (`harness_engine::codegraff_auth`); this side starts it, opens the
-//! browser, and polls the status until the loopback callback lands.
+//! "Sign in with Codegraff" in the account menu. The engine owns the device
+//! flow (`harness_engine::codegraff_auth`, shared with `graff login`); this
+//! side starts it, opens the approval page, and polls the status until the
+//! key lands.
 
 use super::*;
 
-/// How often, and for how long, a pending browser sign-in is polled.
+/// How often, and for how long, a pending browser sign-in is polled (the
+/// gateway's device codes live ten minutes).
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(1500);
-const POLL_FOR: std::time::Duration = std::time::Duration::from_secs(300);
+const POLL_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]

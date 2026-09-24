@@ -288,7 +288,7 @@ fn parse_started_block(cur: &mut Cursor) -> Vec<Block> {
             vec![parse_table(cur, align)]
         }
         Tag::HtmlBlock => {
-            // Render raw HTML blocks as plain text (zeron's markdown does the same).
+            // Render raw HTML blocks as plain text (harness's markdown does the same).
             let mut text = String::new();
             loop {
                 match cur.next_event() {
@@ -1071,10 +1071,10 @@ mod tests {
     #[test]
     fn bare_urls_autolink() {
         assert_eq!(
-            only_link("PR is updated: https://github.com/zeronsh/comet/pull/31\n"),
+            only_link("PR is updated: https://github.com/example/project/pull/31\n"),
             Some((
-                "https://github.com/zeronsh/comet/pull/31".into(),
-                "https://github.com/zeronsh/comet/pull/31".into()
+                "https://github.com/example/project/pull/31".into(),
+                "https://github.com/example/project/pull/31".into()
             ))
         );
         assert_eq!(

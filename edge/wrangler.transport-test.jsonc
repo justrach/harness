@@ -1,7 +1,7 @@
 // Isolated development-auth test deployment. No production routes.
 // Delete this worker and its bucket after running the transport matrix.
 {
-  "name": "zeron-transport-385-20260915",
+  "name": "harness-transport-385-20260915",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "workers_dev": true,
@@ -56,11 +56,11 @@
   "r2_buckets": [
     {
       "binding": "BLOBS",
-      "bucket_name": "zeron-transport-385-20260915"
+      "bucket_name": "harness-transport-385-20260915"
     },
     {
       "binding": "RELEASES",
-      "bucket_name": "zeron-transport-385-20260915"
+      "bucket_name": "harness-transport-385-20260915"
     }
   ],
   "vars": {

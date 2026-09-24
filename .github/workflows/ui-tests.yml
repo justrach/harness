@@ -134,7 +134,7 @@ jobs:
       - name: Project discovery, stable URLs and HMR in native WebKit
         timeout-minutes: 3
         env:
-          ZERON_PREVIEW_AUTO_OPEN: 1
+          HARNESS_PREVIEW_AUTO_OPEN: 1
         run: |
           VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
@@ -171,10 +171,10 @@ jobs:
       - name: Run iOS unit tests
         working-directory: apps/ios
         run: |
-          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+          xcodebuild -project Harness.xcodeproj -scheme Harness \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
-            -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
+            -only-testing:HarnessTests CODE_SIGNING_ALLOWED=NO test
       - name: Upload iOS test results
         if: always()
         uses: actions/upload-artifact@v4

@@ -51,7 +51,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::remove_var("HERMES_EXECUTABLE");
         std::env::remove_var("PI_ACP_EXECUTABLE");
         std::env::remove_var("CLAUDE_CODE_EXECUTABLE");
-        std::env::remove_var("ZERON_NO_LOGIN_SHELL");
+        std::env::remove_var("HARNESS_NO_LOGIN_SHELL");
     }
 
     let snapshot = harness_adapters::shell_env::login_shell_path().expect("snapshot captured");

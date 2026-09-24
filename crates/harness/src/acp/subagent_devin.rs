@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use serde_json::Value;
 use harness_proto::{AgentEvent, DoneStatus};
+use serde_json::Value;
 
 use super::normalize::map_update;
 
@@ -205,8 +205,8 @@ fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use harness_proto::{AgentEvent, DoneStatus, ToolCall};
+    use serde_json::json;
 
     use super::DevinTracker;
 

@@ -47,10 +47,10 @@ The profiling feature and its benchmark dependencies are not enabled in normal
 application builds.
 
 The final completed native replay image is pixel-identical to the baseline.
-With `ZERON_VERIFY_CACHE=1`, the example also compares the reused scene with a
+With `HARNESS_VERIFY_CACHE=1`, the example also compares the reused scene with a
 forced fresh render after settling, hiding/restoring the sidebar and scrolling;
 all four comparisons are pixel-identical. With the bundled 80-section fixture,
-`ZERON_VERIFY_INTERACTIONS=1` also drives a text-selection drag, composer typing,
+`HARNESS_VERIFY_INTERACTIONS=1` also drives a text-selection drag, composer typing,
 and model-menu open/outside-click dismissal. Selection, typed text and dismissal match a fresh
 render byte for byte. The model menu has no engine catalog in this isolated
 example, so its loading bars keep animating: the comparison excludes the menu
@@ -137,26 +137,26 @@ that window foreground and the display awake for the entire run. Replay uses
 an isolated profile and the bundled sanitized fixture; it makes no model API call.
 
 ```sh
-cargo build --release --locked -p zeron
-ZERON_FRAME_STATS=0 ZERON_PROFILE_IDLE_MS=10000 \
+cargo build --release --locked -p harness
+HARNESS_FRAME_STATS=0 HARNESS_PROFILE_IDLE_MS=10000 \
   CLAUDE_CODE_EXECUTABLE="$PWD/scripts/replay-claude.py" \
-  ZERON_REPLAY_JOURNAL="$PWD/scripts/fixtures/resource-stream.jsonl" \
-  node scripts/resource-profile.mjs target/release/zeron /tmp/zeron-native claude-code
+  HARNESS_REPLAY_JOURNAL="$PWD/scripts/fixtures/resource-stream.jsonl" \
+  node scripts/resource-profile.mjs target/release/harness /tmp/harness-native claude-code
 
 # UI-only offscreen replay of those verified protocol frames:
 cargo build --release --locked -p harness-ui --features resource-profile \
   --example macos-resource-profile
-ZERON_VERIFY_CACHE=1 ZERON_VERIFY_INTERACTIONS=1 ZERON_FRAME_STATS=0 \
+HARNESS_VERIFY_CACHE=1 HARNESS_VERIFY_INTERACTIONS=1 HARNESS_FRAME_STATS=0 \
   target/release/examples/macos-resource-profile \
-  /tmp/zeron-native/frames.json /tmp/zeron-native-ui
+  /tmp/harness-native/frames.json /tmp/harness-native-ui
 
 # Larger/faster reply: use the foreground command above with these added:
-# ZERON_REPLAY_REPEAT=4 ZERON_REPLAY_DELAY_MS=10 ZERON_PROFILE_IDLE_MS=30000
+# HARNESS_REPLAY_REPEAT=4 HARNESS_REPLAY_DELAY_MS=10 HARNESS_PROFILE_IDLE_MS=30000
 # and a fresh output directory.
 
 # Native counter usable with either process (CPU uses 100% per core):
-xcrun clang -O2 scripts/macos-resource-stat.c -o /tmp/zeron-stat
-/tmp/zeron-stat PID
+xcrun clang -O2 scripts/macos-resource-stat.c -o /tmp/harness-stat
+/tmp/harness-stat PID
 ```
 
 Compare fresh release builds in alternating order, with the same trace,

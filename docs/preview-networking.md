@@ -20,7 +20,7 @@ wins. Unrelated listeners and non-HTTP services are excluded. HTTP probes are
 bounded and run every two seconds, using HEAD and accepting valid HTTP status
 responses (including authentication and application errors).
 
-Zeron terminal/task/agent descendants are marked as Zeron-owned. Framework
+Harness terminal/task/agent descendants are marked as Harness-owned. Framework
 commands identify Vite, Next.js, Astro, Miniflare and Node servers; otherwise the
 list uses a generic HTTP label. Before a local backend connection, the daemon
 rechecks the listener's process identity and cwd to reject stale port reuse.
@@ -112,4 +112,4 @@ attachments, not the repository.
 The opt-in `coordinator` integration test connects two authenticated clients to a
 local Worker, advertises a service, pairs over SDP/ICE, then transfers a 4 MiB
 HTTP response through the remote hostname. Run it with
-`ZERON_PREVIEW_TEST_EDGE=http://127.0.0.1:27641 cargo test -p harness-preview --test coordinator -- --ignored`.
+`HARNESS_PREVIEW_TEST_EDGE=http://127.0.0.1:27641 cargo test -p harness-preview --test coordinator -- --ignored`.

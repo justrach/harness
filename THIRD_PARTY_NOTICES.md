@@ -8,14 +8,16 @@ and warranty notice, is retained verbatim in
 [`third_party/licenses/Zeron-MIT.txt`](third_party/licenses/Zeron-MIT.txt).
 The Harness license does not erase the MIT rights in that upstream material.
 
-CodeGraff visual elements used by the Harness app are derived from
-[justrach/codegraff](https://github.com/justrach/codegraff). CodeGraff is
-Copyright (C) 2026 Rach Pradhan and Yu Xi Lim and is distributed under its
-modified AGPLv3 terms; the complete notice is retained in
+The CodeGraff emblem and workshop/context illustrations reproduced in
+`docs/brand/` come from [justrach/codegraff](https://github.com/justrach/codegraff)
+(`gui/public/codegraff-emblem.png`, `docs/images/readme-rats.png`, and
+`docs/images/readme-context-workshop.png`). CodeGraff is Copyright (C) 2026
+Rach Pradhan and Yu Xi Lim and is distributed under its modified AGPLv3 terms;
+the complete notice is retained in
 [`third_party/licenses/CodeGraff-LICENSE.txt`](third_party/licenses/CodeGraff-LICENSE.txt).
-These elements are credited to CodeGraff and are not claimed as original
-Harness contributions. The Harness app icon was created for this project with
-its visual language aligned to the CodeGraff emblem.
+These images are credited to CodeGraff and are not claimed as original Harness
+contributions. The Harness app icon was created for this project with its
+visual language aligned to the CodeGraff emblem.
 
 Harness bundles the following syntax-highlighting components. Unless noted otherwise, their parsers and queries are consumed from the pinned Rust crates listed in `Cargo.lock`. The Kotlin highlight query is maintained as Harness source code and is not attributed to the grammar crate.
 

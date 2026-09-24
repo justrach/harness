@@ -32,6 +32,9 @@ impl Platform {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Method {
     Archive,
+    /// codegraff's checksummed GitHub release into `~/.harness/bin/graff`
+    /// (see `graff_bundle`); rerunning it is the in-app graff update.
+    GraffRelease,
     Shell(&'static str, &'static str),
     Npm(&'static str, bool),
     PowerShell(&'static str),
@@ -53,8 +56,8 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     let windows = platform == Platform::Windows;
     match id {
         Mock => vec![],
-        // graff ships through codegraff's own installer; no verified one-liner.
-        Graff => vec![],
+        Graff if windows => vec![],
+        Graff => vec![GraffRelease],
         Antigravity => vec![Archive],
         ClaudeCode if windows => vec![PowerShell("irm https://claude.ai/install.ps1 | iex")],
         ClaudeCode => vec![Shell(
@@ -125,6 +128,7 @@ fn available(
 ) -> bool {
     match method {
         Method::Archive => archive,
+        Method::GraffRelease => has("tar"),
         Method::Shell(_, shell) => has("sh") && has("curl") && has(shell),
         Method::Npm(..) => has("npm") && (platform == Platform::Windows || has("sh")),
         Method::PowerShell(_) => has("powershell"),
@@ -174,9 +178,9 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Pi => ("pi", "the npm global bin"),
         Grok => ("grok", "~/.grok/bin or the npm global bin"),
         Hermes => ("hermes", "~/.local/bin or ~/.hermes/bin"),
-        Graff => ("graff", "~/.local/bin"),
+        Graff => ("graff", "~/.harness/bin"),
         Devin => ("devin", "~/.local/bin"),
-        Antigravity => ("agy_acp_server", "~/.zeron/adapters"),
+        Antigravity => ("agy_acp_server", "~/.harness/adapters"),
         Mock => ("mock", "PATH"),
     }
 }
@@ -220,7 +224,7 @@ fn post_install(id: HarnessId) -> Result<(), HarnessError> {
 fn configure(command: &mut Command) {
     crate::acp::child::configure(command);
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("ZERON_") {
+        if key.to_string_lossy().starts_with("HARNESS_") {
             command.env_remove(key);
         }
     }
@@ -284,7 +288,9 @@ fn command(method: Method) -> Result<Command, HarnessError> {
             }
         ))?,
         Method::Brew => shell_command("brew install --cask devin-cli")?,
-        Method::Archive => unreachable!("archives have a separate executor"),
+        Method::Archive | Method::GraffRelease => {
+            unreachable!("archives and graff releases have separate executors")
+        }
     };
     configure(&mut command);
     Ok(command)
@@ -304,7 +310,20 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
             "No supported installer or required tools available on this device".into(),
         )
     })?;
-    let result = if method == Method::Archive {
+    let result = if method == Method::GraffRelease {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(HarnessError::Install("installation cancelled".into())),
+            result = tokio::time::timeout(DEADLINE, crate::graff_bundle::update_managed()) => match result {
+                Ok(Ok(outcome)) => {
+                    tracing::info!(?outcome, "graff release installed");
+                    Ok(())
+                }
+                Ok(Err(err)) => Err(HarnessError::Install(format!("{err:#}"))),
+                Err(_) => Err(HarnessError::Install("installation timed out after 15 minutes".into())),
+            },
+        }
+    } else if method == Method::Archive {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(HarnessError::Install("installation cancelled".into())),
@@ -432,6 +451,10 @@ mod tests {
             }
         }
         assert_eq!(methods(HarnessId::Devin, Platform::Mac)[0], Method::Brew);
+        assert_eq!(methods(HarnessId::Graff, Platform::Mac), [Method::GraffRelease]);
+        assert_eq!(methods(HarnessId::Graff, Platform::Unix), [Method::GraffRelease]);
+        assert!(methods(HarnessId::Graff, Platform::Windows).is_empty());
+        assert!(!available(Method::GraffRelease, Platform::Mac, &|p| p != "tar", true));
         assert!(matches!(
             methods(HarnessId::Codex, Platform::Unix)[0],
             Method::Shell(_, "sh")

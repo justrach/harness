@@ -62,13 +62,23 @@ fn auto_enabled(id: HarnessId) -> bool {
     id != HarnessId::Mock
 }
 
+/// The agents this build offers out of the box: found ⇒ on unless the user
+/// switched them off. Every other agent is OFF by default — found or not —
+/// until the user turns it on in Settings → Agents (recorded as an opt-in).
+pub fn default_on(id: HarnessId) -> bool {
+    matches!(
+        id,
+        HarnessId::Graff | HarnessId::Codex | HarnessId::ClaudeCode
+    )
+}
+
 /// A descriptor's effective enabled flag. `None` — a catalog from an engine
-/// predating the setting — falls back to detection, the same rule new devices
-/// start from (see [`HarnessRegistry::enabled_set`]).
+/// predating the setting — falls back to the rule a fresh device starts from
+/// (installed default-on agents only; see [`HarnessRegistry::enabled_set`]).
 pub fn descriptor_enabled(descriptor: &HarnessDescriptor) -> bool {
     descriptor
         .enabled
-        .unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
+        .unwrap_or_else(|| descriptor.installed && default_on(descriptor.id))
 }
 
 fn describe(harness: &dyn Harness) -> HarnessDescriptor {
@@ -88,10 +98,14 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct HarnessPrefsFile {
-    /// The user's explicit opt-OUTS. Enablement otherwise follows detection,
-    /// so the file only records "no" — an agent installed later turns itself
-    /// on without a trip to Settings.
+    /// The user's explicit opt-OUTS. A found [`default_on`] agent is otherwise
+    /// on, so an install of one turns itself on without a trip to Settings.
     disabled: Vec<HarnessId>,
+    /// The user's explicit opt-INS for agents that are off by default (see
+    /// [`default_on`]). Still gated on detection: an opted-in agent whose CLI
+    /// goes missing drops out until it is found again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
@@ -178,33 +192,55 @@ impl HarnessRegistry {
         self.migrate_legacy_prefs();
     }
 
-    /// Fold a legacy allow-list into the opt-out shape: a registered harness
-    /// missing from it was a deliberate "no", so it stays off. Rewrites the
-    /// file once, which is what lets later installs auto-enable.
+    /// Fold a legacy allow-list into the opt-out/opt-in shape: a registered
+    /// default-on harness missing from it was a deliberate "no", so it stays
+    /// off; an off-by-default harness listed in it was a deliberate "yes", so
+    /// it becomes an opt-in. Rewrites the file once, which is what lets later
+    /// installs of default-on agents auto-enable.
     fn migrate_legacy_prefs(&self) {
         let legacy = { self.prefs().enabled.take() };
         let Some(legacy) = legacy else { return };
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
         let disabled: Vec<HarnessId> = registered
             .into_iter()
-            .filter(|id| auto_enabled(*id) && !legacy.contains(id))
+            .filter(|id| default_on(*id) && !legacy.contains(id))
             .collect();
-        self.prefs().disabled = disabled;
+        let mut opted_in: Vec<HarnessId> = Vec::new();
+        for id in legacy {
+            if auto_enabled(id) && !default_on(id) && !opted_in.contains(&id) {
+                opted_in.push(id);
+            }
+        }
+        {
+            let mut prefs = self.prefs();
+            prefs.disabled = disabled;
+            prefs.opted_in = opted_in;
+        }
         self.persist_prefs();
     }
 
-    /// What this device offers: every harness whose CLI is FOUND, minus the
-    /// user's explicit opt-outs. Enablement follows detection, so installing
-    /// an agent is all it takes for it to appear in the composer.
+    /// What this device offers: every harness whose CLI is FOUND and that is
+    /// either [`default_on`] or opted in by the user, minus the user's
+    /// explicit opt-outs. Installing a default-on agent is all it takes for
+    /// it to appear in the composer; any other agent also needs a Settings
+    /// toggle.
     pub fn enabled_set(&self) -> Vec<HarnessId> {
         // Both guards drop before the installed probes run: `descriptors()`
         // takes `slots` then `order`, so holding `order` across a probe (which
         // takes `slots`) would invert the lock order.
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
-        let disabled = self.prefs().disabled.clone();
+        let (disabled, opted_in) = {
+            let prefs = self.prefs();
+            (prefs.disabled.clone(), prefs.opted_in.clone())
+        };
         registered
             .into_iter()
-            .filter(|id| auto_enabled(*id) && !disabled.contains(id) && self.installed_for(*id))
+            .filter(|id| {
+                auto_enabled(*id)
+                    && !disabled.contains(id)
+                    && (default_on(*id) || opted_in.contains(id))
+                    && self.installed_for(*id)
+            })
             .collect()
     }
 
@@ -219,11 +255,12 @@ impl HarnessRegistry {
 
     /// Flip one harness's enablement and persist. Refuses unknown harnesses,
     /// enabling one whose CLI is missing (the settings gate, enforced where
-    /// the state lives), and disabling the last enabled harness — under
-    /// detection-based enablement everything enabled is runnable, so the
-    /// last one standing is always worth protecting (the composer needs
-    /// something to run). A harness whose CLI is missing is never enabled
-    /// in the first place, so turning it off is a clean no-op.
+    /// the state lives), and disabling the last enabled harness — everything
+    /// enabled is installed and so runnable, so the last one standing is
+    /// always worth protecting (the composer needs something to run). A
+    /// harness whose CLI is missing is never enabled in the first place, so
+    /// turning it off is a clean no-op. When no default-on agent is found the
+    /// set starts empty and the user enables an installed one from Settings.
     pub fn set_enabled(&self, id: HarnessId, on: bool) -> Result<(), String> {
         if !self.slots().contains_key(&id) {
             return Err(format!("unknown harness {id:?}"));
@@ -239,13 +276,21 @@ impl HarnessRegistry {
             (true, false) => {
                 let mut prefs = self.prefs();
                 prefs.disabled.retain(|h| *h != id);
+                if !default_on(id) && !prefs.opted_in.contains(&id) {
+                    prefs.opted_in.push(id);
+                }
             }
             (false, true) => {
                 if enabled.len() == 1 {
                     return Err("cannot disable the last enabled harness".into());
                 }
                 let mut prefs = self.prefs();
-                prefs.disabled.push(id);
+                prefs.opted_in.retain(|h| *h != id);
+                // Off-by-default agents need no opt-out once the opt-in is
+                // gone; a default-on one records the "no".
+                if default_on(id) && !prefs.disabled.contains(&id) {
+                    prefs.disabled.push(id);
+                }
             }
             _ => return Ok(()),
         }
@@ -815,13 +860,17 @@ mod tests {
         assert!(claude.installed);
         assert!(!claude.can_install);
         assert_eq!(claude.enabled, None);
-        // Unknown enablement follows detection: a found CLI is offered...
+        // Unknown enablement follows the fresh-device rule: a found
+        // default-on CLI is offered...
         assert!(descriptor_enabled(&claude));
+        // ...a found off-by-default one is not...
+        assert!(parse("grok").installed);
+        assert!(!descriptor_enabled(&parse("grok")));
         // ...and one this device never found is not.
         let missing = HarnessDescriptor {
             installed: false,
             can_install: false,
-            ..parse("grok")
+            ..parse("codex")
         };
         assert!(!descriptor_enabled(&missing));
     }
@@ -858,8 +907,8 @@ mod tests {
         test_slot(&registry, HarnessId::Grok, true);
         test_slot(&registry, HarnessId::Hermes, false);
 
-        // Enablement follows detection: the three found CLIs are on with no
-        // prefs file at all, and the missing one is off.
+        // With no prefs file at all, the found default-on CLIs are on; the
+        // found off-by-default one and the missing one are off.
         let flags: Vec<(HarnessId, Option<bool>)> = registry
             .descriptors()
             .into_iter()
@@ -870,7 +919,7 @@ mod tests {
             vec![
                 (HarnessId::ClaudeCode, Some(true)),
                 (HarnessId::Codex, Some(true)),
-                (HarnessId::Grok, Some(true)),
+                (HarnessId::Grok, Some(false)),
                 (HarnessId::Hermes, Some(false)),
             ]
         );
@@ -879,7 +928,8 @@ mod tests {
         assert!(registry.set_enabled(HarnessId::Hermes, true).is_err());
         assert!(registry.set_enabled(HarnessId::Pi, true).is_err());
         assert!(registry.set_enabled(HarnessId::Mock, true).is_err());
-        // Installed CLIs toggle both ways; no-op flips are fine.
+        // Installed CLIs toggle both ways (Grok via an opt-in); no-op flips
+        // are fine.
         registry.set_enabled(HarnessId::Grok, true).unwrap();
         registry.set_enabled(HarnessId::Grok, true).unwrap();
         registry.set_enabled(HarnessId::Codex, false).unwrap();
@@ -897,58 +947,146 @@ mod tests {
         assert_eq!(reloaded.enabled_set(), vec![HarnessId::Grok]);
     }
 
-    /// The point of following detection: an agent installed after the user has
-    /// already edited Settings turns itself on, while the ones they switched
-    /// off stay off. An allow-list can't express that — it can't tell "the
-    /// user said no" from "this wasn't installed yet".
+    /// A DEFAULT-ON agent installed after the user has already edited
+    /// Settings turns itself on, while the ones they switched off stay off —
+    /// and an off-by-default agent that appears stays off until opted in.
     #[test]
-    fn newly_found_harnesses_enable_themselves_without_reviving_opt_outs() {
+    fn newly_found_default_on_harnesses_enable_themselves_without_reviving_opt_outs() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         test_slot(&registry, HarnessId::ClaudeCode, true);
         test_slot(&registry, HarnessId::Codex, true);
-        // Not installed yet — the probe flips when the user installs the CLI.
+        // Not installed yet — the probes flip when the user installs the CLIs.
         let found = Arc::new(AtomicBool::new(false));
-        let probe = Arc::clone(&found);
-        registry.register_lazy(
-            HarnessDescriptor {
-                id: HarnessId::Grok,
-                name: "Grok".into(),
-                supports_steering: true,
-                steering_mode: SteeringMode::TurnBoundary,
-                reasoning_levels: vec![],
-                installed: true,
-                can_install: false,
-                enabled: None,
-            },
-            Box::new(move || probe.load(Ordering::SeqCst)),
-            Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
-        );
+        for (id, name) in [(HarnessId::Graff, "graff"), (HarnessId::Grok, "Grok")] {
+            let probe = Arc::clone(&found);
+            registry.register_lazy(
+                HarnessDescriptor {
+                    id,
+                    name: name.into(),
+                    supports_steering: true,
+                    steering_mode: SteeringMode::TurnBoundary,
+                    reasoning_levels: vec![],
+                    installed: true,
+                    can_install: false,
+                    enabled: None,
+                },
+                Box::new(move || probe.load(Ordering::SeqCst)),
+                Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
+            );
+        }
         registry.set_enabled(HarnessId::Codex, false).unwrap();
         assert_eq!(registry.enabled_set(), vec![HarnessId::ClaudeCode]);
 
-        // The CLI appears mid-session; no restart, no visit to Settings.
+        // The CLIs appear mid-session; no restart, no visit to Settings.
+        // graff is default-on and joins; Grok is off by default and doesn't.
         found.store(true, Ordering::SeqCst);
         assert_eq!(
             registry.enabled_set(),
-            vec![HarnessId::ClaudeCode, HarnessId::Grok]
+            vec![HarnessId::ClaudeCode, HarnessId::Graff]
         );
         // The opt-out survives the reload that picks the new agent up.
         let reloaded = HarnessRegistry::new();
         reloaded.load_prefs(dir.path());
         test_slot(&reloaded, HarnessId::ClaudeCode, true);
         test_slot(&reloaded, HarnessId::Codex, true);
+        test_slot(&reloaded, HarnessId::Graff, true);
         test_slot(&reloaded, HarnessId::Grok, true);
         assert_eq!(
             reloaded.enabled_set(),
-            vec![HarnessId::ClaudeCode, HarnessId::Grok]
+            vec![HarnessId::ClaudeCode, HarnessId::Graff]
         );
     }
 
+    /// Only Graff, Codex and Claude Code are on out of the box; every other
+    /// found agent needs an explicit opt-in, which persists — and turning it
+    /// back off drops the opt-in instead of accumulating an opt-out.
     #[test]
-    fn antigravity_detection_ignores_legacy_opt_in_and_preserves_opt_out() {
+    fn default_on_agents_enable_and_others_need_an_opt_in() {
+        let all = [
+            HarnessId::Graff,
+            HarnessId::ClaudeCode,
+            HarnessId::Codex,
+            HarnessId::Cursor,
+            HarnessId::Devin,
+            HarnessId::Grok,
+            HarnessId::Hermes,
+            HarnessId::Pi,
+            HarnessId::Opencode,
+            HarnessId::Antigravity,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        for id in all {
+            test_slot(&registry, id, true);
+        }
+        let defaults = vec![HarnessId::Graff, HarnessId::ClaudeCode, HarnessId::Codex];
+        assert_eq!(registry.enabled_set(), defaults);
+        for id in all {
+            assert_eq!(default_on(id), defaults.contains(&id), "{id:?}");
+        }
+        assert!(!default_on(HarnessId::Mock));
+
+        registry.set_enabled(HarnessId::Cursor, true).unwrap();
+        registry.set_enabled(HarnessId::Pi, true).unwrap();
+        registry.set_enabled(HarnessId::Codex, false).unwrap();
+        let expected = vec![
+            HarnessId::Graff,
+            HarnessId::ClaudeCode,
+            HarnessId::Cursor,
+            HarnessId::Pi,
+        ];
+        assert_eq!(registry.enabled_set(), expected);
+
+        // Round trip: the file records exactly the opt-ins and opt-outs.
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        let file: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(file.opted_in, vec![HarnessId::Cursor, HarnessId::Pi]);
+        assert_eq!(file.disabled, vec![HarnessId::Codex]);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        for id in all {
+            test_slot(&reloaded, id, true);
+        }
+        assert_eq!(reloaded.enabled_set(), expected);
+
+        // Opting back out removes the opt-in; no opt-out is recorded for an
+        // agent that is off by default anyway.
+        reloaded.set_enabled(HarnessId::Pi, false).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
+        let file: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(file.opted_in, vec![HarnessId::Cursor]);
+        assert_eq!(file.disabled, vec![HarnessId::Codex]);
+
+        // An empty opt-in list is omitted from the file entirely.
+        let empty = serde_json::to_string(&HarnessPrefsFile::default()).unwrap();
+        assert!(!empty.contains("optedIn"), "{empty}");
+    }
+
+    /// No default-on agent is installed: nothing starts enabled, but an
+    /// installed off-by-default agent can still be turned on from Settings,
+    /// and then it is protected as the last one standing.
+    #[test]
+    fn without_default_agents_settings_can_still_enable_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        test_slot(&registry, HarnessId::Graff, false);
+        test_slot(&registry, HarnessId::ClaudeCode, false);
+        test_slot(&registry, HarnessId::Codex, false);
+        test_slot(&registry, HarnessId::Opencode, true);
+        assert_eq!(registry.enabled_set(), Vec::<HarnessId>::new());
+
+        registry.set_enabled(HarnessId::Opencode, true).unwrap();
+        assert_eq!(registry.enabled_set(), vec![HarnessId::Opencode]);
+        assert!(registry.set_enabled(HarnessId::Opencode, false).is_err());
+    }
+
+    #[test]
+    fn antigravity_opt_out_wins_over_a_stale_opt_in() {
         let dir = tempfile::tempdir().unwrap();
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
@@ -977,7 +1115,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn antigravity_detection_subprocess() {
-        let Ok(expected) = std::env::var("ZERON_TEST_AGY_INSTALLED") else {
+        let Ok(expected) = std::env::var("HARNESS_TEST_AGY_INSTALLED") else {
             return;
         };
         let registry = HarnessRegistry::new();
@@ -986,6 +1124,12 @@ mod tests {
         registry.register(Arc::new(harness_adapters::AcpHarness::antigravity()));
         let expected = expected == "true";
         assert_eq!(registry.descriptors()[0].installed, expected);
+        // Off by default either way; only an installed server can opt in.
+        assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
+        assert_eq!(
+            registry.set_enabled(HarnessId::Antigravity, true).is_ok(),
+            expected
+        );
         assert_eq!(
             registry.enabled_set().contains(&HarnessId::Antigravity),
             expected
@@ -1018,8 +1162,8 @@ mod tests {
                 .env("HOME", home.path())
                 .env("PATH", &bin)
                 .env_remove("ANTIGRAVITY_ACP_EXECUTABLE")
-                .env("ZERON_NO_LOGIN_SHELL", "1")
-                .env("ZERON_TEST_AGY_INSTALLED", installed.to_string())
+                .env("HARNESS_NO_LOGIN_SHELL", "1")
+                .env("HARNESS_TEST_AGY_INSTALLED", installed.to_string())
                 .output()
                 .unwrap();
             assert!(
@@ -1047,38 +1191,48 @@ mod tests {
         assert_eq!(mock.enabled, Some(false));
     }
 
-    /// A prefs file from the fixed-default era is an allow-list: everything
-    /// registered and absent from it was a deliberate "no", so it converts to
-    /// opt-outs rather than silently re-enabling on the next launch.
+    /// A prefs file from the fixed-default era is an allow-list: a registered
+    /// default-on agent absent from it was a deliberate "no", so it converts
+    /// to an opt-out rather than silently re-enabling on the next launch; an
+    /// off-by-default agent listed in it was a deliberate "yes", so it
+    /// becomes an opt-in.
     #[test]
-    fn legacy_allow_list_migrates_to_opt_outs() {
+    fn legacy_allow_list_migrates_to_opt_outs_and_opt_ins() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("harness-prefs.json"),
-            r#"{ "enabled": ["claude-code"] }"#,
+            r#"{ "enabled": ["claude-code", "grok"] }"#,
         )
         .unwrap();
         let registry = HarnessRegistry::new();
         test_slot(&registry, HarnessId::ClaudeCode, true);
         test_slot(&registry, HarnessId::Codex, true);
         test_slot(&registry, HarnessId::Grok, true);
+        test_slot(&registry, HarnessId::Hermes, true);
         registry.load_prefs(dir.path());
-        assert_eq!(registry.enabled_set(), vec![HarnessId::ClaudeCode]);
+        assert_eq!(
+            registry.enabled_set(),
+            vec![HarnessId::ClaudeCode, HarnessId::Grok]
+        );
 
         // The rewritten file is the new shape, and the legacy key is gone.
         let text = std::fs::read_to_string(dir.path().join("harness-prefs.json")).unwrap();
-        assert!(!text.contains("enabled"), "{text}");
-        assert!(text.contains("codex") && text.contains("grok"), "{text}");
-        // An agent registered after the migration is new, not a past "no".
+        assert!(!text.contains("\"enabled\""), "{text}");
+        let file: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(file.disabled, vec![HarnessId::Codex]);
+        assert_eq!(file.opted_in, vec![HarnessId::Grok]);
+        // A default-on agent registered after the migration is new, not a
+        // past "no"; an off-by-default one still waits for an opt-in.
+        test_slot(&registry, HarnessId::Graff, true);
         test_slot(&registry, HarnessId::Cursor, true);
         assert_eq!(
             registry.enabled_set(),
-            vec![HarnessId::ClaudeCode, HarnessId::Cursor]
+            vec![HarnessId::ClaudeCode, HarnessId::Grok, HarnessId::Graff]
         );
     }
 
-    /// The fresh-machine shape (#128): no CLIs installed at all. Under
-    /// detection-based enablement nothing is enabled to begin with — no
+    /// The fresh-machine shape (#128): no CLIs installed at all. Enablement is
+    /// gated on detection, so nothing is enabled to begin with — no
     /// dimmed default toggles to dismiss — and switching an uninstalled
     /// harness "off" is a clean no-op, not an error.
     #[test]

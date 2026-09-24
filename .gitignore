@@ -11,3 +11,5 @@ node_modules
 build/
 edge/dist/
 .agents
+.graff/
+vendor/zui/Cargo.lock

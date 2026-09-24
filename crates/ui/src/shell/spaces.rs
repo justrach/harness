@@ -237,7 +237,7 @@ mod pinned_session_tests {
                     edge_url: "http://127.0.0.1:1".into(),
                     edge_token: None,
                     org_id: None,
-                    workos_client_id: None,
+                    codegraff_client_id: None,
                     default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,
@@ -1020,7 +1020,7 @@ mod pinned_session_tests {
                         edge_url: "http://127.0.0.1:1".into(),
                         edge_token: None,
                         org_id: None,
-                        workos_client_id: None,
+                        codegraff_client_id: None,
                         default_harness: harness_proto::HarnessId::Mock,
                     },
                     cx,
@@ -1140,7 +1140,7 @@ mod pinned_session_tests {
                         edge_url: "http://127.0.0.1:1".into(),
                         edge_token: None,
                         org_id: None,
-                        workos_client_id: None,
+                        codegraff_client_id: None,
                         default_harness: harness_proto::HarnessId::Mock,
                     },
                     cx,
@@ -5545,6 +5545,80 @@ impl Shell {
         cx.notify();
     }
 
+    /// `harness <dir>`: land in the project for that folder on this device,
+    /// creating it first when none exists. Waits (leaving the request
+    /// pending) until the engine, the local device id, and the first spaces
+    /// frame are all known, so the dedupe check sees every existing project.
+    pub(super) fn drive_pending_folder_open(&mut self, cx: &mut Context<Self>) {
+        let (engine, device_id, path) = {
+            let state = self.state.read(cx);
+            let (Some(path), Some(engine), Some(device_id), true) = (
+                state.pending_open_folder.clone(),
+                state.engine().cloned(),
+                state.local_device_id.clone(),
+                state.spaces_synced,
+            ) else {
+                return;
+            };
+            (engine, device_id, path)
+        };
+        self.state.update(cx, |s, _| s.pending_open_folder = None);
+        if let Some(existing) = self
+            .state
+            .read(cx)
+            .spaces
+            .iter()
+            .find(|s| s.device_id == device_id && s.path == path)
+            .map(|s| s.id.clone())
+        {
+            self.land_in_space(existing, cx);
+            return;
+        }
+        let space_id = uuid::Uuid::new_v4().to_string();
+        let git_detected = std::path::Path::new(&path).join(".git").exists();
+        let space = Space {
+            id: space_id.clone(),
+            device_id: device_id.clone(),
+            path: path.clone(),
+            name: None,
+            git_detected,
+            git_checked_at: None,
+            checkout_id: None,
+            created_at: Utc::now(),
+        };
+        self.state.update(cx, |s, cx| {
+            if !s.spaces.iter().any(|existing| existing.id == space.id) {
+                s.spaces.push(space);
+            }
+            cx.notify();
+        });
+        let params = serde_json::json!({
+            "op": "createSpace",
+            "spaceId": space_id,
+            "deviceId": device_id,
+            "path": path,
+            "gitDetected": git_detected,
+        });
+        cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |shell, cx| {
+                match result {
+                    Ok(_) => shell.land_in_space(space_id, cx),
+                    Err(err) => {
+                        shell.state.update(cx, |s, cx| {
+                            s.spaces.retain(|space| space.id != space_id);
+                            cx.notify();
+                        });
+                        shell.sidebar_notice = Some(format!("Couldn't open folder: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Back traverses folders, then locations, then devices.
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
         let Some(flow) = &self.add_space else {
@@ -6390,7 +6464,7 @@ mod tests {
 #[cfg(feature = "project-palette-fixture")]
 impl Shell {
     pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
-        if std::env::var_os("ZERON_FIXTURE_BACKGROUND").is_some() {
+        if std::env::var_os("HARNESS_FIXTURE_BACKGROUND").is_some() {
             self.composer
                 .read(cx)
                 .pickers()
@@ -6467,7 +6541,7 @@ mod project_flow_tests {
                     edge_url: String::new(),
                     edge_token: None,
                     org_id: None,
-                    workos_client_id: None,
+                    codegraff_client_id: None,
                     default_harness: harness_proto::HarnessId::Mock,
                 },
                 cx,

@@ -218,12 +218,12 @@ impl GlideTimeline {
     }
 }
 
-/// `ZERON_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
-/// the smoothness measurement knob (same family as `ZERON_FRAME_STATS`).
+/// `HARNESS_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
+/// the smoothness measurement knob (same family as `HARNESS_FRAME_STATS`).
 fn scroll_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("ZERON_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
+        std::env::var("HARNESS_SCROLL_TRACE").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 

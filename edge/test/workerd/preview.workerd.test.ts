@@ -7,7 +7,7 @@ function next(ws: WebSocket): Promise<Record<string, any>> {
   });
 }
 async function connect(user: string, device: string, org = "org") {
-  const response = await SELF.fetch(`https://test/preview/${org}/ws?device=${device}`, { headers: { authorization: `Bearer ${user}@${org}`, upgrade: "websocket", "x-zeron-auth-user": "spoofed" } });
+  const response = await SELF.fetch(`https://test/preview/${org}/ws?device=${device}`, { headers: { authorization: `Bearer ${user}@${org}`, upgrade: "websocket", "x-harness-auth-user": "spoofed" } });
   expect(response.status).toBe(101); const ws = response.webSocket!; ws.accept(); return ws;
 }
 describe("authenticated preview coordination on workerd", () => {

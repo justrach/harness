@@ -7,11 +7,11 @@ scripts/package-linux.sh            # release build (thin LTO, stripped)
 PROFILE=debug scripts/package-linux.sh   # fast smoke package
 ```
 
-Produces `target/package/zeron-<version>-linux-<arch>.tar.gz` containing:
+Produces `target/package/harness-<version>-linux-<arch>.tar.gz` containing:
 
-- `zeron` — the binary (headed by default; `zeron headless` runs the engine alone)
-- `zeron.desktop` — XDG desktop entry
-- `zeron.png` — 1024×1024 Zeron app icon
+- `harness` — the binary (headed by default; `harness headless` runs the engine alone)
+- `harness.desktop` — XDG desktop entry
+- `harness.png` — 1024×1024 Harness app icon
 - `install.sh` — installs into `~/.local/{bin,share/applications,share/icons}`
 
 The release profile in the root `Cargo.toml` sets `lto = "thin"` and

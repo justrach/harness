@@ -10,7 +10,7 @@ pub struct ConversationDeepLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HarnessConversationLink {
+pub struct ProviderConversationLink {
     pub label: &'static str,
     pub url: String,
 }
@@ -41,7 +41,7 @@ pub fn workspace_locator(
     Some(format!("{:x}", hash.finalize())[..16].to_string())
 }
 
-pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
+pub fn harness_conversation_link(chat_id: &str, workspace: &str) -> String {
     format!(
         "harness://open/chat/{}?workspace={}",
         encode_component(chat_id),
@@ -49,7 +49,7 @@ pub fn zeron_conversation_link(chat_id: &str, workspace: &str) -> String {
     )
 }
 
-pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
+pub fn parse_harness_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
     let rest = url
         .strip_prefix("harness://open/chat/")
         .ok_or("not a Harness conversation link")?;
@@ -67,15 +67,38 @@ pub fn parse_zeron_conversation_link(url: &str) -> Result<ConversationDeepLink, 
     })
 }
 
+/// `harness <dir>` / `codegraff <dir>` hand a folder to the app through this
+/// link, so a running instance picks it up via the URL scheme instead of a
+/// second GUI process starting.
+pub fn folder_open_link(path: &str) -> String {
+    format!("harness://open/folder?path={}", encode_component(path))
+}
+
+/// The absolute folder path a [`folder_open_link`] carries.
+pub fn parse_folder_open_link(url: &str) -> Result<String, &'static str> {
+    let query = url
+        .strip_prefix("harness://open/folder?")
+        .ok_or("not a Harness folder link")?;
+    let path = query
+        .split('&')
+        .find_map(|part| part.strip_prefix("path="))
+        .ok_or("missing folder path")?;
+    let path = decode_component(path)?;
+    if !std::path::Path::new(&path).is_absolute() {
+        return Err("folder path must be absolute");
+    }
+    Ok(path)
+}
+
 /// Only return schemes verified against the harness app. Hermes exposes a
 /// candidate scheme, but its contract is not stable enough to put on users'
 /// clipboards yet.
-pub fn harness_conversation_link(chat: &Chat) -> Option<HarnessConversationLink> {
+pub fn provider_conversation_link(chat: &Chat) -> Option<ProviderConversationLink> {
     let id = chat.harness_session_id.as_deref()?.trim();
     if id.is_empty() || chat.config.as_ref()?.harness != HarnessId::Codex {
         return None;
     }
-    Some(HarnessConversationLink {
+    Some(ProviderConversationLink {
         label: "Codex conversation link",
         url: format!("codex://threads/{}", encode_component(id)),
     })
@@ -148,10 +171,10 @@ mod tests {
     }
 
     #[test]
-    fn zeron_link_round_trips_reserved_characters() {
-        let link = zeron_conversation_link("chat/with space", "workspace:one");
+    fn harness_link_round_trips_reserved_characters() {
+        let link = harness_conversation_link("chat/with space", "workspace:one");
         assert_eq!(
-            parse_zeron_conversation_link(&link).unwrap(),
+            parse_harness_conversation_link(&link).unwrap(),
             ConversationDeepLink {
                 chat_id: "chat/with space".into(),
                 workspace: "workspace:one".into(),
@@ -160,10 +183,21 @@ mod tests {
     }
 
     #[test]
+    fn folder_link_round_trips_spaces_and_unicode() {
+        let link = folder_open_link("/Users/me/My Projects/café");
+        assert_eq!(
+            parse_folder_open_link(&link).unwrap(),
+            "/Users/me/My Projects/café"
+        );
+        assert!(parse_folder_open_link("harness://open/folder?path=relative").is_err());
+        assert!(parse_folder_open_link("harness://open/chat/x?workspace=y").is_err());
+    }
+
+    #[test]
     fn malformed_or_foreign_links_are_rejected() {
-        assert!(parse_zeron_conversation_link("https://example.com").is_err());
-        assert!(parse_zeron_conversation_link("harness://open/chat/id").is_err());
-        assert!(parse_zeron_conversation_link("harness://open/chat/%GG?workspace=x").is_err());
+        assert!(parse_harness_conversation_link("https://example.com").is_err());
+        assert!(parse_harness_conversation_link("harness://open/chat/id").is_err());
+        assert!(parse_harness_conversation_link("harness://open/chat/%GG?workspace=x").is_err());
     }
 
     #[test]
@@ -220,11 +254,11 @@ mod tests {
     #[test]
     fn codex_link_is_exact_and_unverified_harnesses_are_omitted() {
         assert_eq!(
-            harness_conversation_link(&harness_chat(HarnessId::Codex))
+            provider_conversation_link(&harness_chat(HarnessId::Codex))
                 .unwrap()
                 .url,
             "codex://threads/thread%2Fone"
         );
-        assert!(harness_conversation_link(&harness_chat(HarnessId::Hermes)).is_none());
+        assert!(provider_conversation_link(&harness_chat(HarnessId::Hermes)).is_none());
     }
 }

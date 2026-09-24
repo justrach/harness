@@ -1,4 +1,4 @@
-//! Zeron's source-neutral theme domain model.
+//! Harness's source-neutral theme domain model.
 //!
 //! Runtime code consumes complete [`ThemeVariant`] values. Import formats such
 //! as VS Code are deliberately isolated in [`vscode`], so a component never
@@ -276,7 +276,7 @@ pub struct ColorParseError;
 #[serde(rename_all = "camelCase")]
 pub enum AccentPreset {
     #[default]
-    Zeron,
+    Harness,
     Orange,
     Amber,
     Green,
@@ -287,7 +287,7 @@ pub enum AccentPreset {
 
 impl AccentPreset {
     pub const ALL: [Self; 7] = [
-        Self::Zeron,
+        Self::Harness,
         Self::Orange,
         Self::Amber,
         Self::Green,
@@ -298,7 +298,7 @@ impl AccentPreset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Harness",
+            Self::Harness => "Harness",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -310,7 +310,7 @@ impl AccentPreset {
 
     pub fn color(self, appearance: Appearance) -> Color {
         let (dark, light) = match self {
-            Self::Zeron => ("#8b7cf6", "#5b43e8"),
+            Self::Harness => ("#8b7cf6", "#5b43e8"),
             Self::Orange => ("#fb923c", "#c2410c"),
             Self::Amber => ("#fbbf24", "#a16207"),
             Self::Green => ("#4ade80", "#15803d"),
@@ -538,8 +538,8 @@ impl ThemeRegistry {
 
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
         let id = match id {
-            "zeron-dark" => "harnesser-dark",
-            "zeron-light" => "harnesser-light",
+            "harness-dark" => "harnesser-dark",
+            "harness-light" => "harnesser-light",
             other => other,
         };
         self.families
@@ -564,7 +564,7 @@ impl ThemeRegistry {
                     "harnesser-light"
                 })
             })
-            .expect("the built-in registry always contains both Zeron variants")
+            .expect("the built-in registry always contains both Harness variants")
     }
 
     pub fn validate(&self) -> Vec<ValidationIssue> {
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 20);
+        assert_eq!(registry.families.len(), 19);
         assert!(registry.variant("harnesser-light").is_some());
         assert!(registry.variant("harnesser-dark").is_some());
         assert!(registry.variant("codegraff-light").is_some());

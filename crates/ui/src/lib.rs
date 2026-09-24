@@ -6,11 +6,11 @@
 //!
 //! M3a foundation:
 //! - [`theme`] — always-dark monochrome theme (oklch-derived neutrals), a gpui Global;
-//! - [`motion`] — the zeron animation catalog over gpui `Animation` + cubic-bezier;
+//! - [`motion`] — the harness animation catalog over gpui `Animation` + cubic-bezier;
 //! - [`state`] — `AppState` entity + `EngineHandle` (connect-or-embed engine);
 //! - [`settings`] — persisted pane widths/collapse flags;
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
-//! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
+//! - [`loaders`] — harness pulse loader, gradient spinner, boot splash.
 
 pub mod app_menus;
 pub mod appearance;
@@ -80,7 +80,7 @@ pub(crate) const fn click_activation_drag_enabled() -> bool {
 }
 
 /// Everything the headed binary passes in (config/env resolution lives in
-/// `apps/zeron`, not here).
+/// `apps/harness`, not here).
 #[derive(Debug, Clone)]
 pub struct UiConfig {
     /// Data directory — engine stores + `ui-settings.json`.
@@ -93,9 +93,9 @@ pub struct UiConfig {
     pub edge_token: Option<String>,
     /// Workspace org override for explicit dev-mode runs.
     pub org_id: Option<String>,
-    /// WorkOS client id; `Some` makes the embedded headed engine require a
+    /// CodeGraff client id; `Some` makes the embedded headed engine require a
     /// production session before opening identity-scoped stores.
-    pub workos_client_id: Option<String>,
+    pub codegraff_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
     /// Conversation URL passed by the OS on a cold launch.
@@ -110,7 +110,7 @@ impl UiConfig {
             edge_url: self.edge_url.clone(),
             edge_token: self.edge_token.clone(),
             org_id: self.org_id.clone(),
-            workos_client_id: self.workos_client_id.clone(),
+            codegraff_client_id: self.codegraff_client_id.clone(),
             default_harness: self.default_harness,
         }
     }
@@ -371,7 +371,7 @@ fn open_main_window(
                 // Drag + start_window_move) — mark the content view app-owned
                 // so AppKit neither dead-zones the strip nor delays clicks.
                 app_owns_titlebar_drag: true,
-                // Linux: request client-side decorations — zeron draws its own
+                // Linux: request client-side decorations — harness draws its own
                 // unified titlebar and (under CSD) its own caption buttons
                 // (shell.rs `render_linux_caption_controls`). Leaving this unset
                 // requests SERVER decorations, which stacked a compositor
@@ -391,7 +391,7 @@ fn open_main_window(
                 // — if these two ever disagree, vibrancy dies on the first theme
                 // change and never comes back.
                 window_background: theme::Theme::of(cx).window_background_appearance(),
-                app_id: Some("zeron".into()),
+                app_id: Some("harness".into()),
                 ..Default::default()
             },
             move |window, cx| {

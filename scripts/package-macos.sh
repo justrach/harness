@@ -69,6 +69,8 @@ echo "bundled $("$APP/Contents/Resources/bin/graff" --version | head -1)"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/"
+cp "$ROOT/third_party/licenses/Zeron-MIT.txt" "$APP/Contents/Resources/licenses/"
+cp "$ROOT/third_party/licenses/CodeGraff-LICENSE.txt" "$APP/Contents/Resources/licenses/"
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is

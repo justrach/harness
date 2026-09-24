@@ -20,7 +20,7 @@ without the expected window screen/occlusion notifications. This is consistent
 with the report, but the original incident has not been reproduced on macOS
 hardware or confirmed by a process sample.
 
-The fix is in [zeronsh/zui#3](https://github.com/zeronsh/zui/pull/3), pinned by
+The fix is in [upstream Zui#3](https://github.com/zeronsh/zui/pull/3), pinned by
 this PR. It clears the request flag on every stop, including the no-screen
 path before a source exists, and sets it only after a successful subscription.
 CoreVideo start/stop errors are accepted only when its actual running state

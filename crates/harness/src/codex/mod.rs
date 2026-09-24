@@ -199,7 +199,7 @@ impl CodexHarness {
                     "initialize",
                     json!({
                         "clientInfo": {
-                            "name": "zeron-native",
+                            "name": "harness-native",
                             "title": "Harness",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
@@ -253,7 +253,7 @@ impl CodexHarness {
                     "initialize",
                     json!({
                         "clientInfo": {
-                            "name": "zeron-native",
+                            "name": "harness-native",
                             "title": "Harness",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
@@ -945,7 +945,7 @@ async fn run_session(session: Session) {
 
     // ---- wire params ------------------------------------------------------
     // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (zeron sessions run unattended; combined
+    // regardless of `auto_approve` (harness sessions run unattended; combined
     // with the danger-full-access override above this is codex's yolo mode):
     // never surface wire approvals. "on-request" turned
     // every command into a yes/no question (user report: "asking me for
@@ -1009,7 +1009,7 @@ async fn run_session(session: Session) {
                 "initialize",
                 json!({
                     "clientInfo": {
-                        "name": "zeron-native",
+                        "name": "harness-native",
                         "title": "Harness",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
@@ -1647,7 +1647,7 @@ async fn steer_as_new_turn(
 }
 
 // ---------------------------------------------------------------------------
-// Approvals (approval-as-input parity with zeron's UX)
+// Approvals (approval-as-input parity with harness's UX)
 // ---------------------------------------------------------------------------
 
 type RequestInputFn = Box<
@@ -1979,7 +1979,7 @@ mod skill_discovery_tests {
             json!({"type":"skill","name":"review","path":"/repo/a b/SKILL.md"})
         );
         assert_eq!(input[2]["path"], "/repo/other/SKILL.md");
-        assert!(!input[0]["text"].as_str().unwrap().contains("zeron-invoke:"));
+        assert!(!input[0]["text"].as_str().unwrap().contains("harness-invoke:"));
         for raw in [
             "$review".into(),
             format!("`{}`", a.link()),
@@ -2021,8 +2021,8 @@ mod skill_discovery_tests {
             json!({"type":"skill", "name":"review`ui", "path":"/repo/é skill/SKILL.md"})
         );
         let text = input[0]["text"].as_str().unwrap();
-        assert!(!text.contains("zeron-invoke:"));
-        assert!(!text.contains("zeron-file:"));
+        assert!(!text.contains("harness-invoke:"));
+        assert!(!text.contains("harness-file:"));
         assert_eq!(text.matches("/repo/%C3%A9%20skill/SKILL.md").count(), 2);
     }
 

@@ -1,7 +1,7 @@
 //! The app theme — two concrete appearances, one token set.
 //!
 //! Colors are precomputed from an oklch-derived neutral scale (perceptually even
-//! lightness steps; the same scale zeron's Tailwind theme used) into gpui [`Hsla`].
+//! lightness steps; the same scale harness's Tailwind theme used) into gpui [`Hsla`].
 //! **Numbers drive layout, colors are paint**: layout constants live here as plain
 //! numbers and never depend on which color is painted.
 //!
@@ -48,10 +48,10 @@ use harness_theme::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentColor {
-    /// The exact upstream Zeron indigo.
+    /// The exact upstream Harness indigo.
     #[default]
     #[serde(alias = "violet", alias = "indigo", alias = "red", alias = "purple")]
-    Zeron,
+    Harness,
     Orange,
     Amber,
     Green,
@@ -63,7 +63,7 @@ pub enum AccentColor {
 
 impl AccentColor {
     pub const ALL: [Self; 7] = [
-        Self::Zeron,
+        Self::Harness,
         Self::Orange,
         Self::Amber,
         Self::Green,
@@ -74,7 +74,7 @@ impl AccentColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Zeron => "Harness",
+            Self::Harness => "Harness",
             Self::Orange => "Orange",
             Self::Amber => "Amber",
             Self::Green => "Green",
@@ -89,10 +89,10 @@ impl AccentColor {
         // used to gamut-clip OKLCH into sRGB and then mutate HSL lightness,
         // producing different chroma and apparent hues across light/dark.
         let (primary, strong) = match (self, appearance) {
-            (Self::Zeron, Appearance::Dark) => {
+            (Self::Harness, Appearance::Dark) => {
                 (oklch(0.673, 0.182, 276.935), oklch(0.585, 0.233, 277.117))
             }
-            (Self::Zeron, Appearance::Light) => {
+            (Self::Harness, Appearance::Light) => {
                 (oklch(0.511, 0.262, 276.966), oklch(0.511, 0.262, 276.966))
             }
             (Self::Orange, Appearance::Dark) => (oklch(0.75, 0.18, 55.0), oklch(0.54, 0.19, 55.0)),
@@ -133,7 +133,7 @@ impl AccentColor {
 impl From<AccentColor> for AccentPreset {
     fn from(value: AccentColor) -> Self {
         match value {
-            AccentColor::Zeron => Self::Zeron,
+            AccentColor::Harness => Self::Harness,
             AccentColor::Orange => Self::Orange,
             AccentColor::Amber => Self::Amber,
             AccentColor::Green => Self::Green,
@@ -147,7 +147,7 @@ impl From<AccentColor> for AccentPreset {
 impl From<AccentPreset> for AccentColor {
     fn from(value: AccentPreset) -> Self {
         match value {
-            AccentPreset::Zeron => Self::Zeron,
+            AccentPreset::Harness => Self::Harness,
             AccentPreset::Orange => Self::Orange,
             AccentPreset::Amber => Self::Amber,
             AccentPreset::Green => Self::Green,
@@ -770,13 +770,13 @@ impl TerminalColors {
         }
     }
 
-    fn zeron(appearance: Appearance) -> Self {
+    fn harness(appearance: Appearance) -> Self {
         let id = match appearance {
             Appearance::Dark => "harnesser-dark",
             Appearance::Light => "harnesser-light",
         };
         let registry = ThemeRegistry::active();
-        Self::from_variant(registry.variant(id).expect("Zeron terminal palette exists"))
+        Self::from_variant(registry.variant(id).expect("Harness terminal palette exists"))
     }
 }
 
@@ -809,7 +809,7 @@ impl Theme {
     } else {
         1.0
     };
-    /// Main-panel header height (zeron `h-11`) — in-card headers (changes pane).
+    /// Main-panel header height (harness `h-11`) — in-card headers (changes pane).
     pub const HEADER_HEIGHT: f32 = 44.0;
     /// The unified window titlebar (traffic lights + cluster + tabs). Content
     /// rides [`Self::TITLEBAR_TOP_PAD`] lower than center so the air above
@@ -818,7 +818,7 @@ impl Theme {
     /// Top-only padding moves the flex center by half this value. On macOS,
     /// 38 / 2 + 4 / 2 = 21 matches the native traffic lights' center.
     pub const TITLEBAR_TOP_PAD: f32 = 4.0;
-    /// Reserved status strip under the content outlet (zeron `h-6`) — the
+    /// Reserved status strip under the content outlet (harness `h-6`) — the
     /// WorkingIndicator row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;
     /// Height of the gradient that fades the transcript into the panel
@@ -846,7 +846,7 @@ impl Theme {
     /// The selected theme's shell tint painted over the blurred window
     /// background (macOS glass). Keeping the hue theme-owned matters when a
     /// user forces frost onto a palette authored for an opaque workbench: a
-    /// fixed Zeron grey would erase that palette's identity.
+    /// fixed Harness grey would erase that palette's identity.
     pub fn glass(&self) -> Hsla {
         if self.surface_treatment == SurfaceTreatment::Opaque {
             return self.surface;
@@ -867,7 +867,7 @@ impl Theme {
         self.contrast_checked_tint_alpha(self.surface, base, self.adverse_backdrop())
     }
 
-    /// Increase tint coverage only as far as needed for Zeron's shared text
+    /// Increase tint coverage only as far as needed for Harness's shared text
     /// roles. This is used for both window glass and in-app frosted surfaces,
     /// whose blurred content can otherwise invalidate an imported palette's
     /// original solid-background assumptions.
@@ -927,7 +927,7 @@ impl Theme {
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
     /// tabs, titlebar buttons). The importer maps this role from the source
-    /// theme, so forcing frost does not reintroduce Zeron's neutral hover.
+    /// theme, so forcing frost does not reintroduce Harness's neutral hover.
     pub fn glass_hover(&self) -> Hsla {
         self.element_hover
     }
@@ -1117,7 +1117,7 @@ impl Theme {
             diff_add: oklch(0.765, 0.177, 163.223), // emerald-400
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
-            terminal: TerminalColors::zeron(Appearance::Dark),
+            terminal: TerminalColors::harness(Appearance::Dark),
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
@@ -1216,7 +1216,7 @@ impl Theme {
             diff_add: oklch(0.596, 0.145, 163.225), // emerald-600
             diff_del: oklch(0.577, 0.245, 27.325),  // red-600
             diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
-            terminal: TerminalColors::zeron(Appearance::Light),
+            terminal: TerminalColors::harness(Appearance::Light),
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
@@ -1283,7 +1283,7 @@ impl Theme {
             .variant(variant_id)
             .filter(|variant| model_appearance(variant.appearance) == appearance)
             .or_else(|| registry.variant(fallback_id))
-            .expect("the built-in registry contains both Zeron appearances");
+            .expect("the built-in registry contains both Harness appearances");
         Self::from_variant(variant, accent_selection, surface_preference)
     }
 
@@ -1294,7 +1294,7 @@ impl Theme {
     ) -> Self {
         let appearance = model_appearance(variant.appearance);
         let accent_color = match accent_selection {
-            AccentSelection::ThemeDefault => AccentColor::Zeron,
+            AccentSelection::ThemeDefault => AccentColor::Harness,
             AccentSelection::Preset(preset) => preset.into(),
         };
         let mut theme = Self::for_preferences(appearance, accent_color);
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[test]
     fn neutral_950_is_0a0a0a() {
-        // oklch(0.145 0 0) is Tailwind neutral-950, zeron's app background.
+        // oklch(0.145 0 0) is Tailwind neutral-950, harness's app background.
         let rgb = srgb_u8(oklch_to_srgb(0.145, 0.0, 0.0));
         assert_eq!(rgb, [10, 10, 10]);
     }
@@ -1951,10 +1951,10 @@ mod tests {
     }
 
     #[test]
-    fn zeron_accent_is_the_exact_upstream_default() {
+    fn harness_accent_is_the_exact_upstream_default() {
         let dark = Theme::dark();
         let light = Theme::light();
-        assert_eq!(dark.accent_color, AccentColor::Zeron);
+        assert_eq!(dark.accent_color, AccentColor::Harness);
         assert_eq!(dark.accent, oklch(0.673, 0.182, 276.935));
         assert_eq!(dark.accent_strong, oklch(0.585, 0.233, 277.117));
         assert_eq!(dark.code_text, dark.accent);
@@ -1974,7 +1974,7 @@ mod tests {
         for old_default in ["violet", "indigo", "red", "purple"] {
             assert_eq!(
                 serde_json::from_str::<AccentColor>(&format!(r#""{old_default}""#)).unwrap(),
-                AccentColor::Zeron
+                AccentColor::Harness
             );
         }
         assert_eq!(
@@ -1991,8 +1991,8 @@ mod tests {
             AccentSelection::ThemeDefault,
             SurfacePreference::ThemeDefault,
         );
-        let zeron = Theme::dark();
-        assert_ne!(catppuccin.surface, zeron.surface);
+        let harness = Theme::dark();
+        assert_ne!(catppuccin.surface, harness.surface);
         assert_eq!(catppuccin.busy, catppuccin.accent);
         assert_eq!(catppuccin.glyph.mid, catppuccin.accent);
         assert_eq!(catppuccin.surface_treatment, SurfaceTreatment::Opaque);
@@ -2020,14 +2020,14 @@ mod tests {
             assert!(frosted.is_frost());
         }
 
-        let opaque_zeron = Theme::for_selection(
+        let opaque_harness = Theme::for_selection(
             Appearance::Dark,
             "harnesser-dark",
             AccentSelection::ThemeDefault,
             SurfacePreference::Opaque,
         );
-        assert_eq!(opaque_zeron.surface_treatment, SurfaceTreatment::Opaque);
-        assert_eq!(opaque_zeron.glass(), opaque_zeron.surface);
+        assert_eq!(opaque_harness.surface_treatment, SurfaceTreatment::Opaque);
+        assert_eq!(opaque_harness.glass(), opaque_harness.surface);
     }
 
     #[test]
@@ -2181,7 +2181,7 @@ mod tests {
                 assert_eq!(theme.success, baseline.success);
                 assert_eq!(theme.diff_add, baseline.diff_add);
                 assert_eq!(theme.diff_del, baseline.diff_del);
-                if accent != AccentColor::Zeron {
+                if accent != AccentColor::Harness {
                     assert_ne!(theme.code_text, baseline.code_text);
                     assert_ne!(theme.busy, baseline.busy);
                     assert_ne!(theme.selection, baseline.selection);
@@ -2808,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_numbers_match_zeron() {
+    fn layout_numbers_match_harness() {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);

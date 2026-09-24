@@ -1,15 +1,15 @@
 /**
- * Zeron-native edge Worker (design §2, ARCHITECTURE §6): JWT auth at the
+ * Harness-native edge Worker (design §2, ARCHITECTURE §6): JWT auth at the
  * edge, then forwarding into per-session, per-workspace, and per-device
  * Durable Objects. Also serves content-addressed R2 attachments (§1.2) and
- * the absorbed WorkOS auth routes (formerly apps/server).
+ * the CodeGraff OAuth bridge.
  *
  * Routes:
  *   GET  /health
- *   POST /auth/exchange               — WorkOS code → tokens
- *   POST /auth/refresh                — WorkOS refresh → fresh tokens
- *   GET  /auth/orgs                   — caller's active org memberships
- *   POST /auth/orgs                   — create org + admin membership
+ *   GET  /source                      — corresponding source archive
+ *   POST /auth/exchange               — CodeGraff code + PKCE → tokens
+ *   POST /auth/refresh                — rotate CodeGraff refresh token
+ *   GET  /auth/orgs                   — caller's personal workspace
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
@@ -48,6 +48,8 @@ import { ChatRoom } from "./chat-room";
 import installSh from "./install.sh";
 
 export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
+
+const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -116,10 +118,13 @@ export default {
     const parts = url.pathname.split("/").filter(Boolean);
 
     if (url.pathname === "/health") {
-      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "workos" });
+      return json({ ok: true, auth: env.AUTH_MODE === "dev" ? "dev" : "codegraff", source: SOURCE_ARCHIVE });
+    }
+    if (url.pathname === "/source" && request.method === "GET") {
+      return Response.redirect(new URL(SOURCE_ARCHIVE, url).toString(), 302);
     }
 
-    // ── public install surface (also routed from zeron.sh): the
+    // ── public install surface (served by edge.codegraff.com): the
     //    `curl | sh` installer and the release artifacts it downloads ───────
     if (url.pathname === "/install.sh" && (request.method === "GET" || request.method === "HEAD")) {
       return new Response(request.method === "HEAD" ? null : installSh, {
@@ -153,7 +158,7 @@ export default {
       return new Response(request.method === "HEAD" ? null : object.body, { headers });
     }
 
-    // ── WorkOS auth routes (pre-bearer: exchange/refresh/callback have no
+    // ── CodeGraff auth routes (pre-bearer: exchange/refresh/callback have no
     //    access token yet; the org routes verify the bearer themselves) ─────
     const authRouted = await handleAuthRoute(request, env, url);
     if (authRouted) return authRouted;
@@ -169,7 +174,7 @@ export default {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return json({ error: "expected websocket" }, 426);
       }
-      // `s2/` = the WorkOS staging→production identity break: rooms are
+      // `s2/` = the previous identity migration: rooms are
       // claim-on-first-join per user id, and prod issued a fresh id for
       // everyone — a new namespace lets prod identities claim fresh rooms
       // while hosts re-upload doc state from their local snapshots (same
@@ -239,7 +244,7 @@ export default {
     }
 
     // ── workspace rooms (ARCHITECTURE §2.2/§6.1): same SessionRoom DO class;
-    //    the caller's WorkOS org claim (`org_id`) must equal the URL's orgId,
+    //    the caller's Harness org claim (`org_id`) must equal the URL's orgId,
     //    and the room itself is derived from the caller's OWN user id — the
     //    workspace doc (spaces, chats index, devices) is per-user; teammates
     //    in the same org can never address each other's rooms. ──────────────

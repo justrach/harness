@@ -303,7 +303,7 @@ impl Catalog {
             (
                 root.clone(),
                 std::cmp::Reverse(framework(&l.args).1),
-                std::cmp::Reverse(l.zeron_owned),
+                std::cmp::Reverse(l.harness_owned),
                 l.started_at,
                 l.pid,
                 l.address,
@@ -425,7 +425,7 @@ impl Catalog {
                 pid: listener.pid,
                 cwd: listener.cwd.to_string_lossy().into_owned(),
                 started_at: listener.started_at,
-                zeron_owned: listener.zeron_owned,
+                harness_owned: listener.harness_owned,
             };
             next.insert(id, LocalRoute { service, listener });
         }
@@ -476,7 +476,7 @@ mod tests {
             ],
             started_at: pid as u64,
             address: ([127, 0, 0, 1], port).into(),
-            zeron_owned: true,
+            harness_owned: true,
         }
     }
     #[test]

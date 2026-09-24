@@ -12,7 +12,7 @@ workspaces are disposable. No real user's conversation is resumed or modified.
    execute; command-ID deduplication and interrupt supersession remain intact.
    The fix applies to every harness using this shared command path.
 2. **Interrupted startup:** Cursor can stop before committing the current user
-   message to its conversation checkpoint. Zeron's transcript already contains
+   message to its conversation checkpoint. Harness's transcript already contains
    that message, but a plain SDK resume cannot recover it. A live engine test
    interrupted immediately after `SessionStarted`, asked for a random token
    from that message, and received: “No INTERRUPTED token was in your previous
@@ -32,7 +32,7 @@ user-visible transcript. This conservative startup bridge can repeat historical
 context already saved by Cursor; it never creates an additional executable turn.
 The receipt uses mode 0600 beside the existing conversation store. Invalid
 receipts or unexpected history schemas produce an explicit error instead of
-silently discarding context. Legacy SDK-default stores without a Zeron-owned
+silently discarding context. Legacy SDK-default stores without a Harness-owned
 store have no receipt; the new protection cannot reconstruct previously lost
 messages from those stores.
 
@@ -89,14 +89,14 @@ cargo test -p harness-doc
 cargo test -p harness-engine --test message_queue
 cargo test -p harness-adapters
 
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_EARLY_ROUNDS=10 \
+HARNESS_CURSOR_STATE_DIR=$(mktemp -d) HARNESS_CURSOR_EARLY_ROUNDS=10 \
   cargo test -p harness-engine --test cursor_live -- --ignored --nocapture --test-threads=1
 
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
+HARNESS_CURSOR_STATE_DIR=$(mktemp -d) HARNESS_CURSOR_TEST_MODEL=muse-spark-1.3 \
   cargo run -p harness-adapters --example cursor_stability_probe -- history 40
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
+HARNESS_CURSOR_STATE_DIR=$(mktemp -d) HARNESS_CURSOR_TEST_MODEL=muse-spark-1.3 \
   cargo run -p harness-adapters --example cursor_stability_probe -- sessions 12
-ZERON_CURSOR_STATE_DIR=$(mktemp -d) ZERON_CURSOR_TEST_MODEL=muse-spark-1.3 \
+HARNESS_CURSOR_STATE_DIR=$(mktemp -d) HARNESS_CURSOR_TEST_MODEL=muse-spark-1.3 \
   cargo run -p harness-adapters --example cursor_stability_probe -- cancel-burst 40
 
 cursor-agent update
@@ -105,7 +105,7 @@ python3 scripts/cursor-cli-history-probe.py
 
 For accelerated auth expiry, use the clock-preload command in the
 [auth investigation](../cursor-auth-incident/README.md), with
-`ZERON_CURSOR_TEST_MODEL=muse-spark-1.3` and `parked 8`.
+`HARNESS_CURSOR_TEST_MODEL=muse-spark-1.3` and `parked 8`.
 
 ## Limits
 

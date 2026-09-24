@@ -1,5 +1,5 @@
 //! Shared notice chip — the tinted failure card the composer strip and the
-//! transcript converged on (zeron composer.tsx `Notice` / chat-view.tsx
+//! transcript converged on (harness composer.tsx `Notice` / chat-view.tsx
 //! `ErrorChip`).
 
 use gpui::{AnyElement, Div, FontWeight, SharedString, div, prelude::*, px};
@@ -18,14 +18,14 @@ pub enum NoticeChipIcon {
     Tile,
 }
 
-/// The failure notice both surfaces render (zeron composer.tsx `Notice`,
+/// The failure notice both surfaces render (harness composer.tsx `Notice`,
 /// chat-view.tsx `ErrorChip`): a tinted rounded chip — `border
 /// <accent>/[0.16]` over a `<accent>/[0.05]` wash, a subtle tinted wash,
 /// never a bare stroke — with a header row (DangerTriangle + medium label, a
 /// tiny copy button pinned to its top-right corner — failure payloads are
 /// meant to be pasted, not screenshotted) and the message below. The message WRAPS instead of truncating: failure payloads carry
 /// exit statuses and stderr, and a one-line ellipsis was exactly what made
-/// zeronsh/comet#95 undiagnosable from the screenshot. `warning` picks the
+/// the upstream adapter failure undiagnosable from the screenshot. `warning` picks the
 /// amber palette (amber-400/amber-200) over the default red
 /// (red-400/red-300). Callers chain their own chrome: the composer its
 /// id/dismiss click, the transcript `w_full().overflow_hidden()`.

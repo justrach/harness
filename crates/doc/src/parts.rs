@@ -17,6 +17,34 @@ use crate::constants::MSG_INLINE_MAX;
 /// summary, so 160 is generous.
 pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
 
+fn effort_rank(value: &str) -> Option<u8> {
+    match value {
+        "none" | "off" => Some(0),
+        "minimal" => Some(1),
+        "low" => Some(2),
+        "medium" => Some(3),
+        "high" => Some(4),
+        "xhigh" => Some(5),
+        "max" => Some(6),
+        "ultra" => Some(7),
+        _ => None,
+    }
+}
+
+fn effort_label(value: &str) -> &str {
+    match value {
+        "none" | "off" => "Off",
+        "high" => "High",
+        "xhigh" => "Extra high",
+        "max" => "Max",
+        "ultra" => "Ultra",
+        "low" => "Low",
+        "medium" => "Medium",
+        "minimal" => "Minimal",
+        other => other,
+    }
+}
+
 /// The doc-resident form of a tool output (docs/chat2-sync.md A1; the R2
 /// sidecar is PARKED as of 2026-08-10, so this IS the whole record in the
 /// doc — the full text survives only in the host's local run journal):
@@ -256,7 +284,7 @@ impl MessagePart {
 /// In place because the fold runs once per streamed event: rebuilding the
 /// accumulator each time made long turns O(n²) in allocations.
 ///
-/// Semantics from zeron `foldEventIntoParts`:
+/// Semantics from harness `foldEventIntoParts`:
 /// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
 /// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
 ///   (a tool call in between breaks the text block).
@@ -313,6 +341,50 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     text: text.clone(),
                 });
             }
+        }
+        AgentEvent::EffortChanged {
+            previous,
+            current,
+            binary,
+        } => {
+            let label = if *binary && current == "high" {
+                "On"
+            } else {
+                effort_label(current)
+            };
+            let name = match (previous.as_deref(), current.as_str()) {
+                (Some(before), after)
+                    if effort_rank(after)
+                        .zip(effort_rank(before))
+                        .is_some_and(|(a, b)| a < b) =>
+                {
+                    format!("Jev: {label} · using less reasoning; may reduce cost")
+                }
+                (Some(before), after)
+                    if effort_rank(after)
+                        .zip(effort_rank(before))
+                        .is_some_and(|(a, b)| a > b) =>
+                {
+                    format!("Jev: {label} · thinking harder")
+                }
+                _ => format!("Jev: reasoning effort {label}"),
+            };
+            let id = format!("jev-{}", out.len());
+            out.push(MessagePart::Tool {
+                id,
+                call: ToolCall::Unknown { name, input: None },
+                is_error: false,
+                resolved: true,
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            });
         }
         AgentEvent::ToolCall { id, call } => {
             if let Some(existing) = out.iter_mut().find_map(|p| match p {
@@ -611,7 +683,7 @@ pub fn continuation_id(root: &str, index: usize) -> String {
 ///
 /// Splitting happens at part boundaries; an oversized text part is itself chunked at char
 /// boundaries. Returns one Vec per resulting entry — the first keeps the root id, the rest are
-/// continuations (`continuation_id(root, i)`), matching `splitMessageEntry` in zeron.
+/// continuations (`continuation_id(root, i)`), matching `splitMessageEntry` in harness.
 pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
     let mut chunks: Vec<Vec<MessagePart>> = vec![Vec::new()];
     let mut current_bytes = 0usize;
@@ -1298,5 +1370,42 @@ mod tests {
         .unwrap();
         assert_eq!(payload.part_id, "t");
         assert_eq!(payload.output.as_deref(), Some("full output"));
+    }
+
+    #[test]
+    fn jev_effort_chip_uses_binary_labels_and_qualitative_cost_copy() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::EffortChanged {
+                previous: Some("high".into()),
+                current: "none".into(),
+                binary: true,
+            },
+        );
+        let MessagePart::Tool { call, resolved, .. } = &parts[0] else {
+            panic!("expected chip")
+        };
+        assert!(*resolved);
+        let (label, detail) = harness_proto::view::tool_chip_content(call);
+        assert_eq!(label, "Jev");
+        assert_eq!(detail, "Off · using less reasoning; may reduce cost");
+
+        parts.clear();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::EffortChanged {
+                previous: Some("none".into()),
+                current: "high".into(),
+                binary: true,
+            },
+        );
+        let MessagePart::Tool { call, .. } = &parts[0] else {
+            panic!("expected chip")
+        };
+        assert_eq!(
+            harness_proto::view::tool_chip_content(call),
+            ("Jev", "On · thinking harder".into())
+        );
     }
 }

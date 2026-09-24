@@ -1,10 +1,22 @@
-# Harness
+<p align="center"><img src="docs/brand/harness-icon.png" alt="Harness 应用图标" width="112"></p>
+
+<h1 align="center">Harness</h1>
 
 在你自己的机器上管理编码 agent 的原生桌面界面：Claude Code、Codex、Cursor、Devin、Grok、Hermes、graff、Pi、OpenCode、Antigravity。默认纯本地，需要时再打开多设备同步。
 
-*[English](README.md) | 简体中文*
+*[English](README.md) · 简体中文 · [Deutsch](README.de.md) · [हिन्दी](README.hindi.md) · [ไทย](README.thai.md) · [Bahasa Indonesia](README.indo.md) · [Bahasa Melayu](README.malay.md)*
 
-产品名是 **Harness**（`harness.codegraff.app`）。命令行二进制是 `harness`。`HARNESS_*` 优先，`ZERON_*` 仍然有效。一个二进制同时覆盖带界面的 GUI 和无界面引擎。
+产品名是 **Harness**（`harness.codegraff.app`），命令行程序是 `harness`。同一个程序既能打开图形界面，也能作为无界面引擎运行。
+
+## 看看 Harness
+
+| 选择编码 Agent | 跨设备查看同一会话 |
+| :---: | :---: |
+| <img src="docs/media/harness-settings/s2-agents-settings.png" alt="Harness Agent 设置" width="520"> | <img src="docs/media/registry-sync/03-transcript-synced.png" alt="已同步的 Harness 会话" width="520"> |
+
+Harness 内置 [CodeGraff](https://github.com/justrach/codegraff) 适配器。下方标志和插画来自 CodeGraff 项目；来源和许可见[第三方声明](THIRD_PARTY_NOTICES.md)。
+
+<p align="center"><img src="docs/brand/codegraff-emblem.png" alt="CodeGraff 标志" width="92"> <img src="docs/brand/codegraff-workshop.png" alt="CodeGraff 工作室插画" width="188"></p>
 
 新安装默认使用 **Codegraff** 主题（Warm Graphite：浅色是奶油+琥珀，深色是近黑+金）。设置 → 外观里仍有 Harness、VS Code 目录，以及 VS Code 主题导入。
 
@@ -89,4 +101,4 @@ macOS 上用桌面发行包，或者从源码构建 `harness` 再运行 `harness
 
 ## 许可
 
-[MIT](LICENSE)。源自 [Zeron](https://github.com/zeronsh/zeron)（Wing）。
+Harness 使用 [GNU Affero General Public License 第 3 版](LICENSE)（`AGPL-3.0-only`），与 CodeGraff 的公共许可采用相同的 AGPL 版本。Standard Harness Pte. Ltd. 保留其拥有的原创 Harness 贡献的权利；已有代码和第三方材料仍保留各自的版权与许可声明，详见[第三方声明](THIRD_PARTY_NOTICES.md)。

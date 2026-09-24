@@ -1,4 +1,4 @@
-//! Isolated native sidebar review fixture. ZERON_SIDEBAR_COMPACT / ZERON_SIDEBAR_HIDE_LABEL select layout.
+//! Isolated native sidebar review fixture. HARNESS_SIDEBAR_COMPACT / HARNESS_SIDEBAR_HIDE_LABEL select layout.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use harness_ui::*;
 
@@ -12,8 +12,8 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
-        settings.sidebar_compact = std::env::var_os("ZERON_SIDEBAR_COMPACT").is_some();
-        settings.sidebar_show_project_label = std::env::var_os("ZERON_SIDEBAR_HIDE_LABEL").is_none();
+        settings.sidebar_compact = std::env::var_os("HARNESS_SIDEBAR_COMPACT").is_some();
+        settings.sidebar_show_project_label = std::env::var_os("HARNESS_SIDEBAR_HIDE_LABEL").is_none();
         settings.sidebar_organization = settings::SidebarOrganization::InOneList;
         settings.sidebar_width = 310.0;
         settings.sidebar_pins_mut("local".into()).extend(["chat-0".into(), "chat-1".into()]);
@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
         let fonts = typography::register_fonts(cx);
         typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx);
-        appearance::init(if std::env::var_os("ZERON_PALETTE_LIGHT").is_some() { appearance::AppearanceMode::Light } else { appearance::AppearanceMode::Dark }, settings.theme_selection, settings.accent, settings.surface, cx);
+        appearance::init(if std::env::var_os("HARNESS_PALETTE_LIGHT").is_some() { appearance::AppearanceMode::Light } else { appearance::AppearanceMode::Dark }, settings.theme_selection, settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths,
             settings.git_history_column_order, settings.git_history_author_display, cx);
         composer::init(cx, settings.composer_send_behavior); terminal::panel::init(cx); app_menus::init(cx);
@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
             let mut s = state::AppState::new();
             s.connection = harness_proto::view::ConnectionStatus::Ready;
             s.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
-            if std::env::var_os("ZERON_SIDEBAR_ACCOUNT").is_some() {
+            if std::env::var_os("HARNESS_SIDEBAR_ACCOUNT").is_some() {
                 s.workspace_scope = Some(harness_proto::WorkspaceScope::Synced);
                 s.auth = Some(harness_proto::AuthState::SignedIn {
                     user: harness_proto::UserProfile { id: "fixture-user".into(), email: "alex@example.test".into(), name: Some("Alex".into()) },
@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
                 let source = chat.source_context.as_ref().unwrap();
                 s.fixture_sidebar_change_request(harness_proto::CheckoutChangeRequestStatus {
                     checkout_id: source.checkout_id.clone(), device_id: chat.device_id.clone(), cwd: source.repo_root.clone(), branch: source.branch.clone(), updated_at: chrono::Utc::now(),
-                    change_request: Some(harness_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/zeronsh/zeron/pull/412".into(), state: harness_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
+                    change_request: Some(harness_proto::ChangeRequestSummary { provider: "github".into(), number: 412 + ix as u64, title: chat.title.clone().unwrap(), url: "https://github.com/justrach/harness/pull/412".into(), state: harness_proto::ChangeRequestState::Open, base_ref: "main".into(), head_ref: source.branch.clone() }),
                 });
             }
             s.chats[4].last_message_at = Some(chrono::Utc::now());

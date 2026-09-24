@@ -8,4 +8,4 @@ Reproduce with `cargo run -p harness-ui --example project-selector-fixture` on a
 
 The fixture uses temporary settings and in-memory data without starting an engine or connecting to a real device. These captures validate rendering and picker interaction, not device synchronization. The after captures use Linux window rendering; they do not validate the macOS compositor.
 
-Validation: `cargo build -p zeron`; `cargo build -p harness-ui --example project-selector-fixture`; `cargo test -p harness-ui --lib state::tests:: -- --test-threads=1` (54 passed); rustfmt checks on the changed Rust files; `git diff --check`.
+Validation: `cargo build -p harness`; `cargo build -p harness-ui --example project-selector-fixture`; `cargo test -p harness-ui --lib state::tests:: -- --test-threads=1` (54 passed); rustfmt checks on the changed Rust files; `git diff --check`.

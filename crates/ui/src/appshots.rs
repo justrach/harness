@@ -589,7 +589,7 @@ pub fn semantic_settings_url() -> Option<&'static str> {
 }
 
 /// Register the platform global shortcut and, on Linux, the local activation
-/// socket used by `zeron appshot` when the desktop owns shortcut setup.
+/// socket used by `harness appshot` when the desktop owns shortcut setup.
 pub fn start_global_shortcut(
     activation_dir: PathBuf,
 ) -> futures::channel::mpsc::UnboundedReceiver<()> {
@@ -607,7 +607,7 @@ pub async fn capture_active_window() -> Result<CapturedAppshot, CaptureError> {
 
 /// Ask the running headed Harness process to capture an Appshot. Linux desktop
 /// environments that do not implement the Global Shortcuts portal can bind
-/// `zeron appshot` in their native Keyboard Shortcuts settings.
+/// `harness appshot` in their native Keyboard Shortcuts settings.
 #[cfg(target_os = "linux")]
 pub fn request_running_appshot(data_dir: &Path) -> Result<(), CaptureError> {
     linux::request_running_appshot(data_dir)

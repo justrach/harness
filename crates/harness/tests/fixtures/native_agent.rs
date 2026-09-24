@@ -29,9 +29,9 @@ fn main() {
             json!({
                 "argv": args.iter().skip(2).collect::<Vec<_>>(),
                 "cwd": std::env::current_dir().unwrap(),
-                "marker": std::env::var("ZERON_LAUNCH_MARKER").ok(),
-                "removed": std::env::var("ZERON_LAUNCH_REMOVED").ok(),
-                "unicode": std::env::var("ZERON_Ä_KEY").ok(),
+                "marker": std::env::var("HARNESS_LAUNCH_MARKER").ok(),
+                "removed": std::env::var("HARNESS_LAUNCH_REMOVED").ok(),
+                "unicode": std::env::var("HARNESS_Ä_KEY").ok(),
                 "path": std::env::var("PATH").ok(),
             })
         );

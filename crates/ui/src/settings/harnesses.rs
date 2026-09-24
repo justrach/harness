@@ -6,9 +6,11 @@
 //! `ListHarnesses` probe and the `SetHarnessEnabled` writes at any registered
 //! device over the relay-forwarded RPCs.
 //!
-//! Enablement follows DETECTION: every harness whose CLI probe passes is on
-//! unless the user switched it off, so installing an agent is all it takes
-//! for it to appear here and in the composer. A harness whose CLI is missing
+//! Enablement is gated on DETECTION: only Graff, Codex and Claude Code are on
+//! by default (a found one is on unless the user switched it off, so
+//! installing it is all it takes to appear in the composer); every other
+//! agent is off until the user turns it on here, even when its CLI is found
+//! (see `harness_engine::registry::default_on`). A harness whose CLI is missing
 //! on the target device renders dimmed with an install hint and is never
 //! enabled (enabling an agent that can't run would only manufacture
 //! NotInstalled errors at send time); an ENABLED agent can always be turned
@@ -25,7 +27,7 @@ use gpui::{
 
 use std::time::Duration;
 use harness_engine::registry::TitleSettings;
-use harness_engine::registry::{HarnessDescriptor, descriptor_enabled};
+use harness_engine::registry::{HarnessDescriptor, default_on, descriptor_enabled};
 
 use harness_proto::Model;
 use harness_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
@@ -1007,6 +1009,14 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                if installed && !enabled && !default_on(harness) {
+                    meta.push(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("Off by default — turn on to use"))
+                            .into_any_element(),
+                    );
+                }
                 if !installed {
                     meta.push(
                         div()
@@ -1075,6 +1085,29 @@ impl HarnessesPage {
                                         )
                                     })
                                     .child("Install"),
+                            )
+                        },
+                    )
+                    // graff is app-managed (~/.harness/bin/graff): rerunning
+                    // its installer fetches the latest checksummed release,
+                    // independent of app updates.
+                    .when(
+                        harness == HarnessId::Graff
+                            && installed
+                            && descriptor.can_install
+                            && self.installing != Some(harness),
+                        |el| {
+                            el.child(
+                                widgets::ghost_action(&theme)
+                                    .id(("harness-update", ix))
+                                    .when(self.installing.is_none(), |el| {
+                                        el.hover(|s| widgets::ghost_hover(&theme, s)).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.install(harness, cx)
+                                            }),
+                                        )
+                                    })
+                                    .child("Update"),
                             )
                         },
                     )

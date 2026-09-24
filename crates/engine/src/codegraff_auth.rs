@@ -1,87 +1,105 @@
-//! "Sign in with Codegraff": OAuth 2.0 authorization code + PKCE against
-//! codegraff.com's OpenID Connect provider (zigrepper
-//! `frontend/src/lib/oidc.ts`). The desktop app is a public (secretless)
-//! native client. The provider matches `redirect_uri` exactly, so the browser
-//! comes back to a FIXED loopback address, [`CALLBACK_PORT`].
+//! "Sign in with Codegraff", shared 1:1 with the graff CLI's `graff login`.
 //!
-//! Identity only: the grant yields the account id (`sub`) and email, never
-//! credits or API keys. The refresh token (offline_access) is stored so the
-//! signed-in state survives restarts.
+//! Both use codegraff's device flow (zigrepper
+//! `services/codegraff-gateway/src/device.ts`): `POST /v1/device/start`, the
+//! user approves at `codegraff.com/cli/auth?code=…` in the browser, and
+//! `POST /v1/device/poll` hands back a `cg_sk_` gateway key once. The key is
+//! written to the CLI's own file, `~/.simple-harness-codegraff.json`
+//! (`{"api_key": …}`, 0600), so signing in here signs graff in, `graff login`
+//! signs the app in, and signing out here (which also revokes the key) signs
+//! both out.
+//!
+//! The app only keeps a display cache next to its data — the account email
+//! keyed by a fingerprint of the key it was fetched for — never the key.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
-pub const ISSUER: &str = "https://codegraff.com";
-/// Registered redirect: `http://127.0.0.1:27643/callback`.
-pub const CALLBACK_PORT: u16 = 27643;
-const SCOPES: &str = "openid email profile offline_access";
-const STORE_FILE: &str = "codegraff-auth.json";
+pub const GATEWAY: &str = "https://gateway.codegraff.com";
+/// The graff CLI's credential file, relative to the home directory.
+pub const KEY_FILE: &str = ".simple-harness-codegraff.json";
+const IDENTITY_FILE: &str = "codegraff-identity.json";
+/// The OAuth-era store: it held an unused refresh token, so it is deleted.
+const LEGACY_STORE_FILE: &str = "codegraff-auth.json";
+const DEVICE_LABEL: &str = "harness-desktop";
 
-/// The registered public client "Harness" (zigrepper
-/// `scripts/oauth-client.mjs --public`, redirect [`CALLBACK_PORT`]). Public
-/// client ids aren't secrets. `HARNESS_CODEGRAFF_CLIENT_ID` overrides.
-const DEFAULT_CLIENT_ID: Option<&str> = Some("cg_client_43e753878956c2cf7b5b0f53");
-
-fn client_id() -> Option<String> {
-    std::env::var("HARNESS_CODEGRAFF_CLIENT_ID")
+/// `HARNESS_CODEGRAFF_GATEWAY` points at a local gateway for development.
+fn gateway() -> String {
+    std::env::var("HARNESS_CODEGRAFF_GATEWAY")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .or_else(|| DEFAULT_CLIENT_ID.map(str::to_owned))
-}
-
-/// `HARNESS_CODEGRAFF_ISSUER` points at a local codegraff for development.
-fn issuer() -> String {
-    std::env::var("HARNESS_CODEGRAFF_ISSUER")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| ISSUER.into())
+        .unwrap_or_else(|| GATEWAY.into())
         .trim_end_matches('/')
         .to_owned()
 }
 
-fn redirect_uri() -> String {
-    format!("http://127.0.0.1:{CALLBACK_PORT}/callback")
+fn default_key_file() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(KEY_FILE))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct Stored {
-    sub: String,
+struct Identity {
+    /// [`fingerprint`] of the key this identity was fetched for.
+    key_fingerprint: String,
     email: Option<String>,
-    name: Option<String>,
-    refresh_token: Option<String>,
+    user_id: Option<i64>,
     signed_in_at: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodegraffStatus {
-    /// A client id is available (sign-in can start).
+    /// Sign-in can start (kept for older UIs; the device flow needs no
+    /// client registration).
     pub configured: bool,
     pub signed_in: bool,
     pub email: Option<String>,
     pub name: Option<String>,
-    /// A browser sign-in is waiting for its callback.
+    /// A browser approval is outstanding.
     pub pending: bool,
     /// The last sign-in attempt's failure, if any.
     pub error: Option<String>,
 }
 
-struct Pending {
-    task: tokio::task::JoinHandle<()>,
+pub struct CodegraffAuth {
+    identity: PathBuf,
+    key_file: Option<PathBuf>,
+    gateway: String,
+    pending: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lookup: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    last_error: Mutex<Option<String>>,
 }
 
-pub struct CodegraffAuth {
-    store: PathBuf,
-    pending: Mutex<Option<Pending>>,
-    last_error: Mutex<Option<String>>,
+#[derive(Deserialize)]
+struct DeviceStart {
+    device_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    interval: u64,
+}
+
+#[derive(Deserialize)]
+struct DevicePoll {
+    status: String,
+    api_key: Option<String>,
+    email: Option<String>,
+    user_id: Option<i64>,
+    interval: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct Me {
+    email: Option<String>,
+    user_id: Option<i64>,
 }
 
 impl CodegraffAuth {
@@ -94,346 +112,313 @@ impl CodegraffAuth {
             .unwrap()
             .entry(data_dir.to_path_buf())
             .or_insert_with(|| {
-                Arc::new(Self {
-                    store: data_dir.join(STORE_FILE),
-                    pending: Mutex::new(None),
-                    last_error: Mutex::new(None),
-                })
+                let _ = std::fs::remove_file(data_dir.join(LEGACY_STORE_FILE));
+                Arc::new(Self::new(data_dir, default_key_file(), gateway()))
             })
             .clone()
     }
 
-    fn load(&self) -> Option<Stored> {
-        serde_json::from_slice(&std::fs::read(&self.store).ok()?).ok()
-    }
-
-    fn save(&self, stored: &Stored) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(stored).map_err(std::io::Error::other)?;
-        std::fs::write(&self.store, bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.store, std::fs::Permissions::from_mode(0o600))?;
+    fn new(data_dir: &Path, key_file: Option<PathBuf>, gateway: String) -> Self {
+        Self {
+            identity: data_dir.join(IDENTITY_FILE),
+            key_file,
+            gateway,
+            pending: Mutex::new(None),
+            lookup: Mutex::new(None),
+            last_error: Mutex::new(None),
         }
-        Ok(())
     }
 
-    pub fn status(&self) -> CodegraffStatus {
-        let stored = self.load();
+    /// The key graff would use: its credential file, else `CODEGRAFF_API_KEY`.
+    fn current_key(&self) -> Option<String> {
+        self.key_file
+            .as_deref()
+            .and_then(read_key_file)
+            .or_else(|| {
+                std::env::var("CODEGRAFF_API_KEY")
+                    .ok()
+                    .filter(|key| !key.trim().is_empty())
+            })
+    }
+
+    fn load_identity(&self) -> Option<Identity> {
+        serde_json::from_slice(&std::fs::read(&self.identity).ok()?).ok()
+    }
+
+    fn save_identity(&self, identity: &Identity) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(identity).map_err(std::io::Error::other)?;
+        write_private(&self.identity, &bytes)
+    }
+
+    pub fn status(self: &Arc<Self>) -> CodegraffStatus {
+        let key = self.current_key();
+        let identity = key.as_deref().and_then(|key| {
+            let identity = self.load_identity()?;
+            (identity.key_fingerprint == fingerprint(key)).then_some(identity)
+        });
+        // Signed in by `graff login` (or a key we haven't described yet):
+        // look the account up once, in the background.
+        if let (Some(key), None) = (&key, &identity) {
+            self.spawn_lookup(key.clone());
+        }
         CodegraffStatus {
-            configured: client_id().is_some(),
-            signed_in: stored.is_some(),
-            email: stored.as_ref().and_then(|s| s.email.clone()),
-            name: stored.and_then(|s| s.name),
+            configured: true,
+            signed_in: key.is_some(),
+            email: identity.and_then(|identity| identity.email),
+            name: None,
             pending: self
                 .pending
                 .lock()
                 .unwrap()
                 .as_ref()
-                .is_some_and(|p| !p.task.is_finished()),
+                .is_some_and(|task| !task.is_finished()),
             error: self.last_error.lock().unwrap().clone(),
         }
     }
 
-    pub fn sign_out(&self) {
-        if let Some(pending) = self.pending.lock().unwrap().take() {
-            pending.task.abort();
+    fn spawn_lookup(self: &Arc<Self>, key: String) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let print = fingerprint(&key);
+        let mut lookup = self.lookup.lock().unwrap();
+        if lookup.as_ref().is_some_and(|(seen, _)| *seen == print) {
+            return;
         }
-        *self.last_error.lock().unwrap() = None;
-        let _ = std::fs::remove_file(&self.store);
+        let this = self.clone();
+        let task = runtime.spawn(async move {
+            match this.fetch_me(&key).await {
+                Ok(me) => {
+                    let _ = this.save_identity(&Identity {
+                        key_fingerprint: fingerprint(&key),
+                        email: me.email,
+                        user_id: me.user_id,
+                        signed_in_at: chrono::Utc::now().timestamp(),
+                    });
+                }
+                // Older gateways have no /v1/me: stay signed in, just nameless.
+                Err(error) => tracing::debug!(%error, "codegraff account lookup failed"),
+            }
+        });
+        *lookup = Some((print, task));
     }
 
-    /// Start a browser sign-in: bind the loopback callback, return the
-    /// authorize URL for the caller to open.
-    pub async fn start_sign_in(self: &Arc<Self>) -> Result<String, String> {
-        let client_id = client_id().ok_or_else(|| {
-            "Codegraff sign-in isn't configured (set HARNESS_CODEGRAFF_CLIENT_ID)".to_string()
-        })?;
-        // A second click replaces the first attempt (and frees the port).
-        let previous = self.pending.lock().unwrap().take();
-        if let Some(previous) = previous {
-            previous.task.abort();
-            let _ = previous.task.await;
-        }
-        let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+    async fn fetch_me(&self, key: &str) -> Result<Me, String> {
+        http()
+            .get(format!("{}/v1/me", self.gateway))
+            .bearer_auth(key)
+            .send()
             .await
-            .map_err(|e| format!("can't listen on 127.0.0.1:{CALLBACK_PORT}: {e}"))?;
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Revoke the key server-side (best effort — an unreachable gateway must
+    /// not keep anyone signed in), then remove it from graff's file.
+    pub async fn sign_out(&self) {
+        if let Some(pending) = self.pending.lock().unwrap().take() {
+            pending.abort();
+        }
         *self.last_error.lock().unwrap() = None;
+        let file_key = self.key_file.as_deref().and_then(read_key_file);
+        if let Some(key) = &file_key {
+            let revoked = http()
+                .post(format!("{}/v1/keys/revoke", self.gateway))
+                .bearer_auth(key)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+            if let Err(error) = revoked {
+                tracing::warn!(%error, "couldn't revoke the codegraff key; removing it locally");
+            }
+        }
+        if let Some(path) = &self.key_file {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_file(&self.identity);
+    }
 
-        let verifier = random_token();
-        let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
-        let state = random_token();
-        let nonce = random_token();
-        let url = authorize_url(&issuer(), &client_id, &state, &nonce, &challenge);
-
+    /// Start a device sign-in: returns the approval URL for the caller to open
+    /// and polls for the key in the background.
+    pub async fn start_sign_in(self: &Arc<Self>) -> Result<String, String> {
+        if self.key_file.is_none() {
+            return Err("no home directory to store the Codegraff key in".into());
+        }
+        // A second click replaces the first attempt.
+        if let Some(previous) = self.pending.lock().unwrap().take() {
+            previous.abort();
+        }
+        *self.last_error.lock().unwrap() = None;
+        let start: DeviceStart = http()
+            .post(format!("{}/v1/device/start", self.gateway))
+            .json(&serde_json::json!({ "device_label": DEVICE_LABEL }))
+            .send()
+            .await
+            .map_err(|e| format!("couldn't reach Codegraff: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Codegraff refused the sign-in: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("unexpected Codegraff response: {e}"))?;
+        let url = start
+            .verification_uri_complete
+            .clone()
+            .unwrap_or_else(|| start.verification_uri.clone());
         let this = self.clone();
         let task = tokio::spawn(async move {
-            let outcome = this.await_callback(listener, &client_id, &state, &verifier).await;
-            if let Err(error) = outcome {
+            if let Err(error) = this.poll(start).await {
                 tracing::warn!(%error, "codegraff sign-in failed");
                 *this.last_error.lock().unwrap() = Some(error);
             }
         });
-        *self.pending.lock().unwrap() = Some(Pending { task });
+        *self.pending.lock().unwrap() = Some(task);
         Ok(url)
     }
 
-    async fn await_callback(
-        &self,
-        listener: TcpListener,
-        client_id: &str,
-        state: &str,
-        verifier: &str,
-    ) -> Result<(), String> {
+    async fn poll(&self, start: DeviceStart) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(start.expires_in.max(1));
+        let mut interval = start.interval.clamp(1, 30);
         loop {
-            let (mut socket, _) = listener.accept().await.map_err(|e| e.to_string())?;
-            let mut buf = vec![0u8; 8192];
-            let n = socket.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let Some(query) = callback_query(&request) else {
-                // Favicon probes and the like: not ours, keep waiting.
-                let _ = socket.write_all(http_page(404, "Not found").as_bytes()).await;
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err("The sign-in link expired. Try again.".into());
+            }
+            let response = http()
+                .post(format!("{}/v1/device/poll", self.gateway))
+                .json(&serde_json::json!({ "device_code": start.device_code }))
+                .send()
+                .await;
+            // Transient network trouble: keep polling, like `graff login`.
+            let Ok(response) = response else { continue };
+            let Ok(poll) = response.json::<DevicePoll>().await else {
                 continue;
             };
-            if query.get("state").map(String::as_str) != Some(state) {
-                let _ = socket
-                    .write_all(http_page(400, "This sign-in link is stale. Start again from Harness.").as_bytes())
-                    .await;
-                continue;
+            match poll.status.as_str() {
+                "pending" => interval = poll.interval.unwrap_or(interval).clamp(1, 30),
+                "ok" => {
+                    let key = poll.api_key.ok_or("Codegraff approved without a key")?;
+                    return self.finish(&key, poll.email, poll.user_id).await;
+                }
+                "denied" => return Err("Sign-in was denied in the browser.".into()),
+                "expired" => return Err("The sign-in link expired. Try again.".into()),
+                "consumed" => return Err("This sign-in was already used. Try again.".into()),
+                "not_found" => return Err("Codegraff lost this sign-in. Try again.".into()),
+                _ => {}
             }
-            if let Some(error) = query.get("error") {
-                let _ = socket
-                    .write_all(http_page(400, "Sign-in was cancelled. You can close this tab.").as_bytes())
-                    .await;
-                return Err(format!("codegraff returned {error}"));
-            }
-            let Some(code) = query.get("code") else {
-                let _ = socket.write_all(http_page(400, "Missing code.").as_bytes()).await;
-                return Err("callback without a code".into());
-            };
-            let result = self.finish(code, client_id, verifier).await;
-            let page = match &result {
-                Ok(()) => http_page(200, "Signed in to Codegraff. You can close this tab and return to Harness."),
-                Err(_) => http_page(500, "Sign-in failed. Return to Harness and try again."),
-            };
-            let _ = socket.write_all(page.as_bytes()).await;
-            return result;
         }
     }
 
-    async fn finish(&self, code: &str, client_id: &str, verifier: &str) -> Result<(), String> {
-        #[derive(Deserialize)]
-        struct Tokens {
-            access_token: String,
-            refresh_token: Option<String>,
-        }
-        #[derive(Deserialize)]
-        struct UserInfo {
-            sub: String,
-            email: Option<String>,
-            name: Option<String>,
-        }
-        let http = reqwest::Client::new();
-        let issuer = issuer();
-        let response = http
-            .post(format!("{issuer}/api/oauth/token"))
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", redirect_uri().as_str()),
-                ("client_id", client_id),
-                ("code_verifier", verifier),
-            ])
-            .send()
-            .await
-            .map_err(|e| format!("token request failed: {e}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("token exchange rejected ({status}): {body}"));
-        }
-        let tokens: Tokens = response.json().await.map_err(|e| format!("bad token response: {e}"))?;
-        let user: UserInfo = http
-            .get(format!("{issuer}/api/oauth/userinfo"))
-            .bearer_auth(&tokens.access_token)
-            .send()
-            .await
-            .map_err(|e| format!("userinfo request failed: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("userinfo rejected: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("bad userinfo response: {e}"))?;
-        self.save(&Stored {
-            sub: user.sub,
-            email: user.email,
-            name: user.name,
-            refresh_token: tokens.refresh_token,
+    async fn finish(
+        &self,
+        key: &str,
+        email: Option<String>,
+        user_id: Option<i64>,
+    ) -> Result<(), String> {
+        let path = self.key_file.as_ref().ok_or("no home directory")?;
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "api_key": key }))
+            .map_err(|e| e.to_string())?;
+        write_private(path, &bytes).map_err(|e| format!("couldn't save the Codegraff key: {e}"))?;
+        // Older gateways omit the email from the poll; ask /v1/me instead.
+        let (email, user_id) = match email {
+            Some(email) => (Some(email), user_id),
+            None => match self.fetch_me(key).await {
+                Ok(me) => (me.email, me.user_id.or(user_id)),
+                Err(_) => (None, user_id),
+            },
+        };
+        let _ = self.save_identity(&Identity {
+            key_fingerprint: fingerprint(key),
+            email,
+            user_id,
             signed_in_at: chrono::Utc::now().timestamp(),
-        })
-        .map_err(|e| format!("couldn't save the sign-in: {e}"))
+        });
+        Ok(())
     }
 }
 
-fn b64url(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+fn http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_default()
 }
 
-/// 32 random bytes, base64url (a PKCE verifier is 43+ chars of this alphabet).
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    b64url(&bytes)
-}
-
-fn authorize_url(issuer: &str, client_id: &str, state: &str, nonce: &str, challenge: &str) -> String {
-    let query = [
-        ("response_type", "code"),
-        ("client_id", client_id),
-        ("redirect_uri", &redirect_uri()),
-        ("scope", SCOPES),
-        ("state", state),
-        ("nonce", nonce),
-        ("code_challenge", challenge),
-        ("code_challenge_method", "S256"),
-    ]
-    .iter()
-    .map(|(k, v)| format!("{k}={}", urlencode(v)))
-    .collect::<Vec<_>>()
-    .join("&");
-    format!("{issuer}/oauth/authorize?{query}")
-}
-
-fn urlencode(value: &str) -> String {
+/// graff's credential file: `{"api_key": …}` (extra fields are ignored, as
+/// graff itself does).
+fn read_key_file(path: &Path) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+        .get("api_key")?
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
 }
 
-fn urldecode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok())
-            .flatten()
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (bytes[i], hex) {
-            (_, Some(decoded)) => {
-                out.push(decoded);
-                i += 3;
-            }
-            (b'+', None) => {
-                out.push(b' ');
-                i += 1;
-            }
-            (b, None) => {
-                out.push(b);
-                i += 1;
-            }
+/// Identifies which key a cached identity belongs to without storing it.
+fn fingerprint(key: &str) -> String {
+    format!("{:x}", Sha256::digest(key.as_bytes()))[..16].to_owned()
+}
+
+/// Write via a 0600 temp file and rename, so a crash never leaves a
+/// half-written or world-readable credential.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    {
+        use std::io::Write as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
     }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The query of a `GET /callback?...` request line, decoded.
-fn callback_query(request: &str) -> Option<HashMap<String, String>> {
-    let line = request.lines().next()?;
-    let mut parts = line.split_whitespace();
-    if parts.next()? != "GET" {
-        return None;
-    }
-    let target = parts.next()?;
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    if path != "/callback" {
-        return None;
-    }
-    Some(
-        query
-            .split('&')
-            .filter(|kv| !kv.is_empty())
-            .map(|kv| {
-                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-                (urldecode(k), urldecode(v))
-            })
-            .collect(),
-    )
-}
-
-fn http_page(status: u16, message: &str) -> String {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        _ => "Internal Server Error",
-    };
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Harness</title>\
-         <body style=\"font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh;color:#333\">\
-         <p>{}</p></body>",
-        message.replace('<', "&lt;")
-    );
-    format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
-    #[test]
-    fn authorize_url_carries_pkce_and_the_fixed_loopback_redirect() {
-        let url = authorize_url("https://codegraff.com", "cg_client_x", "st", "no", "ch");
-        assert!(url.starts_with("https://codegraff.com/oauth/authorize?response_type=code&client_id=cg_client_x"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A27643%2Fcallback"));
-        assert!(url.contains("scope=openid%20email%20profile%20offline_access"));
-        assert!(url.contains("code_challenge=ch&code_challenge_method=S256"));
-    }
-
-    #[test]
-    fn callback_query_parses_only_the_callback_path() {
-        let q = callback_query("GET /callback?code=a%2Bb&state=s1 HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
-        assert_eq!(q["code"], "a+b");
-        assert_eq!(q["state"], "s1");
-        assert!(callback_query("GET /favicon.ico HTTP/1.1\r\n").is_none());
-        assert!(callback_query("POST /callback?code=x HTTP/1.1\r\n").is_none());
-    }
-
-    #[test]
-    fn random_tokens_are_long_and_distinct() {
-        let (a, b) = (random_token(), random_token());
-        assert_ne!(a, b);
-        assert!(a.len() >= 43, "PKCE verifiers need 43+ chars");
-    }
-
-    /// Full round trip against a fake provider: authorize URL → browser hits
-    /// the loopback callback → code exchanged with the PKCE verifier as a
-    /// public client → userinfo → account saved.
-    #[tokio::test]
-    async fn sign_in_round_trip_against_a_fake_provider() {
-        let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let issuer = format!("http://{}", provider.local_addr().unwrap());
-        let seen_token_form = Arc::new(Mutex::new(String::new()));
-        let seen = seen_token_form.clone();
+    /// A fake gateway: answers device start/poll, /v1/me, and revoke, and
+    /// records every request line + body it saw.
+    async fn fake_gateway(poll_body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
         tokio::spawn(async move {
             loop {
-                let (mut socket, _) = provider.accept().await.unwrap();
+                let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = vec![0u8; 16384];
                 let n = socket.read(&mut buf).await.unwrap();
                 let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                let body = if request.starts_with("POST /api/oauth/token") {
-                    *seen.lock().unwrap() = request.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
-                    r#"{"access_token":"cg_at_1","token_type":"Bearer","refresh_token":"cg_rt_1"}"#
+                log.lock().unwrap().push(request.clone());
+                let body = if request.starts_with("POST /v1/device/start") {
+                    r#"{"device_code":"dc","user_code":"ABCD-EFGH","verification_uri":"https://codegraff.com/cli/auth","verification_uri_complete":"https://codegraff.com/cli/auth?code=ABCD-EFGH","expires_in":600,"interval":1}"#
+                } else if request.starts_with("POST /v1/device/poll") {
+                    poll_body
+                } else if request.starts_with("GET /v1/me") {
+                    r#"{"user_id":7,"email":"me@codegraff.dev","tier":"free","credits_micro_usd":0,"key_id":1,"scopes":["api"]}"#
                 } else {
-                    r#"{"sub":"7","email":"you@codegraff.dev","name":"You"}"#
+                    r#"{"ok":true,"key_id":1}"#
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -442,59 +427,137 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        // SAFETY (env): this is the only test touching these variables.
-        unsafe {
-            std::env::set_var("HARNESS_CODEGRAFF_ISSUER", &issuer);
-            std::env::set_var("HARNESS_CODEGRAFF_CLIENT_ID", "cg_client_test");
-        }
+        (base, seen)
+    }
+
+    fn auth_in(dir: &Path, gateway: String) -> Arc<CodegraffAuth> {
+        Arc::new(CodegraffAuth::new(
+            dir,
+            Some(dir.join("home").join(KEY_FILE)),
+            gateway,
+        ))
+    }
+
+    #[tokio::test]
+    async fn device_sign_in_writes_graffs_key_file() {
+        let (gateway, seen) = fake_gateway(
+            r#"{"status":"ok","api_key":"cg_sk_test","user_id":7,"device_label":"harness-desktop","email":"you@codegraff.dev"}"#,
+        )
+        .await;
         let dir = tempfile::tempdir().unwrap();
-        let auth = CodegraffAuth::shared(dir.path());
+        let auth = auth_in(dir.path(), gateway);
         let url = auth.start_sign_in().await.unwrap();
-        assert!(url.starts_with(&format!("{issuer}/oauth/authorize?")));
+        assert_eq!(url, "https://codegraff.com/cli/auth?code=ABCD-EFGH");
         assert!(auth.status().pending);
-        let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_owned();
+        let pending = auth.pending.lock().unwrap().take().unwrap();
+        pending.await.unwrap();
 
-        // The "browser" follows the provider's redirect back to us.
-        let page = reqwest::get(format!("{}?code=the_code&state={state}", redirect_uri()))
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        assert!(page.contains("Signed in to Codegraff"), "{page}");
-
-        let form = seen_token_form.lock().unwrap().clone();
-        assert!(form.contains("grant_type=authorization_code"), "{form}");
-        assert!(form.contains("code=the_code"));
-        assert!(form.contains("client_id=cg_client_test"));
-        assert!(form.contains("code_verifier="));
+        let key_file = dir.path().join("home").join(KEY_FILE);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&key_file).unwrap()).unwrap();
+        assert_eq!(written, serde_json::json!({ "api_key": "cg_sk_test" }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                key_file.metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         let status = auth.status();
         assert!(status.signed_in, "{status:?}");
         assert_eq!(status.email.as_deref(), Some("you@codegraff.dev"));
-        assert_eq!(status.name.as_deref(), Some("You"));
-        assert_eq!(auth.load().unwrap().refresh_token.as_deref(), Some("cg_rt_1"));
-        unsafe {
-            std::env::remove_var("HARNESS_CODEGRAFF_ISSUER");
-            std::env::remove_var("HARNESS_CODEGRAFF_CLIENT_ID");
-        }
+        let requests = seen.lock().unwrap().join("\n");
+        assert!(
+            requests.contains(r#""device_label":"harness-desktop""#),
+            "{requests}"
+        );
+        assert!(requests.contains(r#""device_code":"dc""#), "{requests}");
+        // The identity cache never holds the key.
+        let cache = std::fs::read_to_string(dir.path().join(IDENTITY_FILE)).unwrap();
+        assert!(!cache.contains("cg_sk_test"));
     }
 
-    #[test]
-    fn sign_out_forgets_the_account() {
+    #[tokio::test]
+    async fn a_graff_login_key_signs_the_app_in_and_fetches_the_email() {
+        let (gateway, seen) = fake_gateway(r#"{"status":"pending"}"#).await;
         let dir = tempfile::tempdir().unwrap();
-        let auth = CodegraffAuth::shared(dir.path());
-        auth.save(&Stored {
-            sub: "2".into(),
-            email: Some("you@example.com".into()),
-            name: None,
-            refresh_token: Some("cg_rt_x".into()),
-            signed_in_at: 0,
-        })
+        let auth = auth_in(dir.path(), gateway);
+        write_private(
+            &dir.path().join("home").join(KEY_FILE),
+            br#"{"api_key":"cg_sk_from_cli"}"#,
+        )
         .unwrap();
         let status = auth.status();
         assert!(status.signed_in);
-        assert_eq!(status.email.as_deref(), Some("you@example.com"));
-        auth.sign_out();
-        assert!(!auth.status().signed_in);
+        assert_eq!(status.email, None);
+        let lookup = auth.lookup.lock().unwrap().take().unwrap().1;
+        lookup.await.unwrap();
+        assert_eq!(auth.status().email.as_deref(), Some("me@codegraff.dev"));
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.starts_with("GET /v1/me") && r.contains("Bearer cg_sk_from_cli"))
+        );
+        // A different key (another `graff login`) doesn't inherit the email.
+        write_private(
+            &dir.path().join("home").join(KEY_FILE),
+            br#"{"api_key":"cg_sk_other"}"#,
+        )
+        .unwrap();
+        assert_eq!(auth.status().email, None);
+    }
+
+    #[tokio::test]
+    async fn sign_out_revokes_and_signs_graff_out_too() {
+        let (gateway, seen) = fake_gateway(r#"{"status":"pending"}"#).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = auth_in(dir.path(), gateway);
+        let key_file = dir.path().join("home").join(KEY_FILE);
+        write_private(&key_file, br#"{"api_key":"cg_sk_bye"}"#).unwrap();
+        auth.sign_out().await;
+        assert!(!key_file.exists());
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.starts_with("POST /v1/keys/revoke") && r.contains("Bearer cg_sk_bye"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_out_still_forgets_the_key_when_the_gateway_is_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = auth_in(dir.path(), "http://127.0.0.1:9".into());
+        let key_file = dir.path().join("home").join(KEY_FILE);
+        write_private(&key_file, br#"{"api_key":"cg_sk_offline"}"#).unwrap();
+        auth.sign_out().await;
+        assert!(!key_file.exists());
+    }
+
+    #[tokio::test]
+    async fn denied_approval_surfaces_an_error() {
+        let (gateway, _) = fake_gateway(r#"{"status":"denied"}"#).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = auth_in(dir.path(), gateway);
+        auth.start_sign_in().await.unwrap();
+        let pending = auth.pending.lock().unwrap().take().unwrap();
+        pending.await.unwrap();
+        let status = auth.status();
+        assert!(!status.signed_in);
+        assert!(status.error.unwrap().contains("denied"));
+    }
+
+    #[test]
+    fn key_file_reader_matches_graff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_FILE);
+        std::fs::write(&path, r#"{"api_key":" cg_sk_x ","email":"extra@ok"}"#).unwrap();
+        assert_eq!(read_key_file(&path).as_deref(), Some("cg_sk_x"));
+        std::fs::write(&path, r#"{"api_key":""}"#).unwrap();
+        assert_eq!(read_key_file(&path), None);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_key_file(&path), None);
     }
 }

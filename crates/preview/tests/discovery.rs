@@ -86,7 +86,7 @@ async fn only_current_project_http_processes_are_exposed_and_removals_are_live()
         .expect("proxy did not retry the freed port");
     }
     let found = &service.catalog().snapshot().services[0];
-    assert!(found.zeron_owned);
+    assert!(found.harness_owned);
     assert_eq!(std::path::Path::new(&found.cwd), a.canonicalize().unwrap());
     assert!(found.started_at > 0);
     *roots.lock().unwrap() = vec![b];
