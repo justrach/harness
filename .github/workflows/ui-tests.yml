@@ -79,20 +79,30 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Check out pinned GPUI for native frame-source tests
-        shell: bash
+      - name: Locate the vendored GPUI workspace
+        id: gpui-source
         run: |
-          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
-          git init frame-source-tests
-          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
-          git -C frame-source-tests fetch --depth=1 origin "$rev"
-          git -C frame-source-tests checkout --detach FETCH_HEAD
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path.cwd().resolve()
+          with (root / "Cargo.toml").open("rb") as manifest:
+              gpui = tomllib.load(manifest)["workspace"]["dependencies"]["gpui"]
+          source = (root / gpui["path"]).resolve()
+          workspace = source.parent.parent
+          relative = workspace.relative_to(root)
+          test = workspace / "crates/gpui_macos/tests/frame_source_recovery.rs"
+          if not test.is_file():
+              raise SystemExit(f"vendored GPUI frame-source test missing: {test}")
+          print(f"workspace={relative}")
+          PY
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           workspaces: |
             .
-            frame-source-tests
+            ${{ steps.gpui-source.outputs.workspace }}
       - name: Check macOS application
         run: cargo check --release --locked -p harness
       - name: Native diff font geometry regression
@@ -136,8 +146,10 @@ jobs:
           path: ${{ runner.temp }}/preview-captures
           if-no-files-found: ignore
       - name: Native frame-source recovery regression
-        working-directory: frame-source-tests
-        run: cargo test --release --locked -p gpui_macos --test frame_source_recovery
+        working-directory: ${{ steps.gpui-source.outputs.workspace }}
+        # The vendored GPUI workspace has no independent lockfile. Its source
+        # is pinned by this checkout and selected from Cargo.toml above.
+        run: cargo test --release -p gpui_macos --test frame_source_recovery
 
   ios-tests:
     runs-on: macos-latest
