@@ -104,8 +104,21 @@ jobs:
             echo "NOTARY_KEY_ID=$AC_API_KEY_ID"
             echo "NOTARY_ISSUER_ID=$AC_API_ISSUER_ID"
           } >>"$GITHUB_ENV"
+      - name: require signed stable macOS distribution
+        if: github.event_name == 'push'
+        run: |
+          test -n "${CODESIGN_IDENTITY:-}" || { echo 'Developer ID signing is required for a stable release'; exit 1; }
+          test -n "${NOTARY_KEY_PATH:-}" || { echo 'Notarization is required for a stable release'; exit 1; }
+          test -n "${NOTARY_KEY_ID:-}" || exit 1
+          test -n "${NOTARY_ISSUER_ID:-}" || exit 1
       - name: package dmg
         run: scripts/package-macos.sh
+      - name: verify signed stable macOS distribution
+        if: github.event_name == 'push'
+        run: |
+          codesign --verify --strict --deep --verbose=2 target/package/Harness.app
+          xcrun stapler validate target/package/Harness.app
+          xcrun stapler validate target/package/harness-*-macos-arm64.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ runner.arch }}
@@ -160,11 +173,17 @@ jobs:
           ver="${GITHUB_REF_NAME#v}"
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
-              macos-arm64.dmg macos-arm64-app.tar.gz \
               windows-x86_64.zip windows-x86_64.exe; do
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done
+          for platform in macos-arm64.dmg macos-arm64-app.tar.gz; do
+            test -f "dist/harness-$ver-$platform" \
+              || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
+          done
+          # This is a byte-for-byte alias of the notarized, stapled DMG from
+          # the macOS job. The stable download link does not change per tag.
+          cp "dist/harness-$ver-macos-arm64.dmg" dist/Harness-macos-arm64.dmg
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         run: |

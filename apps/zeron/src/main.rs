@@ -5,6 +5,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod auth_cli;
+mod bundled_graff;
 mod daemon;
 mod paths;
 mod update_cli;
@@ -243,6 +244,7 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
+            bundled_graff::prepare();
             let edge_token = paths::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes HARNESS_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).

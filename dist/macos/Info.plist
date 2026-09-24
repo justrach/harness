@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Template for Zeron.app/Contents/Info.plist — see dist/README.md for the
+<!-- Template for Harness.app/Contents/Info.plist — see dist/README.md for the
      bundling steps. Replace __VERSION__ before packaging. -->
 <plist version="1.0">
 <dict>
@@ -11,7 +11,7 @@
     <key>CFBundleExecutable</key>
     <string>harness</string>
     <key>CFBundleIconFile</key>
-    <string>zeron.icns</string>
+    <string>harness.icns</string>
     <key>CFBundleIdentifier</key>
     <string>harness.codegraff.app</string>
     <key>CFBundleInfoDictionaryVersion</key>

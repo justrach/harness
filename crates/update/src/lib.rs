@@ -1,12 +1,11 @@
 //! harness-update — release checking and self-update, shared by the engine (the
-//! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
+//! background checker + `ApplyUpdate`), the CLI (`harness update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
-//! releases published before the manifest existed.
+//! Release layout (see `.github/workflows/release.yml`): the packaged macOS
+//! app reads Harness's latest stable GitHub release. Managed installs still
+//! use `{edge}/releases/*`. `manifest.json` carries the latest version plus a
+//! sha256 per artifact; `latest.txt` remains a fallback for older releases.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
@@ -107,10 +106,10 @@ pub fn headless_artifact(version: &str) -> String {
     format!("zeron-{version}-{os}-{arch}.tar.gz")
 }
 
-/// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+/// `harness-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
-    format!("zeron-{version}-macos-{arch}-app.tar.gz")
+    format!("harness-{version}-macos-{arch}-app.tar.gz")
 }
 
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
@@ -189,7 +188,7 @@ fn http_client_with_timeouts(
         // Inactivity timeout, not a total download cap: slow progressing
         // updates remain viable on constrained links.
         .read_timeout(read)
-        .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many update redirects");
@@ -222,6 +221,11 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
 }
 
 fn release_base(edge_url: &str) -> anyhow::Result<String> {
+    if let Ok(url) = std::env::var("HARNESS_RELEASES_URL")
+        && !url.trim().is_empty()
+    {
+        return validate_release_override(&url);
+    }
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
         && !url.trim().is_empty()
     {
@@ -230,6 +234,11 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     #[cfg(windows)]
     if let Some(url) = windows::release_url()? {
         return Ok(url.trim_end_matches('/').to_owned());
+    }
+    // The installed desktop GUI follows Harness's stable GitHub releases.
+    // Its manifest is attached to the same release as the signed app tarball.
+    if matches!(detect_install(), InstallKind::MacApp { .. }) {
+        return Ok("https://github.com/justrach/harness/releases/latest/download".into());
     }
     Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
 }
@@ -724,9 +733,9 @@ impl Updater {
     }
 
     async fn check_loop(&self) {
-        // Harness is a fork: zeron's release channel would replace this
-        // binary with upstream zeron, so the fork never checks or applies.
-        if !cfg!(test) {
+        // The installed app has a dedicated Harness release feed. Managed
+        // legacy installs retain their existing manual update behavior.
+        if !cfg!(test) && !matches!(detect_install(), InstallKind::MacApp { .. }) {
             return;
         }
         let mut shutdown = self.shutdown_tx.subscribe();
@@ -1030,7 +1039,10 @@ mod tests {
             headless_artifact("0.2.0"),
             format!("zeron-0.2.0-{os}-{arch}.tar.gz")
         );
-        assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+        assert_eq!(
+            mac_app_artifact("0.2.0"),
+            format!("harness-0.2.0-macos-{arch}-app.tar.gz")
+        );
     }
 
     #[cfg(windows)]

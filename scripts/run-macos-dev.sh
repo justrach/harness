@@ -29,22 +29,28 @@ TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
 install -m 755 "$TARGET_DIR/$PROFILE_DIR/harness" "$CONTENTS/MacOS/harness"
+GRAFF_SRC="${GRAFF_BINARY:-$(command -v graff || true)}"
+if [[ -n "$GRAFF_SRC" ]]; then
+  mkdir -p "$CONTENTS/Resources/bin"
+  install -m 755 "$GRAFF_SRC" "$CONTENTS/Resources/bin/graff"
+fi
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.HARNESS_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.HARNESS_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
 
-if [[ ! -f "$CONTENTS/Resources/zeron.icns" || "$ROOT/dist/macos/icon-1024.png" -nt "$CONTENTS/Resources/zeron.icns" ]]; then
-  ICONSET="$DEV_ROOT/zeron-dev.iconset"
+if [[ ! -f "$CONTENTS/Resources/harness.icns" || "$ROOT/dist/macos/icon-1024.png" -nt "$CONTENTS/Resources/harness.icns" ]]; then
+  ICONSET="$DEV_ROOT/harness-dev.iconset"
   mkdir -p "$ICONSET"
   for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
     retina=$((size * 2))
     sips -z "$retina" "$retina" "$ROOT/dist/macos/icon-1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
   done
-  rm -f "$CONTENTS/Resources/zeron.icns"
-  iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/zeron.icns"
+  rm -f "$CONTENTS/Resources/harness.icns"
+  iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/harness.icns"
+  rm -rf "$ICONSET"
 fi
 
 # A real Apple Development identity gives TCC a stable signing requirement
