@@ -103,6 +103,11 @@ struct SetHarnessEnabledParams {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct SetGraffDraftSubagentsParams {
+    enabled: bool,
+}
+
 async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
@@ -1064,7 +1069,8 @@ async fn run_requested_install(
     cancel: harness_adapters::CancellationToken,
 ) -> Result<(), harness_adapters::HarnessError> {
     #[cfg(test)]
-    if let Ok(script) = std::env::var(format!("HARNESS_INSTALLER_COMMAND_{harness:?}").to_uppercase())
+    if let Ok(script) =
+        std::env::var(format!("HARNESS_INSTALLER_COMMAND_{harness:?}").to_uppercase())
     {
         return harness_adapters::install::install_with_command(harness, &script, cancel).await;
     }
@@ -1122,6 +1128,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_GRAFF_DRAFT_SUBAGENTS
+            | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1265,7 +1273,8 @@ fn doc_messages_stream(
                 };
                 let replay_baseline = match prev.as_ref() {
                     None => {
-                        opening_baseline = harness_doc::TranscriptBaseline::capture(&current.entries);
+                        opening_baseline =
+                            harness_doc::TranscriptBaseline::capture(&current.entries);
                         Some(opening_baseline.clone())
                     }
                     Some(prev)
@@ -1512,6 +1521,14 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_GRAFF_DRAFT_SUBAGENTS => {
+                RpcReply::value(&self.registry.graff_draft_subagents())
+            }
+            methods::SET_GRAFF_DRAFT_SUBAGENTS => {
+                let p: SetGraffDraftSubagentsParams = parse_params(params)?;
+                self.registry.set_graff_draft_subagents(p.enabled);
+                RpcReply::value(&self.registry.graff_draft_subagents())
+            }
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;
                 self.registry
@@ -3050,10 +3067,10 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_install_rpc_verifies_archive_and_refreshes_descriptors() {
+        use harness_adapters::archive_install::{ArchivePin, ensure_installed, installed_entry};
         use sha2::{Digest, Sha512};
         use std::io::Write;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use harness_adapters::archive_install::{ArchivePin, ensure_installed, installed_entry};
         if std::env::var_os("HARNESS_INSTALL_RPC_TEST").is_none() {
             let root = tempfile::tempdir().unwrap();
             let output = tokio::process::Command::new(std::env::current_exe().unwrap())

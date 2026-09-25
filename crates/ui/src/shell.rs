@@ -3840,20 +3840,26 @@ impl Shell {
     /// immediately, so the central store is an equally canonical read and
     /// keeps this block on a single source.
     fn sync_independent_settings(&mut self, cx: &App) {
-        let current = settings::current(cx);
-        self.settings.window_geometry = current.window_geometry;
-        self.settings.new_thread_composer_background = current.new_thread_composer_background;
-        self.settings.new_thread_background_effect = current.new_thread_background_effect;
-        self.settings.open_web_links_in_harness = current.open_web_links_in_harness;
-        self.settings.ui_font_family = current.ui_font_family;
-        self.settings.ui_font_size = current.ui_font_size;
-        self.settings.terminal_font_family = current.terminal_font_family;
-        self.settings.terminal_font_size = current.terminal_font_size;
-        self.settings.code_font_family = current.code_font_family;
-        self.settings.code_font_size = current.code_font_size;
-        self.settings.transcript_width = current.transcript_width;
-        self.settings.skill_completion_by_harness = current.skill_completion_by_harness;
-        self.settings.skills_in_slash_menu = current.skills_in_slash_menu;
+        // Runs on every Shell render: borrow the store and copy only these
+        // fields rather than cloning the whole settings struct.
+        let target = &mut self.settings;
+        settings::with_current(cx, |current| {
+            target.window_geometry = current.window_geometry.clone();
+            target.new_thread_composer_background = current.new_thread_composer_background.clone();
+            target.new_thread_background_effect = current.new_thread_background_effect.clone();
+            target.open_web_links_in_harness = current.open_web_links_in_harness;
+            target.ui_font_family = current.ui_font_family.clone();
+            target.ui_font_size = current.ui_font_size;
+            target.terminal_font_family = current.terminal_font_family.clone();
+            target.terminal_font_size = current.terminal_font_size;
+            target.code_font_family = current.code_font_family.clone();
+            target.code_font_size = current.code_font_size;
+            target.transcript_width = current.transcript_width;
+            if target.skill_completion_by_harness != current.skill_completion_by_harness {
+                target.skill_completion_by_harness = current.skill_completion_by_harness.clone();
+            }
+            target.skills_in_slash_menu = current.skills_in_slash_menu;
+        });
     }
 
     fn retry_engine(&mut self, cx: &mut Context<Self>) {

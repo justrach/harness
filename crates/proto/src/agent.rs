@@ -336,6 +336,8 @@ pub enum DoneStatus {
     Completed,
     Interrupted,
     Errored,
+    Cancelled,
+    Disconnected,
 }
 
 /// The normalized streaming event every harness emits.

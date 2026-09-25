@@ -41,6 +41,8 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    pub const GET_GRAFF_DRAFT_SUBAGENTS: &str = "GetGraffDraftSubagents";
+    pub const SET_GRAFF_DRAFT_SUBAGENTS: &str = "SetGraffDraftSubagents";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

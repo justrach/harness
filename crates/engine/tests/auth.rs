@@ -1,4 +1,4 @@
-//! Auth service tests: dev mode, and the CodeGraff OAuth flows (headless paste-code exchange,
+//! Auth service tests: dev mode, and the Codegraff sign-in flows (headless paste-code exchange,
 //! loopback callback, refresh rotation + revocation, org onboarding) against a stub
 //! edge HTTP server on a plain tokio TcpListener.
 
@@ -161,7 +161,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
     let ttl = state.token_ttl.load(Ordering::SeqCst) as i64;
     match (method.as_str(), path) {
         ("GET", "/health") => {
-            respond(&mut stream, "200 OK", r#"{"ok":true,"auth":"workos"}"#).await;
+            respond(&mut stream, "200 OK", r#"{"ok":true,"auth":"codegraff"}"#).await;
         }
         ("POST", "/auth/exchange") => {
             let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -214,7 +214,7 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
                 respond(&mut stream, &format!("{status} Unavailable"), "{}").await;
                 return;
             }
-            if refresh_token == "dead" {
+            if refresh_token == "harness_rt_dead" {
                 respond(&mut stream, "401 Unauthorized", r#"{"error":"revoked"}"#).await;
                 return;
             }
@@ -250,10 +250,8 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
 
 fn codegraff_config(edge_url: &str, data_dir: &std::path::Path) -> AuthConfig {
     let mut config = AuthConfig::new(edge_url, data_dir);
-    config.codegraff_client_id = Some("client_test".into());
-    config.codegraff_api_base = "https://authkit.example".into();
-    // Ephemeral loopback port: the production default (27643) is held by
-    // any Harness app running on the same machine.
+    config.codegraff_client_id = Some("cg_client_test".into());
+    config.codegraff_api_base = "https://codegraff.example".into();
     config.callback_port = None;
     config
 }
@@ -319,10 +317,10 @@ async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     );
 
     let url = auth.start_headless_sign_in();
-    assert!(url.starts_with("https://authkit.example/oauth/authorize?"));
+    assert!(url.starts_with("https://codegraff.example/oauth/authorize?"));
     assert_eq!(
         query_param(&url, "client_id").as_deref(),
-        Some("client_test")
+        Some("cg_client_test")
     );
     let redirect = query_param(&url, "redirect_uri").expect("redirect");
     assert!(
@@ -441,7 +439,7 @@ async fn revoked_refresh_token_signs_out() {
     // A persisted session whose refresh token the edge rejects with a definitive 4xx.
     std::fs::write(
         dir.path().join("session.json"),
-        r#"{"refreshToken":"dead","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_dead","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     )
     .expect("seed session");
     let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
@@ -469,7 +467,7 @@ async fn offline_refresh_loop_backs_off_without_revoking_session() {
     let session_file = dir.path().join("session.json");
     std::fs::write(
         &session_file,
-        r#"{"refreshToken":"offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     )
     .expect("seed session");
     let auth = Auth::new(codegraff_config(&edge.url(), dir.path()));
@@ -490,7 +488,7 @@ async fn offline_refresh_loop_backs_off_without_revoking_session() {
 fn persisted_auth(edge: &StubEdge, dir: &std::path::Path) -> Auth {
     std::fs::write(
         dir.join("session.json"),
-        r#"{"refreshToken":"offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
+        r#"{"refreshToken":"harness_rt_offline","user":{"id":"user_1","email":"w@example.com"},"orgId":"org_1"}"#,
     ).expect("seed session");
     Auth::new(codegraff_config(&edge.url(), dir))
 }
@@ -660,7 +658,7 @@ async fn cancelling_a_consumer_does_not_cancel_the_shared_refresh() {
     assert_eq!(edge.state.refreshes.load(Ordering::SeqCst), 1);
     assert_eq!(
         edge.state.refresh_tokens.lock().unwrap().as_slice(),
-        ["offline"]
+        ["harness_rt_offline"]
     );
 }
 

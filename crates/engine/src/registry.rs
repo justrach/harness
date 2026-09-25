@@ -9,7 +9,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{
+    Arc, Mutex, MutexGuard, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +111,7 @@ struct HarnessPrefsFile {
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
+    graff_draft_subagents: bool,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing, deserialize_with = "known_harnesses_opt")]
@@ -175,6 +179,7 @@ pub struct HarnessRegistry {
     order: Mutex<Vec<HarnessId>>,
     /// This device's enabled set; `None` inner value = the default set.
     prefs: Mutex<HarnessPrefsFile>,
+    graff_draft_subagents: Arc<AtomicBool>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -192,6 +197,7 @@ impl HarnessRegistry {
             slots: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
+            graff_draft_subagents: Arc::new(AtomicBool::new(false)),
             prefs_path: Mutex::new(None),
         }
     }
@@ -216,6 +222,8 @@ impl HarnessRegistry {
             .ok()
             .and_then(|text| serde_json::from_str::<HarnessPrefsFile>(&text).ok())
             .unwrap_or_default();
+        self.graff_draft_subagents
+            .store(loaded.graff_draft_subagents, Ordering::Relaxed);
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -355,6 +363,16 @@ impl HarnessRegistry {
 
     pub fn title_settings(&self) -> TitleSettings {
         self.prefs().titles.clone()
+    }
+
+    pub fn graff_draft_subagents(&self) -> bool {
+        self.prefs().graff_draft_subagents
+    }
+
+    pub fn set_graff_draft_subagents(&self, enabled: bool) {
+        self.prefs().graff_draft_subagents = enabled;
+        self.graff_draft_subagents.store(enabled, Ordering::Relaxed);
+        self.persist_prefs();
     }
 
     pub fn set_title_settings(&self, mut settings: TitleSettings) -> Result<(), String> {
@@ -499,6 +517,7 @@ pub fn default_registry() -> HarnessRegistry {
     // graff over ACP (`graff acp`), registered first so it leads the picker.
     // Turn-boundary steering. Per-model effort comes from the live catalog;
     // session/new does not yet advertise thought_level.
+    let graff_draft_subagents = registry.graff_draft_subagents.clone();
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Graff,
@@ -518,7 +537,12 @@ pub fn default_registry() -> HarnessRegistry {
             enabled: None,
         },
         Box::new(|| harness_adapters::AcpHarness::graff().installed()),
-        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::graff()) as Arc<dyn Harness>)),
+        Box::new(move || {
+            Ok(Arc::new(
+                harness_adapters::AcpHarness::graff()
+                    .with_graff_draft_subagents(graff_draft_subagents.clone()),
+            ) as Arc<dyn Harness>)
+        }),
     );
     registry.register_lazy(
         HarnessDescriptor {
@@ -737,6 +761,27 @@ pub fn default_registry() -> HarnessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graff_draft_subagents_defaults_off_and_survives_reload() {
+        let data = tempfile::tempdir().unwrap();
+        let registry = default_registry();
+        registry.load_prefs(data.path());
+        assert!(!registry.graff_draft_subagents());
+        assert!(!registry.graff_draft_subagents.load(Ordering::Relaxed));
+
+        registry.set_graff_draft_subagents(true);
+        assert!(registry.graff_draft_subagents.load(Ordering::Relaxed));
+        let reloaded = default_registry();
+        reloaded.load_prefs(data.path());
+        assert!(reloaded.graff_draft_subagents());
+        assert!(reloaded.graff_draft_subagents.load(Ordering::Relaxed));
+
+        reloaded.set_graff_draft_subagents(false);
+        let again = default_registry();
+        again.load_prefs(data.path());
+        assert!(!again.graff_draft_subagents());
+    }
 
     #[test]
     fn mid_turn_steering_requires_support_and_a_step_boundary() {
@@ -1398,7 +1443,8 @@ mod title_tests {
         let registry = HarnessRegistry::new();
         registry.load_prefs(dir.path());
         registry.register(Arc::new(
-            harness_adapters::ClaudeHarness::new().with_executable(std::env::current_exe().unwrap()),
+            harness_adapters::ClaudeHarness::new()
+                .with_executable(std::env::current_exe().unwrap()),
         ));
         let settings = TitleSettings {
             harness: Some(HarnessId::ClaudeCode),

@@ -837,7 +837,6 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        // 31 since Shades of Purple left the built-ins with the rebrand.
         assert_eq!(variants, 31);
         assert_eq!(variants * VisualFixture::ALL.len(), 310);
     }

@@ -183,6 +183,8 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                     SubagentStatus::Running => "running",
                     SubagentStatus::Done => "done",
                     SubagentStatus::Failed => "failed",
+                    SubagentStatus::Cancelled => "cancelled",
+                    SubagentStatus::Disconnected => "disconnected",
                 }
                 .to_owned()
             }),
@@ -231,6 +233,8 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     "running" => Some(SubagentStatus::Running),
                     "done" => Some(SubagentStatus::Done),
                     "failed" => Some(SubagentStatus::Failed),
+                    "cancelled" => Some(SubagentStatus::Cancelled),
+                    "disconnected" => Some(SubagentStatus::Disconnected),
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
@@ -1682,6 +1686,21 @@ mod tests {
                 assert_eq!(subagent_tail.as_deref(), Some("scanning"));
             }
             other => panic!("{other:?}"),
+        }
+        // Terminal states added after the original three-state schema must
+        // survive both the live segment patch and a fresh document read.
+        for state in [SubagentStatus::Cancelled, SubagentStatus::Disconnected] {
+            if let MessagePart::Tool {
+                subagent_status, ..
+            } = &mut part
+            {
+                *subagent_status = Some(state);
+            }
+            w.sync(std::slice::from_ref(&part)).unwrap();
+            let entries = doc.read_entries().unwrap();
+            assert!(
+                matches!(&entries[0].parts[0], MessagePart::Tool { subagent_status: Some(actual), .. } if *actual == state)
+            );
         }
     }
 

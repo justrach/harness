@@ -886,7 +886,7 @@ impl MarkdownPreview {
         let runtime = self.code_fences.entry(key.clone()).or_default();
         render::code_ui_for(
             key,
-            crate::settings::current(cx).code_fences_fit_content,
+            crate::settings::with_current(cx, |s| s.code_fences_fit_content),
             runtime,
             cx.weak_entity(),
             |view| &mut view.code_fences,

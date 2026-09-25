@@ -367,7 +367,7 @@ impl Element for LinkRanges {
                         }),
                     );
                 }
-                let open_in_harness = crate::settings::current(cx).open_web_links_in_harness;
+                let open_in_harness = crate::settings::with_current(cx, |s| s.open_web_links_in_harness);
                 let menu = state.menu.clone();
                 card = card.child(popover::menu_separator()).child(
                     popover::menu_row(

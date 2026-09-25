@@ -29,7 +29,7 @@ for line in sys.stdin:
     elif method == "initialize":
         emit({"id": ident, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     elif method == "authenticate":
-        # Grok signs in with its configured method before session/new.
+        assert frame["params"]["methodId"] == "grok.com", frame
         emit({"id": ident, "result": {}})
     elif method == "session/new":
         for index in range(40):

@@ -1247,6 +1247,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                     Some(SubagentStatus::Running) => 1 << 1,
                     Some(SubagentStatus::Done) => 2 << 1,
                     Some(SubagentStatus::Failed) => 3 << 1,
+                    Some(SubagentStatus::Cancelled) => 4 << 1,
+                    Some(SubagentStatus::Disconnected) => 5 << 1,
                 },
         );
         if let Some(tail) = &t.subagent_tail {
@@ -1763,8 +1765,9 @@ fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize
 /// the smoothness measurement knob. Off by default; zero cost when off.
 fn frame_stats_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("HARNESS_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
+    *ENABLED.get_or_init(|| {
+        std::env::var("HARNESS_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 const FRAME_STATS_WINDOW: usize = 240;
@@ -6879,7 +6882,7 @@ impl Transcript {
         let runtime = self.code_fences.entry(key.clone()).or_default();
         render::code_ui_for(
             key,
-            crate::settings::current(cx).code_fences_fit_content,
+            crate::settings::with_current(cx, |s| s.code_fences_fit_content),
             runtime,
             cx.weak_entity(),
             |transcript| &mut transcript.code_fences,
@@ -7404,7 +7407,12 @@ impl Transcript {
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
                         tool.subagent_status,
-                        Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
+                        Some(
+                            SubagentStatus::Done
+                                | SubagentStatus::Failed
+                                | SubagentStatus::Cancelled
+                                | SubagentStatus::Disconnected
+                        )
                     );
                     return subagent_chip(
                         tool,
@@ -8075,11 +8083,23 @@ fn chip_header_row(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    let (label, detail) = match tool.kind {
+    let (label, mut detail) = match tool.kind {
         ToolItemKind::Thought => ("Thought process", String::new()),
         ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
+    if is_agent_tool(tool) {
+        if let Some(suffix) = match tool.subagent_status {
+            Some(SubagentStatus::Cancelled) => Some("Cancelled"),
+            Some(SubagentStatus::Disconnected) => Some("Disconnected"),
+            _ => None,
+        } {
+            if !detail.is_empty() {
+                detail.push_str(" · ");
+            }
+            detail.push_str(suffix);
+        }
+    }
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
         ToolCall::ReadFile { path }
@@ -8682,6 +8702,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                         Some(SubagentStatus::Running) => 1 << 1,
                         Some(SubagentStatus::Done) => 2 << 1,
                         Some(SubagentStatus::Failed) => 3 << 1,
+                        Some(SubagentStatus::Cancelled) => 4 << 1,
+                        Some(SubagentStatus::Disconnected) => 5 << 1,
                     },
             );
             if let Some(tail) = subagent_tail {
@@ -9276,6 +9298,82 @@ mod tests {
         direct_send_keeps_a_long_chat_near_its_tail(cx, true, true);
     }
 
+    /// Cost probe (run with --ignored --nocapture): per-chunk `sync` and
+    /// frame time while a reply streams at the end of a long chat.
+    #[gpui::test]
+    #[ignore]
+    fn probe_streaming_chunk_cost_in_a_long_chat(cx: &mut gpui::TestAppContext) {
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let body = (0..8)
+            .map(|i| format!("Paragraph {i} explains `code` and **bold** text at some length.\n\n```rust\nfn f{i}() -> u32 {{ {i} }}\n```\n\n"))
+            .collect::<String>();
+        let mut entries = Vec::new();
+        for i in 0..150 {
+            let mut user = assistant(&format!("p{i}"), MessageStatus::Complete, vec![text_part("t", "Please explain this.")]);
+            user.role = MessageRole::User;
+            entries.push(user);
+            entries.push(assistant(&format!("r{i}"), MessageStatus::Complete, vec![
+                tool_part(&format!("tool{i}"), "cargo test"),
+                text_part("t", &body),
+            ]));
+        }
+        let mut live = String::new();
+        let mut push = |live: &str, cx: &mut gpui::TestAppContext| {
+            let mut next = entries.clone();
+            next.push(assistant("live", MessageStatus::Streaming, vec![text_part("t", live)]));
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = next;
+                state.transcript_revision += 1;
+            });
+        };
+        push("", cx);
+        let t = Instant::now();
+        transcript.update(cx, |this, cx| this.sync(cx));
+        eprintln!("PROBE attach sync (main-thread parse, no prepared rows)={:?}", t.elapsed());
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        draw(cx);
+        let (mut sync_total, mut draw_total) = (Duration::ZERO, Duration::ZERO);
+        let chunks = 60;
+        for i in 0..chunks {
+            live.push_str(&format!("Streaming token batch {i} with some words. "));
+            push(&live, cx);
+            let t = Instant::now();
+            transcript.update(cx, |this, cx| this.sync(cx));
+            sync_total += t.elapsed();
+            let t = Instant::now();
+            draw(cx);
+            draw_total += t.elapsed();
+        }
+        let rows = transcript.read_with(cx, |this, _| this.rows.len());
+        eprintln!(
+            "PROBE rows={rows} per-chunk sync={:?} draw={:?}",
+            sync_total / chunks,
+            draw_total / chunks
+        );
+    }
+
     use harness_doc::MessagePart;
 
     fn with_tool_group_navigation(
@@ -9742,7 +9840,9 @@ mod tests {
                         harness_doc::TranscriptUpdate {
                             frame,
                             context_usage: None,
-                            replay_baseline: Some(harness_doc::TranscriptBaseline::capture(&history)),
+                            replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
+                                &history,
+                            )),
                         },
                         cx,
                     )
@@ -12071,9 +12171,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&history),
+                                    ),
                                 },
                                 cx,
                             )
@@ -12101,9 +12201,9 @@ mod tests {
                                     context_usage: None,
                                     // The RPC must retain its opening cutoff when
                                     // publishing subsequent changed-part history.
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &cutoff,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&cutoff),
+                                    ),
                                 },
                                 cx,
                             )
@@ -12154,9 +12254,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::TranscriptFrame::reset(&history),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&history),
+                                    ),
                                 },
                                 cx,
                             )
@@ -12216,9 +12316,9 @@ mod tests {
                                 harness_doc::TranscriptUpdate {
                                     frame: harness_doc::diff_transcript(&live, &next),
                                     context_usage: None,
-                                    replay_baseline: Some(harness_doc::TranscriptBaseline::capture(
-                                        &next_history,
-                                    )),
+                                    replay_baseline: Some(
+                                        harness_doc::TranscriptBaseline::capture(&next_history),
+                                    ),
                                 },
                                 cx,
                             )

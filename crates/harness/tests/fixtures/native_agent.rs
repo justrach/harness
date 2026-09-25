@@ -90,6 +90,7 @@ fn main() {
     let mut session = "native-session".to_string();
     let mut pending = None;
     let mut ignore_cancel = false;
+    let mut authenticated = false;
     for line in std::io::stdin().lock().lines() {
         let message: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let id = message.get("id").cloned().unwrap_or(Value::Null);
@@ -97,12 +98,23 @@ fn main() {
             "initialize" => emit(json!({"jsonrpc":"2.0","id":id,"result":{
                 "protocolVersion":1,"agentCapabilities":{"loadSession":true}
             }})),
-            "session/new" => emit(json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":session}})),
+            "authenticate" => {
+                assert_eq!(message["params"]["methodId"], "grok.com");
+                assert!(!authenticated, "duplicate authentication");
+                authenticated = true;
+                emit(json!({"jsonrpc":"2.0","id":id,"result":{}}));
+            }
+            "session/new" => {
+                assert!(authenticated, "session started before authentication");
+                emit(json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":session}}));
+            }
             "session/load" => {
+                assert!(authenticated, "session loaded before authentication");
                 session = message["params"]["sessionId"].as_str().unwrap().to_string();
                 emit(json!({"jsonrpc":"2.0","id":id,"result":{}}));
             }
             "session/prompt" => {
+                assert!(authenticated, "prompt sent before authentication");
                 let prompt = message["params"]["prompt"]
                     .as_array()
                     .unwrap()

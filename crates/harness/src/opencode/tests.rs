@@ -2055,15 +2055,36 @@ async fn stalled_prompt_post_has_a_bounded_timeout() {
     .await;
     wire.request("/prompt_async").await;
     wire.status("busy");
-    tokio::task::yield_now().await;
+    // Observe a forwarded bus event before advancing virtual time. Merely
+    // sending `busy` does not prove the run loop has consumed it, and the
+    // independent first-activity watchdog can otherwise win this race.
+    wire.bus.send(json!({"type":"message.updated", "properties":{"info":{"id":"answer", "sessionID":"fixture", "role":"assistant"}}})).unwrap();
+    wire.bus.send(json!({"type":"message.part.updated", "properties":{"part":{"id":"text", "messageID":"answer", "sessionID":"fixture", "type":"text", "text":"started"}}})).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(wire.events.recv().await, Some(Ok(AgentEvent::TextDelta { .. }))) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     tokio::time::pause();
     tokio::time::advance(CALL_TIMEOUT + Duration::from_secs(1)).await;
-    // The call timeout has fired. Resume real time before waiting: the
-    // Errored turn still crosses real sockets, and a paused clock
-    // auto-advances whenever the runtime idles on that IO, expiring
-    // `done()`'s own 5s guard instantly (flaked ~1 in 3).
-    tokio::time::resume();
-    assert_eq!(wire.done().await.0, DoneStatus::Errored);
+    let (status, error) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(Ok(AgentEvent::Done { status, error, .. })) = wire.events.recv().await {
+                break (status, error.unwrap_or_default());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status, DoneStatus::Errored);
+    assert!(
+        error.contains("opencode POST /session/fixture/prompt_async"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

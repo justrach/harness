@@ -9,13 +9,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
-use harness_doc::{
-    MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
-    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
-};
-use harness_engine::{EngineCore, HarnessRegistry, RunJournal};
 use harness_adapters::mock::MockHarness;
 use harness_adapters::{Harness, HarnessError, RunControls};
+use harness_doc::{
+    MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
+    SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
+};
+use harness_engine::{EngineCore, HarnessRegistry, RunJournal};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode, ToolCall,
@@ -936,7 +936,10 @@ async fn rpc_surface_over_in_memory_transport() {
 
     // ListHarnesses + ListModels.
     let harnesses = client
-        .call(harness_rpc::methods::LIST_HARNESSES, serde_json::Value::Null)
+        .call(
+            harness_rpc::methods::LIST_HARNESSES,
+            serde_json::Value::Null,
+        )
         .await
         .unwrap();
     assert_eq!(harnesses[0]["id"], "mock");
@@ -951,7 +954,10 @@ async fn rpc_surface_over_in_memory_transport() {
 
     // WatchSessions + WatchDocMessages streams.
     let mut sessions_stream = client
-        .subscribe(harness_rpc::methods::WATCH_SESSIONS, serde_json::Value::Null)
+        .subscribe(
+            harness_rpc::methods::WATCH_SESSIONS,
+            serde_json::Value::Null,
+        )
         .await
         .unwrap();
     let first_sessions = tokio::time::timeout(Duration::from_secs(5), sessions_stream.recv())
@@ -2100,6 +2106,101 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
     let all = entries(&core);
     assert_eq!(all.len(), 2, "user + one assistant entry");
     assert_eq!(all[1].status, Some(MessageStatus::Complete));
+}
+
+#[tokio::test]
+async fn parked_parent_keeps_background_child_transcript_and_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                AgentEvent::SessionStarted {
+                    harness: HarnessId::Mock,
+                    model: "mock-1".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "hs-1".into(),
+                    assistant_message_id: "a-1".into(),
+                },
+                AgentEvent::ToolCall {
+                    id: "tool-child".into(),
+                    call: ToolCall::Unknown {
+                        name: "Agent: Inspect".into(),
+                        input: None,
+                    },
+                },
+                done(DoneStatus::Completed),
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "tool-child".into(),
+                    event: Box::new(AgentEvent::UserMessage {
+                        text: "Inspect".into(),
+                    }),
+                },
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "tool-child".into(),
+                    event: Box::new(AgentEvent::TextDelta {
+                        text: "Found issue".into(),
+                    }),
+                },
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "tool-child".into(),
+                    event: Box::new(done(DoneStatus::Cancelled)),
+                },
+            ],
+            step_delay: Duration::from_millis(30),
+            hang_until_interrupt: false,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "background-child",
+        SessionCommandPayload::Run {
+            request: run_request("Inspect"),
+            message_id: "background-child-user".into(),
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|entry| {
+                entry.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Tool { id, subagent_status: Some(status), .. }
+            if id == "tool-child" && *status == SubagentStatus::Cancelled)
+                })
+            })
+        },
+        "background child status after parent Done",
+    )
+    .await;
+    let child_doc = entries(&core)
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Tool {
+                id,
+                subagent_ref: Some(reference),
+                ..
+            } if id == "tool-child" => Some(reference.clone()),
+            _ => None,
+        })
+        .expect("parent chip links child transcript");
+    let child = core.doc_host.open(&child_doc).unwrap();
+    assert!(
+        child
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.parts.iter().any(
+                |part| matches!(part, MessagePart::Text { text, .. } if text == "Found issue")
+            )),
+        "background child text persisted in its own doc"
+    );
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
 }
 
 #[tokio::test]

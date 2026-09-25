@@ -3480,7 +3480,6 @@ mod tests {
         );
         assert_eq!(
             registry.variants_for(harness_theme::Appearance::Dark).count(),
-            // Shades of Purple left the built-ins with the Harness rebrand.
             20
         );
     }

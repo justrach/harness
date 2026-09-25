@@ -183,10 +183,8 @@ async fn mimo_off_is_discovered_and_set_before_prompt_without_inference_on_disco
         }
     )));
     let entries = wire(root.path());
-    assert!(
-        entries.iter().any(|entry| entry["argv"]
-            == serde_json::json!(["acp", "--yolo", "--model", "xiaomi/mimo-v2.6-flash"]))
-    );
+    assert!(entries.iter().any(|entry| entry["argv"]
+        == serde_json::json!(["acp", "--yolo", "--model", "xiaomi/mimo-v2.6-flash"])));
     let set = entries
         .iter()
         .position(|entry| entry["method"] == "session/set_config_option")
@@ -266,7 +264,8 @@ async fn catalog_has_per_provider_efforts_without_inference_then_run_sets_picked
     assert!(
         entries
             .iter()
-            .any(|entry| entry["argv"] == serde_json::json!(["acp", "--yolo", "--model", "p1/shared"]))
+            .any(|entry| entry["argv"]
+                == serde_json::json!(["acp", "--yolo", "--model", "p1/shared"]))
     );
     let set = entries
         .iter()
@@ -434,12 +433,8 @@ async fn legacy_provider_qualified_chat_preserves_route_on_resume() {
             "{mode}: {events:?}"
         );
         let entries = wire(root.path());
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry["argv"]
-                    == serde_json::json!(["acp", "--yolo", "--model", "codex/gpt-6-sol"]))
-        );
+        assert!(entries.iter().any(|entry| entry["argv"]
+            == serde_json::json!(["acp", "--yolo", "--model", "codex/gpt-6-sol"])));
         assert_eq!(
             entries
                 .iter()

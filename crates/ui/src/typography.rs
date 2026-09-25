@@ -328,21 +328,52 @@ fn installed_families_with_latin_metrics() -> BTreeMap<String, bool> {
     let mut database = fontdb::Database::new();
     database.load_system_fonts();
 
+    // Parsing ~800 faces serially cost ~240ms of main-thread launch time
+    // before the first frame (listing them is ~7ms); each face is
+    // independent, so fan the parse out across cores. The merge below is
+    // order-independent (`&=` per family).
+    let faces: Vec<_> = database.faces().collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
+    let chunk = faces.len().div_ceil(threads).max(1);
+    let database = &database;
+    let parsed: Vec<(Vec<String>, bool)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = faces
+            .chunks(chunk)
+            .map(|faces| {
+                scope.spawn(move || {
+                    faces
+                        .iter()
+                        .filter_map(|face| {
+                            let fixed_width = database
+                                .with_face_data(face.id, |data, index| {
+                                    ttf_parser::Face::parse(data, index)
+                                        .ok()
+                                        .filter(|font| font.glyph_index('m').is_some())
+                                        .map(|font| face_is_fixed_width(&font))
+                                })
+                                .flatten()?;
+                            let names = face.families.iter().map(|(name, _)| name.clone());
+                            Some((names.collect(), fixed_width))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap_or_default())
+            .collect()
+    });
+
     let mut families = BTreeMap::new();
-    for face in database.faces() {
-        let Some(Some(fixed_width)) = database.with_face_data(face.id, |data, index| {
-            ttf_parser::Face::parse(data, index)
-                .ok()
-                .filter(|font| font.glyph_index('m').is_some())
-                .map(|font| face_is_fixed_width(&font))
-        }) else {
-            continue;
-        };
-        for (name, _) in &face.families {
+    for (names, fixed_width) in parsed {
+        for name in names {
             // Selecting a family selects all its faces, so one proportional
             // italic is enough to break the grid.
             families
-                .entry(name.clone())
+                .entry(name)
                 .and_modify(|all_fixed| *all_fixed &= fixed_width)
                 .or_insert(fixed_width);
         }
@@ -882,5 +913,36 @@ mod tests {
                 "missing static faces for {expected_family}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod family_scan_tests {
+    use std::collections::BTreeMap;
+
+    /// The launch scan runs in parallel; it must agree exactly with a plain
+    /// serial walk over the same installed faces.
+    #[test]
+    fn parallel_family_scan_matches_a_serial_scan() {
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        let mut serial = BTreeMap::new();
+        for face in database.faces() {
+            let Some(Some(fixed_width)) = database.with_face_data(face.id, |data, index| {
+                ttf_parser::Face::parse(data, index)
+                    .ok()
+                    .filter(|font| font.glyph_index('m').is_some())
+                    .map(|font| super::face_is_fixed_width(&font))
+            }) else {
+                continue;
+            };
+            for (name, _) in &face.families {
+                serial
+                    .entry(name.clone())
+                    .and_modify(|all: &mut bool| *all &= fixed_width)
+                    .or_insert(fixed_width);
+            }
+        }
+        assert_eq!(super::installed_families_with_latin_metrics(), serial);
     }
 }

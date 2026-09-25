@@ -33,7 +33,10 @@ for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request: continue
     method = request['method']
-    if state['fail'] and method != 'initialize':
+    # A failed initialize is shared by all adapters. Grok deliberately falls
+    # back to its curated rows on later auth/session errors, which does not
+    # exercise the last-good cache.
+    if state['fail']:
         response = {'error':{'code':429,'message':state.get('error', 'rate limit')}}
     else:
         result = {}
