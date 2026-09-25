@@ -515,6 +515,23 @@ struct SettingGroup {
     choices: Vec<SettingChoice>,
 }
 
+/// The last Graff worktree action's result, shown in the footer.
+struct GraffWorktreeStatus {
+    chat_id: String,
+    outcome: GraffWorktreeOutcome,
+    message: SharedString,
+    /// Graff kept the tree because it holds unique work; `--discard` is the
+    /// explicit way through.
+    can_discard: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraffWorktreeOutcome {
+    Done,
+    Kept,
+    Failed,
+}
+
 pub struct Pickers {
     state: Entity<AppState>,
     config: DraftConfig,
@@ -596,6 +613,11 @@ pub struct Pickers {
     /// Last mid-session switch failure (shown in the ref popover).
     switch_error: Option<String>,
     mutate_task: Option<Task<()>>,
+    /// Graff worktree card: the chat whose land/archive/remove is running,
+    /// and the last result (Graff's own words) for the chat it belongs to.
+    graff_worktree_busy: Option<String>,
+    graff_worktree_status: Option<GraffWorktreeStatus>,
+    graff_worktree_task: Option<Task<()>>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -760,6 +782,9 @@ impl Pickers {
             switch_task: None,
             switch_error: None,
             mutate_task: None,
+            graff_worktree_busy: None,
+            graff_worktree_status: None,
+            graff_worktree_task: None,
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -2665,6 +2690,152 @@ impl Pickers {
     /// A footer-row trigger (t3code ghost `Button size="xs"`): leading icon,
     /// truncating label, trailing chevron — smaller and quieter than the
     /// in-pill chips.
+    /// Land, archive or remove the chat's Graff worktree on its host
+    /// (`GraffWorktreeAction`); the result stays in the footer until the
+    /// next action.
+    fn run_graff_worktree_action(
+        &mut self,
+        chat: &harness_proto::Chat,
+        action: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.graff_worktree_busy.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let chat_id = chat.id.clone();
+        let mut params = serde_json::json!({ "chatId": chat_id, "action": action });
+        if local.as_deref() != Some(chat.device_id.as_str()) {
+            params["targetDeviceId"] = serde_json::Value::String(chat.device_id.clone());
+        }
+        let tree_path = chat.cwd.clone().unwrap_or_default();
+        self.graff_worktree_busy = Some(chat_id.clone());
+        self.graff_worktree_status = None;
+        cx.notify();
+        self.graff_worktree_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(methods::GRAFF_WORKTREE_ACTION, params)
+                .await;
+            this.update(cx, |pickers, cx| {
+                pickers.graff_worktree_busy = None;
+                let (outcome, message) = match reply {
+                    Ok(value) => (
+                        match value.get("outcome").and_then(|v| v.as_str()) {
+                            Some("done") => GraffWorktreeOutcome::Done,
+                            Some("kept") => GraffWorktreeOutcome::Kept,
+                            _ => GraffWorktreeOutcome::Failed,
+                        },
+                        value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ),
+                    Err(err) => (GraffWorktreeOutcome::Failed, err.to_string()),
+                };
+                pickers.graff_worktree_status = Some(GraffWorktreeStatus {
+                    chat_id,
+                    outcome,
+                    can_discard: outcome != GraffWorktreeOutcome::Done
+                        && (message.contains("--discard") || message.contains("ONLY on this branch")),
+                    message: graff_status_line(&message, &tree_path).into(),
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The Graff worktree card's actions: land it back (`graff worktree
+    /// merge`), archive it (removed only if its work exists elsewhere), or
+    /// remove it — plus Graff's last verdict, and "Discard" once Graff has
+    /// said the tree holds work that exists nowhere else.
+    fn render_graff_worktree_actions(
+        &self,
+        chat: &harness_proto::Chat,
+        tree: &harness_proto::graff_worktree::GraffWorktree,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let busy = self.graff_worktree_busy.as_deref() == Some(chat.id.as_str());
+        let status = self
+            .graff_worktree_status
+            .as_ref()
+            .filter(|status| status.chat_id == chat.id);
+        let button = |id: &'static str, label: &'static str, action: &'static str, danger: bool, cx: &mut Context<Self>| {
+            let chat = chat.clone();
+            div()
+                .id(id)
+                .h(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .px(px(7.0))
+                .rounded(px(FOOTER_CHIP_RADIUS))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if danger {
+                    motion::hover_blend(id, theme.danger.opacity(0.7), theme.danger)
+                } else {
+                    motion::hover_blend(id, theme.text_muted.opacity(0.7), theme.text.opacity(0.85))
+                })
+                .bg(motion::hover_blend(id, gpui::transparent_black(), theme.element_hover))
+                .on_hover(motion::hover_listener(id))
+                .when(busy, |el| el.opacity(0.45))
+                .when(!busy, |el| {
+                    el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_graff_worktree_action(&chat, action, cx)
+                    }))
+                })
+                .child(SharedString::from(label))
+        };
+        let mut card = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .min_w_0()
+            .ml(px(4.0))
+            .pl(px(6.0))
+            .border_l_1()
+            .border_color(theme.border.opacity(0.6))
+            .child(button("graff-worktree-merge", "Merge back", "merge", false, cx))
+            .child(button("graff-worktree-archive", "Archive", "archive", false, cx))
+            .child(button("graff-worktree-remove", "Remove", "remove", false, cx));
+        if status.is_some_and(|status| status.can_discard) {
+            card = card.child(button("graff-worktree-discard", "Discard anyway", "discard", true, cx));
+        }
+        let verdict: Option<(SharedString, gpui::Hsla)> = if busy {
+            Some((format!("Asking Graff about {}…", tree.name).into(), theme.text_muted.opacity(0.7)))
+        } else {
+            status.map(|status| {
+                let color = match status.outcome {
+                    GraffWorktreeOutcome::Done => theme.success,
+                    GraffWorktreeOutcome::Kept => theme.warning,
+                    GraffWorktreeOutcome::Failed => theme.danger,
+                };
+                (status.message.clone(), color)
+            })
+        };
+        card.when_some(verdict, |el, (text, color)| {
+            el.child(
+                div()
+                    .min_w_0()
+                    .max_w(px(320.0))
+                    .px(px(6.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(color)
+                    .child(text),
+            )
+        })
+        .into_any_element()
+    }
+
     fn footer_chip(
         &self,
         kind: PickerKind,
@@ -2935,11 +3106,20 @@ impl Pickers {
                 return None;
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
-            let (icon_path, label) = if is_worktree {
+            let graff_tree = chat
+                .cwd
+                .as_deref()
+                .and_then(harness_proto::graff_worktree::GraffWorktree::from_path);
+            let (icon_path, label) = if graff_tree.is_some() {
+                (crate::icons::FOLDER_WITH_FILES, "Graff worktree")
+            } else if is_worktree {
                 (crate::icons::FOLDER_WITH_FILES, "Worktree")
             } else {
                 (crate::icons::FOLDER, "Local checkout")
             };
+            let graff_card = graff_tree
+                .as_ref()
+                .map(|tree| self.render_graff_worktree_actions(chat, tree, &theme, cx));
             // Keep the same reading order and leading edge as the draft.
             let left = div()
                 .flex()
@@ -2972,6 +3152,7 @@ impl Pickers {
                     .pr_0()
                     .child(left)
                     .child(right)
+                    .when_some(graff_card, |el, card| el.child(card))
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
                         el.child(div().flex_none().child(
@@ -4340,6 +4521,21 @@ impl Pickers {
 /// ([`popover::rail`] folds the note/hide/metrics/render + pointer listeners
 /// into one call): one shared rail state, fed by whichever handle
 /// [`Pickers::active_menu_scroll`] resolves for the mounted menu.
+/// Graff's verdict as one footer line: its first line, with the tree's
+/// absolute path shortened to the tree name.
+fn graff_status_line(message: &str, tree_path: &str) -> String {
+    let first = message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Graff didn't say");
+    let name = tree_path.rsplit('/').next().unwrap_or(tree_path);
+    let first = if tree_path.is_empty() {
+        first.to_owned()
+    } else {
+        first
+            .replace(&format!("/private{tree_path}"), name)
+            .replace(tree_path, name)
+    };
+    first
+}
+
 impl popover::ScrollRailHost for Pickers {
     fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
         &mut self.menu_bar

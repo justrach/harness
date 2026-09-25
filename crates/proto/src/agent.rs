@@ -150,6 +150,12 @@ pub struct WorktreeSpec {
     /// wire compatibility with clients that only request worktree creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_id: Option<String>,
+    /// Agent-owned worktree name, set by the host for agents that manage
+    /// their own trees (Graff: the adapter launches `graff acp -w <name>`
+    /// from `repo_path`, and Graff creates or reuses the tree). The host
+    /// then mints nothing itself. Additive + serde-defaulted for wire compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// The session-scoped singleton id for the live plan/todo chip. ACP plan
@@ -599,6 +605,7 @@ mod tests {
                 repo_path: "/repos/comet".into(),
                 base: "main".into(),
                 space_id: Some("space-1".into()),
+                agent_name: None,
             }),
             ..req
         };

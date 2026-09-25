@@ -257,6 +257,13 @@ struct CreateWorktreeParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GraffWorktreeActionParams {
+    chat_id: String,
+    action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DeleteWorktreeParams {
     #[serde(alias = "repo")]
     repo_path: String,
@@ -1181,6 +1188,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
             | methods::DELETE_WORKTREE
+            | methods::GRAFF_WORKTREE_ACTION
             // Project Actions live in the owning engine's private profile store.
             | methods::LIST_PROJECT_ACTIONS
             | methods::UPSERT_PROJECT_ACTION
@@ -2665,6 +2673,38 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::GRAFF_WORKTREE_ACTION => {
+                let p: GraffWorktreeActionParams = parse_params(params)?;
+                let action = harness_adapters::GraffWorktreeAction::parse(&p.action)
+                    .ok_or_else(|| RpcError::BadParams(format!("unknown action {}", p.action)))?;
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::Failed("Chat not found".into()))?;
+                let tree = chat
+                    .cwd
+                    .as_deref()
+                    .and_then(harness_proto::graff_worktree::GraffWorktree::from_path)
+                    .ok_or_else(|| RpcError::Failed("This chat isn't in a Graff worktree".into()))?;
+                let result = harness_adapters::run_graff_worktree_action(
+                    std::path::Path::new(&tree.root),
+                    &tree.name,
+                    action,
+                )
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if result.outcome == harness_adapters::GraffWorktreeOutcome::Done {
+                    // The tree is gone: the chat carries on in the main checkout.
+                    self.workspace
+                        .set_chat_cwd(&p.chat_id, &tree.root)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if let Ok(branch) = self.repos.current_branch(std::path::Path::new(&tree.root)).await {
+                        let _ = self.workspace.set_chat_branch(&p.chat_id, &branch);
+                    }
+                }
+                RpcReply::value(&result)
             }
             methods::LIST_PROJECT_ACTIONS => {
                 let p: ListProjectActionsParams = parse_params(params)?;

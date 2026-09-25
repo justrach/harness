@@ -1608,7 +1608,7 @@ async fn drive_run(
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
-    let run_cwd = request.cwd.clone();
+    let mut run_cwd = request.cwd.clone();
     if request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
@@ -2389,6 +2389,22 @@ async fn drive_run(
                 // The event's own cwd (where the harness actually created the
                 // session) scopes the stored id, not the request's.
                 inner.remember_harness_session(&chat_id, session_id, cwd);
+                // Graff ran the session in one of its own worktrees: re-home
+                // the chat there, so the next run, its resume, and the diff
+                // and files panels all follow the tree.
+                if *cwd != run_cwd
+                    && let Some(tree) = harness_proto::graff_worktree::GraffWorktree::from_path(cwd)
+                {
+                    run_cwd = cwd.clone();
+                    if let Some(ws) = inner.workspace() {
+                        if let Err(err) = ws.set_chat_cwd(&chat_id, &tree.path) {
+                            tracing::warn!(chat = %chat_id, error = %err, "graff worktree cwd stamp failed");
+                        }
+                        if let Err(err) = ws.set_chat_branch(&chat_id, &tree.branch()) {
+                            tracing::warn!(chat = %chat_id, error = %err, "graff worktree branch stamp failed");
+                        }
+                    }
+                }
             }
             AgentEvent::Done {
                 session_id: Some(session_id),

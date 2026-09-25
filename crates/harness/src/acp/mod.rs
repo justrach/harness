@@ -34,6 +34,7 @@ mod antigravity_paths;
 mod devin_models;
 pub mod exo_bridge;
 mod graff_models;
+pub mod graff_worktree;
 mod normalize;
 mod subagent;
 mod subagent_devin;
@@ -2146,7 +2147,7 @@ impl Harness for AcpHarness {
         mut request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let launch_args = if self.id() == HarnessId::Graff {
+        let mut launch_args = if self.id() == HarnessId::Graff {
             request.model = request
                 .model
                 .take()
@@ -2155,9 +2156,23 @@ impl Harness for AcpHarness {
         } else {
             Vec::new()
         };
+        // Graff-owned worktree (WorktreeSpec::agent_name): `-w <name>` from
+        // the main checkout makes Graff create or reuse its named tree and
+        // run the session there (named trees survive between runs).
+        let graff_worktree = (self.id() == HarnessId::Graff)
+            .then(|| request.worktree.as_ref().and_then(|spec| spec.agent_name.clone()))
+            .flatten()
+            .filter(|name| harness_proto::graff_worktree::valid_name(name));
+        if let Some(name) = &graff_worktree {
+            launch_args.extend(["-w".to_owned(), name.clone()]);
+        }
         let (scratch, mut child, stderr_tail) = self
             .spawn_agent(Some(&request.cwd), true, &launch_args)
             .await?;
+        if let Some(name) = &graff_worktree {
+            // session/load only accepts the checkout Graff runs in: the tree.
+            request.cwd = harness_proto::graff_worktree::GraffWorktree::path_in(&request.cwd, name);
+        }
         let stdin = child
             .stdin
             .take()
@@ -3564,14 +3579,20 @@ async fn run_session(session: Session) {
                     .map(str::to_owned);
             }
         }
-        Ok::<(String, bool, Vec<SlashCommand>, Option<String>), HarnessError>((
+        // Graff reports the worktree it runs the session in; the engine
+        // re-homes the chat there so later runs, resumes and panels follow.
+        let session_cwd = (harness == HarnessId::Graff)
+            .then(|| graff_worktree::session_worktree(&options_snapshot))
+            .flatten();
+        Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>), HarnessError>((
             session_id,
             steer_ext,
             init_commands,
             initial_effort,
+            session_cwd,
         ))
     };
-    let (session_id, steer_ext, init_commands, initial_effort) = tokio::select! {
+    let (session_id, steer_ext, init_commands, initial_effort, session_cwd) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -3644,7 +3665,7 @@ async fn run_session(session: Session) {
             harness,
             model: request.model.clone().unwrap_or_default(),
             tools: Vec::new(),
-            cwd: request.cwd.clone(),
+            cwd: session_cwd.unwrap_or_else(|| request.cwd.clone()),
             session_id: session_id.clone(),
             assistant_message_id: assistant_message_id.clone(),
         },

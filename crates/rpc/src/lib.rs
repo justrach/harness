@@ -170,6 +170,11 @@ pub mod methods {
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
+    /// Land, archive or remove the Graff-owned worktree a chat runs in.
+    /// `{ chatId, action: "merge"|"archive"|"remove"|"discard" }` →
+    /// `{ outcome: "done"|"kept"|"failed", message }`; on "done" the chat
+    /// moves back to the main checkout. Host-only.
+    pub const GRAFF_WORKTREE_ACTION: &str = "GraffWorktreeAction";
     // Project Actions are private state on the device that owns the project.
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";

@@ -4233,6 +4233,18 @@ impl DocHost {
                 // minting another checkout.
                 let worktree_spec = request.worktree.take();
                 let fresh_worktree = match &worktree_spec {
+                    // Graff owns its worktrees: the adapter launches
+                    // `graff acp -w <name>` from the repo, and Graff creates
+                    // (or reuses) the tree and runs its own workspace setup.
+                    // The chat is re-homed when the session reports the tree.
+                    Some(spec) if self.harness_for_request(chat_id, &request) == HarnessId::Graff => {
+                        request.cwd = spec.repo_path.clone();
+                        request.worktree = Some(harness_proto::WorktreeSpec {
+                            agent_name: Some(harness_proto::graff_worktree::name_for_chat(chat_id)),
+                            ..spec.clone()
+                        });
+                        None
+                    }
                     Some(spec) => {
                         let (cwd, fresh) = self.materialize_worktree(chat_id, &spec).await?;
                         request.cwd = cwd;
