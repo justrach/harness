@@ -111,9 +111,13 @@ async fn stress() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stats = host.sync_resources();
-        assert!(stats["budget"]["sockets"].as_u64().unwrap() <= 24);
+        assert!(stats["budget"]["sockets"].as_u64().unwrap() <= 32);
         assert!(stats["budget"]["http"].as_u64().unwrap() <= 8);
-        assert!(stats["openDocuments"].as_u64().unwrap() <= 16, "{stats}");
+        assert!(
+            stats["openDocuments"].as_u64().unwrap()
+                <= stats["activeClientLimit"].as_u64().unwrap() + 4,
+            "{stats}"
+        );
         if let Some(fds) = stats["openFileDescriptors"].as_u64() {
             peak = peak.max(fds);
             assert!(fds < 224, "no reserved headroom: {stats}");
@@ -133,7 +137,11 @@ async fn stress() {
         while store.sync_work_counts().unwrap() != (0, 0) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let stats = host.sync_resources();
-            assert!(stats["openDocuments"].as_u64().unwrap() <= 16, "{stats}");
+            assert!(
+                stats["openDocuments"].as_u64().unwrap()
+                    <= stats["activeClientLimit"].as_u64().unwrap() + 4,
+                "{stats}"
+            );
         }
     })
     .await

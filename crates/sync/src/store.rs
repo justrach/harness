@@ -396,6 +396,21 @@ impl DocsStore {
         store_blocking(|| self.load_snapshot_with_cursor_blocking(doc_id))
     }
 
+    /// Read admission metadata without fetching or decoding the snapshot blob.
+    pub fn snapshot_epoch(&self, doc_id: &str) -> Result<u32, StoreError> {
+        store_blocking(|| {
+            Ok(self
+                .conn()
+                .query_row(
+                    "SELECT COALESCE(epoch, 0) FROM snapshots WHERE doc_id = ?1",
+                    params![doc_id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .optional()?
+                .unwrap_or(0))
+        })
+    }
+
     fn load_snapshot_with_cursor_blocking(
         &self,
         doc_id: &str,

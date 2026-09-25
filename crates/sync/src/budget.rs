@@ -2,6 +2,7 @@
 //! deliberately remain outside this small budget. Permits cover the resource's
 //! entire lifetime, including response bodies and socket teardown.
 use crate::SyncError;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -22,6 +23,7 @@ pub struct Budget {
     limits: [usize; 3],
     paused_until: Mutex<Option<Instant>>,
     next_dial: Mutex<Option<Instant>>,
+    socket_waiters: AtomicUsize,
 }
 
 pub struct Permit {
@@ -39,6 +41,7 @@ pub struct BudgetStats {
     pub http: usize,
     pub http_limit: usize,
     pub waiting: usize,
+    pub socket_waiting: usize,
     pub resource_paused: bool,
 }
 
@@ -54,6 +57,7 @@ impl Budget {
             limits: [sockets, dials, http],
             paused_until: Mutex::new(None),
             next_dial: Mutex::new(None),
+            socket_waiters: AtomicUsize::new(0),
         })
     }
 
@@ -91,6 +95,16 @@ impl Budget {
     }
 
     pub async fn socket(&self) -> Result<Permit, SyncError> {
+        // Track socket contention separately from HTTP/dial pacing. Hosts can
+        // yield a transport to another profile even below their own local cap.
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        self.socket_waiters.fetch_add(1, Ordering::AcqRel);
+        let _waiting = Waiting(&self.socket_waiters);
         self.acquire(&self.sockets, false).await
     }
     pub async fn dial(&self) -> Result<Permit, SyncError> {
@@ -150,6 +164,7 @@ impl Budget {
             http: self.limits[2] - self.http.available_permits(),
             http_limit: self.limits[2],
             waiting: 128 - self.waiters.available_permits(),
+            socket_waiting: self.socket_waiters.load(Ordering::Acquire),
             resource_paused: self
                 .paused_until
                 .lock()
@@ -161,7 +176,7 @@ impl Budget {
 
 pub fn shared() -> &'static Arc<Budget> {
     static BUDGET: OnceLock<Arc<Budget>> = OnceLock::new();
-    BUDGET.get_or_init(|| Budget::new(24, 4, 8))
+    BUDGET.get_or_init(|| Budget::new(32, 4, 8))
 }
 
 #[cfg(test)]
@@ -205,8 +220,21 @@ mod tests {
         });
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
+        assert_eq!(budget.stats().socket_waiting, 1);
         drop(socket);
         drop(waiting.await.unwrap().unwrap());
         assert_eq!(budget.stats().sockets, 0);
+        assert_eq!(budget.stats().socket_waiting, 0);
+        let socket = budget.socket().await.unwrap();
+        let waiting = tokio::spawn({
+            let budget = budget.clone();
+            async move { budget.socket().await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(budget.stats().socket_waiting, 1);
+        waiting.abort();
+        let _ = waiting.await;
+        assert_eq!(budget.stats().socket_waiting, 0);
+        drop(socket);
     }
 }

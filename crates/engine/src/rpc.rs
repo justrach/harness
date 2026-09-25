@@ -844,7 +844,7 @@ impl EngineRpc {
                 });
                 return Ok(RpcReply::Stream(stream.boxed()));
             }
-            let rx = match client.subscribe(method, params).await {
+            let rx = match client.subscribe_scoped(method, params).await {
                 Ok(rx) => rx,
                 Err(err) => {
                     if should_invalidate_link(&err) {
@@ -1662,6 +1662,13 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "outcome": outcome }))
+            }
+            methods::FOCUS_CHAT => {
+                let p: ChatParams = parse_params(params)?;
+                self.doc_host
+                    .focus_chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
             }
             methods::WATCH_DOC_MESSAGES => {
                 // Opt-in: older viewports retain the full-reset contract.
@@ -3332,6 +3339,7 @@ mod tests {
     #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
+        assert!(!forwardable(methods::FOCUS_CHAT));
         assert!(!forwardable(methods::ENGINE_INFO));
         assert!(!forwardable(methods::ENGINE_READY));
         assert!(forwardable(methods::QUEUE_COMMAND));

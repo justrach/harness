@@ -273,6 +273,10 @@ struct PendingPush {
 struct Shared {
     cursor: u64,
     caught_up: bool,
+    /// Wake receipts need a read started after the receipt, not an old
+    /// caught-up flag. Tickets survive reconnects within this client.
+    refresh_requested: u64,
+    refresh_completed: u64,
     pending: VecDeque<PendingPush>,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
@@ -293,7 +297,11 @@ struct Shared {
     /// wedge); instead this flag asks the session loop for a rowsReq
     /// backfill from the honest cursor.
     gap_repair: bool,
+    /// Serialization is independent of whether imported rows are historical.
+    rows_req_outstanding: bool,
     replaying_gap: bool,
+    /// A complete HTTP pull may repair an old socket gap, never a newer one.
+    row_gap_generation: u64,
     /// HTTP polling also has a live mode. Reopening/probing a chat or losing
     /// delivery starts a new replay epoch; a complete pull establishes its
     /// baseline. Failed socket dials alone do not disable live HTTP animation.
@@ -376,6 +384,7 @@ fn apply_remote_row(
         let mut shared = lock(shared);
         if seq > shared.cursor.saturating_add(1) {
             shared.gap_repair = true;
+            shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
             shared.cursor
         } else {
             shared.cursor.max(seq)
@@ -705,6 +714,25 @@ impl ChatClient {
         let _ = self.probe.try_send(());
     }
 
+    /// Request a fresh, version-fenced catch-up on the existing transport.
+    /// Coalesced wakes are covered only by reads started after their ticket.
+    pub fn request_catch_up(&self) -> u64 {
+        let mut shared = lock(&self.shared);
+        shared.refresh_requested += 1;
+        let ticket = shared.refresh_requested;
+        drop(shared);
+        let _ = self.probe.try_send(());
+        ticket
+    }
+
+    pub fn catch_up_completed(&self, ticket: u64) -> bool {
+        let shared = lock(&self.shared);
+        shared.refresh_completed >= ticket
+            && shared.caught_up
+            && !shared.needs_checkpoint
+            && !shared.gap_repair
+    }
+
     /// Escalation: tear the session down and dial a fresh socket.
     pub fn redial(&self) {
         let _ = self.redial.try_send(());
@@ -739,7 +767,10 @@ impl ChatClient {
 
     pub fn caught_up(&self) -> bool {
         let shared = lock(&self.shared);
-        shared.caught_up && !shared.needs_checkpoint && !shared.gap_repair
+        shared.caught_up
+            && !shared.needs_checkpoint
+            && !shared.gap_repair
+            && shared.refresh_completed >= shared.refresh_requested
     }
 
     pub fn stats(&self) -> ChatStatsSnapshot {
@@ -1006,6 +1037,11 @@ impl Actor {
         use std::sync::atomic::Ordering::Relaxed;
 
         // ── hello / state ───────────────────────────────────────────────────
+        {
+            let mut shared = lock(&self.shared);
+            shared.replaying_gap = false;
+            shared.rows_req_outstanding = false;
+        }
         let cursor = lock(&self.shared).cursor;
         let hello = wire::encode(
             frame_type::HELLO,
@@ -1042,7 +1078,11 @@ impl Actor {
             return SessionEnd::Reconnect;
         };
         lock(&self.shared).server = Some(state);
-        lock(&self.shared).replaying_gap = false;
+        {
+            let mut shared = lock(&self.shared);
+            shared.replaying_gap = false;
+            shared.rows_req_outstanding = false;
+        }
         // Server behind our cursor = the room was reset/wiped. Detect on the
         // RAW persisted cursor, BEFORE the amnesty below rewrites it —
         // plan_catch_up treats the cursor as fresh; SURFACE the signal too:
@@ -1101,6 +1141,7 @@ impl Actor {
         // checkpoint imports — row seqs are all > checkpointSeq, so ordering
         // is preserved, and the persisted cursor can't advance past state it
         // doesn't contain because nothing applies until the import lands.
+        let refresh_ticket = lock(&self.shared).refresh_requested;
         let rows_req = wire::encode(
             frame_type::ROWS_REQ,
             &wire::RowsReqHeader {
@@ -1235,7 +1276,12 @@ impl Actor {
             let _ = ready.send(Ok(()));
         }
         if !lock(&self.shared).needs_checkpoint {
-            lock(&self.shared).caught_up = true;
+            let mut shared = lock(&self.shared);
+            shared.caught_up = true;
+            if !shared.gap_repair && shared.cursor >= head_seq {
+                shared.refresh_completed = shared.refresh_completed.max(refresh_ticket);
+            }
+            drop(shared);
             let _ = self.events.send(ChatEvent::CaughtUp { head_seq });
         }
 
@@ -1245,10 +1291,49 @@ impl Actor {
         // Row-gap repairs this session (see `Shared::gap_repair`): a live
         // frame during the backfill above may already have flagged one.
         let mut gap_repairs = 0u32;
+        let mut refresh_in_flight: Option<(u64, tokio::time::Instant)> = None;
+        let mut refresh_gap_deadline = None;
         if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
             return SessionEnd::Reconnect;
         }
         loop {
+            // Serialize wake reads with gap repair. An older ROWS_DONE must
+            // never acknowledge a newer wake, even when wakes coalesce.
+            let (refresh, waiting_on_gap) = {
+                let shared = lock(&self.shared);
+                let pending = refresh_in_flight.is_none()
+                    && shared.refresh_requested > shared.refresh_completed;
+                (
+                    (pending && !shared.rows_req_outstanding)
+                        .then_some((shared.refresh_requested, shared.cursor)),
+                    pending && shared.rows_req_outstanding,
+                )
+            };
+            if waiting_on_gap {
+                refresh_gap_deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + BACKFILL_DEADLINE);
+            } else {
+                refresh_gap_deadline = None;
+            }
+            if let Some((ticket, after)) = refresh {
+                lock(&self.shared).rows_req_outstanding = true;
+                let request = wire::encode(
+                    frame_type::ROWS_REQ,
+                    &wire::RowsReqHeader {
+                        after,
+                        exclude_own: false,
+                    },
+                    &[],
+                );
+                if pipe.tx.send(request).await.is_err() {
+                    return SessionEnd::Reconnect;
+                }
+                refresh_in_flight = Some((ticket, tokio::time::Instant::now() + BACKFILL_DEADLINE));
+            }
+            let refresh_deadline = refresh_in_flight
+                .map(|(_, at)| at)
+                .or(refresh_gap_deadline)
+                .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
             let quiet_probe_at = last_frame + self.tuning.probe_quiet;
             let deadline_at = probe_deadline
                 .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
@@ -1266,8 +1351,26 @@ impl Actor {
                         tracing::warn!("chat2: unparseable frame");
                         return SessionEnd::Reconnect;
                     };
+                    let refreshed_head = if frame.kind == frame_type::ROWS_DONE {
+                        serde_json::from_value::<wire::RowsDoneHeader>(frame.header.clone()).ok()
+                    } else {
+                        None
+                    };
                     if !self.handle_frame(frame) {
                         return SessionEnd::Reconnect;
+                    }
+                    if let Some(done) = refreshed_head
+                        && let Some((ticket, _)) = refresh_in_flight.take()
+                    {
+                        let mut shared = lock(&self.shared);
+                        if shared.cursor >= done.head_seq && !shared.needs_checkpoint && !shared.gap_repair {
+                            shared.refresh_completed = shared.refresh_completed.max(ticket);
+                        } else if shared.cursor < done.head_seq {
+                            // Missing rows use bounded gap repair, not an
+                            // endless loop of fresh wake requests.
+                            shared.gap_repair = true;
+                            shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
+                        }
                     }
                     if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
                         return SessionEnd::Reconnect;
@@ -1294,6 +1397,10 @@ impl Actor {
                     if !self.send_probe(&mut pipe, &mut probe_deadline).await {
                         return SessionEnd::Reconnect;
                     }
+                }
+                _ = tokio::time::sleep_until(refresh_deadline), if refresh_in_flight.is_some() || refresh_gap_deadline.is_some() => {
+                    tracing::warn!("chat2: wake catch-up timed out; redialing");
+                    return SessionEnd::Reconnect;
                 }
                 _ = self.redial_rx.recv() => {
                     tracing::info!("chat2: redial requested");
@@ -1414,10 +1521,16 @@ impl Actor {
                     }
                 }
             }
-            let (cursor, replay_epoch, mut was_live) = {
+            let (cursor, replay_epoch, mut was_live, refresh_ticket, gap_generation) = {
                 let mut sh = lock(&shared);
                 let was_live = sh.http_live_epoch.take() == Some(sh.http_replay_epoch);
-                (sh.cursor, sh.http_replay_epoch, was_live)
+                (
+                    sh.cursor,
+                    sh.http_replay_epoch,
+                    was_live,
+                    sh.refresh_requested,
+                    sh.row_gap_generation,
+                )
             };
             let body = match transport.fetch_rows(cursor).await {
                 Ok(body) => body,
@@ -1543,6 +1656,12 @@ impl Actor {
                             {
                                 sh.http_live_epoch = Some(replay_epoch);
                                 sh.caught_up = true;
+                                if sh.row_gap_generation == gap_generation {
+                                    sh.gap_repair = false;
+                                }
+                                if !sh.gap_repair {
+                                    sh.refresh_completed = sh.refresh_completed.max(refresh_ticket);
+                                }
                             }
                         }
                     }
@@ -1571,12 +1690,19 @@ impl Actor {
                 // bypass frontier precision on the next catch-up.
                 return false;
             }
+            if shared.rows_req_outstanding {
+                return true;
+            }
             (std::mem::take(&mut shared.gap_repair), shared.cursor)
         };
         if !repair {
             return true;
         }
-        lock(&self.shared).replaying_gap = true;
+        {
+            let mut shared = lock(&self.shared);
+            shared.replaying_gap = true;
+            shared.rows_req_outstanding = true;
+        }
         *repairs += 1;
         if *repairs > MAX_GAP_REPAIRS_PER_SESSION {
             tracing::warn!("chat2: gap repairs exhausted; redialing for a full catch-up");
@@ -1679,6 +1805,7 @@ impl Actor {
                 // HAVE the interleaved ones from other devices.
                 if ack.seq > shared.cursor + 1 {
                     shared.gap_repair = true;
+                    shared.row_gap_generation = shared.row_gap_generation.wrapping_add(1);
                     tracing::warn!(
                         seq = ack.seq,
                         cursor = shared.cursor,
@@ -1705,7 +1832,9 @@ impl Actor {
                 let _ = self.events.send(ChatEvent::Presence);
             }
             frame_type::ROWS_DONE => {
-                lock(&self.shared).replaying_gap = false;
+                let mut shared = lock(&self.shared);
+                shared.replaying_gap = false;
+                shared.rows_req_outstanding = false;
             }
             frame_type::PROBE_OK => {
                 if let Ok(probe) = serde_json::from_value::<wire::ProbeOkHeader>(frame.header) {
