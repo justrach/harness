@@ -239,6 +239,13 @@ fn own_turn_glide_crossed(offset: ListOffset, anchor_ix: usize, inset: f32) -> b
         || (offset.item_ix == anchor_ix && f32::from(offset.offset_in_item) > -inset)
 }
 
+/// Split the previous build's rows: the first `reused` move out (returned),
+/// the rest stay in `old_rows` for diffing against the rebuilt tail.
+fn take_row_prefix(old_rows: &mut Vec<Row>, reused: usize) -> Vec<Row> {
+    let tail = old_rows.split_off(reused);
+    std::mem::replace(old_rows, tail)
+}
+
 /// Drop code-fence scroll handles whose block no longer exists. Only blocks
 /// that have rendered hold a handle, so each handle is checked against its
 /// row rather than keying every code block of every row: that used to cost
@@ -3166,6 +3173,12 @@ pub struct Transcript {
     /// don't need it (the pin branch already opens at the end).
     land_end_pending: bool,
     row_cache: HashMap<String, CachedRows>,
+    /// The prepared-row `Arc` each LEADING message's rows were cloned from in
+    /// the last build (stops at the first message built another way). A
+    /// message whose prepared `Arc` is unchanged has byte-identical rows, so
+    /// `sync` moves them over instead of cloning the whole transcript per
+    /// streamed chunk.
+    row_sources: Vec<Arc<Vec<Row>>>,
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
     folds: HashMap<SharedString, FoldState>,
@@ -3474,6 +3487,7 @@ impl Transcript {
             viewport_finalize_scheduled: false,
             viewport_layout_revision: 0,
             row_cache: HashMap::new(),
+            row_sources: Vec::new(),
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
@@ -4616,6 +4630,7 @@ impl Transcript {
             }
             self.chat_id = selected;
             self.rows.clear();
+            self.row_sources.clear();
             self.row_cache.clear();
             self.live_parsers.clear();
             self.tree_cache.clear();
@@ -4677,6 +4692,18 @@ impl Transcript {
             self.stop_selection_scroll();
         }
 
+        // Leading messages whose prepared rows are the very `Arc` the last
+        // build used are unchanged byte for byte: their rows MOVE over from
+        // the previous build. The first message that differs (usually the
+        // streaming tail) ends the reuse and everything after it rebuilds as
+        // before. `old_rows` holds the previous rows after the reused prefix;
+        // the old-row readers below see `new_rows[..reused]` + `old_rows`.
+        let mut old_rows = std::mem::take(&mut self.rows);
+        let old_len = old_rows.len();
+        let previous_sources = std::mem::take(&mut self.row_sources);
+        let mut sources: Vec<Arc<Vec<Row>>> = Vec::new();
+        let mut reused = 0usize;
+        let mut reusing = !self.compact_mode;
         let mut new_rows: Vec<Row> = Vec::new();
         // Borrow the transcript only while deriving rows. Cloning the entity
         // handle lets rows_for mutate our caches without copying every text
@@ -4692,14 +4719,36 @@ impl Transcript {
                 .chat_id
                 .as_ref()
                 .and_then(|id| state.prepared_transcripts.get(id));
-            for entry in entries {
-                if !self.compact_mode
-                    && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
+            for (ix, entry) in entries.iter().enumerate() {
+                let prepared_rows = (!self.compact_mode)
+                    .then(|| prepared.and_then(|p| p.rows.get(&entry.id)))
+                    .flatten();
+                if reusing
+                    && let Some(rows) = prepared_rows
+                    && previous_sources.get(ix).is_some_and(|prev| Arc::ptr_eq(prev, rows))
+                    && reused + rows.len() <= old_len
+                    && rows.first().map(|r| &r.id) == old_rows.get(reused).map(|r| &r.id)
                 {
-                    new_rows.extend(rows.iter().cloned());
-                } else {
-                    new_rows.extend(self.rows_for(entry, false));
+                    reused += rows.len();
+                    sources.push(rows.clone());
+                    continue;
                 }
+                if reusing {
+                    reusing = false;
+                    new_rows = take_row_prefix(&mut old_rows, reused);
+                }
+                match prepared_rows {
+                    Some(rows) => {
+                        if sources.len() == ix {
+                            sources.push(rows.clone());
+                        }
+                        new_rows.extend(rows.iter().cloned());
+                    }
+                    None => new_rows.extend(self.rows_for(entry, false)),
+                }
+            }
+            if reusing {
+                new_rows = take_row_prefix(&mut old_rows, reused);
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
@@ -4713,6 +4762,7 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+        self.row_sources = sources;
 
         let baseline = self
             .chat_id
@@ -4822,9 +4872,10 @@ impl Transcript {
                 fold.disclosure_at = None;
             }
         }
-        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = self
-            .rows
+        let previous_tools: HashMap<SharedString, HashMap<String, Option<Instant>>> = new_rows
+            [..reused]
             .iter()
+            .chain(old_rows.iter())
             .filter(|row| !fully_historical.contains(&row.entry_id))
             .filter_map(|row| match &row.kind {
                 RowKind::ToolGroup { tools, .. } => {
@@ -4954,9 +5005,12 @@ impl Transcript {
         // or coordinates changes.
         let live_following =
             should_anchor_live_stream(self.pinned, self.distance_from_bottom(), tail_streaming);
-        let was_empty = self.rows.is_empty();
-        let old_last = self.rows.len().checked_sub(1);
-        match diff_rows(&self.rows, &new_rows) {
+        let was_empty = old_len == 0;
+        let old_last = old_len.checked_sub(1);
+        // The reused prefix is identical on both sides by construction.
+        let diff = diff_rows(&old_rows, &new_rows[reused..])
+            .map(|(range, count)| (range.start + reused..range.end + reused, count));
+        match diff {
             None => {
                 self.rows = new_rows;
                 self.refresh_protected_attachments(cx);
@@ -4975,7 +5029,7 @@ impl Transcript {
                 // because live replies splice only the rows whose content hash
                 // changed (the tail), this is O(changed rows) per commit, never
                 // O(reply).
-                for row in &self.rows[old_range.clone()] {
+                for row in &old_rows[old_range.start - reused..old_range.end - reused] {
                     self.render_cache.borrow_mut().invalidate_row(&row.id);
                 }
                 if old_range.len() == count {
@@ -5084,10 +5138,12 @@ impl Transcript {
         } else {
             entry_fingerprint(entry, pending) ^ ((self.compact_mode as u64) << 63)
         };
+        let mut cache_hit = false;
         let mut rows = if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
             && cached.fingerprint == fingerprint
         {
+            cache_hit = true;
             cached.rows.clone()
         } else {
             let live_parsers = &mut self.live_parsers;
@@ -5112,7 +5168,10 @@ impl Transcript {
             }
         }
 
-        if !streaming {
+        // A hit already holds exactly these rows (the compact worked-seconds
+        // stamp above is reapplied on every read); re-inserting cloned every
+        // settled entry's rows and id again on each streamed chunk.
+        if !streaming && !cache_hit {
             self.row_cache.insert(
                 entry.id.clone(),
                 CachedRows {
@@ -9304,6 +9363,104 @@ mod tests {
     #[gpui::test]
     fn send_as_the_reply_finishes_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
         direct_send_keeps_a_long_chat_near_its_tail(cx, true, true);
+    }
+
+    /// Incremental rows (prepared-`Arc` prefix reuse) match a from-scratch
+    /// build at every step: streaming chunks, an edit to a middle message, a
+    /// removal, and the live→complete flip. And the unchanged leading
+    /// messages really are reused rather than cloned.
+    #[gpui::test]
+    fn prefix_reuse_matches_a_fresh_build(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let incremental = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let mut prep = TranscriptPreparation::default();
+        let mut current: Vec<SessionMessageEntry> = Vec::new();
+        let mut install = |next: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+            let frame = if current.is_empty() {
+                harness_doc::TranscriptFrame::reset(&next)
+            } else {
+                harness_doc::diff_transcript(&current, &next)
+            };
+            let prepared = prep
+                .prepare(&harness_doc::TranscriptUpdate {
+                    frame,
+                    context_usage: None,
+                    replay_baseline: None,
+                })
+                .unwrap();
+            current = next.clone();
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = next;
+                state.prepared_transcripts.insert("chat".into(), prepared);
+                state.transcript_revision += 1;
+            });
+        };
+        let keys = |t: &Transcript| {
+            t.rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.id.to_string(),
+                        r.version,
+                        r.entry_id.to_string(),
+                        r.turn_start,
+                        r.timestamp,
+                        r.copy_text.as_ref().map(|c| c.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let check = |label: &str, cx: &mut gpui::TestAppContext| {
+            incremental.update(cx, |t, cx| t.sync(cx));
+            let fresh = cx.new(|cx| Transcript::new(state.clone(), cx));
+            fresh.update(cx, |t, cx| t.sync(cx));
+            let (a, b) = (incremental.read_with(cx, |t, _| keys(t)), fresh.read_with(cx, |t, _| keys(t)));
+            assert_eq!(a, b, "{label}: incremental rows diverged from a fresh build");
+        };
+        let prompt = |id: &str| {
+            let mut e = assistant(id, MessageStatus::Complete, vec![text_part("t", "Explain it.")]);
+            e.role = MessageRole::User;
+            e.status = None;
+            e
+        };
+        let body = "Para one with `code`.\n\n```rust\nfn f() {}\n```\n\nPara two.";
+        let mut entries = Vec::new();
+        for i in 0..30 {
+            entries.push(prompt(&format!("p{i}")));
+            entries.push(assistant(&format!("r{i}"), MessageStatus::Complete, vec![text_part("t", body)]));
+        }
+        let with_live = |entries: &Vec<SessionMessageEntry>, text: &str, status| {
+            let mut next = entries.clone();
+            next.push(prompt("p-live"));
+            next.push(assistant("r-live", status, vec![text_part("t", text)]));
+            next
+        };
+        install(with_live(&entries, "Streaming", MessageStatus::Streaming), cx);
+        check("open", cx);
+        let mut live = String::from("Streaming");
+        for i in 0..8 {
+            live.push_str(&format!(" chunk {i}."));
+            install(with_live(&entries, &live, MessageStatus::Streaming), cx);
+            check(&format!("chunk {i}"), cx);
+            let reused = incremental.read_with(cx, |t, _| t.row_sources.len());
+            assert!(reused >= 60, "chunk {i}: settled history reused ({reused} sources)");
+        }
+        entries[21] = assistant("r10", MessageStatus::Complete, vec![text_part("t", "Edited in the middle.")]);
+        install(with_live(&entries, &live, MessageStatus::Streaming), cx);
+        check("middle edit", cx);
+        entries.remove(5);
+        install(with_live(&entries, &live, MessageStatus::Streaming), cx);
+        check("removal", cx);
+        install(with_live(&entries, &live, MessageStatus::Complete), cx);
+        check("complete", cx);
     }
 
     /// Cost probe (run with --ignored --nocapture): per-chunk `sync` and
