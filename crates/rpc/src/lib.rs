@@ -61,6 +61,9 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
+    /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
+    /// connection; automatic subscriptions and retries must not call it.
+    pub const FOCUS_CHAT: &str = "FocusChat";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";

@@ -329,6 +329,12 @@ impl RpcClient {
                 ready: Some(ready_tx),
             },
         );
+        let subscription = RpcSubscription {
+            id,
+            items: items_rx,
+            out: self.out.clone(),
+            shared: self.shared.clone(),
+        };
         self.send(ClientFrame {
             id,
             method: Some(method.into()),
@@ -339,12 +345,6 @@ impl RpcClient {
         .inspect_err(|_| {
             self.shared.lock().remove(&id);
         })?;
-        let subscription = RpcSubscription {
-            id,
-            items: items_rx,
-            out: self.out.clone(),
-            shared: self.shared.clone(),
-        };
         ready_rx.await.map_err(|_| RpcError::Closed)??;
         Ok(subscription)
     }
