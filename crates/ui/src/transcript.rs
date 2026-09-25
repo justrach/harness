@@ -239,6 +239,32 @@ fn own_turn_glide_crossed(offset: ListOffset, anchor_ix: usize, inset: f32) -> b
         || (offset.item_ix == anchor_ix && f32::from(offset.offset_in_item) > -inset)
 }
 
+/// Drop code-fence scroll handles whose block no longer exists. Only blocks
+/// that have rendered hold a handle, so each handle is checked against its
+/// row rather than keying every code block of every row: that used to cost
+/// ~150µs per streamed chunk on a 2.7k-row chat (O(transcript), allocating).
+fn prune_code_fences<V>(fences: &mut HashMap<SharedString, V>, rows: &[Row]) {
+    if fences.is_empty() {
+        return;
+    }
+    let rows_by_id: HashMap<&str, &Row> = rows.iter().map(|row| (row.id.as_ref(), row)).collect();
+    fences.retain(|key, _| {
+        let Some((row_id, ix)) = key.rsplit_once("#code") else {
+            return false;
+        };
+        let (Ok(ix), Some(row)) = (ix.parse::<usize>(), rows_by_id.get(row_id)) else {
+            return false;
+        };
+        match &row.kind {
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+                .blocks
+                .get(*block_ix)
+                .is_some_and(|top| render::code_block_indices(&top.block, *block_ix).contains(&ix)),
+            _ => false,
+        }
+    });
+}
+
 /// Pure stick-to-bottom spring stepper — the mugen `tick()` integration:
 /// velocity relaxes toward `(damping·v + stiffness·diff)/mass` per 60fps
 /// sub-frame, position advances by `v + target_vel` where `target_vel` is a
@@ -4889,25 +4915,7 @@ impl Transcript {
         // Runtime scroll handles follow the stable code rows exactly. A live
         // block keeps its handle through completion; deleted/reindexed tail
         // blocks and the previous chat cannot accumulate stale handles.
-        let active_code_fences: HashSet<SharedString> = new_rows
-            .iter()
-            .flat_map(|row| match &row.kind {
-                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
-                    tree.blocks
-                        .get(*block_ix)
-                        .map(|top| {
-                            render::code_block_indices(&top.block, *block_ix)
-                                .into_iter()
-                                .map(|ix| format!("{}#code{ix}", row.id).into())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                }
-                _ => Vec::new(),
-            })
-            .collect();
-        self.code_fences
-            .retain(|key, _| active_code_fences.contains(key));
+        prune_code_fences(&mut self.code_fences, &new_rows);
 
         // Text already streamed before this (re)attach is the veil BASELINE:
         // its rows' veils seed instead of fading (render creates them from
@@ -10746,6 +10754,51 @@ mod tests {
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
         Arc::new(parse_full(text))
+    }
+
+    /// Handle pruning keeps exactly the handles the old full re-keying kept:
+    /// live code blocks (top-level, in lists, in quotes) stay; handles for
+    /// vanished rows, re-indexed blocks and malformed keys go.
+    #[test]
+    fn code_fence_pruning_matches_full_rekeying() {
+        let markdown = "Intro\n\n```rust\nfn a() {}\n```\n\n- item\n\n  ```sh\nls\n  ```\n\n> ```py\n> x = 1\n> ```\n\nTail";
+        let entries = [
+            assistant("m1", MessageStatus::Complete, vec![text_part("t", markdown)]),
+            assistant("m2", MessageStatus::Streaming, vec![text_part("t", markdown)]),
+        ];
+        let rows: Vec<Row> = entries
+            .iter()
+            .flat_map(|e| rows_for_entry(e, false, false, &mut parse))
+            .collect();
+        let full: HashSet<String> = rows
+            .iter()
+            .flat_map(|row| match &row.kind {
+                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+                    .blocks
+                    .get(*block_ix)
+                    .map(|top| {
+                        render::code_block_indices(&top.block, *block_ix)
+                            .into_iter()
+                            .map(|ix| format!("{}#code{ix}", row.id))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(full.len() >= 6, "fixture has nested code blocks in both rows: {full:?}");
+        let mut fences: HashMap<SharedString, ()> = full.iter().map(|k| (k.clone().into(), ())).collect();
+        for stale in ["gone-row#code0", "m1#t#code0#code99", "no-marker", "m1#codeX"] {
+            fences.insert(stale.into(), ());
+        }
+        let first_row = &rows[0].id;
+        fences.insert(format!("{first_row}#code4242").into(), ());
+        prune_code_fences(&mut fences, &rows);
+        let kept: HashSet<String> = fences.keys().map(|k| k.to_string()).collect();
+        assert_eq!(kept, full);
+        // Rows gone (chat switch): nothing survives.
+        prune_code_fences(&mut fences, &[]);
+        assert!(fences.is_empty());
     }
 
     /// A replayed entry still streaming keeps a fixed historical prefix: its
