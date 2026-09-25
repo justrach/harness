@@ -42,6 +42,9 @@ enum Entry {
     NewProject,
     Settings,
     Theme(AppearanceMode),
+    /// An unfocused split pane (index into the split); picking it moves
+    /// focus there instead of pulling its chat into the current pane.
+    Pane(usize),
     Chat(String),
 }
 
@@ -59,7 +62,16 @@ impl Entry {
                 },
                 mode.icon(),
             )),
-            Self::Chat(_) => None,
+            Self::Pane(_) | Self::Chat(_) => None,
+        }
+    }
+
+    /// Result groups, in display order: open panes, actions, chat history.
+    fn section(&self) -> u8 {
+        match self {
+            Self::Pane(_) => 0,
+            Self::Chat(_) => 2,
+            _ => 1,
         }
     }
 }
@@ -98,9 +110,12 @@ impl Shell {
             return;
         }
         self.add_space = None;
-        let search = cx.new(|cx| {
-            ComposerInput::with_context("Search commands and chats…", "PaletteSearch", cx)
-        });
+        let placeholder = if self.chat_split.as_ref().is_some_and(|split| split.panes.len() > 1) {
+            "Search open panes, commands and chats…"
+        } else {
+            "Search commands and chats…"
+        };
+        let search = cx.new(|cx| ComposerInput::with_context(placeholder, "PaletteSearch", cx));
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(palette) = this.command_palette.as_mut() {
@@ -138,13 +153,27 @@ impl Shell {
             return Vec::new();
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
-        let mut entries = actions_for(&query, Theme::of(cx).appearance.is_dark());
+        // Open panes lead: with several chats side by side, "take me to that
+        // one" is the common search. Their chats leave the history list.
+        let mut entries = Vec::new();
+        let mut in_panes: Vec<String> = Vec::new();
+        if let Some(split) = self.chat_split.as_ref().filter(|_| matches!(self.route, Route::Chat)) {
+            for ix in (0..split.panes.len()).filter(|&ix| ix != split.focus) {
+                in_panes.extend(split.panes[ix].clone());
+                let (title, project) = self.pane_label(ix, cx);
+                if matches_query(&query, &format!("{title} {project}")) {
+                    entries.push(Entry::Pane(ix));
+                }
+            }
+        }
+        entries.extend(actions_for(&query, Theme::of(cx).appearance.is_dark()));
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
         let mut chats: Vec<_> = state
             .chats
             .iter()
+            .filter(|chat| !in_panes.contains(&chat.id))
             .filter(|chat| {
                 let project = state
                     .space_for_chat(chat)
@@ -195,8 +224,39 @@ impl Shell {
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => self.open_settings(SettingsSection::Devices, cx),
             Entry::Theme(_) => unreachable!(),
-            Entry::Chat(id) => self.open_chat(id, cx),
+            Entry::Pane(ix) => self.focus_chat_pane(ix, window, cx),
+            Entry::Chat(id) => {
+                if !self.reveal_chat_in_tabs(&id, window, cx) {
+                    self.open_chat(id, cx)
+                }
+            }
         }
+    }
+
+    /// A split pane's chat title and project, as the pane strip shows them.
+    fn pane_label(&self, ix: usize, cx: &App) -> (String, String) {
+        let state = self.state.read(cx);
+        let Some(split) = self.chat_split.as_ref() else {
+            return ("New session".into(), String::new());
+        };
+        let chat = split.panes[ix]
+            .as_deref()
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+        let title = chat
+            .map(|chat| {
+                transcript::single_line(chat.title.as_deref().unwrap_or("Untitled session"))
+            })
+            .unwrap_or_else(|| "New session".into());
+        let project = chat
+            .and_then(|chat| state.space_for_chat(chat))
+            .or_else(|| {
+                split.projects[ix]
+                    .as_deref()
+                    .and_then(|id| state.spaces.iter().find(|s| s.id == id))
+            })
+            .map(|space| space.display_name().to_string())
+            .unwrap_or_default();
+        (title, project)
     }
 
     pub(super) fn render_command_palette(
@@ -217,7 +277,6 @@ impl Shell {
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let theme = Theme::of(cx).for_popup();
-        let action_count = entries.iter().take_while(|e| e.action().is_some()).count();
         let mut rows = Vec::new();
         for (ix, entry) in entries.iter().enumerate() {
             // End spacing belongs to the content, so it scrolls out of the
@@ -227,10 +286,60 @@ impl Shell {
                 .flex_none()
                 .when(ix == 0, |row| row.pt(px(8.0)))
                 .when(ix + 1 == entries.len(), |row| row.pb(px(8.0)));
-            if ix == action_count && action_count > 0 {
+            if ix > 0 && entries[ix - 1].section() != entry.section() {
                 row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
-            let content = if let Some((label, glyph)) = entry.action() {
+            let content = if let Entry::Pane(pane) = entry {
+                let pane = *pane;
+                let (title, project) = self.pane_label(pane, cx);
+                let glyph = self
+                    .chat_split
+                    .as_ref()
+                    .map(|split| chat_split::pane_glyph(split.axis, pane, split.panes.len()))
+                    .unwrap_or("▣");
+                popover::menu_row(&theme, ix == active, format!("command-pane-{ix}"))
+                    .id(("command-pane", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Go to pane: {title}"))
+                    .min_h(px(30.0))
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_command(Entry::Pane(pane), window, cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .text_center()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(glyph)),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(popover::search_highlight(
+                        title.into(),
+                        Some(&query),
+                        &theme,
+                    )))
+                    .when(!project.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(160.0))
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(project)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(SharedString::from("Go to pane")),
+                    )
+                    .into_any_element()
+            } else if let Some((label, glyph)) = entry.action() {
                 let shortcut = match entry {
                     Entry::NewChat | Entry::NewProject => {
                         let id = if *entry == Entry::NewChat {
@@ -355,7 +464,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_color(theme.text_muted)
-                                .child("Try a command, chat title, project, or device."),
+                                .child("Try a pane, command, chat title, project, or device."),
                         ),
                 )
             });
@@ -492,6 +601,23 @@ impl Shell {
     }
 }
 
+#[cfg(feature = "appshots-fixture")]
+impl CommandPalette {
+    pub(super) fn fixture_type(&self, query: &str, cx: &mut App) {
+        self.search.update(cx, |input, cx| input.set_text(query, cx));
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+impl Shell {
+    pub(super) fn fixture_command_palette_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.command_entries(cx);
+        if let Some(entry) = self.command_palette.as_ref().and_then(|p| entries.get(p.active)).cloned() {
+            self.activate_command(entry, window, cx);
+        }
+    }
+}
+
 fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
     div()
         .flex()
@@ -575,6 +701,17 @@ mod tests {
             actions_for("dark", false),
             vec![Entry::Theme(AppearanceMode::Dark)]
         );
+    }
+
+    #[test]
+    fn open_panes_lead_then_actions_then_history() {
+        let order = [
+            Entry::Pane(2),
+            Entry::NewChat,
+            Entry::Chat("a".into()),
+        ];
+        assert!(order.windows(2).all(|w| w[0].section() < w[1].section()));
+        assert_eq!(Entry::Pane(0).action(), None);
     }
 
     #[test]

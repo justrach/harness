@@ -690,6 +690,11 @@ pub struct AppState {
     /// [`Self::selected_space_row`] reads as `None` — healing must NOT
     /// re-select a project underneath it.
     pub no_project: bool,
+    /// Screen Recording notice ([`crate::screen_access`]): set when a live
+    /// tool result shows macOS refusing an agent's screenshot.
+    pub(crate) screen_access_notice: Option<crate::screen_access::Notice>,
+    /// "Not now" on that notice: stay quiet until the next launch.
+    pub(crate) screen_access_dismissed: bool,
     /// The composer's device pick — where project-less sessions run, and the
     /// device whose projects the project picker lists. `None` falls back to
     /// the local device.
@@ -807,6 +812,8 @@ impl AppState {
             session_presentation: None,
             selected_space: None,
             no_project: false,
+            screen_access_notice: None,
+            screen_access_dismissed: false,
             selected_device: None,
             selected_chat: None,
             transcript: Vec::new(),
@@ -1260,6 +1267,7 @@ impl AppState {
                     && self.pending_echoes().is_empty()
             })
             .cloned();
+        self.note_screen_access_denial(&frame);
         let result = self.apply_transcript_frame(frame);
         if let Some(doc_id) = text_doc.filter(|_| result.is_ok()) {
             cx.emit(TranscriptTextChanged { doc_id });
@@ -1267,6 +1275,34 @@ impl AppState {
             cx.notify();
         }
         result
+    }
+
+    /// Raise the Screen Recording notice when a LIVE tool result (a delta,
+    /// never a history reset) shows macOS refusing an agent's screenshot.
+    fn note_screen_access_denial(&mut self, frame: &TranscriptFrame) {
+        if self.screen_access_dismissed
+            || self.screen_access_notice.is_some()
+            || !crate::screen_access::supported()
+        {
+            return;
+        }
+        let (Some(chat_id), TranscriptFrame::Delta { upsert, .. }) = (&self.selected_chat, frame)
+        else {
+            return;
+        };
+        let denied = upsert.iter().flat_map(|u| &u.entry.parts).any(|part| {
+            matches!(
+                part,
+                harness_doc::MessagePart::Tool { call, resolved: true, output, .. }
+                    if crate::screen_access::is_denial(call, output.as_deref())
+            )
+        });
+        if denied && !crate::screen_access::granted() {
+            self.screen_access_notice = Some(crate::screen_access::Notice {
+                chat_id: chat_id.clone(),
+                requested: false,
+            });
+        }
     }
 
     pub(crate) fn transcript_baseline(
@@ -4043,6 +4079,48 @@ mod tests {
         // No spaces at all: selection clears.
         state.apply_spaces(vec![]);
         assert_eq!(state.selected_space, None);
+    }
+
+    #[test]
+    fn screen_capture_denials_raise_the_notice_only_when_live() {
+        let entry: SessionMessageEntry = serde_json::from_value(serde_json::json!({
+            "id": "a1",
+            "role": "assistant",
+            "parts": [{
+                "id": "t1",
+                "kind": "tool",
+                "call": {"kind": "exec", "command": "screencapture -x /tmp/s.png"},
+                "isError": true,
+                "resolved": true,
+                "output": "Exit code 1\ncould not create image from rect"
+            }],
+            "createdAt": 1_i64,
+            "deviceId": "d"
+        }))
+        .unwrap();
+        let mut state = AppState::new();
+        state.selected_chat = Some("chat".into());
+        // Opening a chat replays history: an old denial must stay quiet.
+        state.note_screen_access_denial(&TranscriptFrame::reset(std::slice::from_ref(&entry)));
+        assert_eq!(state.screen_access_notice, None);
+        let live = TranscriptFrame::Delta {
+            upsert: vec![harness_doc::TranscriptUpsert { after: None, entry }],
+            append: Vec::new(),
+            remove: Vec::new(),
+            count: 1,
+        };
+        // "Not now" silences it for the rest of the launch.
+        state.screen_access_dismissed = true;
+        state.note_screen_access_denial(&live);
+        assert_eq!(state.screen_access_notice, None);
+        state.screen_access_dismissed = false;
+        state.note_screen_access_denial(&live);
+        if crate::screen_access::supported() && !crate::screen_access::granted() {
+            assert_eq!(
+                state.screen_access_notice,
+                Some(crate::screen_access::Notice { chat_id: "chat".into(), requested: false })
+            );
+        }
     }
 
     #[test]

@@ -5,17 +5,23 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Harness</string>
+    <string>Harness Dev</string>
     <key>CFBundleExecutable</key>
     <string>harness</string>
     <key>CFBundleIconFile</key>
     <string>harness.icns</string>
+    <!-- Its own identifier, not the release's harness.codegraff.app: macOS
+         privacy (TCC) keeps ONE grant per bundle id, pinned to one code
+         signature. Sharing the id with the Developer ID release meant a
+         Screen Recording grant made for this Apple Development build silently
+         denied the installed app (and vice versa) while Settings showed a
+         single "Harness" row switched on. -->
     <key>CFBundleIdentifier</key>
-    <string>harness.codegraff.app</string>
+    <string>harness.codegraff.app.dev</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Harness</string>
+    <string>Harness Dev</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -26,7 +32,7 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>harness.codegraff.app.conversation</string>
+            <string>harness.codegraff.app.dev.conversation</string>
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>harness</string>
@@ -40,10 +46,6 @@
          the same isolated development instance. -->
     <key>LSEnvironment</key>
     <dict>
-        <key>HARNESS_DATA_DIR</key>
-        <string>__DATA_DIR__</string>
-        <key>HARNESS_IPC_PORT</key>
-        <string>__IPC_PORT__</string>
         <key>HARNESS_DATA_DIR</key>
         <string>__DATA_DIR__</string>
         <key>HARNESS_IPC_PORT</key>

@@ -296,6 +296,10 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // Jump to the message box from anywhere (the browser keeps ⌘L for
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
+        // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
+        KeyBinding::new(&b("cmd-t", "ctrl-shift-t"), NewChatTab, None),
+        KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
+        KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ]
 }
 
@@ -339,6 +343,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if !matches!(self.route, Route::Chat) {
+            return;
+        }
+        // Another side-by-side pane would be too narrow to read: open it in
+        // a new tab instead, leaving this layout as it is.
+        let panes = self.chat_split.as_ref().map_or(1, |s| s.panes.len());
+        if axis == SplitAxis::Horizontal
+            && self.can_split(axis)
+            && !chat_tabs::fits_another_pane(self.chat_column_width, panes)
+        {
+            self.new_chat_tab(open, window, cx);
             return;
         }
         let selected = self.state.read(cx).selected_chat.clone();
@@ -423,7 +437,8 @@ impl Shell {
     /// ⌘W with a split open closes the focused pane (not the window).
     pub(crate) fn close_focused_chat_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.chat_split_active() {
-            return false;
+            // One pane left: close its tab while others remain.
+            return self.close_chat_tab(window, cx);
         }
         let Some(split) = self.chat_split.as_mut() else {
             return false;
@@ -681,6 +696,16 @@ impl Shell {
             })
             .unwrap_or_else(|| "New session".into())
             .into();
+        // An empty pane names the project its new session will start in.
+        let empty_hint: SharedString = self
+            .chat_split
+            .as_ref()
+            .and_then(|split| split.projects.get(ix).cloned().flatten())
+            .and_then(|id| self.state.read(cx).spaces.iter().find(|s| s.id == id).map(space_label))
+            .map_or_else(
+                || "Click to start a session".into(),
+                |project| format!("Click to start a session in {project}").into(),
+            );
         let view = chat_id.and_then(|id| self.peer_chat_views.get(id));
         let body: AnyElement = match view {
             Some(view) => {
@@ -723,7 +748,7 @@ impl Shell {
                     div()
                         .text_size(crate::typography::ui_rems(11.5))
                         .text_color(theme.text_muted.opacity(0.55))
-                        .child(SharedString::from("Click to start a session")),
+                        .child(empty_hint),
                 )
                 .into_any_element(),
         };
@@ -1030,7 +1055,7 @@ impl Shell {
     }
 }
 
-const STRIP_REVEAL_KEY: &str = "chat-pane-strip";
+pub(super) const STRIP_REVEAL_KEY: &str = "chat-pane-strip";
 /// Revealed height of the hover preview (prompt line + three reply lines).
 const PREVIEW_HEIGHT: f32 = 132.0;
 

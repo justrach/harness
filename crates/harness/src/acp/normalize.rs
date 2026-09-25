@@ -97,6 +97,37 @@ pub(crate) fn xai_tool_name(update: &Value) -> Option<&str> {
     update.get("_meta")?.get("x.ai/tool")?.get("name")?.as_str()
 }
 
+/// Graff's background-agent controls, named like codex's collab tools so the
+/// transcript reads "Wait for agent 1" (bot icon, linked to the spawn chip)
+/// instead of a bare "Tool agent_output". The spawn itself (`subagent`) is
+/// the Agent chip; these are the parent's follow-ups: `agent_output` blocks
+/// (often for many minutes) until background agent `id` reports,
+/// `agent_message` queues feedback to it, `subagent_resume` continues a
+/// retained child, and `load_tool_schemas` is catalog plumbing.
+fn graff_agent_control(update: &Value, title: &str, raw: Option<&Value>) -> Option<ToolCall> {
+    let tool = update
+        .get("_meta")
+        .and_then(|m| m.get("graff/toolName"))
+        .and_then(Value::as_str)
+        .unwrap_or(title);
+    let id = raw.and_then(|r| r.get("id")).and_then(|id| match id {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    });
+    let name = match tool {
+        "agent_output" => id.map_or_else(|| "Wait for agents".into(), |id| format!("Wait for agent {id}")),
+        "agent_message" => id.map_or_else(|| "Message agent".into(), |id| format!("Message agent {id}")),
+        "subagent_resume" => "Resume agent".into(),
+        "load_tool_schemas" => "Load tools".into(),
+        _ => return None,
+    };
+    Some(ToolCall::Unknown {
+        name,
+        input: raw.cloned(),
+    })
+}
+
 /// First location path (`locations: [{path, line?}]`), for read/edit calls.
 fn first_location(update: &Value) -> Option<String> {
     let path = update.get("locations")?.as_array()?.first()?.get("path")?;
@@ -172,6 +203,9 @@ fn typed_call(update: &Value) -> ToolCall {
         .unwrap_or("other");
     let title = str_field(update, "title");
     let raw = update.get("rawInput").filter(|v| !v.is_null());
+    if let Some(call) = graff_agent_control(update, &title, raw) {
+        return call;
+    }
     let raw_str = |key: &str| -> Option<String> {
         raw.and_then(|r| r.get(key))
             .and_then(Value::as_str)
@@ -944,6 +978,33 @@ mod tests {
                 },
             }]
         );
+    }
+
+    #[test]
+    fn graff_background_agent_controls_read_as_agent_actions() {
+        let call = |title: &str, raw: Value| {
+            match map_update(&json!({
+                "sessionUpdate": "tool_call", "toolCallId": "t", "kind": "other",
+                "title": title, "rawInput": raw,
+            }))
+            .as_slice()
+            {
+                [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }] => name.clone(),
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert_eq!(call("agent_output", json!({"id": 1, "wait_ms": 600000})), "Wait for agent 1");
+        assert_eq!(call("agent_message", json!({"id": 2, "message": "hi"})), "Message agent 2");
+        assert_eq!(call("subagent_resume", json!({"task_id": "abc", "message": "go"})), "Resume agent");
+        assert_eq!(call("load_tool_schemas", json!({"tools": ["agent_output"]})), "Load tools");
+        // Graff's own tool name wins over a human title.
+        let named = map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "t", "kind": "other",
+            "title": "Waiting on agent 3", "rawInput": {"id": 3},
+            "_meta": {"graff/toolName": "agent_output"}
+        }));
+        assert!(matches!(named.as_slice(),
+            [AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }] if name == "Wait for agent 3"));
     }
 
     #[test]

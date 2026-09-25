@@ -1038,6 +1038,12 @@ impl Pickers {
         true
     }
 
+    pub fn open_project_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_kind() != Some(PickerKind::Space) {
+            self.toggle(PickerKind::Space, window, cx);
+        }
+    }
+
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);
@@ -2079,7 +2085,7 @@ impl Pickers {
         self.close(cx);
     }
 
-    fn pick_no_project(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pick_no_project(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             // A late opening chats frame must not auto-open an old session
             // after the user has explicitly chosen the new-session target.
@@ -2852,6 +2858,9 @@ impl Pickers {
             .id(id)
             .h(px(20.0))
             .max_w(px(280.0))
+            // Shrink (the label truncates) rather than overflow: a narrow
+            // split pane spilled the machine chip out past the pane's edge.
+            .min_w_0()
             .flex()
             .flex_row()
             .items_center()
@@ -2975,7 +2984,8 @@ impl Pickers {
             cx,
         );
         div()
-            .flex_none()
+            .min_w_0()
+            .max_w_full()
             .flex()
             .flex_row()
             .items_center()

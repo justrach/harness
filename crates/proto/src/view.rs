@@ -435,8 +435,33 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             Some(description) => ("Agent", description.to_owned()),
             None if name.starts_with("Jev: ") => ("Jev", name[5..].to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
-            None => ("Tool", name.clone()),
+            None => agent_control(name).unwrap_or_else(|| ("Tool", name.clone())),
         },
+    }
+}
+
+/// A parent's control of its subagents, as drivers name them (codex collab
+/// tools, graff background agents): "Wait for agent 1[: <title>]" reads
+/// "Waiting on <title>" (or "agent 1" until the spawn is known), not the
+/// generic "Tool · Wait for agent 1".
+fn agent_control(name: &str) -> Option<(&'static str, String)> {
+    let target = |rest: &str| {
+        rest.split_once(": ")
+            .map_or(rest, |(_, title)| title)
+            .to_owned()
+    };
+    if let Some(rest) = name.strip_prefix("Wait for ") {
+        return Some(("Waiting on", target(rest)));
+    }
+    if let Some(rest) = name.strip_prefix("Message agent") {
+        return Some(("Message", target(&format!("agent{rest}"))));
+    }
+    match name {
+        "Send agent message" => Some(("Message", "agent".into())),
+        "Resume agent" => Some(("Resume", "agent".into())),
+        "Close agent" => Some(("Close", "agent".into())),
+        "Load tools" => Some(("Load", "tools".into())),
+        _ => None,
     }
 }
 

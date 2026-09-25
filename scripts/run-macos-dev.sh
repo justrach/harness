@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Build and run an isolated macOS development bundle. It shares the product
-# bundle id (harness.codegraff.app) and keeps its own data directory and
-# engine IPC port.
+# Build and run an isolated macOS development bundle ("Harness Dev"). It has
+# its own bundle id (harness.codegraff.app.dev), data directory and engine IPC
+# port. The id must differ from the release's: macOS privacy keeps one grant
+# per bundle id pinned to one signature, so a shared id made a Screen Recording
+# grant for this build deny the installed Developer ID app, and vice versa.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+BUNDLE_ID="harness.codegraff.app.dev"
 DEV_ROOT="$ROOT/target/macos-dev"
 APP="$DEV_ROOT/Harness.app"
 CONTENTS="$APP/Contents"
@@ -61,9 +64,9 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier harness.codegraff.app "$APP"
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 else
-  codesign --force --sign - --identifier harness.codegraff.app "$APP"
+  codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
@@ -71,7 +74,7 @@ fi
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$LSREGISTER" -f "$APP"
 
-echo "running Harness (bundle harness.codegraff.app, data $DATA_DIR, IPC $IPC_PORT)" >&2
+echo "running Harness Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
 # LaunchServices must own the process. Launching Contents/MacOS/harness directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the

@@ -64,6 +64,7 @@ use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
 mod chat_split;
+mod chat_tabs;
 mod codegraff_account;
 mod command_palette;
 mod files_panel;
@@ -87,6 +88,8 @@ actions!(
         OpenModelPicker,
         NewSession,
         OpenSettings,
+        /// Quit and reopen (a new Screen Recording grant applies only then).
+        RestartHarness,
         NextSession,
         PrevSession,
         ArchiveSession,
@@ -105,7 +108,11 @@ actions!(
         ResizeChatPaneDown,
         EqualizeChatPanes,
         ToggleChatPaneZoom,
-        FocusComposer
+        FocusComposer,
+        // Chat tabs, each holding its own split (`shell/chat_tabs.rs`).
+        NewChatTab,
+        NextChatTab,
+        PrevChatTab
     ]
 );
 
@@ -1510,6 +1517,7 @@ enum PendingExit {
     Quit,
     RuntimeChange,
     InstallUpdate(PathBuf),
+    Relaunch,
 }
 
 pub struct Shell {
@@ -1584,6 +1592,12 @@ pub struct Shell {
     chat_split: Option<chat_split::ChatSplit>,
     /// The selection the split last saw, to tell outside picks from its own.
     chat_split_selected: Option<String>,
+    /// Chat tabs (`shell/chat_tabs.rs`): empty = one implicit tab. The entry
+    /// at `chat_tab` is stale; the active tab lives in the fields above.
+    chat_tabs: Vec<chat_tabs::ChatTab>,
+    chat_tab: usize,
+    /// Width of the conversation column the split divides, last frame.
+    chat_column_width: f32,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
     /// Which pane card the sidebar strip last had under the pointer.
@@ -2011,6 +2025,9 @@ impl Shell {
             subagent_seq: 0,
             chat_split: None,
             chat_split_selected: None,
+            chat_tabs: Vec::new(),
+            chat_tab: 0,
+            chat_column_width: 0.0,
             peer_chat_views: std::collections::HashMap::new(),
             pane_strip_hovered: 0,
             chat_split_drag: None,
@@ -7107,6 +7124,7 @@ impl Shell {
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
         // A chat split adds a strip of pane cards above the list.
+        let chat_tabs = self.render_chat_tabs(theme, cx);
         let pane_strip = self.render_pane_strip(theme, cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
@@ -7166,6 +7184,7 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
+            .children(chat_tabs)
             .children(pane_strip)
             .child(filter_row)
             .child(sidebar_lists)
@@ -7324,6 +7343,18 @@ impl Shell {
     /// Swap the staged bundle over the installed one, arm the detached
     /// relauncher, and quit — the relauncher `open`s the new bundle once this
     /// process (and its engine lock / IPC port) is gone.
+    /// Quit and reopen this bundle, after unsaved file edits are resolved.
+    /// Without a bundle to reopen (a bare binary) it just quits.
+    fn relaunch(&mut self, cx: &mut Context<Self>) {
+        if !self.prepare_exit(PendingExit::Relaunch, cx) {
+            return;
+        }
+        if let Some(bundle) = crate::screen_access::running_bundle(&self.install) {
+            harness_update::relaunch_app_after_exit(&bundle);
+        }
+        crate::app_menus::quit_after_save(cx);
+    }
+
     fn apply_staged_update(&mut self, staged: PathBuf, cx: &mut Context<Self>) {
         if !self.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx) {
             return;
@@ -8550,15 +8581,37 @@ impl Shell {
                 })
                 .into_any_element()
         } else if !has_spaces && !no_project {
-            // Onboarding (first boot / after the destructive wipe): no folders
-            // to work in yet — one clear affordance.
+            // Onboarding (first boot / after the destructive wipe). Say what
+            // Harness does and offer starters that need no repo; adding an
+            // existing folder is one card among them, not a gate.
             let _ = faint;
+            let starter_cards = crate::starters::available(false).map(|starter| {
+                crate::starters::card(starter.id, starter.icon, starter.title, starter.blurb, &theme_owned)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.composer
+                            .update(cx, |composer, cx| composer.apply_starter(starter, cx));
+                    }))
+                    .into_any_element()
+            });
+            let existing_code = crate::starters::card(
+                "existing",
+                icons::FOLDER,
+                "Work on existing code",
+                "Point Harness at a folder or repo you already have.",
+                &theme_owned,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx)))
+            .into_any_element();
             div()
+                .id("no-spaces-scroll")
                 .size_full()
+                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
+                .px(px(24.0))
+                .py(px(Theme::TITLEBAR_HEIGHT))
                 .child(motion::fade_in(
                     "no-spaces-canvas",
                     div()
@@ -8567,32 +8620,52 @@ impl Shell {
                         .items_center()
                         .child(
                             icon(icons::HARNESS_LOGO)
-                                .w(px(48.0))
-                                .h(px(48.0))
-                                .text_color(theme.text.opacity(0.09)),
+                                .w(px(40.0))
+                                .h(px(40.0))
+                                .text_color(theme.text.opacity(0.12)),
+                        )
+                        .child(
+                            div()
+                                .mt(px(20.0))
+                                .text_size(crate::typography::ui_rems(22.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(SharedString::from("What do you want to make?")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .max_w(px(460.0))
+                                .text_center()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .line_height(crate::typography::ui_rems(19.0))
+                                .text_color(theme.text_muted.opacity(0.8))
+                                .child(SharedString::from(
+                                    "Harness runs AI agents on your computer. They can build an app \
+                                     from scratch, research anything, or help you launch it. You \
+                                     don't need code or a repo to start.",
+                                )),
                         )
                         .child(
                             div()
                                 .mt(px(24.0))
-                                .text_size(crate::typography::ui_rems(16.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
+                                .max_w(px(500.0))
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .justify_center()
+                                .gap(px(10.0))
+                                .children(starter_cards)
+                                .child(existing_code),
                         )
                         .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
-                        )
-                        .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
+                            popover::btn_ghost(&theme_owned, "Or just start typing", "onboarding-start-typing")
+                                .id("onboarding-start-typing")
+                                .mt(px(16.0))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.composer
+                                        .update(cx, |composer, cx| composer.start_outside_project(cx));
+                                })),
                         ),
                 ))
                 .into_any_element()
@@ -10628,6 +10701,7 @@ impl Render for Shell {
                             PendingExit::InstallUpdate(staged) => {
                                 shell.apply_staged_update(staged, cx)
                             }
+                            PendingExit::Relaunch => shell.relaunch(cx),
                             PendingExit::Quit => unreachable!(),
                         })
                         .ok();
@@ -10904,6 +10978,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| {
                 this.toggle_chat_pane_zoom(cx)
             }))
+            .on_action(cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)))
+            .on_action(cx.listener(|this, _: &NextChatTab, window, cx| this.cycle_chat_tab(true, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| this.cycle_chat_tab(false, window, cx)))
             .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.close_terminal_split(window, cx);
@@ -10983,6 +11060,7 @@ impl Render for Shell {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &RestartHarness, _, cx| this.relaunch(cx)))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
                     this.add_space = None;
@@ -11060,6 +11138,7 @@ impl Render for Shell {
                     self.sidebar_target(),
                     right_target_width,
                 );
+                self.chat_column_width = split_total_width;
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
                 let main_target_width = split_total_width * self.focused_chat_pane_share();
@@ -13869,6 +13948,52 @@ impl Shell {
         } else {
             self.close_settings(cx);
         }
+    }
+    /// Onboarding QA (`examples/onboarding-fixture.rs`): click a starter.
+    pub fn fixture_onboarding_starter(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(starter) = crate::starters::STARTERS.iter().find(|s| s.id == id) {
+            self.composer
+                .update(cx, |composer, cx| composer.apply_starter(starter, cx));
+        }
+    }
+    /// Onboarding QA: ⌘D, or close the focused pane.
+    pub fn fixture_onboarding_split(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if open {
+            self.split_chat(SplitAxis::Horizontal, window, cx);
+        } else {
+            self.close_focused_chat_pane(window, cx);
+        }
+    }
+    /// Tabs QA: ⌘T (`None`), or switch to tab `ix`.
+    pub fn fixture_chat_tab(&mut self, switch_to: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        match switch_to {
+            None => self.new_chat_tab(None, window, cx),
+            Some(ix) => self.switch_chat_tab(ix, window, cx),
+        }
+    }
+    /// Pane-search QA: open ⌘K with `query` typed, or press Enter in it.
+    pub fn fixture_command_palette(&mut self, query: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        match query {
+            Some(query) => {
+                if self.command_palette.is_none() {
+                    self.toggle_command_palette(window, cx);
+                }
+                if let Some(palette) = self.command_palette.as_ref() {
+                    palette.fixture_type(query, cx);
+                }
+            }
+            None => self.fixture_command_palette_enter(window, cx),
+        }
+    }
+    /// Onboarding QA: an agent in `chat_id` was refused a screenshot.
+    pub fn fixture_screen_access_notice(&mut self, chat_id: &str, requested: bool, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.screen_access_notice = Some(crate::screen_access::Notice {
+                chat_id: chat_id.into(),
+                requested,
+            });
+            cx.notify();
+        });
     }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()

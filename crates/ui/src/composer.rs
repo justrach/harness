@@ -79,6 +79,15 @@ pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 /// The original floating selector rows use the same 20px chip height as the
 /// established-thread footer. Their surrounding rows own no plate or border.
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
+/// The new-session heading ("New session in <project>") floats this far
+/// above the destination chips, in a slot this tall.
+const NEW_THREAD_HEADING_HEIGHT: f32 = 52.0;
+const NEW_THREAD_HEADING_GAP: f32 = 14.0;
+/// Starter chips ("Build something new", "Research a topic", …) sit in a
+/// slot this far below the empty new-session composer. Tall enough for two
+/// wrapped rows in a narrow pane.
+const STARTER_ROW_HEIGHT: f32 = 62.0;
+const STARTER_ROW_GAP: f32 = 4.0;
 // Accommodate the 24px usage indicator and PR badge without overflowing the
 // row's equal 8px top/bottom gutters.
 const SESSION_FOOTER_HEIGHT: f32 = 24.0;
@@ -6775,6 +6784,213 @@ impl Composer {
         div().relative().child(self.input.clone())
     }
 
+    /// "Agents can't see your screen": an agent in this chat was refused a
+    /// screenshot because Harness lacks Screen Recording access
+    /// ([`crate::screen_access`]). Allow asks macOS (Harness itself can
+    /// prompt; its agents can't), then the grant needs a relaunch.
+    fn render_screen_access_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let notice = {
+            let state = self.state.read(cx);
+            state
+                .screen_access_notice
+                .clone()
+                .filter(|notice| state.selected_chat.as_deref() == Some(notice.chat_id.as_str()))?
+        };
+        let message = if notice.requested {
+            "Turn on Harness under Screen Recording in System Settings, then restart Harness. \
+             Running agents will stop; your chats are kept."
+        } else {
+            "An agent tried to take a screenshot, but macOS blocked it because Harness \
+             doesn't have Screen Recording access."
+        };
+        let not_now = crate::popover::btn_ghost(theme, "Not now", "screen-access-dismiss")
+            .id("screen-access-dismiss")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |state, cx| {
+                    state.screen_access_notice = None;
+                    state.screen_access_dismissed = true;
+                    cx.notify();
+                });
+            }));
+        let mut actions = div().flex().flex_row().flex_wrap().gap(px(6.0));
+        if notice.requested {
+            actions = actions
+                .child(
+                    crate::popover::btn_primary(theme, "Restart Harness")
+                        .id("screen-access-restart")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::shell::RestartHarness), cx);
+                        }),
+                )
+                .children(crate::screen_access::SETTINGS_URL_OPT.map(|url| {
+                    crate::popover::btn_ghost(theme, "Open System Settings", "screen-access-settings")
+                        .id("screen-access-settings")
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                }));
+        } else {
+            actions = actions.child(
+                crate::popover::btn_primary(theme, "Allow Screen Recording")
+                    .id("screen-access-allow")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        crate::screen_access::request();
+                        this.state.update(cx, |state, cx| {
+                            if let Some(notice) = state.screen_access_notice.as_mut() {
+                                notice.requested = true;
+                            }
+                            cx.notify();
+                        });
+                    })),
+            );
+        }
+        Some(
+            crate::motion::fade_in(
+                "composer-screen-access",
+                div()
+                    .id("composer-screen-access")
+                    .mx(px(4.0))
+                    .mt(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_color(theme.warning.opacity(0.2))
+                    .bg(theme.warning.opacity(0.05))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(
+                                crate::icons::icon(crate::icons::MONITOR)
+                                    .size(px(14.0))
+                                    .flex_none()
+                                    .text_color(theme.warning),
+                            )
+                            .child(SharedString::from("Agents can't see your screen")),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(px(17.0))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(message)),
+                    )
+                    .child(actions.child(not_now)),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// Drop a starter's prompt into the composer (caret at the end) and focus
+    /// it. Starters that make their own folder, and any starter picked before
+    /// a project exists, run outside a project, which also brings the
+    /// composer onto the first-run screen.
+    pub(crate) fn apply_starter(&mut self, starter: &'static crate::starters::Starter, cx: &mut Context<Self>) {
+        if starter.fresh_folder || self.state.read(cx).spaces.is_empty() {
+            self.start_outside_project(cx);
+        }
+        self.input.update(cx, |input, cx| input.set_text(starter.prompt, cx));
+        self.on_input_edited(cx);
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// Target "no project" (the session runs from the home folder) and focus
+    /// the composer: the first-run screen's way in without adding a folder.
+    pub(crate) fn start_outside_project(&mut self, cx: &mut Context<Self>) {
+        if !self.state.read(cx).no_project {
+            self.pickers.update(cx, |pickers, cx| pickers.pick_no_project(cx));
+        }
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// Starter chips under an empty new-session composer.
+    fn render_starter_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let empty = self.input.read(cx).text().is_empty()
+            && self.staged().is_empty()
+            && self.staged_appshots().is_empty();
+        if !empty {
+            return None;
+        }
+        let has_project = self.state.read(cx).selected_space_row().is_some();
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .justify_center()
+                .gap(px(6.0))
+                .children(crate::starters::available(has_project).map(|starter| {
+                    crate::starters::chip(starter, theme).on_click(cx.listener(
+                        move |this, _, _, cx| this.apply_starter(starter, cx),
+                    ))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The new-session canvas heading. The destination chips alone read as
+    /// settings, so a fresh canvas (first launch, ⌘D) never said where the
+    /// session would run; this names the project up front. Clicking it opens
+    /// the project picker, which also offers "New project…".
+    fn render_new_thread_heading(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let project = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .map(|s| s.display_name().to_string());
+        let (eyebrow, title) = match project {
+            Some(name) => ("New session in", name),
+            None => ("New session in your home folder", "No project".to_string()),
+        };
+        let id = "new-thread-heading";
+        div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(SharedString::from(eyebrow)),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(22.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(motion::hover_blend(id, theme.text.opacity(0.9), theme.text))
+                    .on_hover(motion::hover_listener(id))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.pickers
+                            .update(cx, |pickers, cx| pickers.open_project_menu(window, cx));
+                    }))
+                    .child(div().min_w_0().truncate().child(SharedString::from(title)))
+                    .child(
+                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(theme.text_muted.opacity(0.6)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // ---- slash commands ---------------------------------------------------
 
     /// Track the `/` token on every edit: open/refresh the popup, fetch the
@@ -8916,6 +9132,7 @@ impl Render for Composer {
         // Composer honesty: when the target's delivery path is degraded, say
         // UP FRONT that a send will queue (a durable local write delivered on
         // reconnect) instead of letting the button imply instant delivery.
+        let screen_access_notice = self.render_screen_access_notice(&theme, cx);
         let queue_notice: Option<(SharedString, bool)> = {
             use harness_proto::ConnectivityState as S;
             let state = self.state.read(cx);
@@ -8978,6 +9195,7 @@ impl Render for Composer {
                     })),
                 )
             })
+            .children(screen_access_notice)
             .when_some(queue_notice, |el, (notice, offline)| {
                 // Not a warning box (v0.2.12 feedback: the amber Notice read
                 // as an error and flashed on every blip — pre-grace). One
@@ -9489,6 +9707,11 @@ impl Render for Composer {
                 })
             })
             .flatten();
+        let new_thread_heading = (new_thread_chrome_opacity > 0.0)
+            .then(|| self.render_new_thread_heading(&theme, cx));
+        let starter_chips = (new_thread_chrome_opacity > 0.0)
+            .then(|| self.render_starter_chips(&theme, cx))
+            .flatten();
         let has_new_thread_git_selectors = self
             .state
             .read(cx)
@@ -9538,6 +9761,29 @@ impl Render for Composer {
                     .justify_end()
                     .opacity(new_thread_chrome_opacity)
                     .children(new_thread_target_selectors),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-(28.0 + NEW_THREAD_HEADING_GAP + NEW_THREAD_HEADING_HEIGHT)))
+                    .left(px(Theme::SPACE_LG + 10.0))
+                    .right(px(Theme::SPACE_LG + 10.0))
+                    .h(px(NEW_THREAD_HEADING_HEIGHT))
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .opacity(new_thread_chrome_opacity)
+                    .children(new_thread_heading),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-(STARTER_ROW_GAP + STARTER_ROW_HEIGHT)))
+                    .left(px(Theme::SPACE_LG))
+                    .right(px(Theme::SPACE_LG))
+                    .h(px(STARTER_ROW_HEIGHT))
+                    .opacity(new_thread_chrome_opacity)
+                    .children(starter_chips),
             )
         } else if new_thread_chrome > 0.0 {
             container.child(

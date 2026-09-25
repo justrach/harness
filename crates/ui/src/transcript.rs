@@ -428,13 +428,109 @@ fn is_agent_call(call: &ToolCall) -> bool {
 /// traffic), and honoring the ref alone turned those Runs into spawn chips
 /// that opened empty, never-created subagent docs.
 fn is_agent_tool(item: &ToolItem) -> bool {
-    is_agent_call(&item.call)
+    is_agent_call(&item.call) || is_agent_wait(&item.call)
+}
+
+/// A parent blocking on a subagent ("Wait for agent 1", codex's "Wait for
+/// agents"). It can sit there for many minutes, so it belongs with the
+/// subagent it waits on — its own visible row, linked to the spawn's doc
+/// when [`link_agent_waits`] could bind it — never folded in "Called 1 tool".
+fn is_agent_wait(call: &ToolCall) -> bool {
+    matches!(call, ToolCall::Unknown { name, .. } if name.starts_with("Wait for agent"))
 }
 
 /// A chip renders as the spawn LINK (whole-card click → subagent tab) only
 /// when an agent call has actually been bound to its doc.
 fn is_spawn_link(item: &ToolItem) -> bool {
-    is_agent_call(&item.call) && item.subagent_ref.is_some()
+    is_agent_tool(item) && item.subagent_ref.is_some()
+}
+
+/// `[agent 3 started: Audit frontend login] …` — graff's spawn result names
+/// the background agent number that later `agent_output` calls wait on.
+fn started_agent(output: &str) -> Option<(&str, Option<&str>)> {
+    let rest = output.trim_start().strip_prefix("[agent ")?;
+    let (number, rest) = rest.split_once(' ')?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rest = rest.strip_prefix("started")?;
+    let title = rest
+        .strip_prefix(": ")
+        .and_then(|t| t.split_once(']'))
+        .map(|(title, _)| title.trim())
+        .filter(|title| !title.is_empty());
+    Some((number, title))
+}
+
+/// A background agent a turn started: its number, title, doc and status.
+type AgentSpawn = (String, String, Option<SharedString>, Option<SubagentStatus>);
+
+/// The background agents this turn's spawn results announced, in order.
+fn agent_spawns(parts: &[MessagePart]) -> Vec<AgentSpawn> {
+    let mut spawns: Vec<AgentSpawn> = Vec::new();
+    for part in parts {
+        if let MessagePart::Tool { call, output: Some(output), subagent_ref, subagent_status, .. } = part
+            && let Some((number, title)) = started_agent(output)
+        {
+            let title = title
+                .map(str::to_owned)
+                .or_else(|| match call {
+                    ToolCall::Unknown { name, .. } => Some(strip_spawn_prefix(name).to_owned()),
+                    _ => None,
+                })
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| format!("agent {number}"));
+            spawns.push((
+                number.to_owned(),
+                title,
+                subagent_ref.clone().map(SharedString::from),
+                *subagent_status,
+            ));
+        }
+    }
+    spawns
+}
+
+/// Bind a "Wait for agent N" to the spawn that started agent N in the same
+/// turn: take its title ("Waiting on Audit frontend login") and its subagent
+/// doc + status, so the row opens the same live transcript.
+fn bind_agent_wait(spawns: &[AgentSpawn], item: &mut ToolItem) {
+    // Chats recorded before the graff driver named these keep the raw tool
+    // names; read them the same way.
+    if let ToolCall::Unknown { name, input } = &item.call
+        && matches!(name.as_str(), "agent_output" | "agent_message" | "subagent_resume" | "load_tool_schemas")
+    {
+        let id = input.as_ref().and_then(|i| i.get("id")).map(|id| match id {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+        let renamed = match (name.as_str(), id) {
+            ("agent_output", Some(id)) => format!("Wait for agent {id}"),
+            ("agent_output", None) => "Wait for agents".into(),
+            ("agent_message", Some(id)) => format!("Message agent {id}"),
+            ("agent_message", None) => "Message agent".into(),
+            ("subagent_resume", _) => "Resume agent".into(),
+            _ => "Load tools".into(),
+        };
+        item.call = ToolCall::Unknown { name: renamed, input: input.clone() };
+    }
+    let ToolCall::Unknown { name, input } = &item.call else {
+        return;
+    };
+    let Some(number) = name.strip_prefix("Wait for agent ").filter(|n| !n.contains(':')) else {
+        return;
+    };
+    let Some((_, title, doc, status)) = spawns.iter().rev().find(|(n, ..)| n == number) else {
+        return;
+    };
+    item.call = ToolCall::Unknown {
+        name: format!("Wait for agent {number}: {title}"),
+        input: input.clone(),
+    };
+    if item.subagent_ref.is_none() {
+        item.subagent_ref = doc.clone();
+        item.subagent_status = *status;
+    }
 }
 
 /// Ordinary tool groups fold behind a summary header; agent/spawn chips
@@ -1469,6 +1565,7 @@ pub fn rows_for_entry(
             *group_ix += 1;
         };
 
+    let spawns = agent_spawns(&entry.parts);
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
             MessagePart::Tool {
@@ -1486,7 +1583,7 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
-                let item = ToolItem {
+                let mut item = ToolItem {
                     part_id: part.id().to_owned(),
                     call: call.clone(),
                     is_error: *is_error,
@@ -1502,6 +1599,7 @@ pub fn rows_for_entry(
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
                     kind: ToolItemKind::Call,
                 };
+                bind_agent_wait(&spawns, &mut item);
                 if compact {
                     // Compact mode keeps ONE group for the whole turn —
                     // agent chips fold in with everything else, so the genus
@@ -8481,6 +8579,11 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
         _ => return "Subagent".into(),
     };
+    // A wait row opens its subagent under the subagent's own title.
+    let name = name
+        .strip_prefix("Wait for agent")
+        .and_then(|rest| rest.split_once(": "))
+        .map_or(name, |(_, title)| title);
     let candidates = [
         Some(name),
         input.and_then(|i| i.get("description")?.as_str()),
@@ -14285,6 +14388,70 @@ mod tests {
             .as_ref(),
             "Subagent"
         );
+    }
+
+    #[test]
+    fn agent_waits_bind_to_the_spawn_they_wait_on() {
+        assert_eq!(
+            started_agent("[agent 3 started: Audit frontend login] [task_id ab]\nIt runs…"),
+            Some(("3", Some("Audit frontend login")))
+        );
+        assert_eq!(started_agent("[agent 2: completed in 5ms]"), None);
+        let parts = vec![MessagePart::Tool {
+            id: "spawn".into(),
+            call: ToolCall::Unknown { name: "Agent: Audit frontend login".into(), input: None },
+            is_error: false,
+            resolved: true,
+            output: Some("[agent 1 started: Audit frontend login]".into()),
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some("c--sub--spawn".into()),
+            subagent_status: Some(SubagentStatus::Running),
+            subagent_tail: None,
+        }];
+        let spawns = agent_spawns(&parts);
+        let mut wait = ToolItem {
+            part_id: "wait".into(),
+            call: ToolCall::Unknown {
+                name: "Wait for agent 1".into(),
+                input: Some(serde_json::json!({"id": 1, "wait_ms": 600000})),
+            },
+            is_error: false,
+            resolved: false,
+            detail: None,
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            kind: ToolItemKind::Call,
+        };
+        bind_agent_wait(&spawns, &mut wait);
+        assert!(is_agent_tool(&wait) && is_spawn_link(&wait));
+        assert_eq!(wait.subagent_ref.as_deref(), Some("c--sub--spawn"));
+        assert_eq!(
+            tool_chip_content(&wait.call),
+            ("Waiting on", "Audit frontend login".to_string())
+        );
+        assert_eq!(subagent_tab_title(&wait.call).as_ref(), "Audit frontend login");
+        // A chat recorded before the driver fix binds the same way.
+        let mut legacy = wait.clone();
+        legacy.call = ToolCall::Unknown {
+            name: "agent_output".into(),
+            input: Some(serde_json::json!({"id": 1, "wait_ms": 600000})),
+        };
+        legacy.subagent_ref = None;
+        bind_agent_wait(&spawns, &mut legacy);
+        assert_eq!(legacy.subagent_ref.as_deref(), Some("c--sub--spawn"));
+        // An unbound wait still reads as a subagent wait, just unlinked.
+        let lone = ToolCall::Unknown { name: "Wait for agent 7".into(), input: None };
+        assert_eq!(tool_chip_content(&lone), ("Waiting on", "agent 7".to_string()));
+        assert!(is_agent_wait(&lone));
     }
 
     #[test]

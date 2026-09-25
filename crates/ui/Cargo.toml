@@ -38,6 +38,10 @@ name = "readme-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "onboarding-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 

@@ -150,6 +150,9 @@ pub struct HarnessesPage {
     title_menu: Option<bool>, // false = harness, true = model
     title_task: Option<Task<()>>,
     title_saving: bool,
+    /// "Allow" on the Screen Recording row was used: offer the restart and
+    /// System Settings instead (macOS prompts once, then only Settings works).
+    screen_access_requested: bool,
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
@@ -225,6 +228,7 @@ impl HarnessesPage {
             title_menu: None,
             title_task: None,
             title_saving: false,
+            screen_access_requested: false,
             state,
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
@@ -449,6 +453,83 @@ impl HarnessesPage {
             }
         }));
         cx.notify();
+    }
+
+    /// Screen Recording for agents ([`crate::screen_access`]): agents run
+    /// under Harness, so their screenshots use Harness's macOS grant.
+    fn render_screen_access(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !crate::screen_access::supported() {
+            return None;
+        }
+        let granted = crate::screen_access::granted();
+        let action = |id: &'static str, label: &'static str| {
+            widgets::ghost_action(theme)
+                .id(id)
+                .hover(|s| widgets::ghost_hover(theme, s))
+                .child(SharedString::from(label))
+        };
+        let mut controls = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .child(widgets::badge(theme, if granted { "Allowed" } else { "Off" }));
+        if !granted && !self.screen_access_requested {
+            controls = controls.child(action("screen-access-allow", "Allow").on_click(cx.listener(
+                |page, _, _, cx| {
+                    crate::screen_access::request();
+                    page.screen_access_requested = true;
+                    cx.notify();
+                },
+            )));
+        } else if !granted {
+            controls = controls
+                .children(crate::screen_access::SETTINGS_URL_OPT.map(|url| {
+                    action("screen-access-settings", "Open System Settings")
+                        .on_click(move |_, _, cx| cx.open_url(url))
+                }))
+                .child(action("screen-access-restart", "Restart Harness").on_click(
+                    |_, window, cx| {
+                        window.dispatch_action(Box::new(crate::shell::RestartHarness), cx);
+                    },
+                ));
+        }
+        let description = if granted {
+            "Agents can take screenshots, for example to check a UI they built."
+        } else if self.screen_access_requested {
+            "Turn on Harness under Screen Recording, then restart Harness. Running agents \
+             stop on restart; your chats are kept."
+        } else {
+            "Lets agents take screenshots, for example to check a UI they built. \
+             macOS asks once, and the change applies after Harness restarts."
+        };
+        Some(
+            widgets::section_card(theme)
+                .mb(px(4.0))
+                .p(px(16.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(200.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .child(widgets::row_title(theme, "Screen Recording"))
+                                .child(widgets::page_subtitle(theme, description)),
+                        )
+                        .child(controls),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_titles(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1369,6 +1450,7 @@ impl Render for HarnessesPage {
             .map(|message| widgets::page_subtitle(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
+        let screen_access = self.render_screen_access(&theme, cx);
         let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1406,6 +1488,9 @@ impl Render for HarnessesPage {
                             )
                             .children(error)
                             .children(install_notice)
+                            // Above the agent list: a missing grant silently
+                            // breaks screenshots for every agent below.
+                            .children(screen_access)
                             .child(body)
                             .child(graff_draft_subagents)
                             .child(titles),
