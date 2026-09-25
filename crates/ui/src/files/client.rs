@@ -9,7 +9,7 @@ use harness_proto::{
     WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceFileSearchMatch,
     WorkspaceFileText, WorkspaceTarget, WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
 };
-use harness_rpc::{RpcError, methods};
+use harness_rpc::{RpcError, RpcSubscription, methods};
 
 use crate::state::{AppState, EngineHandle};
 
@@ -74,14 +74,33 @@ pub struct WorkspaceFilesClient {
     context: FilesRequestContext,
 }
 
+/// A workspace-files change stream. The engine's is scoped: dropping it (a
+/// closed panel, a switched workspace) cancels the watch engine-side at
+/// once instead of on its next change.
+pub enum FilesWatch {
+    Scoped(RpcSubscription),
+    Channel(mpsc::Receiver<Value>),
+}
+
+impl FilesWatch {
+    pub async fn recv(&mut self) -> Option<Value> {
+        match self {
+            Self::Scoped(subscription) => subscription.recv().await,
+            Self::Channel(receiver) => receiver.recv().await,
+        }
+    }
+}
+
+impl From<mpsc::Receiver<Value>> for FilesWatch {
+    fn from(receiver: mpsc::Receiver<Value>) -> Self {
+        Self::Channel(receiver)
+    }
+}
+
 #[async_trait]
 pub(super) trait WorkspaceFilesTransport: Send + Sync {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError>;
-    async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError>;
+    async fn subscribe(&self, method: &str, params: Value) -> Result<FilesWatch, RpcError>;
 }
 
 struct EngineFilesTransport(EngineHandle);
@@ -92,12 +111,12 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
         self.0.client().call(method, params).await
     }
 
-    async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError> {
-        self.0.client().subscribe(method, params).await
+    async fn subscribe(&self, method: &str, params: Value) -> Result<FilesWatch, RpcError> {
+        self.0
+            .client()
+            .subscribe_scoped(method, params)
+            .await
+            .map(FilesWatch::Scoped)
     }
 }
 
@@ -249,7 +268,7 @@ impl WorkspaceFilesClient {
         self.call(methods::WRITE_WORKSPACE_FILE, &request).await
     }
 
-    pub async fn watch(&self) -> Result<mpsc::Receiver<serde_json::Value>, FilesClientError> {
+    pub async fn watch(&self) -> Result<FilesWatch, FilesClientError> {
         let request = WatchWorkspaceFilesRequest {
             target: self.context.target.clone(),
         };
@@ -318,17 +337,13 @@ mod tests {
             Ok(self.responses.get(method).cloned().unwrap())
         }
 
-        async fn subscribe(
-            &self,
-            method: &str,
-            params: Value,
-        ) -> Result<mpsc::Receiver<Value>, RpcError> {
+        async fn subscribe(&self, method: &str, params: Value) -> Result<FilesWatch, RpcError> {
             self.calls.lock().unwrap().push((method.into(), params));
             let (sender, receiver) = mpsc::channel(self.watch_values.len().max(1));
             for value in &self.watch_values {
                 sender.try_send(value.clone()).unwrap();
             }
-            Ok(receiver)
+            Ok(receiver.into())
         }
     }
 
@@ -738,7 +753,7 @@ mod tests {
                 .pop_front()
                 .expect("unexpected extra request")
         }
-        async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
+        async fn subscribe(&self, _: &str, _: Value) -> Result<FilesWatch, RpcError> {
             unreachable!()
         }
     }

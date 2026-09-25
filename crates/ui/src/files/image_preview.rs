@@ -261,7 +261,7 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, harness_rpc::RpcError> {
+        ) -> Result<crate::files::client::FilesWatch, harness_rpc::RpcError> {
             unreachable!()
         }
     }
@@ -375,7 +375,7 @@ mod tests {
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, harness_rpc::RpcError> {
+        ) -> Result<crate::files::client::FilesWatch, harness_rpc::RpcError> {
             unreachable!()
         }
     }

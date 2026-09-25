@@ -794,7 +794,7 @@ impl TerminalPanel {
 
                 let subscribed = engine
                     .client()
-                    .subscribe(
+                    .subscribe_scoped(
                         methods::SUBSCRIBE_TERMINAL,
                         with_target(
                             serde_json::json!({ "terminalId": terminal_id, "afterSeq": after_seq }),
