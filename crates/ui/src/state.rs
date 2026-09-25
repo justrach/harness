@@ -4652,6 +4652,7 @@ mod tests {
         }];
         s.connectivity.state = ConnectivityState::Connected;
         s.connectivity.chats = vec![ChatConnectivity {
+            sync_state: harness_proto::ChatSyncState::Unknown,
             chat_id: "c-remote".into(),
             connected: true,
             pending_pushes: 0,

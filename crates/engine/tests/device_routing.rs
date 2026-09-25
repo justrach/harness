@@ -526,7 +526,7 @@ async fn unsupported_remote_change_request_watch_keeps_the_shared_device_link() 
             Arc::new(StaticToken("test-user".into())),
         ),
         legacy.clone(),
-        Arc::new(|_| {}),
+        Arc::new(|_| true),
     );
 
     let core = assemble(&dirs.path().join("new"), "new-device");
