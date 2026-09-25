@@ -13,9 +13,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const RELEASES: &str = "https://github.com/justrach/codegraff/releases/latest/download";
+const RELEASES: &str = "https://github.com/justrach/codegraff/releases/download";
 const LATEST_RELEASE: &str = "https://api.github.com/repos/justrach/codegraff/releases/latest";
 const MAX_TARBALL_BYTES: usize = 256 * 1024 * 1024;
+static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -55,6 +56,8 @@ fn parse_dotted(text: &str) -> Option<Vec<u64>> {
     text.split_whitespace().find_map(|word| {
         let parts: Option<Vec<u64>> = word
             .trim_start_matches('v')
+            .split('-')
+            .next()?
             .split('.')
             .map(|part| part.parse().ok())
             .collect();
@@ -70,6 +73,44 @@ pub fn display_version(version: &[u64]) -> String {
         .join(".")
 }
 
+fn installed_beta_tag(managed: &Path) -> Option<String> {
+    if !managed.is_file() {
+        return None;
+    }
+    let output = std::process::Command::new(managed)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(|word| {
+            let tag = format!("v{}", word.trim_start_matches('v'));
+            crate::graff_beta::beta_key(&tag).map(|_| tag)
+        })
+}
+
+fn current_is_at_least_target(
+    current: Option<&[u64]>,
+    current_beta: Option<&str>,
+    target: &[u64],
+    target_beta: Option<&str>,
+) -> bool {
+    match target_beta {
+        Some(target_beta) => match current_beta {
+            Some(current_beta) => {
+                crate::graff_beta::beta_key(current_beta)
+                    >= crate::graff_beta::beta_key(target_beta)
+            }
+            None => current.is_some_and(|current| current >= target),
+        },
+        None => current_beta.is_none() && current.is_some_and(|current| current >= target),
+    }
+}
+
 /// Copy the bundled graff over the managed one when the managed copy is
 /// missing or older. Returns the managed path when one is in place.
 pub fn seed_managed() -> std::io::Result<Option<PathBuf>> {
@@ -79,6 +120,9 @@ pub fn seed_managed() -> std::io::Result<Option<PathBuf>> {
     let Some(bundled) = bundled() else {
         return Ok(managed.is_file().then_some(managed));
     };
+    if installed_beta_tag(&managed).is_some() {
+        return Ok(Some(managed));
+    }
     let stale = match (version_of(&bundled), version_of(&managed)) {
         (_, None) => true,
         (Some(bundled), Some(managed)) => bundled > managed,
@@ -131,9 +175,12 @@ pub enum UpdateOutcome {
 /// never silently changes the user to a beta channel.
 pub async fn check_and_update_managed() -> anyhow::Result<UpdateOutcome> {
     let managed = managed_path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    if let Some(tag) = installed_beta_tag(&managed) {
+        return Ok(UpdateOutcome::AlreadyCurrent { version: tag });
+    }
     let client = reqwest::Client::builder()
         .user_agent("harness-graff-updater")
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(15 * 60))
         .build()?;
     let release: GitHubRelease = client
         .get(LATEST_RELEASE)
@@ -145,6 +192,14 @@ pub async fn check_and_update_managed() -> anyhow::Result<UpdateOutcome> {
         .await?;
     let latest = parse_dotted(&release.tag_name)
         .ok_or_else(|| anyhow::anyhow!("CodeGraff release has an invalid version tag"))?;
+    anyhow::ensure!(
+        release
+            .tag_name
+            .strip_prefix('v')
+            .and_then(crate::graff_beta::numeric_version)
+            .is_some(),
+        "CodeGraff release has an invalid stable version tag"
+    );
     if let Some(current) = version_of(&managed)
         && current >= latest
     {
@@ -152,7 +207,7 @@ pub async fn check_and_update_managed() -> anyhow::Result<UpdateOutcome> {
             version: display_version(&current),
         });
     }
-    let outcome = update_managed().await?;
+    let outcome = install_release(&client, &release.tag_name, false, false).await?;
     if matches!(outcome, UpdateOutcome::Updated { .. }) {
         crate::executable::invalidate_versions(&["graff"]);
     }
@@ -162,14 +217,62 @@ pub async fn check_and_update_managed() -> anyhow::Result<UpdateOutcome> {
 /// Download the latest graff release, verify it against the release's
 /// SHA256SUMS, check the binary runs, and swap it in as the managed copy.
 pub async fn update_managed() -> anyhow::Result<UpdateOutcome> {
-    let managed = managed_path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
-    let asset = asset_name().ok_or_else(|| anyhow::anyhow!("no graff build for this platform"))?;
     let client = reqwest::Client::builder()
         .user_agent("harness-graff-updater")
         .timeout(Duration::from_secs(15 * 60))
         .build()?;
+    let release: GitHubRelease = client
+        .get(LATEST_RELEASE)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    anyhow::ensure!(
+        release
+            .tag_name
+            .strip_prefix('v')
+            .and_then(crate::graff_beta::numeric_version)
+            .is_some(),
+        "invalid stable release tag"
+    );
+    install_release(&client, &release.tag_name, false, true).await
+}
+
+/// Explicit opt-in to the newest published beta of the newest release branch.
+/// The app's background updater will leave this channel alone on later launches.
+pub async fn update_managed_beta() -> anyhow::Result<UpdateOutcome> {
+    anyhow::ensure!(
+        !std::env::var_os("GRAFF_EXECUTABLE").is_some_and(|value| !value.is_empty()),
+        "a custom Graff executable is selected; unset GRAFF_EXECUTABLE to use the managed beta"
+    );
+    let client = reqwest::Client::builder()
+        .user_agent("harness-graff-updater")
+        .timeout(Duration::from_secs(15 * 60))
+        .build()?;
+    let tag = crate::graff_beta::latest_tag(&client).await?;
+    install_release(&client, &tag, true, true).await
+}
+
+async fn install_release(
+    client: &reqwest::Client,
+    tag: &str,
+    beta: bool,
+    allow_channel_switch: bool,
+) -> anyhow::Result<UpdateOutcome> {
+    let _lock = UPDATE_LOCK.lock().await;
+    let managed = managed_path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    if !beta
+        && !allow_channel_switch
+        && let Some(tag) = installed_beta_tag(&managed)
+    {
+        return Ok(UpdateOutcome::AlreadyCurrent { version: tag });
+    }
+    let asset = asset_name().ok_or_else(|| anyhow::anyhow!("no graff build for this platform"))?;
+    let url = format!("{RELEASES}/{tag}");
     let sums = client
-        .get(format!("{RELEASES}/SHA256SUMS"))
+        .get(format!("{url}/SHA256SUMS"))
         .send()
         .await?
         .error_for_status()?
@@ -178,7 +281,7 @@ pub async fn update_managed() -> anyhow::Result<UpdateOutcome> {
     let expected = expected_sha(&sums, &asset)
         .ok_or_else(|| anyhow::anyhow!("{asset} is missing from the release's SHA256SUMS"))?;
     let mut response = client
-        .get(format!("{RELEASES}/{asset}"))
+        .get(format!("{url}/{asset}"))
         .send()
         .await?
         .error_for_status()?;
@@ -196,7 +299,8 @@ pub async fn update_managed() -> anyhow::Result<UpdateOutcome> {
         "checksum mismatch for {asset} (expected {expected}, got {actual})"
     );
 
-    tokio::task::spawn_blocking(move || -> anyhow::Result<UpdateOutcome> {
+    let tag = tag.to_string();
+    let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<UpdateOutcome> {
         let parent = managed.parent().expect("managed path has a parent");
         std::fs::create_dir_all(parent)?;
         let work = parent.join(format!(".graff-update.{}", uuid::Uuid::new_v4()));
@@ -222,10 +326,47 @@ pub async fn update_managed() -> anyhow::Result<UpdateOutcome> {
             anyhow::ensure!(binary.is_file(), "{asset} has no graff binary");
             let fetched = version_of(&binary)
                 .ok_or_else(|| anyhow::anyhow!("the downloaded graff didn't run"))?;
+            if beta {
+                anyhow::ensure!(
+                    installed_beta_tag(&binary).as_deref() == Some(tag.as_str()),
+                    "downloaded graff version does not match {tag}"
+                );
+            }
             // Recheck after the download so overlapping manual and automatic
             // updates cannot replace a newer managed copy with an older one.
             let current = version_of(&managed);
-            if current.as_ref().is_some_and(|current| *current >= fetched) {
+            let old_beta = installed_beta_tag(&managed);
+            if !beta
+                && !allow_channel_switch
+                && let Some(old_beta) = old_beta.as_deref()
+            {
+                return Ok(UpdateOutcome::AlreadyCurrent {
+                    version: old_beta.to_string(),
+                });
+            }
+            if beta
+                && current_is_at_least_target(
+                    current.as_deref(),
+                    old_beta.as_deref(),
+                    &fetched,
+                    Some(&tag),
+                )
+            {
+                if let Some(old_beta) = old_beta {
+                    return Ok(UpdateOutcome::AlreadyCurrent { version: old_beta });
+                }
+                anyhow::bail!(
+                    "the installed stable Graff is at least as new as the available beta"
+                );
+            }
+            if !beta
+                && current_is_at_least_target(
+                    current.as_deref(),
+                    old_beta.as_deref(),
+                    &fetched,
+                    None,
+                )
+            {
                 return Ok(UpdateOutcome::AlreadyCurrent {
                     version: display_version(current.as_deref().unwrap_or(&fetched)),
                 });
@@ -233,13 +374,21 @@ pub async fn update_managed() -> anyhow::Result<UpdateOutcome> {
             install_file(&binary, &managed)?;
             Ok(UpdateOutcome::Updated {
                 from: current.as_deref().map(display_version),
-                to: display_version(&fetched),
+                to: if beta {
+                    tag.clone()
+                } else {
+                    display_version(&fetched)
+                },
             })
         })();
         let _ = std::fs::remove_dir_all(&work);
         result
     })
-    .await?
+    .await??;
+    if matches!(outcome, UpdateOutcome::Updated { .. }) {
+        crate::executable::invalidate_versions(&["graff"]);
+    }
+    Ok(outcome)
 }
 
 fn expected_sha(sums: &str, asset: &str) -> Option<String> {
@@ -262,7 +411,63 @@ mod tests {
         assert!(parse_dotted("graff 0.0.302.10").unwrap() > current);
         assert!(parse_dotted("graff 0.0.303.0").unwrap() > current);
         assert_eq!(display_version(&current), "0.0.302.4");
+        assert_eq!(
+            parse_dotted("graff 0.0.302.6-beta.26.1"),
+            Some(vec![0, 0, 302, 6])
+        );
         assert!(parse_dotted("no version here").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn beta_channel_is_read_from_the_installed_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("graff");
+        assert_eq!(installed_beta_tag(&managed), None);
+        std::fs::write(&managed, "#!/bin/sh\necho 'graff 0.0.302.6-beta.26.1'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            installed_beta_tag(&managed).as_deref(),
+            Some("v0.0.302.6-beta.26.1")
+        );
+    }
+
+    #[test]
+    fn beta_update_does_not_downgrade_stable_or_newer_beta() {
+        let stable = [0, 0, 302, 6];
+        let previous = [0, 0, 302, 5];
+        let target = "v0.0.302.6-beta.26.1";
+        assert!(current_is_at_least_target(
+            Some(&stable),
+            None,
+            &stable,
+            Some(target)
+        ));
+        assert!(!current_is_at_least_target(
+            Some(&previous),
+            None,
+            &stable,
+            Some(target)
+        ));
+        assert!(current_is_at_least_target(
+            Some(&stable),
+            Some("v0.0.302.6-beta.27.1"),
+            &stable,
+            Some(target)
+        ));
+        assert!(!current_is_at_least_target(
+            Some(&stable),
+            Some("v0.0.302.6-beta.25.1"),
+            &stable,
+            Some(target)
+        ));
+        assert!(!current_is_at_least_target(
+            Some(&stable),
+            Some(target),
+            &stable,
+            None
+        ));
     }
 
     #[test]

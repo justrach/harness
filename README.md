@@ -92,8 +92,14 @@ The macOS app bundles a managed `graff` CLI. While Harness is open, it checks
 the [latest stable CodeGraff release](https://github.com/justrach/codegraff/releases)
 shortly after launch and every six hours. It installs a newer version only
 after verifying the release archive's SHA-256 checksum. You can also update
-graff in **Settings → Agents**. Set `HARNESS_GRAFF_AUTO_UPDATE=0` to disable
-background checks; Harness leaves a custom `GRAFF_EXECUTABLE` alone.
+graff in **Settings → Agents**. Choose **Install beta** there to opt in to the
+newest published CodeGraff beta on its current release branch. This updates
+Harness's managed CLI engine for new Graff sessions; open sessions keep their
+current engine. Click **Install beta** again for a newer beta; background stable
+checks leave the selected beta in place. The **Update** action switches back to
+the stable release.
+Set `HARNESS_GRAFF_AUTO_UPDATE=0` to disable background checks; Harness leaves
+a custom `GRAFF_EXECUTABLE` alone.
 
 The CodeGraff images are credited in
 [third-party notices](THIRD_PARTY_NOTICES.md).

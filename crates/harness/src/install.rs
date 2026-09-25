@@ -312,7 +312,16 @@ fn shell_command(script: &str) -> Result<Command, HarnessError> {
 }
 
 /// Only the explicit Install RPC may call this; dropping the future also kills its process group.
-pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result<(), HarnessError> {
+pub async fn install_harness(
+    id: HarnessId,
+    beta: bool,
+    cancel: CancellationToken,
+) -> Result<(), HarnessError> {
+    if beta && id != HarnessId::Graff {
+        return Err(HarnessError::Install(
+            "beta updates are only available for Graff".into(),
+        ));
+    }
     let method = selected(id).ok_or_else(|| {
         HarnessError::Install(
             "No supported installer or required tools available on this device".into(),
@@ -322,7 +331,10 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(HarnessError::Install("installation cancelled".into())),
-            result = tokio::time::timeout(DEADLINE, crate::graff_bundle::update_managed()) => match result {
+            result = tokio::time::timeout(DEADLINE, async {
+                if beta { crate::graff_bundle::update_managed_beta().await }
+                else { crate::graff_bundle::update_managed().await }
+            }) => match result {
                 Ok(Ok(outcome)) => {
                     tracing::info!(?outcome, "graff release installed");
                     Ok(())

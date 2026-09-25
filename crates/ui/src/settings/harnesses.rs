@@ -101,8 +101,8 @@ fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
 
-fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Value {
-    serde_json::json!({"harness": harness, "targetDeviceId": target})
+fn install_params(harness: HarnessId, target: &Option<String>, beta: bool) -> serde_json::Value {
+    serde_json::json!({"harness": harness, "targetDeviceId": target, "beta": beta})
 }
 
 /// The CLI named in the not-installed hint.
@@ -164,9 +164,11 @@ pub struct HarnessesPage {
     device_menu_pressed_open: bool,
     /// Last refused/failed toggle (engine guards), shown in the error strip.
     error: Option<String>,
+    install_notice: Option<String>,
     load_task: Option<Task<()>>,
     toggle_task: Option<Task<()>>,
     installing: Option<HarnessId>,
+    installing_beta: bool,
     install_task: Option<Task<()>>,
     /// a sign-in that switches its harness on once it succeeds.
     sign_in: Option<SignIn>,
@@ -230,9 +232,11 @@ impl HarnessesPage {
             device_menu_open: false,
             device_menu_pressed_open: false,
             error: None,
+            install_notice: None,
             load_task: None,
             toggle_task: None,
             installing: None,
+            installing_beta: false,
             install_task: None,
             sign_in: None,
             sign_in_failure: None,
@@ -268,7 +272,9 @@ impl HarnessesPage {
         self.title_menu = None;
         self.title_saving = false;
         self.installing = None;
+        self.installing_beta = false;
         self.install_task = None;
+        self.install_notice = None;
         self.target_device = target;
         self.error = None;
         self.sign_in_failure = None;
@@ -756,7 +762,7 @@ impl HarnessesPage {
             return;
         };
         let target = self.target_device.clone();
-        let params = install_params(harness, &target);
+        let params = install_params(harness, &target, false);
         cx.spawn(async move |this, cx| {
             if let Err(error) = engine.client().call(methods::CANCEL_INSTALL, params).await {
                 this.update(cx, |page, cx| {
@@ -771,17 +777,19 @@ impl HarnessesPage {
         .detach();
     }
 
-    fn install(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+    fn install(&mut self, harness: HarnessId, beta: bool, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         if self.installing.is_some() {
             return;
         }
-        let params = install_params(harness, &self.target_device);
+        let params = install_params(harness, &self.target_device, beta);
         let target = self.target_device.clone();
         self.installing = Some(harness);
+        self.installing_beta = beta;
         self.error = None;
+        self.install_notice = None;
         self.install_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -797,9 +805,16 @@ impl HarnessesPage {
                     return;
                 }
                 page.installing = None;
+                page.installing_beta = false;
                 match result {
                     Ok(list) => {
                         page.harnesses = Loadable::Ready(list);
+                        if harness == HarnessId::Graff {
+                            page.install_notice = Some(format!(
+                                "Codegraff engine {}. New chats use the updated engine; open chats keep their current session.",
+                                if beta { "beta installed" } else { "updated" }
+                            ));
+                        }
                         crate::pickers::bump_harness_catalog(cx);
                     }
                     Err(error) => page.error = Some(format!("Installation failed — {error}")),
@@ -1040,6 +1055,14 @@ impl HarnessesPage {
                         .child(SharedString::from(blurb(harness)))
                         .into_any_element(),
                 ];
+                if harness == HarnessId::Graff && descriptor.can_install {
+                    meta.push(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child("Install beta updates the managed Codegraff CLI for new Graff sessions.")
+                            .into_any_element(),
+                    );
+                }
                 if let Some(sign_in) = signing_in {
                     meta.push(
                         div()
@@ -1088,7 +1111,13 @@ impl HarnessesPage {
                                 cx.entity_id(),
                                 cx,
                             ))
-                            .child(SharedString::from(install_label(&descriptor.name)))
+                            .child(SharedString::from(
+                                if self.installing_beta && harness == HarnessId::Graff {
+                                    "Installing Codegraff engine beta…".to_string()
+                                } else {
+                                    install_label(&descriptor.name)
+                                },
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -1163,7 +1192,7 @@ impl HarnessesPage {
                                     .when(self.installing.is_none(), |el| {
                                         el.hover(|s| widgets::ghost_hover(&theme, s)).on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.install(harness, cx)
+                                                this.install(harness, false, cx)
                                             }),
                                         )
                                     })
@@ -1186,11 +1215,30 @@ impl HarnessesPage {
                                     .when(self.installing.is_none(), |el| {
                                         el.hover(|s| widgets::ghost_hover(&theme, s)).on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.install(harness, cx)
+                                                this.install(harness, false, cx)
                                             }),
                                         )
                                     })
                                     .child("Update"),
+                            )
+                        },
+                    )
+                    .when(
+                        harness == HarnessId::Graff
+                            && descriptor.can_install
+                            && self.installing != Some(harness),
+                        |el| {
+                            el.child(
+                                widgets::ghost_action(&theme)
+                                    .id(("harness-beta", ix))
+                                    .when(self.installing.is_none(), |el| {
+                                        el.hover(|s| widgets::ghost_hover(&theme, s)).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.install(harness, true, cx)
+                                            }),
+                                        )
+                                    })
+                                    .child("Install beta"),
                             )
                         },
                     )
@@ -1315,6 +1363,10 @@ impl Render for HarnessesPage {
             .error
             .clone()
             .map(|message| widgets::error_strip(&theme, message).into_any_element());
+        let install_notice = self
+            .install_notice
+            .clone()
+            .map(|message| widgets::page_subtitle(&theme, message).into_any_element());
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
         let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
@@ -1353,6 +1405,7 @@ impl Render for HarnessesPage {
                                 .line_height(px(20.0)),
                             )
                             .children(error)
+                            .children(install_notice)
                             .child(body)
                             .child(graff_draft_subagents)
                             .child(titles),
@@ -1450,13 +1503,15 @@ fn install_phase_copy_and_cancel_target_match_install() {
     assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
     assert_eq!(install_label("Pi"), "Installing Pi…");
     for target in [None, Some("remote-device".to_string())] {
-        let params = install_params(HarnessId::Pi, &target);
+        let params = install_params(HarnessId::Pi, &target, false);
         assert_eq!(params["harness"], "pi");
+        assert_eq!(params["beta"], false);
         assert_eq!(
             params["targetDeviceId"],
             serde_json::to_value(&target).unwrap()
         );
     }
+    assert_eq!(install_params(HarnessId::Graff, &None, true)["beta"], true);
     assert_eq!(
         install_hint(HarnessId::Codex, false, false),
         "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
