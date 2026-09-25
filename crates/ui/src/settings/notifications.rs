@@ -22,6 +22,7 @@ pub enum NotificationsEvent {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
+        performance_stats: bool,
     },
 }
 
@@ -33,6 +34,7 @@ pub struct NotificationsPage {
     attention_sound: bool,
     desktop: bool,
     background_only: bool,
+    performance_stats: bool,
 }
 
 impl EventEmitter<NotificationsEvent> for NotificationsPage {}
@@ -45,6 +47,7 @@ enum NotificationPreference {
     AttentionSound,
     Desktop,
     BackgroundOnly,
+    PerformanceStats,
 }
 
 fn is_switch_activation(key: &str, is_held: bool) -> bool {
@@ -80,6 +83,7 @@ impl NotificationsPage {
         attention_sound: bool,
         desktop: bool,
         background_only: bool,
+        performance_stats: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -90,6 +94,7 @@ impl NotificationsPage {
             attention_sound,
             desktop,
             background_only,
+            performance_stats,
         }
     }
 
@@ -101,6 +106,7 @@ impl NotificationsPage {
             attention_sound: self.attention_sound,
             desktop: self.desktop,
             background_only: self.background_only,
+            performance_stats: self.performance_stats,
         });
     }
 
@@ -112,6 +118,7 @@ impl NotificationsPage {
             NotificationPreference::AttentionSound => &mut self.attention_sound,
             NotificationPreference::Desktop => &mut self.desktop,
             NotificationPreference::BackgroundOnly => &mut self.background_only,
+            NotificationPreference::PerformanceStats => &mut self.performance_stats,
         };
         *value = !*value;
         self.emit(cx);
@@ -145,6 +152,7 @@ impl Render for NotificationsPage {
         let attention_sound = self.attention_sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
+        let performance_stats = self.performance_stats;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
             // Keep the familiar 32×18 visual inside a 40×40 activation target.
             // Disabled subordinate controls remain named switches in the
@@ -387,6 +395,39 @@ impl Render for NotificationsPage {
                         }),
                     ),
             );
+        let privacy_card = widgets::section_card(&theme).child(
+            widgets::card_row(&theme, true)
+                .child(widgets::row_tile(&theme, icons::FAST_TIER))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(&theme, "Share anonymous performance stats"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child(SharedString::from(
+                                    "Send launch, load, send, and streaming timings so Harness \
+                                     can get faster. Timings only: no account, chats, paths, \
+                                     or content.",
+                                ))
+                                .into_any_element()],
+                        )),
+                )
+                .child(interactive_switch(
+                    toggle(
+                        "notifications-performance-stats-toggle",
+                        "Share anonymous performance stats",
+                        performance_stats,
+                        true,
+                    ),
+                    accent,
+                    NotificationPreference::PerformanceStats,
+                    cx,
+                )),
+        );
 
         let scrollbar = popover::rail(self, "notifications-page-scrollbar", &theme, cx);
         div()
@@ -412,7 +453,9 @@ impl Render for NotificationsPage {
                                 .max_w(px(512.0))
                                 .line_height(px(20.0)),
                             )
-                            .child(card),
+                            .child(card)
+                            .child(widgets::field_label(&theme, "Privacy"))
+                            .child(privacy_card),
                     ),
             )
             .children(scrollbar)

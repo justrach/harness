@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    const HARNESSES: [crate::HarnessId; 9] = [
+    const HARNESSES: [crate::HarnessId; 10] = [
         crate::HarnessId::ClaudeCode,
         crate::HarnessId::Codex,
         crate::HarnessId::Cursor,
@@ -301,6 +301,7 @@ mod tests {
         crate::HarnessId::Pi,
         crate::HarnessId::Antigravity,
         crate::HarnessId::Opencode,
+        crate::HarnessId::Exo,
     ];
 
     #[test]

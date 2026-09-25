@@ -4596,6 +4596,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
+        HarnessId::Exo => (crate::icons::EXO_MARK, None),
     }
 }
 
@@ -6595,7 +6596,7 @@ mod tests {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
         assert_eq!(&"Documents"[3..], "uments");
-        assert_eq!(completion_prefix_len("harness", "harness"), Some(5));
+        assert_eq!(completion_prefix_len("harness", "harness"), Some(7));
         assert_eq!(completion_prefix_len("harness", ""), Some(0));
         assert_eq!(completion_prefix_len("harness", "dev"), None);
         // Longer than the name → not a prefix.

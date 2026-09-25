@@ -287,13 +287,17 @@ pub fn apply_transcript_frame(
                     remove.iter().map(String::as_str).collect();
                 current.retain(|e| !gone.contains(e.id.as_str()));
             }
+            // Entry ids are unique (the diff side keys them in a map), so the
+            // id lookups below may scan from either end; they scan from the
+            // BACK because the target is almost always the live tail entry
+            // (or its predecessor, as an anchor) while streaming.
             for TranscriptUpsert { after, entry } in upsert {
-                if let Some(existing) = current.iter().position(|e| e.id == entry.id) {
+                if let Some(existing) = current.iter().rposition(|e| e.id == entry.id) {
                     current.remove(existing);
                 }
                 let at = match &after {
                     None => 0,
-                    Some(anchor) => match current.iter().position(|e| &e.id == anchor) {
+                    Some(anchor) => match current.iter().rposition(|e| &e.id == anchor) {
                         Some(ix) => ix + 1,
                         None => {
                             return Err(TranscriptDesync(format!("missing anchor {anchor}")));
@@ -309,7 +313,7 @@ pub fn apply_transcript_frame(
                 len,
             } in append
             {
-                let Some(target) = current.iter_mut().find(|e| e.id == entry) else {
+                let Some(target) = current.iter_mut().rev().find(|e| e.id == entry) else {
                     return Err(TranscriptDesync(format!("missing append entry {entry}")));
                 };
                 let tail = target.parts.iter_mut().find_map(|p| match p {
@@ -498,6 +502,32 @@ mod tests {
         };
         let mut current = Vec::new();
         assert!(apply_transcript_frame(&mut current, frame).is_err());
+    }
+
+    /// Id lookups scan from the tail; targets at the head, middle and tail
+    /// (appends, in-place upserts, anchored inserts) must all still land.
+    #[test]
+    fn id_lookups_find_head_middle_and_tail_targets() {
+        let base: Vec<_> = (0..6).map(|i| entry(&format!("e{i}"), "x")).collect();
+        for target in [0, 3, 5] {
+            // Pure text append on one entry.
+            let mut next = base.clone();
+            next[target] = entry(&format!("e{target}"), "x grown");
+            apply(&base, &next);
+            // Non-append rewrite -> in-place upsert.
+            let mut next = base.clone();
+            next[target] = entry(&format!("e{target}"), "rewritten");
+            apply(&base, &next);
+            // New entry anchored right after the target.
+            let mut next = base.clone();
+            next.insert(target + 1, entry("new", "n"));
+            apply(&base, &next);
+        }
+        // Two appends in one frame: tail and head.
+        let mut next = base.clone();
+        next[0] = entry("e0", "x head");
+        next[5] = entry("e5", "x tail");
+        apply(&base, &next);
     }
 }
 

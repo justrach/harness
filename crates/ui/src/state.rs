@@ -1215,6 +1215,7 @@ impl AppState {
         }
         self.transcript = entries;
         self.transcript_replayed = true;
+        self.note_transcript_perf(true);
         self.ack_pending_send_from_transcript();
     }
 
@@ -1233,6 +1234,7 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
+        self.note_transcript_perf(is_reset);
         if let Some(chat_id) = self.selected_chat.as_deref()
             && let Some(echoes) = self.echoes.get_mut(chat_id)
         {
@@ -1429,6 +1431,7 @@ impl AppState {
     /// phantom Working→Idle edge in it rang the done-chime on send (user
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
+        crate::perf_stats::turn_started(chat_id, message_id);
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
@@ -1556,7 +1559,30 @@ impl AppState {
             && let Some(pending) = self.pending_sends.get(chat_id)
             && self.transcript.iter().any(|e| e.id == pending.message_id)
         {
+            crate::perf_stats::turn_accepted(chat_id, &pending.message_id);
             self.pending_sends.remove(chat_id);
+        }
+    }
+
+    /// Perf journeys observed on the selected chat's transcript: a replayed
+    /// copy ends a conversation load; the first assistant output after the
+    /// user's own prompt is the turn's first token.
+    fn note_transcript_perf(&self, replayed: bool) {
+        let Some(chat_id) = self.selected_chat.as_deref() else {
+            return;
+        };
+        if replayed {
+            crate::perf_stats::conversation_ready(chat_id);
+        }
+        let Some(message_id) = crate::perf_stats::awaiting_first_output(chat_id) else {
+            return;
+        };
+        if let Some(ix) = self.transcript.iter().position(|e| e.id == message_id)
+            && self.transcript[ix + 1..]
+                .iter()
+                .any(|e| e.role == harness_doc::MessageRole::Assistant && !e.parts.is_empty())
+        {
+            crate::perf_stats::turn_first_output(chat_id);
         }
     }
 
@@ -2069,6 +2095,9 @@ impl AppState {
             }
             return;
         }
+        if let Some(id) = chat_id.as_deref() {
+            crate::perf_stats::conversation_selected(id);
+        }
         // Take the destination before trimming: switching to the oldest warm
         // transcript must not evict the very entry we are about to display.
         let cached = self
@@ -2153,6 +2182,9 @@ impl AppState {
             self.transcript = cached.entries;
             self.context_usage = cached.context_usage;
             self.transcript_replayed = true;
+            if let Some(id) = chat_id.as_deref() {
+                crate::perf_stats::conversation_ready(id);
+            }
         }
         self.transcript_task = None;
         self.queue.clear();

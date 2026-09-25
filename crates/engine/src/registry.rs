@@ -100,17 +100,39 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
 struct HarnessPrefsFile {
     /// The user's explicit opt-OUTS. A found [`default_on`] agent is otherwise
     /// on, so an install of one turns itself on without a trip to Settings.
+    #[serde(deserialize_with = "known_harnesses")]
     disabled: Vec<HarnessId>,
     /// The user's explicit opt-INS for agents that are off by default (see
     /// [`default_on`]). Still gated on detection: an opted-in agent whose CLI
     /// goes missing drops out until it is found again.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, deserialize_with = "known_harnesses_opt")]
     enabled: Option<Vec<HarnessId>>,
+}
+
+/// Agent ids this build knows, skipping the rest: a prefs file written by a
+/// newer build (an agent added since) must not fail as a whole, which reset
+/// every opt-out and opt-in to the defaults.
+fn known_harnesses<'de, D>(deserializer: D) -> Result<Vec<HarnessId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
+fn known_harnesses_opt<'de, D>(deserializer: D) -> Result<Option<Vec<HarnessId>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    known_harnesses(deserializer).map(Some)
 }
 
 /// Per-device automatic session title preferences.
@@ -118,9 +140,19 @@ struct HarnessPrefsFile {
 #[serde(default, rename_all = "camelCase")]
 pub struct TitleSettings {
     /// None follows the session harness, using a supported installed fallback.
+    /// An id from a newer build reads as None instead of failing the file.
+    #[serde(deserialize_with = "known_harness_opt")]
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+fn known_harness_opt<'de, D>(deserializer: D) -> Result<Option<HarnessId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -587,6 +619,7 @@ pub fn default_registry() -> HarnessRegistry {
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
                 ReasoningLevel::High,
+                ReasoningLevel::XHigh,
             ],
             installed: true,
             can_install: false,
@@ -680,6 +713,24 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| harness_adapters::AcpHarness::antigravity().installed()),
         Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::antigravity()) as Arc<dyn Harness>)),
     );
+    // Exo over ACP through Harness's own bridge (`harness exo-acp` → Exo's
+    // agent-cli socket), same lazy pattern: the static descriptor mirrors
+    // AcpHarness::exo() exactly. One whole reply per exchange, so steers
+    // wait for the turn boundary; Exo owns its model and effort.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Exo,
+            name: "Exo".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| harness_adapters::AcpHarness::exo().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::exo()) as Arc<dyn Harness>)),
+    );
     registry
 }
 
@@ -746,6 +797,35 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// The descriptor-stability rule, for every slot at once: a lazy slot's
+    /// static descriptor (what Settings and pickers show before a run) must
+    /// mirror the harness it resolves to. Grok's ladder drifted once — the
+    /// spec gained XHigh, the descriptor did not.
+    #[test]
+    fn every_static_descriptor_mirrors_its_resolved_harness() {
+        let registry = default_registry();
+        for descriptor in registry.descriptors() {
+            let harness = registry.resolve(descriptor.id).unwrap();
+            let resolved = describe(harness.as_ref());
+            assert_eq!(descriptor.name, resolved.name, "{:?} name", descriptor.id);
+            assert_eq!(
+                descriptor.supports_steering, resolved.supports_steering,
+                "{:?} steering support",
+                descriptor.id
+            );
+            assert_eq!(
+                descriptor.steering_mode, resolved.steering_mode,
+                "{:?} steering mode",
+                descriptor.id
+            );
+            assert_eq!(
+                descriptor.reasoning_levels, resolved.reasoning_levels,
+                "{:?} reasoning ladder",
+                descriptor.id
+            );
+        }
+    }
+
     #[test]
     fn default_registry_lists_mock_claude_codex_and_grok_slots() {
         let registry = default_registry();
@@ -763,7 +843,8 @@ mod tests {
                 HarnessId::Hermes,
                 HarnessId::Pi,
                 HarnessId::Opencode,
-                HarnessId::Antigravity
+                HarnessId::Antigravity,
+                HarnessId::Exo
             ]
         );
         assert!(registry.resolve(HarnessId::Mock).is_ok());
@@ -803,6 +884,11 @@ mod tests {
         assert_eq!(hermes.display_name(), "Hermes");
         assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
         assert!(hermes.reasoning_levels().is_empty());
+        let exo = registry.resolve(HarnessId::Exo).unwrap();
+        assert_eq!(exo.id(), HarnessId::Exo);
+        assert_eq!(exo.display_name(), "Exo");
+        assert_eq!(exo.steering_mode(), SteeringMode::TurnBoundary);
+        assert!(exo.reasoning_levels().is_empty());
         let opencode = registry.resolve(HarnessId::Opencode).unwrap();
         assert_eq!(opencode.id(), HarnessId::Opencode);
         assert_eq!(opencode.display_name(), "OpenCode");
@@ -892,6 +978,27 @@ mod tests {
             Box::new(move || installed),
             Box::new(|| Err(HarnessError::NotInstalled("test slot".into()))),
         );
+    }
+
+    /// A prefs file from a newer build names agents this build lacks; the
+    /// known entries (and the titles) still load instead of the whole file
+    /// falling back to defaults.
+    #[test]
+    fn prefs_from_a_newer_build_keep_their_known_entries() {
+        let prefs: HarnessPrefsFile = serde_json::from_str(
+            r#"{"disabled":["codex","future-agent"],"optedIn":["grok","another-new-one"],
+                "titles":{"harness":"future-agent","model":"m"}}"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+        assert_eq!(prefs.opted_in, vec![HarnessId::Grok]);
+        assert_eq!(prefs.titles.harness, None);
+        assert_eq!(prefs.titles.model.as_deref(), Some("m"));
+        let legacy: HarnessPrefsFile =
+            serde_json::from_str(r#"{"enabled":["claude-code","future-agent"]}"#).unwrap();
+        assert_eq!(legacy.enabled, Some(vec![HarnessId::ClaudeCode]));
+        let empty: HarnessPrefsFile = serde_json::from_str("{}").unwrap();
+        assert!(empty.disabled.is_empty() && empty.enabled.is_none());
     }
 
     /// `descriptors()` stamps the per-device enabled flag; `set_enabled`
@@ -1016,6 +1123,7 @@ mod tests {
             HarnessId::Pi,
             HarnessId::Opencode,
             HarnessId::Antigravity,
+            HarnessId::Exo,
         ];
         let dir = tempfile::tempdir().unwrap();
         let registry = HarnessRegistry::new();

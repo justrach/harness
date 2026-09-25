@@ -805,17 +805,9 @@ pub fn tool_detail(
     diff_stats: Option<&[harness_doc::ToolDiffStat]>,
 ) -> Option<ToolDetail> {
     if let Some(diff) = diff {
-        let mut file = diff_to_file(diff);
-        if file.hunks.is_empty() {
-            return None;
-        }
-        // A transcript diff renders as one stacked element inside its row —
-        // cap it so a whole-file rewrite (or fetched full-diff blob) can't
-        // build tens of thousands of elements per frame. The changes pane
-        // has no such cap; it virtualizes per line.
-        crate::changes::truncate_file_lines(&mut file, DIFF_DETAIL_MAX_LINES);
+        let file = memoized_detail_diff(diff)?;
         return Some(ToolDetail::Diff {
-            file: Arc::new(file),
+            file,
             old_text: diff.old_text.as_deref().map(Arc::from),
             new_text: Some(Arc::from(diff.new_text.as_str())),
         });
@@ -843,6 +835,53 @@ pub fn tool_detail(
         lines,
         truncated_by,
     })
+}
+
+/// The capped inline diff for `diff`, `None` when it has no hunks.
+///
+/// Memoized: a streaming reply rebuilds every row of its message on each
+/// delta, which re-ran a full line diff (and thousands of line allocations)
+/// for every file the turn had edited, on every token. The result is a pure
+/// function of the path and both texts, so a small shared LRU keyed by their
+/// hash serves the repeats.
+fn memoized_detail_diff(diff: &harness_proto::ToolDiff) -> Option<Arc<crate::changes::FileDiff>> {
+    use std::hash::{Hash, Hasher};
+    const SLOTS: usize = 64;
+    type Key = (u64, usize, usize);
+    static MEMO: std::sync::Mutex<Vec<(Key, Option<Arc<crate::changes::FileDiff>>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&diff.path, &diff.old_text, &diff.new_text).hash(&mut hasher);
+    let key = (
+        hasher.finish(),
+        diff.old_text.as_ref().map_or(usize::MAX, String::len),
+        diff.new_text.len(),
+    );
+    let lock = || MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    {
+        let mut memo = lock();
+        if let Some(ix) = memo.iter().position(|(k, _)| *k == key) {
+            let hit = memo.remove(ix);
+            let file = hit.1.clone();
+            memo.push(hit);
+            return file;
+        }
+    }
+    let mut file = diff_to_file(diff);
+    let file = (!file.hunks.is_empty()).then(|| {
+        // A transcript diff renders as one stacked element inside its row —
+        // cap it so a whole-file rewrite (or fetched full-diff blob) can't
+        // build tens of thousands of elements per frame. The changes pane
+        // has no such cap; it virtualizes per line.
+        crate::changes::truncate_file_lines(&mut file, DIFF_DETAIL_MAX_LINES);
+        Arc::new(file)
+    });
+    let mut memo = lock();
+    if memo.len() >= SLOTS {
+        memo.remove(0);
+    }
+    memo.push((key, file.clone()));
+    file
 }
 
 /// Columns at which an invocation line soft-wraps into continuation lines.
@@ -2279,6 +2318,19 @@ struct HighlightEntry {
     key: DocumentHighlightKey,
     document: Option<Weak<harness_syntax::HighlightedDocument>>,
     _task: Option<Task<()>>,
+    /// Set when this entry is superseded or dropped. A streaming code block
+    /// changes key on every delta; dropping `_task` only abandons the
+    /// foreground wait, so without this every superseded tokenize of the
+    /// growing block ran to completion in parallel (O(n²) over the block).
+    cancel: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl Drop for HighlightEntry {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Cache of tokenized code blocks keyed by `(row id, block ix)`. Tokenization
@@ -2317,18 +2369,24 @@ impl HighlightStore {
                     key: document_key,
                     document: Some(Arc::downgrade(&document)),
                     _task: None,
+                    cancel: None,
                 },
             );
             return Some(document);
         }
         let code = code.to_string();
         let source_bytes = code.len();
+        let cancel = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancelled = cancel.clone();
         let task = cx.spawn(async move |this, cx| {
             let started = Instant::now();
             let document = cx
                 .background_executor()
                 .spawn(async move {
-                    harness_syntax::highlight(harness_syntax::HighlightRequest {
+                    if cancelled.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+                        return None;
+                    }
+                    harness_syntax::highlight_with_limits(harness_syntax::HighlightRequest {
                         source: &code,
                         path: None,
                         fence_tag: Some(match lang {
@@ -2361,7 +2419,9 @@ impl HighlightStore {
                             Lang::Nix => "nix",
                             Lang::Make => "make",
                         }),
-                    })
+                    },
+                    harness_syntax::HighlightLimits::default(),
+                    Some(&cancelled))
                     .ok()
                 })
                 .await;
@@ -2395,6 +2455,7 @@ impl HighlightStore {
                 key: document_key,
                 document: None,
                 _task: Some(task),
+                cancel: Some(cancel),
             },
         );
         None
@@ -2414,6 +2475,11 @@ pub(crate) struct TranscriptPreparation {
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
     baseline: Option<harness_doc::TranscriptBaseline>,
+    /// Rows of each partially-historical entry's replay prefix, keyed by the
+    /// prefix they were built from. That entry is usually the one still
+    /// streaming, and its prefix is fixed by the baseline, so without this
+    /// every delta re-parsed the whole prefix from scratch.
+    historical_cache: HashMap<String, (SessionMessageEntry, Vec<Row>)>,
 }
 
 pub(crate) struct PreparedTranscript {
@@ -2434,6 +2500,7 @@ impl TranscriptPreparation {
                 self.cache.clear();
                 self.tree_cache.clear();
                 self.live_parsers.clear();
+                self.historical_cache.clear();
             }
             harness_doc::TranscriptFrame::Delta {
                 upsert,
@@ -2488,12 +2555,18 @@ impl TranscriptPreparation {
                 && !fully_historical.contains(&entry.id)
                 && let Some(prefix) = baseline.historical_entry(entry)
             {
-                historical.insert(
-                    entry.id.clone(),
-                    rows_for_entry(&prefix, false, false, &mut |_, text| {
-                        Arc::new(parse_full(text))
-                    }),
-                );
+                let built = match self.historical_cache.get(&entry.id) {
+                    Some((cached, rows)) if *cached == prefix => rows.clone(),
+                    _ => {
+                        let rows = rows_for_entry(&prefix, false, false, &mut |_, text| {
+                            Arc::new(parse_full(text))
+                        });
+                        self.historical_cache
+                            .insert(entry.id.clone(), (prefix, rows.clone()));
+                        rows
+                    }
+                };
+                historical.insert(entry.id.clone(), built);
             }
             bytes += std::mem::size_of::<SessionMessageEntry>()
                 + entry.id.len()
@@ -2504,6 +2577,8 @@ impl TranscriptPreparation {
                     .sum::<usize>();
         }
         self.cache.retain(|id, _| rows.contains_key(id));
+        self.historical_cache
+            .retain(|id, _| historical.contains_key(id));
         Ok(Arc::new(PreparedTranscript {
             rows,
             historical,
@@ -3160,6 +3235,11 @@ pub struct Transcript {
     /// Queue rows authored in this window. They become own-turn anchors only
     /// after the host promotes their stable id into a transcript message.
     pending_queued_turns: PendingQueuedTurns,
+    /// A steered/queued prompt that materialized during `sync`, waiting for
+    /// the next post-layout own-turn step to take the viewport. Anchoring
+    /// inside `sync` read the just-spliced (zero-height) tail as a short list
+    /// and snapped a long chat to its top before gliding back down.
+    deferred_own_send: Option<(String, String)>,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -3399,6 +3479,7 @@ impl Transcript {
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
+            deferred_own_send: None,
             own_turn_kick: false,
             own_turn_scheduled: false,
             own_turn_last_tick: None,
@@ -3905,7 +3986,11 @@ impl Transcript {
             return;
         };
         if !attached {
-            self.on_own_send(chat_id, message_id, cx);
+            // Take the viewport after layout has re-measured the tail, never
+            // from inside `sync` (see `deferred_own_send`).
+            self.deferred_own_send = Some((chat_id, message_id));
+            self.own_turn_kick = true;
+            cx.notify();
         }
     }
 
@@ -4046,6 +4131,14 @@ impl Transcript {
             return;
         }
         self.own_turn_kick = false;
+        if let Some((chat_id, message_id)) = self.deferred_own_send.take() {
+            // Post-layout now: the tail heights are real, so the anchor lands
+            // on the visible rows. The glide starts on the next frame.
+            if self.chat_id.as_deref() == Some(chat_id.as_str()) {
+                self.on_own_send(chat_id, message_id, cx);
+            }
+            return;
+        }
         // Layout moves the bottom too (pad refinement, streaming growth):
         // refresh the wheel handler's escape baseline every frame so only a
         // WHEEL's own delta registers as user intent. Without this, the pad
@@ -4484,6 +4577,13 @@ impl Transcript {
                 self.own_turn = None;
                 self.own_turn_kick = false;
                 self.own_turn_last_tick = None;
+            }
+            if self
+                .deferred_own_send
+                .as_ref()
+                .is_some_and(|(chat, _)| selected.as_deref() != Some(chat.as_str()))
+            {
+                self.deferred_own_send = None;
             }
             self.chat_id = selected;
             self.rows.clear();
@@ -8620,6 +8720,20 @@ impl Render for Transcript {
                 "transcript motion state"
             );
         }
+        if self.doc_override.is_none() {
+            // Frame pacing while a reply streams (`perf_stats` frame_ms). Only
+            // the selected chat's view reports, so split panes don't
+            // interleave their frames into one interval series.
+            let state = self.state.read(cx);
+            if state.selected_chat == self.chat_id {
+                crate::perf_stats::transcript_frame(
+                    state
+                        .transcript
+                        .last()
+                        .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
+                );
+            }
+        }
         self.render_cache
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
@@ -8685,7 +8799,7 @@ impl Render for Transcript {
         // resizes and streaming growth re-derive the reservation; the step
         // only notifies on change, so a settled hold schedules no next frame.
         if !self.route_exit_pending(cx)
-            && (self.own_turn.is_some() || self.own_turn_kick)
+            && (self.own_turn.is_some() || self.own_turn_kick || self.deferred_own_send.is_some())
             && !self.own_turn_scheduled
         {
             self.own_turn_scheduled = true;
@@ -8882,6 +8996,286 @@ mod tests {
             });
         });
     }
+    /// Steer regression (user report: "when I steer it goes down all the way
+    /// from the top"). The promotion frame both completes the live reply and
+    /// appends the steered prompt, so the tail is spliced with a different
+    /// row count; anchoring the own turn inside that `sync` read the
+    /// freshly-zeroed heights as a short list and snapped the viewport to
+    /// item 0 before gliding back down. Runs on the portable test platform.
+    #[gpui::test]
+    fn steer_promotion_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        let feed = |entries: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+        };
+        let tick = |cx: &mut gpui::TestAppContext| {
+            transcript.update(cx, |this, cx| {
+                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
+                    this.step_own_turn(cx);
+                }
+                if this.pinned {
+                    this.step_spring(cx);
+                }
+            });
+            draw(cx);
+        };
+        let prompt = |id: &str| {
+            let mut entry = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("text", "Please explain this.")],
+            );
+            entry.role = MessageRole::User;
+            entry
+        };
+        let body = (0..12)
+            .map(|i| format!("Paragraph {i} of a long answer.\n\n"))
+            .collect::<String>();
+        let history = |live: MessageStatus| {
+            let mut entries = Vec::new();
+            for i in 0..20 {
+                entries.push(prompt(&format!("p{i}")));
+                entries.push(assistant(
+                    &format!("r{i}"),
+                    MessageStatus::Complete,
+                    vec![text_part("text", &body)],
+                ));
+            }
+            entries.push(prompt("p-live"));
+            entries.push(assistant(
+                "r-live",
+                live,
+                vec![
+                    reasoning_part("think", "Considering the request."),
+                    text_part("text", &body),
+                ],
+            ));
+            entries
+        };
+
+        feed(history(MessageStatus::Streaming), cx);
+        transcript.update(cx, |this, _| this.rail_enabled = false);
+        for _ in 0..20 {
+            tick(cx);
+        }
+        transcript.update(cx, |this, cx| {
+            assert!(this.pinned, "a followed stream starts pinned");
+            this.on_own_queued_send("chat".into(), "steer".into(), cx);
+        });
+        let mut next = history(MessageStatus::Complete);
+        next.push(prompt("steer"));
+        feed(next, cx);
+        // The state notify renders before any post-layout step runs.
+        draw(cx);
+        let top_floor = transcript.read_with(cx, |this, _| this.rows.len() / 2);
+        let top = transcript.read_with(cx, |this, _| this.list.logical_scroll_top().item_ix);
+        assert!(top >= top_floor, "promotion frame snapped the chat to row {top}");
+        for frame in 0..40 {
+            tick(cx);
+            let (top, rows) = transcript.read_with(cx, |this, _| {
+                (this.list.logical_scroll_top().item_ix, this.rows.len())
+            });
+            assert!(
+                top >= top_floor,
+                "frame {frame}: steer scrolled the chat to row {top} (of {rows})"
+            );
+        }
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.own_turn.as_ref().is_some_and(|t| &*t.message_id == "steer") || this.pinned,
+                "the steered prompt still takes the viewport"
+            );
+        });
+    }
+
+    /// Direct sends too (user report: "the scroll starts from the top if a
+    /// new message is sent"). The composer pushes the optimistic echo — its
+    /// state notify syncs the row in — then emits `Sent`, so `on_own_send`
+    /// runs before any layout has measured the new tail. Covers an idle
+    /// chat, a steer into a streaming reply, and a reply that finishes in
+    /// the same frame the prompt lands (a tail splice with a new row count).
+    fn direct_send_keeps_a_long_chat_near_its_tail(
+        cx: &mut gpui::TestAppContext,
+        streaming: bool,
+        reply_completes_with_send: bool,
+    ) {
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        let feed = |entries: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+        };
+        let tick = |cx: &mut gpui::TestAppContext| {
+            transcript.update(cx, |this, cx| {
+                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
+                    this.step_own_turn(cx);
+                }
+                if this.pinned {
+                    this.step_spring(cx);
+                }
+            });
+            draw(cx);
+        };
+        let prompt = |id: &str| {
+            let mut entry = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("text", "Please explain this.")],
+            );
+            entry.role = MessageRole::User;
+            entry.status = None;
+            entry
+        };
+        let body = (0..12)
+            .map(|i| format!("Paragraph {i} of a long answer.\n\n"))
+            .collect::<String>();
+        let history = |live: MessageStatus, paragraphs: usize| {
+            let mut entries = Vec::new();
+            for i in 0..20 {
+                entries.push(prompt(&format!("p{i}")));
+                entries.push(assistant(
+                    &format!("r{i}"),
+                    MessageStatus::Complete,
+                    vec![text_part("text", &body)],
+                ));
+            }
+            entries.push(prompt("p-live"));
+            let live_body = (0..paragraphs)
+                .map(|i| format!("Live paragraph {i}.\n\n"))
+                .collect::<String>();
+            entries.push(assistant(
+                "r-live",
+                live,
+                vec![reasoning_part("think", "Considering the request."), text_part("text", &live_body)],
+            ));
+            entries
+        };
+        let live = if streaming { MessageStatus::Streaming } else { MessageStatus::Complete };
+        let check = |label: &str, floor: usize, cx: &mut gpui::TestAppContext| {
+            let (top, rows) = transcript.read_with(cx, |this, _| {
+                (this.list.logical_scroll_top().item_ix, this.rows.len())
+            });
+            assert!(
+                top >= floor,
+                "{label} (streaming={streaming}, completes={reply_completes_with_send}): \
+                 the send scrolled the chat to row {top} of {rows}"
+            );
+        };
+
+        feed(history(live, 8), cx);
+        transcript.update(cx, |this, _| this.rail_enabled = false);
+        for _ in 0..20 {
+            tick(cx);
+        }
+        let floor = transcript.read_with(cx, |this, _| this.rows.len() / 2);
+        check("before the send", floor, cx);
+
+        // Composer::send: push the echo (state notify → sync), then `Sent`.
+        state.update(cx, |state, _| state.push_echo("chat", prompt("sent")));
+        if reply_completes_with_send {
+            feed(history(MessageStatus::Complete, 11), cx);
+        } else {
+            transcript.update(cx, |this, cx| this.sync(cx));
+        }
+        transcript.update(cx, |this, cx| this.on_own_send("chat".into(), "sent".into(), cx));
+        draw(cx);
+        check("send frame", floor, cx);
+        for frame in 0..40 {
+            tick(cx);
+            check(&format!("glide frame {frame}"), floor, cx);
+        }
+
+        // The host confirms the prompt (the echo dedups away) and replies.
+        let mut next = history(MessageStatus::Complete, 11);
+        next.push(prompt("sent"));
+        next.push(assistant("r-sent", MessageStatus::Streaming, vec![text_part("text", "On it.")]));
+        state.update(cx, |state, _| state.remove_echo("chat", "sent"));
+        feed(next, cx);
+        draw(cx);
+        check("confirm frame", floor, cx);
+        for frame in 0..40 {
+            tick(cx);
+            check(&format!("reply frame {frame}"), floor, cx);
+        }
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.own_turn.as_ref().is_some_and(|t| &*t.message_id == "sent") || this.pinned,
+                "the sent prompt still takes the viewport"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn idle_direct_send_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+        direct_send_keeps_a_long_chat_near_its_tail(cx, false, false);
+    }
+
+    #[gpui::test]
+    fn steer_direct_send_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+        direct_send_keeps_a_long_chat_near_its_tail(cx, true, false);
+    }
+
+    #[gpui::test]
+    fn send_as_the_reply_finishes_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+        direct_send_keeps_a_long_chat_near_its_tail(cx, true, true);
+    }
+
     use harness_doc::MessagePart;
 
     fn with_tool_group_navigation(
@@ -10252,6 +10646,55 @@ mod tests {
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
         Arc::new(parse_full(text))
+    }
+
+    /// A replayed entry still streaming keeps a fixed historical prefix: its
+    /// rows are built once and served on every later delta, and still match
+    /// a from-scratch build.
+    #[test]
+    fn historical_prefix_rows_are_reused_across_deltas() {
+        let opened = assistant(
+            "m1",
+            MessageStatus::Streaming,
+            vec![text_part("t", "# Title\n\nSome **history** already written.")],
+        );
+        let baseline = harness_doc::TranscriptBaseline::capture(std::slice::from_ref(&opened));
+        let mut prep = TranscriptPreparation::default();
+        let keys = |rows: &[Row]| rows.iter().map(|r| (r.id.clone(), r.version)).collect::<Vec<_>>();
+        let first = prep
+            .prepare(&harness_doc::TranscriptUpdate {
+                frame: harness_doc::TranscriptFrame::reset(std::slice::from_ref(&opened)),
+                context_usage: None,
+                replay_baseline: Some(baseline.clone()),
+            })
+            .unwrap();
+        assert!(first.fully_historical.contains("m1"));
+
+        let mut text = "# Title\n\nSome **history** already written.".to_string();
+        for token in [" Live", " tokens", " keep", " arriving."] {
+            text.push_str(token);
+            let prepared = prep
+                .prepare(&harness_doc::TranscriptUpdate {
+                    frame: harness_doc::TranscriptFrame::Delta {
+                        upsert: vec![],
+                        append: vec![harness_doc::TextAppend {
+                            entry: "m1".into(),
+                            part: "t".into(),
+                            text: token.into(),
+                            len: text.len(),
+                        }],
+                        remove: vec![],
+                        count: 1,
+                    },
+                    context_usage: None,
+                    replay_baseline: None,
+                })
+                .unwrap();
+            let expected = rows_for_entry(&opened, false, false, &mut parse);
+            assert_eq!(keys(&prepared.historical["m1"]), keys(&expected), "after {token:?}");
+            let (cached_prefix, _) = &prep.historical_cache["m1"];
+            assert_eq!(cached_prefix, &opened, "cache keyed by the fixed prefix");
+        }
     }
 
     fn assistant(id: &str, status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry {
@@ -11946,7 +12389,7 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
                 this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                if this.own_turn.is_some() {
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
                     this.step_own_turn(cx);
                 }
                 if this.pinned {
@@ -13271,6 +13714,29 @@ mod tests {
         let done_rows = rows_for_entry(&done, false, false, &mut parse);
         // Same ids; every version flips its streaming bit → one 3-row splice.
         assert_eq!(diff_rows(&live_rows, &done_rows), Some((0..3, 3)));
+    }
+
+    /// Streaming rebuilds every row of the live message per delta; the
+    /// inline diff for an unchanged edit must be served, not recomputed.
+    #[test]
+    fn tool_diff_detail_is_memoized_per_content() {
+        let diff = |new: &str| harness_proto::ToolDiff {
+            path: "/w/memo.rs".into(),
+            old_text: Some("a\nb\nc\n".into()),
+            new_text: new.into(),
+        };
+        let file = |d: &harness_proto::ToolDiff| match tool_detail(None, Some(d), None) {
+            Some(ToolDetail::Diff { file, .. }) => file,
+            _ => panic!("expected diff detail"),
+        };
+        let first = file(&diff("a\nB\nc\n"));
+        assert!(Arc::ptr_eq(&first, &file(&diff("a\nB\nc\n"))), "repeat is served from the memo");
+        let changed = file(&diff("a\nB\nC\n"));
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!((changed.additions, changed.deletions), (2, 2));
+        // No-op edits stay detail-less on repeat too.
+        assert!(tool_detail(None, Some(&diff("a\nb\nc\n")), None).is_none());
+        assert!(tool_detail(None, Some(&diff("a\nb\nc\n")), None).is_none());
     }
 
     #[test]

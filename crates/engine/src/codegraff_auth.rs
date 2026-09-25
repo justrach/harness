@@ -69,6 +69,22 @@ pub struct CodegraffStatus {
     pub error: Option<String>,
 }
 
+/// Account usage from the authenticated gateway summary. No API key is returned
+/// or persisted with this response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CodegraffUsage {
+    pub email: String,
+    pub tier: String,
+    pub credits_micro_usd: i64,
+    pub spend_30d_micro_usd: i64,
+    pub requests_30d: i64,
+    pub prompt_tokens_30d: i64,
+    pub completion_tokens_30d: i64,
+    pub key_budget_monthly_micro_usd: Option<i64>,
+    pub key_spend_monthly_micro_usd: i64,
+    pub key_budget_resets_at: String,
+}
+
 pub struct CodegraffAuth {
     identity: PathBuf,
     key_file: Option<PathBuf>,
@@ -204,6 +220,7 @@ impl CodegraffAuth {
     }
 
     async fn fetch_me(&self, key: &str) -> Result<Me, String> {
+        crate::auth::validate_secure_url("CodeGraff gateway", &self.gateway)?;
         http()
             .get(format!("{}/v1/me", self.gateway))
             .bearer_auth(key)
@@ -217,6 +234,25 @@ impl CodegraffAuth {
             .map_err(|e| e.to_string())
     }
 
+    pub async fn usage(&self) -> Result<Option<CodegraffUsage>, String> {
+        let Some(key) = self.current_key() else {
+            return Ok(None);
+        };
+        crate::auth::validate_secure_url("CodeGraff gateway", &self.gateway)?;
+        let usage = http()
+            .get(format!("{}/v1/usage/summary", self.gateway))
+            .bearer_auth(key)
+            .send()
+            .await
+            .map_err(|e| format!("couldn't reach CodeGraff: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("CodeGraff usage is unavailable: {e}"))?
+            .json::<CodegraffUsage>()
+            .await
+            .map_err(|e| format!("unexpected CodeGraff usage response: {e}"))?;
+        Ok(Some(usage))
+    }
+
     /// Revoke the key server-side (best effort — an unreachable gateway must
     /// not keep anyone signed in), then remove it from graff's file.
     pub async fn sign_out(&self) {
@@ -225,7 +261,9 @@ impl CodegraffAuth {
         }
         *self.last_error.lock().unwrap() = None;
         let file_key = self.key_file.as_deref().and_then(read_key_file);
-        if let Some(key) = &file_key {
+        if let Some(key) = &file_key
+            && crate::auth::validate_secure_url("CodeGraff gateway", &self.gateway).is_ok()
+        {
             let revoked = http()
                 .post(format!("{}/v1/keys/revoke", self.gateway))
                 .bearer_auth(key)
@@ -245,6 +283,7 @@ impl CodegraffAuth {
     /// Start a device sign-in: returns the approval URL for the caller to open
     /// and polls for the key in the background.
     pub async fn start_sign_in(self: &Arc<Self>) -> Result<String, String> {
+        crate::auth::validate_secure_url("CodeGraff gateway", &self.gateway)?;
         if self.key_file.is_none() {
             return Err("no home directory to store the Codegraff key in".into());
         }
@@ -268,6 +307,7 @@ impl CodegraffAuth {
             .verification_uri_complete
             .clone()
             .unwrap_or_else(|| start.verification_uri.clone());
+        crate::auth::validate_secure_url("CodeGraff approval", &url)?;
         let this = self.clone();
         let task = tokio::spawn(async move {
             if let Err(error) = this.poll(start).await {
@@ -343,9 +383,10 @@ impl CodegraffAuth {
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
         .build()
-        .unwrap_or_default()
+        .expect("construct CodeGraff auth HTTP client")
 }
 
 /// graff's credential file: `{"api_key": …}` (extra fields are ignored, as
@@ -365,20 +406,16 @@ fn fingerprint(key: &str) -> String {
     format!("{:x}", Sha256::digest(key.as_bytes()))[..16].to_owned()
 }
 
-/// Write via a 0600 temp file and rename, so a crash never leaves a
-/// half-written or world-readable credential.
+/// Write via a fresh 0600 temp file and rename, so a crash never leaves a
+/// half-written or world-readable credential, and a symlink cannot redirect it.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    {
+    let tmp = dir.join(format!(".codegraff-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
         use std::io::Write as _;
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -387,8 +424,12 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut file = options.open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    result
 }
 
 #[cfg(test)]
@@ -397,7 +438,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// A fake gateway: answers device start/poll, /v1/me, and revoke, and
+    /// A fake gateway: answers device start/poll, /v1/me, usage, and revoke, and
     /// records every request line + body it saw.
     async fn fake_gateway(poll_body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -417,6 +458,8 @@ mod tests {
                     poll_body
                 } else if request.starts_with("GET /v1/me") {
                     r#"{"user_id":7,"email":"me@codegraff.dev","tier":"free","credits_micro_usd":0,"key_id":1,"scopes":["api"]}"#
+                } else if request.starts_with("GET /v1/usage/summary") {
+                    r#"{"email":"me@codegraff.dev","tier":"pro","credits_micro_usd":5000000,"spend_30d_micro_usd":1200000,"requests_30d":9,"prompt_tokens_30d":1000,"completion_tokens_30d":500,"key_budget_monthly_micro_usd":8000000,"key_spend_monthly_micro_usd":2000000,"key_budget_resets_at":"2026-10-01T00:00:00.000Z"}"#
                 } else {
                     r#"{"ok":true,"key_id":1}"#
                 };
@@ -507,6 +550,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(auth.status().email, None);
+    }
+
+    #[tokio::test]
+    async fn usage_reads_the_signed_in_graff_accounts_summary() {
+        let (gateway, seen) = fake_gateway(r#"{"status":"pending"}"#).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = auth_in(dir.path(), gateway);
+        write_private(
+            &dir.path().join("home").join(KEY_FILE),
+            br#"{"api_key":"cg_sk_usage_test"}"#,
+        )
+        .unwrap();
+
+        let usage = auth.usage().await.unwrap().unwrap();
+        assert_eq!(usage.email, "me@codegraff.dev");
+        assert_eq!(usage.credits_micro_usd, 5_000_000);
+        assert_eq!(usage.spend_30d_micro_usd, 1_200_000);
+        assert_eq!(usage.key_budget_monthly_micro_usd, Some(8_000_000));
+        assert!(seen.lock().unwrap().iter().any(|request| {
+            request.starts_with("GET /v1/usage/summary")
+                && request.contains("Bearer cg_sk_usage_test")
+        }));
+        assert!(!serde_json::to_string(&usage)
+            .unwrap()
+            .contains("cg_sk_usage_test"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_write_replaces_symlink_without_following_it() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let key = dir.path().join(KEY_FILE);
+        symlink(&outside, &key).unwrap();
+
+        write_private(&key, b"private-key").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read(&key).unwrap(), b"private-key");
+        assert_eq!(key.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[tokio::test]

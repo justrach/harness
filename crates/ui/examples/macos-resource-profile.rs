@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
             });
             let boot = EngineBootConfig { data_dir:data, ipc_port:0,
                 edge_url:String::new(), edge_token:None, org_id:None,
-                workos_client_id:None, default_harness:HarnessId::ClaudeCode };
+                codegraff_client_id:None, default_harness:HarnessId::ClaudeCode };
             let window = cx.open_window(WindowOptions {
                 window_bounds:Some(WindowBounds::Windowed(Bounds::new(
                     gpui::point(px(0.),px(0.)),size(px(1320.),px(880.))))),

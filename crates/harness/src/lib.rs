@@ -374,6 +374,7 @@ pub(crate) fn crash_message(
 }
 
 pub use acp::AcpHarness;
+pub use acp::exo_bridge::serve as serve_exo_acp;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;

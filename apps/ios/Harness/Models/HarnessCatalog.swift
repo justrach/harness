@@ -71,6 +71,7 @@ enum HarnessCatalog {
         "cursor": "Cursor",
         "opencode": "OpenCode",
         "antigravity": "Antigravity",
+        "exo": "Exo",
         "mock": "Mock",
     ]
 

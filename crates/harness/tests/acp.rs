@@ -1873,7 +1873,7 @@ fn antigravity_detection_and_missing_server_never_install() {
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let adapters = dir.path().join("adapters");
         if scenario == "partial" {
-            let partial = adapters.join("antigravity-acp/1.1.1");
+            let partial = adapters.join("antigravity-acp/1.2.1");
             std::fs::create_dir_all(&partial).unwrap();
             std::fs::write(partial.join("agy_acp_server.par"), "incomplete").unwrap();
         }
@@ -1899,7 +1899,7 @@ fn antigravity_detection_and_missing_server_never_install() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!adapters.join(".tmp-antigravity-acp-1.1.1").exists());
+        assert!(!adapters.join(".tmp-antigravity-acp-1.2.1").exists());
     }
 }
 

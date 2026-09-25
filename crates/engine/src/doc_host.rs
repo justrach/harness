@@ -47,6 +47,12 @@ use crate::{EngineError, Terminals, new_id, now_ms};
 
 /// Debounce window for local snapshot saves after a doc change.
 const SNAPSHOT_DEBOUNCE_MS: u64 = 1_000;
+/// chat2 maintenance (tail sidecar + threshold checkpoint) waits for this much
+/// quiet: a streaming reply commits every ~120ms, and each pass materializes,
+/// encodes and uploads the whole tail.
+const MAINTENANCE_QUIET_MS: u64 = 1_000;
+/// …but a long stream still refreshes the sidecar at least this often.
+const MAINTENANCE_MAX_WAIT_MS: u64 = 15_000;
 
 /// An edit client renews every 20s. Sixty seconds tolerates two missed
 /// heartbeats without turning a vanished client into an invisible permanent
@@ -698,7 +704,15 @@ impl ChatDocHandle {
     // Caller holds transcript_import, shared with attach and mirror clearing.
     fn publish_messages_locked(&self) {
         self.mirror_dirty.store(false, Ordering::Release);
-        match self.doc.read_entries() {
+        // Re-materialize only the messages changed since the last publish:
+        // a streaming commit touches one, the transcript can be megabytes.
+        let mut cache = lock(&self.transcript_history).take_entry_cache();
+        let read = self.doc.read_entries_cached(&mut cache);
+        if read.is_err() {
+            cache = Default::default();
+        }
+        lock(&self.transcript_history).return_entry_cache(cache);
+        match read {
             Ok(entries) => {
                 let replay_baseline =
                     lock(&self.transcript_history).snapshot(self.doc.doc(), &entries);
@@ -1399,13 +1413,18 @@ impl DocHost {
                             // check and the push let the join's store+drain
                             // slip between, orphaning the update forever).
                             let batch_id = uuid::Uuid::new_v4().to_string();
-                            if let Err(err) = publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
-                                handle.publication_failed.store(true, Ordering::Release);
-                                tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
-                            }
+                            let durable = match publication_store.enqueue_chat_update(&publication_chat, &batch_id, bytes) {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    handle.publication_failed.store(true, Ordering::Release);
+                                    tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                    false
+                                }
+                            };
                             let client_guard = lock(&handle.chat2);
                             match &*client_guard {
-                                Some(client) => client.enqueue_batch(batch_id, bytes.clone()),
+                                // Journaled just above: don't insert it twice.
+                                Some(client) => client.enqueue_persisted_batch(batch_id, bytes.clone(), durable),
                                 None => lock(&handle.chat2_pending_local).push((batch_id, bytes.clone())),
                             }
                         }
@@ -4828,6 +4847,82 @@ mod transfer_progress_tests {
         eprintln!("offline whale rebuilt mirror: {:?}", start.elapsed());
     }
 
+    /// The watched mirror re-materializes only changed messages; after every
+    /// local streaming commit, older-message edit and remote import it must
+    /// still equal a from-scratch read.
+    #[tokio::test]
+    async fn incremental_publication_matches_full_reads() {
+        let (_dir, host) = host();
+        let handle = host.open("incremental").unwrap();
+        for i in 0..30 {
+            handle
+                .write_user_message(&format!("prompt-{i}"), &format!("question {i}"), i)
+                .unwrap();
+        }
+        let rx = handle.watch_messages();
+        let full = |handle: &super::ChatDocHandle| {
+            harness_doc::join_continuation_entries(handle.doc.read_entries().unwrap())
+        };
+        assert_eq!(*rx.borrow().entries, full(&handle));
+
+        let mut writer = harness_doc::SegmentWriter::begin(&handle.doc, "reply", "device", 99).unwrap();
+        let mut text = String::new();
+        for token in 0..50 {
+            text.push_str(&format!("token{token} "));
+            writer
+                .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: text.clone() }])
+                .unwrap();
+            handle.doc.doc().commit();
+            handle.publish_messages_if_watched();
+            assert_eq!(*rx.borrow().entries, full(&handle), "token {token}");
+        }
+
+        // A remote peer edits an OLD message and appends one; the import
+        // must invalidate exactly those.
+        let peer = loro::LoroDoc::new();
+        peer.import(&handle.doc.export_snapshot().unwrap()).unwrap();
+        let peer = harness_doc::SessionDoc::from_doc(peer);
+        let before = peer.doc().oplog_vv();
+        if let Some(loro::ValueOrContainer::Container(loro::Container::Map(old))) =
+            peer.doc().get_list("messages").get(3)
+        {
+            old.insert("status", "complete").unwrap();
+        }
+        peer.push_message(&harness_doc::SessionMessageEntry {
+            id: "remote".into(),
+            role: harness_doc::MessageRole::User,
+            parts: vec![harness_doc::MessagePart::Text {
+                id: "remote-text".into(),
+                text: "from another device".into(),
+            }],
+            created_at: 500,
+            device_id: "peer".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+        peer.doc().commit();
+        let update = peer
+            .doc()
+            .export(loro::ExportMode::updates(&before))
+            .unwrap();
+        handle.doc.doc().import(&update).unwrap();
+        handle.publish_messages_if_watched();
+        assert_eq!(*rx.borrow().entries, full(&handle));
+        assert!(rx.borrow().entries.iter().any(|e| e.id == "remote"));
+
+        // Unwatched changes drop the cache; reattaching rebuilds correctly.
+        drop(rx);
+        writer
+            .sync(&[harness_doc::MessagePart::Text { id: "t".into(), text: format!("{text} done") }])
+            .unwrap();
+        handle.doc.doc().commit();
+        handle.publish_messages_if_watched();
+        let rx = handle.watch_messages();
+        assert_eq!(*rx.borrow().entries, full(&handle));
+    }
+
     #[tokio::test]
     async fn transcript_attach_and_unwatched_clear_share_a_critical_section() {
         let (_dir, host) = host();
@@ -5076,8 +5171,13 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
         host.drain_queue(&handle).await;
     }
     let mut save_deadline: Option<tokio::time::Instant> = None;
+    // Trailing debounce with a ceiling: `(quiet_deadline, max_deadline)`.
+    let mut maintenance: Option<(tokio::time::Instant, tokio::time::Instant)> = None;
     loop {
         let sleep_until = save_deadline.unwrap_or_else(tokio::time::Instant::now);
+        let maintenance_at = maintenance
+            .map(|(quiet, max)| quiet.min(max))
+            .unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
             changed = changed_rx.changed() => {
                 if changed.is_err() {
@@ -5091,12 +5191,16 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 }).await;
                 host.drain_commands(&handle).await;
                 host.drain_queue(&handle).await;
+                let now = tokio::time::Instant::now();
                 if save_deadline.is_none() {
-                    save_deadline = Some(
-                        tokio::time::Instant::now()
-                            + std::time::Duration::from_millis(SNAPSHOT_DEBOUNCE_MS),
-                    );
+                    save_deadline =
+                        Some(now + std::time::Duration::from_millis(SNAPSHOT_DEBOUNCE_MS));
                 }
+                let quiet = now + std::time::Duration::from_millis(MAINTENANCE_QUIET_MS);
+                maintenance = Some(match maintenance {
+                    Some((_, max)) => (quiet, max),
+                    None => (quiet, now + std::time::Duration::from_millis(MAINTENANCE_MAX_WAIT_MS)),
+                });
             }
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
@@ -5104,11 +5208,15 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
                 // chat2 has its own coalescing blocking-pool persister. The
                 // legacy worker must not duplicate every scheduled export.
                 if handle.persistence.is_none() { host.save_snapshot(&handle); }
-                // chat2 host duties ride the same quiesce tick (C3):
-                // threshold checkpoints + the tail sidecar publish.
-                host.chat2_maintenance(&handle).await;
-                // Post-quiesce eviction pass: sizes just refreshed.
+                // Post-save eviction pass: sizes just refreshed.
                 host.evict_over_budget();
+            }
+            _ = tokio::time::sleep_until(maintenance_at), if maintenance.is_some() => {
+                maintenance = None;
+                let Some(handle) = weak.upgrade() else { break };
+                // chat2 host duties on the quiesce tick (C3): threshold
+                // checkpoints + the tail sidecar publish.
+                host.chat2_maintenance(&handle).await;
             }
         }
     }

@@ -123,6 +123,30 @@ pub const PROVIDERS: [(HarnessId, &str, &str); 3] = [
     (HarnessId::Cursor, "Cursor", "cursor-agent"),
 ];
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CodegraffUsage {
+    email: String,
+    tier: String,
+    credits_micro_usd: i64,
+    spend_30d_micro_usd: i64,
+    requests_30d: i64,
+    key_budget_monthly_micro_usd: Option<i64>,
+    key_spend_monthly_micro_usd: i64,
+    key_budget_resets_at: String,
+}
+
+fn format_micro_usd(amount: i64) -> String {
+    let dollars = amount as f64 / 1_000_000.0;
+    let decimals = if dollars.abs() < 0.01 {
+        6
+    } else if dollars.abs() < 1.0 {
+        4
+    } else {
+        2
+    };
+    format!("${dollars:.decimals$}")
+}
+
 /// Accounts of one provider, in the engine's order (slot creation). No
 /// active-first re-sort: switching accounts must not move the switched-to
 /// card — the Active badge already says which one is live, and a list that
@@ -186,12 +210,14 @@ pub struct AccountsPage {
     target_device: Option<String>,
     device_menu: popover::Popup<()>,
     snapshot: Loadable<AgentAccountsSnapshot>,
+    codegraff_usage: Loadable<Option<CodegraffUsage>>,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
     login: Option<LoginFlow>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
+    codegraff_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
     _observe: Subscription,
@@ -213,11 +239,13 @@ impl AccountsPage {
             target_device: None,
             device_menu: popover::Popup::default(),
             snapshot: Loadable::Idle,
+            codegraff_usage: Loadable::Idle,
             busy_account: None,
             login: None,
             error: None,
             code_input,
             load_task: None,
+            codegraff_task: None,
             action_task: None,
             poll_task: None,
             _observe: observe,
@@ -442,6 +470,7 @@ impl AccountsPage {
             return;
         };
         self.snapshot = Loadable::Loading;
+        self.load_codegraff_usage(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -461,6 +490,29 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn load_codegraff_usage(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.codegraff_usage = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        self.codegraff_usage = Loadable::Loading;
+        let params = self.params(serde_json::json!({}));
+        self.codegraff_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::CODEGRAFF_USAGE, params).await;
+            this.update(cx, |page, cx| {
+                page.codegraff_usage = match result {
+                    Ok(value) => match serde_json::from_value::<Option<CodegraffUsage>>(value) {
+                        Ok(usage) => Loadable::Ready(usage),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Switch / Forget an account.
@@ -933,6 +985,166 @@ impl AccountsPage {
             .into_any_element()
     }
 
+    fn render_codegraff_section(
+        &self,
+        theme: &Theme,
+        now: DateTime<Utc>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let header =
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::icons::icon(crate::icons::GRAFF_MARK)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("CodeGraff"),
+                )
+                .child(div().flex_1())
+                .child(
+                    widgets::ghost_action(theme)
+                        .id("codegraff-view-usage")
+                        .hover(|s| widgets::ghost_hover(theme, s))
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.open_url("https://codegraff.com/dashboard/usage")
+                        }))
+                        .child("View usage"),
+                );
+
+        let body: AnyElement = match &self.codegraff_usage {
+            Loadable::Idle | Loadable::Loading => {
+                self.render_skeleton_row(("codegraff-usage", 0), false, true, theme, cx)
+            }
+            Loadable::Error(error) => div()
+                .px(px(20.0))
+                .py(px(24.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(format!("CodeGraff usage unavailable: {error}"))
+                .into_any_element(),
+            Loadable::Ready(None) => div()
+                .px(px(20.0))
+                .py(px(24.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text_muted)
+                .child("Sign in with Codegraff from the account menu to see your usage.")
+                .into_any_element(),
+            Loadable::Ready(Some(usage)) => {
+                let initial: SharedString = usage
+                    .email
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_else(|| "?".into())
+                    .into();
+                let budget_meter = usage.key_budget_monthly_micro_usd.map(|limit| {
+                    let resets_at = DateTime::parse_from_rfc3339(&usage.key_budget_resets_at)
+                        .ok()
+                        .map(|at| at.with_timezone(&Utc));
+                    harness_proto::AgentUsageWindow {
+                        label: "Key budget".into(),
+                        used_fraction: if limit <= 0 {
+                            1.0
+                        } else {
+                            (usage.key_spend_monthly_micro_usd as f64 / limit as f64)
+                                .clamp(0.0, 1.0) as f32
+                        },
+                        resets_at,
+                    }
+                });
+                div()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .flex()
+                    .flex_row()
+                    .items_stretch()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .self_center()
+                            .size(px(32.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(crate::theme::ink(0.03))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text_muted)
+                            .child(initial),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(theme, usage.email.clone()))
+                            .child(
+                                div()
+                                    .mt(px(6.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .text_size(crate::typography::ui_rems(11.5))
+                                    .text_color(theme.text_muted)
+                                    .child("Graff CLI account on this device")
+                                    .child(format!(
+                                        "{} credits available",
+                                        format_micro_usd(usage.credits_micro_usd)
+                                    ))
+                                    .child(format!(
+                                        "{} spent · {} requests in 30 days",
+                                        format_micro_usd(usage.spend_30d_micro_usd),
+                                        usage.requests_30d
+                                    ))
+                                    .when_some(budget_meter, |el, meter| {
+                                        el.child(self.render_usage_meter(&meter, theme, now))
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(6.0))
+                            .child(widgets::badge_active(theme, "Active"))
+                            .child(widgets::badge(theme, usage.tier.clone())),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        div()
+            .mt(px(24.0))
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(widgets::section_card(theme).mt(px(8.0)).child(body))
+            .into_any_element()
+    }
+
     fn render_login_dialog(
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
@@ -1225,7 +1437,10 @@ impl Render for AccountsPage {
         let account_count = self
             .snapshot
             .ready()
-            .map(|s| s.accounts.len())
+            .map(|s| {
+                s.accounts.len()
+                    + usize::from(matches!(self.codegraff_usage, Loadable::Ready(Some(_))))
+            })
             .filter(|&n| n > 0);
 
         let provider_icon = |harness: HarnessId| match harness {
@@ -1237,6 +1452,7 @@ impl Render for AccountsPage {
             HarnessId::Pi => (crate::icons::PI_MARK, None),
             HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
             HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
+            HarnessId::Exo => (crate::icons::EXO_MARK, None),
             _ => (
                 crate::icons::CLAUDE_MARK,
                 Some(crate::icons::claude_brand()),
@@ -1475,9 +1691,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Harness \
-                                 detects the live session, keeps each account backed up, and can \
-                                 swap between them.",
+                                "CodeGraff usage and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.",
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
@@ -1490,6 +1704,7 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
+                            .child(self.render_codegraff_section(&theme, now, cx))
                             .children(sections)
                             // Footer note (harness: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).

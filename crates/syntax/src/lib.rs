@@ -1115,6 +1115,25 @@ fn build(value: usize) -> Widget {
         }
     }
 
+    /// The transcript cancels superseded tokenizes of a streaming block:
+    /// a raised flag must stop the work instead of finishing it.
+    #[test]
+    fn a_raised_cancellation_flag_stops_highlighting() {
+        let source = "fn f() { let x = 1; }\n".repeat(2_000);
+        let request = || HighlightRequest {
+            source: &source,
+            path: Some("main.rs"),
+            fence_tag: None,
+        };
+        let idle = AtomicUsize::new(0);
+        assert!(highlight_with_limits(request(), HighlightLimits::default(), Some(&idle)).is_ok());
+        let raised = AtomicUsize::new(1);
+        assert!(matches!(
+            highlight_with_limits(request(), HighlightLimits::default(), Some(&raised)),
+            Err(HighlightError::Parser(_))
+        ));
+    }
+
     #[test]
     fn limits_and_unbundled_languages_degrade_with_typed_errors() {
         assert_eq!(

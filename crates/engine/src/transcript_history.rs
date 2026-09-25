@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use loro::{Container, ContainerID, EventTriggerKind, Index, LoroDoc, LoroValue, ValueOrContainer};
-use harness_doc::{SessionMessageEntry, TranscriptBaseline};
+use harness_doc::{EntryCache, SessionMessageEntry, TranscriptBaseline};
 
 pub(crate) const REPLAY_ORIGIN: &str = "harness:transcript-replay";
 
@@ -23,6 +23,13 @@ pub(crate) struct TranscriptHistory {
     owners: HashMap<ContainerID, ContainerID>,
     dirty: bool,
     baseline: Arc<TranscriptBaseline>,
+    // Materialized messages for publication, invalidated per message
+    // container from the same diff events. Reset with the rest of the
+    // history whenever a change goes unobserved (nobody watching).
+    entry_cache: EntryCache,
+    // The cache is checked out by a publication reading the doc without
+    // this lock; a reset in the meantime drops it on return.
+    entry_cache_out: bool,
     #[cfg(test)]
     pub(crate) inspected_parts: usize,
 }
@@ -47,6 +54,9 @@ impl TranscriptHistory {
             // Message insertion/deletion or late scalar fields can affect the
             // ids/continuation mapping, but must not reclassify existing parts.
             self.dirty = true;
+            if let Some((message, _)) = path.get(1) {
+                self.entry_cache.invalidate(message.clone());
+            }
             if path.len() >= 4 && matches!(&path[2].1, Index::Key(key) if key.as_str() == "parts") {
                 changed.insert((path[1].0.clone(), path[3].0.clone()));
             }
@@ -81,6 +91,24 @@ impl TranscriptHistory {
                 part.historical_len = Some(len);
             }
         }
+    }
+
+    /// Check out the message cache for a doc read done without holding this
+    /// history's lock (the diff callback takes it while Loro emits events).
+    pub(crate) fn take_entry_cache(&mut self) -> EntryCache {
+        self.entry_cache_out = true;
+        std::mem::take(&mut self.entry_cache)
+    }
+
+    /// Return a checked-out cache, keeping invalidations observed while it
+    /// was out. If the history was reset meanwhile (a change went
+    /// unobserved), the cache is dropped and the next read starts cold.
+    pub(crate) fn return_entry_cache(&mut self, mut cache: EntryCache) {
+        if !std::mem::take(&mut self.entry_cache_out) {
+            return;
+        }
+        cache.absorb_invalidations(std::mem::take(&mut self.entry_cache));
+        self.entry_cache = cache;
     }
 
     pub(crate) fn snapshot(

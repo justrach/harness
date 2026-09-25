@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -34,9 +34,19 @@ struct JournalLine {
     event: AgentEvent,
 }
 
+/// [`JournalLine`]'s wire shape over a borrowed event: appends run once per
+/// streamed token and must not deep-clone the event just to serialize it.
+#[derive(Serialize)]
+struct JournalLineRef<'a> {
+    seq: u64,
+    event: &'a AgentEvent,
+}
+
 struct ChatJournal {
     file: File,
     next_seq: u64,
+    /// Append clock value of the last write — eviction drops the stalest.
+    last_used: u64,
     /// True when the file ends without a newline (torn write) — the next append
     /// starts with one so the torn line stays isolated.
     needs_newline: bool,
@@ -45,7 +55,13 @@ struct ChatJournal {
 /// Append-only JSONL journal store, one file per chat.
 pub struct RunJournal {
     dir: PathBuf,
-    open_files: Mutex<HashMap<String, ChatJournal>>,
+    open_files: Mutex<OpenJournals>,
+}
+
+#[derive(Default)]
+struct OpenJournals {
+    files: HashMap<String, ChatJournal>,
+    clock: u64,
 }
 
 impl RunJournal {
@@ -54,11 +70,11 @@ impl RunJournal {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
-            open_files: Mutex::new(HashMap::new()),
+            open_files: Mutex::new(OpenJournals::default()),
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, ChatJournal>> {
+    fn lock(&self) -> MutexGuard<'_, OpenJournals> {
         self.open_files
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -98,15 +114,24 @@ impl RunJournal {
 
     /// Append one event; returns its journal seq.
     pub fn append(&self, chat_id: &str, event: &AgentEvent) -> Result<u64, JournalError> {
-        let mut files = self.lock();
+        let mut open = self.lock();
+        open.clock += 1;
+        let now = open.clock;
+        let files = &mut open.files;
         if !files.contains_key(chat_id) {
             // Bound the open-fd set: entries were never removed, so every chat
             // ever run held a descriptor for the process lifetime. Dropping is
             // safe — the next append reopens and rescans the tail. The cap
-            // comfortably exceeds concurrent runs, so eviction stays rare.
+            // comfortably exceeds concurrent runs; past it only the least
+            // recently written journal closes, so live runs keep their files.
             const OPEN_FILE_CAP: usize = 16;
-            if files.len() >= OPEN_FILE_CAP {
-                files.clear();
+            if files.len() >= OPEN_FILE_CAP
+                && let Some(stalest) = files
+                    .iter()
+                    .min_by_key(|(_, journal)| journal.last_used)
+                    .map(|(id, _)| id.clone())
+            {
+                files.remove(&stalest);
             }
             let path = self.path_for(chat_id);
             let (next_seq, needs_newline) = scan_tail(&path)?;
@@ -116,6 +141,7 @@ impl RunJournal {
                 ChatJournal {
                     file,
                     next_seq,
+                    last_used: now,
                     needs_newline,
                 },
             );
@@ -126,11 +152,9 @@ impl RunJournal {
                 "journal entry vanished under lock",
             )));
         };
+        journal.last_used = now;
         let seq = journal.next_seq;
-        let line = serde_json::to_string(&JournalLine {
-            seq,
-            event: event.clone(),
-        })?;
+        let line = serde_json::to_string(&JournalLineRef { seq, event })?;
         let mut buf = Vec::with_capacity(line.len() + 2);
         if journal.needs_newline {
             buf.push(b'\n');
@@ -167,7 +191,7 @@ impl RunJournal {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(read_lines(&path)?.into_iter().next_back())
+        Ok(last_valid_line(&path)?.0)
     }
 
     /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
@@ -183,7 +207,9 @@ impl RunJournal {
             let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let last = read_lines(&path)?.into_iter().next_back();
+            // Boot runs this over every journal ever written (never
+            // compacted): read each tail, not each history.
+            let (last, _) = last_valid_line(&path)?;
             match last {
                 Some((_, AgentEvent::Done { .. })) | None => {}
                 Some(_) => stale.push(chat_id.to_string()),
@@ -195,7 +221,7 @@ impl RunJournal {
 
     /// Remove a chat's journal file entirely (tests / future compaction).
     pub fn discard(&self, chat_id: &str) -> Result<(), JournalError> {
-        self.lock().remove(chat_id);
+        self.lock().files.remove(chat_id);
         let path = self.path_for(chat_id);
         if path.exists() {
             std::fs::remove_file(path)?;
@@ -229,17 +255,53 @@ fn read_lines(path: &Path) -> Result<Vec<(u64, AgentEvent)>, JournalError> {
 
 /// Next seq (last valid seq + 1, starting at 1) and whether the file ends mid-line.
 fn scan_tail(path: &Path) -> Result<(u64, bool), JournalError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, false)),
+    let (last, needs_newline) = last_valid_line(path)?;
+    Ok((last.map_or(1, |(seq, _)| seq + 1), needs_newline))
+}
+
+/// The last parseable line (what [`read_lines`] would return last) and
+/// whether the file ends mid-line, reading backwards from the end in growing
+/// windows — journals are append-only and never compacted, so their tails
+/// are what boot recovery and reopen need, not their whole history.
+fn last_valid_line(path: &Path) -> Result<(Option<(u64, AgentEvent)>, bool), JournalError> {
+    const FIRST_WINDOW: u64 = 64 * 1024;
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, false)),
         Err(e) => return Err(e.into()),
     };
-    let needs_newline = bytes.last().is_some_and(|b| *b != b'\n');
-    let next_seq = read_lines(path)?
-        .last()
-        .map(|(seq, _)| seq + 1)
-        .unwrap_or(1);
-    Ok((next_seq, needs_newline))
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok((None, false));
+    }
+    let mut window = FIRST_WINDOW.min(len);
+    let mut needs_newline = None;
+    loop {
+        let start = len - window;
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::with_capacity(window as usize);
+        (&mut file).take(window).read_to_end(&mut bytes)?;
+        let needs_newline = *needs_newline.get_or_insert(bytes.last() != Some(&b'\n'));
+        // Unless the window reaches the file start, its first segment may be
+        // the cut-off end of an earlier line: never parse it.
+        let segments: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+        let skip = usize::from(start > 0);
+        for segment in segments.iter().skip(skip).rev() {
+            let Ok(line) = std::str::from_utf8(segment) else {
+                continue;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(parsed) = serde_json::from_str::<JournalLine>(line) {
+                return Ok((Some((parsed.seq, parsed.event)), needs_newline));
+            }
+        }
+        if start == 0 {
+            return Ok((None, needs_newline));
+        }
+        window = (window * 4).min(len);
+    }
 }
 
 /// Journal (`.jsonl`) and resume-budget (`.resume`) paths for `chat_id` under an
@@ -347,5 +409,61 @@ mod tests {
         let all = journal.replay("chat-1", 0).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[1].0, 2);
+    }
+
+    /// The backward tail scan agrees with a full parse when lines straddle
+    /// the read windows, when the tail is torn, and when the only valid line
+    /// sits at the very start of a large file.
+    #[test]
+    fn tail_scan_matches_a_full_parse_across_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        let path = dir.path().join("big.jsonl");
+        // ~100KB lines put every window edge mid-line.
+        for i in 0..7 {
+            journal.append("big", &text(&"x".repeat(100_000 + i))).unwrap();
+        }
+        let full = read_lines(&path).unwrap();
+        let (last, torn) = last_valid_line(&path).unwrap();
+        assert_eq!(last.as_ref().map(|(seq, _)| *seq), Some(7));
+        assert_eq!(last, full.last().cloned());
+        assert!(!torn);
+
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&vec![b'y'; 200_000]).unwrap();
+        drop(f);
+        let (last, torn) = last_valid_line(&path).unwrap();
+        assert_eq!(last.map(|(seq, _)| seq), Some(7), "torn garbage is skipped");
+        assert!(torn);
+        assert_eq!(scan_tail(&path).unwrap(), (8, true));
+
+        let lone = dir.path().join("lone.jsonl");
+        let mut bytes = serde_json::to_vec(&JournalLine { seq: 4, event: done() }).unwrap();
+        bytes.push(b'\n');
+        bytes.extend(vec![b'z'; 300_000]);
+        std::fs::write(&lone, bytes).unwrap();
+        assert!(matches!(last_valid_line(&lone).unwrap().0, Some((4, AgentEvent::Done { .. }))));
+        assert_eq!(last_valid_line(&dir.path().join("none.jsonl")).unwrap(), (None, false));
+    }
+
+    /// Past the open-file cap only the least recently written journal
+    /// closes; a live run keeps its handle and its seq continues.
+    #[test]
+    fn eviction_closes_only_the_stalest_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = RunJournal::open(dir.path()).unwrap();
+        journal.append("live", &text("a")).unwrap();
+        for i in 0..15 {
+            journal.append(&format!("idle-{i}"), &text("a")).unwrap();
+        }
+        journal.append("live", &text("b")).unwrap();
+        journal.append("newcomer", &text("a")).unwrap();
+        let open = journal.lock();
+        assert_eq!(open.files.len(), 16);
+        assert!(open.files.contains_key("live"));
+        assert!(!open.files.contains_key("idle-0"), "the stalest closes");
+        drop(open);
+        assert_eq!(journal.append("live", &text("c")).unwrap(), 3);
+        assert_eq!(journal.append("idle-0", &text("b")).unwrap(), 2, "reopen rescans");
     }
 }

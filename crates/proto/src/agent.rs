@@ -25,6 +25,9 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Exo (exoharness/exo), driven over ACP through Harness's own bridge
+    /// (`harness exo-acp`) onto Exo's agent-cli socket.
+    Exo,
     /// Test harness; never shown in production pickers.
     Mock,
 }

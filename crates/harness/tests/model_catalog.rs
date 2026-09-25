@@ -58,8 +58,8 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
         assert_eq!(first.models[0].id, "account-model");
         std::fs::write(&state, r#"{"fail":true,"id":"unused"}"#).unwrap();
         let retained = harness.model_catalog(true).await.unwrap();
-        assert_eq!(retained.source, "cache");
-        assert_eq!(retained.models, first.models);
+        assert_eq!(retained.source, "cache", "{:?}", harness.id());
+        assert_eq!(retained.models, first.models, "{:?}", harness.id());
         let cold = harnesses(&binary)
             .into_iter()
             .find(|h| h.id() == harness.id())

@@ -231,11 +231,13 @@ impl EngineCore {
                 edge: edge.clone(),
             },
         );
+        // Resolved once: on macOS it spawns `scutil`, on the Ready path.
+        let device_name = local_device_name(&device_id);
         let workspace = WorkspaceHost::open(
             store,
             WorkspaceHostConfig {
                 device_id: device_id.clone(),
-                device_name: local_device_name(&device_id),
+                device_name: device_name.clone(),
                 platform: std::env::consts::OS.to_string(),
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
@@ -262,7 +264,7 @@ impl EngineCore {
         let previews = harness_preview::PreviewService::new(
             profile.store_root().join("previews.json"),
             device_id.clone(),
-            local_device_name(&device_id),
+            device_name,
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
         let uploads = Uploads::from_root_with_fallback(
@@ -1018,6 +1020,7 @@ pub async fn terminal_sign_in(auth: &Auth) -> Result<(), EngineError> {
                     ));
                 }
                 if stdin_reader.is_none() {
+                    auth.ensure_secure_transport()?;
                     let url = auth.start_headless_sign_in();
                     println!("Sign in to Harness:\n\n  {url}\n");
                     println!("Then paste the code shown in the browser here and press enter.");

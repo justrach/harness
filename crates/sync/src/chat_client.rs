@@ -653,6 +653,14 @@ impl ChatClient {
                 false
             }
         };
+        self.enqueue_persisted_batch(batch_id, bytes, durable);
+    }
+
+    /// [`Self::enqueue_batch`] for a batch the caller ALREADY wrote to the
+    /// sink's outbox (`durable` = that write succeeded): the per-commit
+    /// publish path journals first, and a second identical insert per commit
+    /// only contended the store's connection lock.
+    pub fn enqueue_persisted_batch(&self, batch_id: String, bytes: Vec<u8>, durable: bool) {
         if bytes.len() > MAX_PUSH_BYTES {
             use std::sync::atomic::Ordering::Relaxed;
             tracing::error!(

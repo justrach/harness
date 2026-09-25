@@ -6,7 +6,9 @@
 //! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
 //! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
 //! pinned release archive) — plus pi ([`AcpHarness::pi`]) via the community
-//! `pi-acp` adapter until a native driver exists. Claude, Codex and Cursor moved to native drivers
+//! `pi-acp` adapter until a native driver exists — and Exo
+//! ([`AcpHarness::exo`]) through Harness's own bridge ([`exo_bridge`], `harness
+//! exo-acp`), since Exo only exposes its agent-cli socket. Claude, Codex and Cursor moved to native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
@@ -30,6 +32,7 @@
 
 mod antigravity_paths;
 mod devin_models;
+pub mod exo_bridge;
 mod graff_models;
 mod normalize;
 mod subagent;
@@ -264,7 +267,12 @@ fn grok_spec() -> AcpAgentSpec {
         // shared process via ~/.grok/leader.sock, so a wedged/stale leader
         // (the user's TUI) reads as total silent non-response in harness.
         args: &["--no-auto-update", "agent", "--no-leader", "stdio"],
-        npm_package: Some("@xai-official/grok@1.0.4"),
+        // The npm fallback's launcher prefers an existing ~/.grok install and
+        // otherwise bootstraps THIS version, which `--no-auto-update` then
+        // keeps. 1.0.41 re-verified 2026-09-25 with these exact args:
+        // initialize, `grok.com` authenticate, session/new advertising
+        // `model` + `reasoning_effort` (category thought_level, xhigh..low).
+        npm_package: Some("@xai-official/grok@1.0.41"),
         archive: None,
         extra_paths: grok_install_paths,
         cli_executable: "grok",
@@ -509,6 +517,73 @@ fn graff_spec() -> AcpAgentSpec {
     }
 }
 
+/// The ACP bridge is Harness itself (`harness exo-acp`), so the only launch
+/// candidate is the running app binary — never a test runner or another tool
+/// that links this crate.
+fn exo_bridge_programs() -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.file_stem().is_some_and(|stem| stem == "harness"))
+        .into_iter()
+        .collect()
+}
+
+/// Where Exo's setup docs put the `exo-cli` client (`ln -s … ~/bin/exo-cli`).
+fn exo_cli_paths() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::executable::home_dir() {
+        dirs.push(home.join("bin").join("exo-cli"));
+        dirs.push(home.join(".local").join("bin").join("exo-cli"));
+    }
+    dirs
+}
+
+fn exo_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Exo,
+        display_name: "Exo",
+        // Never on PATH: resolution lands on `exo_bridge_programs`.
+        executable: "harness-exo-acp",
+        env_override: "EXO_ACP_EXECUTABLE",
+        args: &["exo-acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: exo_bridge_programs,
+        // Installed = Exo's agent-cli is set up: its client on PATH, or its
+        // socket live (see `AcpHarness::installed`).
+        cli_executable: "exo-cli",
+        cli_extra_paths: exo_cli_paths,
+        install_hint: "Exo's agent-cli adapter (install Exo from \
+             https://github.com/exoharness/exo, start it with `./exo.sh --setup agent-cli`, \
+             and link `exo/scripts/exo-cli` onto PATH; set EXO_AGENT_CLI_SOCKET if the \
+             socket isn't ~/.exo/agent-cli.sock)",
+        // Exo picks its model itself (`./exo.sh --model`); the picker shows a
+        // single pass-through entry, like pi.
+        models: || {
+            vec![Model {
+                id: "default".into(),
+                label: "Exo default".into(),
+                description: Some("Runs the model configured in Exo (`./exo.sh --model`)".into()),
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+            }]
+        },
+        // One reply per agent-cli exchange: steers queue for the next turn.
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "Check that Exo's stack is running (`./exo.sh`).",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+    }
+}
+
 fn pi_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Pi,
@@ -575,40 +650,40 @@ fn pi_spec() -> AcpAgentSpec {
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-agy_acp_server_1.1.1-darwin-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
             "agy_acp_server.par",
-            "82576ba00164331daeba798db43f9e7c9097b76f0cd536cc07956f976e0132e3500f51b28288f07bdb5a3f90f9702dabc20ca0627edb25aa7e8e50f9fac29b8a",
+            "c0049b1f423ffdf0e6a79a6caa104a27b6368522b1eb2c67d9eeed1424af2a07898a66b475b0824a734a0bdd01264473a7d67d1550357a8607fb136507b0afae",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip",
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-x86_64.zip",
             "agy_acp_server.par",
-            "bccda188b2903d3ff7a56691064fc8698f76d7bc2bb0f24e99bb5f8cda02c77f77629edc5dba640d6e713edf8e6576dfa38e88fb532752a53e26710934b5e4f0",
+            "dd9b778479dbfc753661d63ff66a3235e7249e8451af12adc11d26509172de1ff50452c3af57684009bb944314bd587b2be200bab17df743a2706ce4067d6731",
         )
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.2.1-linux-arm64.zip",
             "agy_acp_server.par",
-            "f895b4ade624e25f9765c90df66f3a864b19b2d1f2bde2fc485de6b6782ce30be458abed2da587d7cdd2272ea0812a8452639682c6318127e4fe0b4b8fc62dcf",
+            "d907f928609ff2232bfeeec9177fe925d3e02e1773295cfb30097e5c4e134758021bff916ba5ae2e2e2ff81d374564349f268f92a4577bc88370537011473e29",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-x86_64.zip",
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-x86_64.zip",
             "agy_acp_server.exe",
-            "5f1c7ad17a3f3a877552bcb9c75da7c53d05417916728a3436962d81a136bb136e9d9e35a880c9c8ca4db0fcbab9c76e959b26965c5ce6e16ebdea51e4ea28b5",
+            "515c0af1d00164ca3a608f4ef04caa4ef8045ffa94a3ef2405c9b43c87c7a74c9f71a232c81917353dc3f2d49b69230f935d2ebfa28f7ee021b5aa088f3fa554",
         )
     } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
         (
-            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-agy_acp_server_1.1.1-windows-arm64.zip",
+            "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.2.1-windows-arm64.zip",
             "agy_acp_server.exe",
-            "5ac47faa3d74a447f8c2b0aa6d174360c2fd08d0009368c2eff97ed8f24d0fedc6b798e5709e91d18ab756af9b06657dd9d90103cd37c67392afb94229fcc536",
+            "ae3f4c2d2255c03d4d9548e10a760a107c41c99e4c6c710bd82758791e4fd497b75bdef0cd2cfd7fdff1a5bb2fee7afd81f5d043da92ab52dce5505dd2aa58b3",
         )
     } else {
         return None;
     };
     Some(crate::archive_install::ArchivePin {
         name: "antigravity-acp",
-        version: "1.1.1",
+        version: "1.2.1",
         url,
         entry,
         sha512,
@@ -898,10 +973,19 @@ fn sign_in_url(line: &str) -> Option<String> {
 /// Skips agents whose adapter is already resolvable; failures are logged and
 /// retried on the next daemon start or blocking launch. A no-op outside a
 /// tokio runtime. Archive-distributed servers require explicit installation.
+///
+/// Returns immediately: the PATH probes wait on the login-shell probe
+/// (`shell_env`, an interactive shell start that can take seconds), and the
+/// caller is the engine's Ready path, so they run on the blocking pool.
 pub fn prewarm_managed_adapters() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
+    let spawner = handle.clone();
+    handle.spawn_blocking(move || prewarm_managed_adapters_on(&spawner));
+}
+
+fn prewarm_managed_adapters_on(handle: &tokio::runtime::Handle) {
     for spec in [grok_spec(), pi_spec()] {
         let Some(pkg) = spec.npm_package else {
             continue;
@@ -1023,6 +1107,11 @@ impl AcpHarness {
     pub fn antigravity() -> Self {
         Self::with_spec(antigravity_spec())
             .with_model_discovery_timeout(ANTIGRAVITY_DISCOVERY_TIMEOUT)
+    }
+
+    /// Exo through Harness's ACP bridge onto its agent-cli socket.
+    pub fn exo() -> Self {
+        Self::with_spec(exo_spec())
     }
 
     /// sign the agent out with acp `logout`, clearing the credentials its
@@ -1507,41 +1596,29 @@ impl AcpHarness {
                 .await?;
             // Grok advertises authMethods and rejects session/new until this
             // process calls authenticate — even when `grok login` already succeeded.
+            // Failures propagate like every other agent's: the catalog layer
+            // then keeps the last good list (or the static one) for transient
+            // errors and surfaces sign-in-required, instead of this probe
+            // passing the static list off as a live one.
             if self.spec.id == HarnessId::Grok
                 && let Some(method) = self.spec.auth_method
-                && let Err(error) = request_draining(
+            {
+                request_draining(
                     &client,
                     &mut incoming,
                     "authenticate",
                     json!({ "methodId": method }),
                 )
-                .await
-            {
-                tracing::debug!(
-                    target: "harness_adapters::acp",
-                    "grok authenticate during model discovery: {error}"
-                );
-                return Ok((self.spec.models)());
+                .await?;
             }
             let cwd = crate::executable::home_or_current_dir();
-            let session = match request_draining(
+            let session = request_draining(
                 &client,
                 &mut incoming,
                 "session/new",
                 json!({ "cwd": cwd, "mcpServers": [] }),
             )
-            .await
-            {
-                Ok(session) => session,
-                Err(error) if self.spec.id == HarnessId::Grok => {
-                    tracing::debug!(
-                        target: "harness_adapters::acp",
-                        "grok session/new during model discovery: {error}"
-                    );
-                    return Ok((self.spec.models)());
-                }
-                Err(error) => return Err(error),
-            };
+            .await?;
             let mut models = models_from_session(&session, &(self.spec.models)());
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
@@ -1874,6 +1951,11 @@ impl Harness for AcpHarness {
         }
         if self.spec.id == HarnessId::Antigravity {
             self.find_server().is_some()
+        } else if self.spec.id == HarnessId::Exo {
+            self.find_server().is_some()
+                && (exo_bridge::socket_path().is_some_and(|socket| socket.exists())
+                    || find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)())
+                        .is_some())
         } else {
             find_on_paths(self.spec.cli_executable, (self.spec.cli_extra_paths)()).is_some()
         }
@@ -5187,7 +5269,7 @@ mod tests {
         );
     }
 
-    /// the pinned 1.1.1 server fetches a signed-in account's flash list
+    /// the pinned server (1.1.1 when verified) fetches a signed-in account's flash list
     /// dynamically, so a newer flagship than the static catalog knows about can
     /// arrive on the wire; it has to reach the picker on its own merits rather
     /// than be filtered down to the ids we happen to have curated.
@@ -5250,8 +5332,9 @@ mod tests {
     }
 
     /// the offline list is what an unreachable or signed-out server falls back
-    /// to, so it stays at what the pinned 1.1.1 archive itself bundles. a newer
-    /// flash belongs here only once that pin advertises it.
+    /// to, so it stays at what the pinned archive itself bundles. a newer
+    /// flash belongs here only once that pin advertises it. (1.2.1 also embeds
+    /// gemini-3.8-flash ids, but what it advertises needs a signed-in check.)
     #[test]
     fn antigravity_static_fallback_stays_on_the_pinned_servers_models() {
         let fallback: Vec<(String, Vec<ReasoningLevel>)> = (antigravity_spec().models)()

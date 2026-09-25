@@ -2058,6 +2058,11 @@ async fn stalled_prompt_post_has_a_bounded_timeout() {
     tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(CALL_TIMEOUT + Duration::from_secs(1)).await;
+    // The call timeout has fired. Resume real time before waiting: the
+    // Errored turn still crosses real sockets, and a paused clock
+    // auto-advances whenever the runtime idles on that IO, expiring
+    // `done()`'s own 5s guard instantly (flaked ~1 in 3).
+    tokio::time::resume();
     assert_eq!(wire.done().await.0, DoneStatus::Errored);
 }
 

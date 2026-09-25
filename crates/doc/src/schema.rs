@@ -392,18 +392,66 @@ impl SessionDoc {
         let raw: Vec<serde_json::Value> = serde_json::from_value(messages)?;
         Ok(raw
             .into_iter()
-            .filter_map(|v| match entry_from_json(v) {
-                Ok(entry) => Some(entry),
-                Err(err) => {
-                    tracing::warn!(
-                        chat = %self.chat_id().unwrap_or_default(),
-                        error = %err,
-                        "skipping unsalvageable transcript entry"
-                    );
-                    None
-                }
-            })
+            .filter_map(|v| self.salvage_entry(v))
             .collect())
+    }
+
+    fn salvage_entry(&self, value: serde_json::Value) -> Option<SessionMessageEntry> {
+        match entry_from_json(value) {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                tracing::warn!(
+                    chat = %self.chat_id().unwrap_or_default(),
+                    error = %err,
+                    "skipping unsalvageable transcript entry"
+                );
+                None
+            }
+        }
+    }
+
+    /// [`Self::read_entries`], re-materializing only the message containers
+    /// `cache` was told changed ([`EntryCache::invalidate`]) or has never
+    /// seen. A streaming commit touches one message, so a watched chat stops
+    /// paying a whole-transcript deep value + JSON round trip per tick.
+    ///
+    /// Correct only while EVERY change under `messages` since the last call
+    /// was reported to the cache (or the cache was cleared).
+    pub fn read_entries_cached(
+        &self,
+        cache: &mut EntryCache,
+    ) -> Result<Vec<SessionMessageEntry>, DocError> {
+        use loro::{Container, ContainerTrait, ValueOrContainer};
+        let messages = self.doc.get_list("messages");
+        let stale = std::mem::take(&mut cache.stale);
+        let mut previous = std::mem::take(&mut cache.entries);
+        let mut entries = Vec::with_capacity(messages.len());
+        for index in 0..messages.len() {
+            match messages.get(index) {
+                Some(ValueOrContainer::Container(Container::Map(map))) => {
+                    let id = map.id();
+                    let entry = match previous.remove(&id) {
+                        Some(entry) if !stale.contains(&id) => entry,
+                        _ => {
+                            #[cfg(test)]
+                            {
+                                cache.materialized += 1;
+                            }
+                            self.salvage_entry(map.get_deep_value().to_json_value())
+                        }
+                    };
+                    if let Some(entry) = &entry {
+                        entries.push(entry.clone());
+                    }
+                    cache.entries.insert(id, entry);
+                }
+                Some(other) => {
+                    entries.extend(self.salvage_entry(other.get_deep_value().to_json_value()));
+                }
+                None => {}
+            }
+        }
+        Ok(entries)
     }
 
     /// Read a bounded suffix directly from the containers, without expanding
@@ -852,6 +900,30 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
     Ok(())
+}
+
+/// Per-message memo for [`SessionDoc::read_entries_cached`], keyed by each
+/// message's map container. `None` records a message that failed to parse
+/// (a torn import), so it is retried only once it changes.
+#[derive(Default)]
+pub struct EntryCache {
+    entries: std::collections::HashMap<loro::ContainerID, Option<SessionMessageEntry>>,
+    stale: std::collections::HashSet<loro::ContainerID>,
+    #[cfg(test)]
+    materialized: usize,
+}
+
+impl EntryCache {
+    /// Something under this message's container changed.
+    pub fn invalidate(&mut self, message: loro::ContainerID) {
+        self.stale.insert(message);
+    }
+
+    /// Carry over invalidations recorded in `other` (the placeholder that
+    /// sat in the cache's slot while this one was out reading).
+    pub fn absorb_invalidations(&mut self, other: EntryCache) {
+        self.stale.extend(other.stale);
+    }
 }
 
 fn entry_from_json(v: serde_json::Value) -> Result<SessionMessageEntry, DocError> {
@@ -1393,6 +1465,95 @@ mod tests {
             doc.export_snapshot().unwrap(),
             "preview never mutates storage"
         );
+    }
+
+    /// The cached read matches a full read through appends, edits, torn
+    /// entries and removals, re-materializing only invalidated messages.
+    #[test]
+    fn cached_entries_match_full_reads_and_skip_unchanged_messages() {
+        use loro::{Container, ContainerTrait, ValueOrContainer};
+        let doc = SessionDoc::init("cache").unwrap();
+        let message = |id: &str, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: format!("{id}-text"),
+                text: text.into(),
+            }],
+            created_at: 1,
+            device_id: "device".into(),
+            status: Some(MessageStatus::Streaming),
+            continuation_of: None,
+            duration_ms: None,
+        };
+        for index in 0..20 {
+            doc.push_message(&message(&format!("m{index}"), "hello")).unwrap();
+        }
+        let container = |index: usize| {
+            let Some(ValueOrContainer::Container(Container::Map(map))) =
+                doc.doc().get_list("messages").get(index)
+            else {
+                panic!("message {index} is a map");
+            };
+            map
+        };
+        let mut cache = EntryCache::default();
+        assert_eq!(doc.read_entries_cached(&mut cache).unwrap(), doc.read_entries().unwrap());
+        assert_eq!(cache.materialized, 20);
+
+        // Unchanged doc: nothing re-materializes.
+        assert_eq!(doc.read_entries_cached(&mut cache).unwrap(), doc.read_entries().unwrap());
+        assert_eq!(cache.materialized, 20);
+
+        // A streaming edit to the tail message re-reads just that message.
+        let tail = container(19);
+        tail.insert("status", "complete").unwrap();
+        doc.doc().commit();
+        cache.invalidate(tail.id());
+        let cached = doc.read_entries_cached(&mut cache).unwrap();
+        assert_eq!(cached, doc.read_entries().unwrap());
+        assert_eq!(cached[19].status, Some(MessageStatus::Complete));
+        assert_eq!(cache.materialized, 21);
+
+        // Appends materialize only the new messages; a torn one (fields
+        // arriving later) is salvaged exactly as read_entries does and
+        // re-read once it changes.
+        doc.push_message(&message("m20", "new")).unwrap();
+        let torn = doc
+            .doc()
+            .get_list("messages")
+            .push_container(loro::LoroMap::new())
+            .unwrap();
+        doc.doc().commit();
+        let cached = doc.read_entries_cached(&mut cache).unwrap();
+        assert_eq!(cached, doc.read_entries().unwrap());
+        assert_eq!(cache.materialized, 23);
+        let filled = message("m21", "late");
+        torn.insert("id", filled.id.as_str()).unwrap();
+        torn.insert("role", "assistant").unwrap();
+        torn.insert("createdAt", 1).unwrap();
+        torn.insert("deviceId", "device").unwrap();
+        doc.doc().commit();
+        cache.invalidate(torn.id());
+        let cached = doc.read_entries_cached(&mut cache).unwrap();
+        assert_eq!(cached, doc.read_entries().unwrap());
+        assert!(cached.iter().any(|entry| entry.id == "m21"));
+        assert_eq!(cache.materialized, 24);
+
+        // Removal needs no invalidation: the list walk drops it.
+        doc.doc().get_list("messages").delete(3, 1).unwrap();
+        doc.doc().commit();
+        assert_eq!(doc.read_entries_cached(&mut cache).unwrap(), doc.read_entries().unwrap());
+        assert_eq!(cache.entries.len(), 21);
+
+        // Invalidations recorded while the cache was checked out carry over.
+        let mut placeholder = EntryCache::default();
+        let head = container(0);
+        head.insert("status", "complete").unwrap();
+        doc.doc().commit();
+        placeholder.invalidate(head.id());
+        cache.absorb_invalidations(placeholder);
+        assert_eq!(doc.read_entries_cached(&mut cache).unwrap(), doc.read_entries().unwrap());
     }
 
     #[test]

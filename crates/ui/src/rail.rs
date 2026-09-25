@@ -7,7 +7,10 @@
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
-use gpui::{AnyElement, Context, ListOffset, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Context, EntityId, ListOffset, SharedString, div, prelude::*, px};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
@@ -29,6 +32,11 @@ pub const PREVIEW_PROMPT_CHARS: usize = 160;
 pub const PREVIEW_REPLY_CHARS: usize = 200;
 
 /// One rail tick: a user prompt and the opening of the reply that followed.
+///
+/// `prompt` / `reply` are the hover card's DISPLAY previews, already
+/// whitespace-flattened and char-capped by [`truncate_preview`]
+/// ([`PREVIEW_PROMPT_CHARS`] / [`PREVIEW_REPLY_CHARS`]) — a tick never holds a
+/// copy of a (possibly streaming, arbitrarily long) full reply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RailTick {
     /// Message id — equals the user row's id in the transcript row model.
@@ -53,15 +61,15 @@ fn user_text(entry: &SessionMessageEntry) -> String {
     crate::attachments::user_message_rail_text(&raw)
 }
 
-fn first_reply_text(entries: &[SessionMessageEntry]) -> Option<String> {
+/// The first non-blank text part of the first assistant entry, borrowed (the
+/// caller only needs its bounded preview, never an owned copy).
+fn first_reply_text(entries: &[SessionMessageEntry]) -> Option<&str> {
     entries
         .iter()
         .find(|e| e.role == MessageRole::Assistant)
         .and_then(|entry| {
             entry.parts.iter().find_map(|part| match part {
-                MessagePart::Text { text, .. } if !text.trim().is_empty() => {
-                    Some(text.trim().to_string())
-                }
+                MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
                 _ => None,
             })
         })
@@ -82,15 +90,16 @@ pub fn rail_ticks(
         }
         ticks.push(RailTick {
             message_id: entry.id.clone(),
-            prompt: user_text(entry),
-            reply: first_reply_text(&entries[ix + 1..]),
+            prompt: truncate_preview(&user_text(entry), PREVIEW_PROMPT_CHARS),
+            reply: first_reply_text(&entries[ix + 1..])
+                .map(|reply| truncate_preview(reply, PREVIEW_REPLY_CHARS)),
         });
     }
     for echo in echoes {
         if echo.role == MessageRole::User && !ticks.iter().any(|t| t.message_id == echo.id) {
             ticks.push(RailTick {
                 message_id: echo.id.clone(),
-                prompt: user_text(echo),
+                prompt: truncate_preview(&user_text(echo), PREVIEW_PROMPT_CHARS),
                 reply: None,
             });
         }
@@ -162,13 +171,149 @@ pub fn bucket_of(buckets: &[(usize, usize)], ix: usize) -> Option<usize> {
 /// Char-cap a preview with an ellipsis. Whitespace runs (including newlines —
 /// prompts and replies are free text) collapse to single spaces first: the
 /// preview card's title is a one-line surface (message-rail.tsx line-clamp-1).
+///
+/// Output is exactly `single_line(text)` capped as above, but the flattening
+/// is lazy: it stops once `max_chars + 1` flattened chars prove the cut, so a
+/// long (streaming) reply costs O(max_chars), not O(len).
 pub fn truncate_preview(text: &str, max_chars: usize) -> String {
-    let flat = crate::transcript::single_line(text);
-    if flat.chars().count() <= max_chars {
+    // `flat` is always a prefix of `single_line(text)` (the same
+    // `split_whitespace` words joined by single spaces).
+    let mut flat = String::new();
+    let mut count = 0usize;
+    'words: for word in text.split_whitespace() {
+        if count > 0 {
+            flat.push(' ');
+            count += 1;
+            if count > max_chars {
+                break;
+            }
+        }
+        for ch in word.chars() {
+            flat.push(ch);
+            count += 1;
+            if count > max_chars {
+                break 'words;
+            }
+        }
+    }
+    if count <= max_chars {
         return flat;
     }
     let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{}…", cut.trim_end())
+}
+
+// ---------------------------------------------------------------------------
+// Per-view tick cache
+// ---------------------------------------------------------------------------
+
+/// Memo of the rail's derived data so a frame (60–120Hz while streaming)
+/// neither re-extracts ticks nor rescans rows:
+/// - ticks are re-extracted only when their key — `(state entity,
+///   transcript_revision)` — changes. `transcript_revision` bumps on every
+///   transcript AND echo mutation (it is the same key the transcript's own
+///   row sync uses), and ticks read nothing else.
+/// - the tick→row mapping is rebuilt (one id→index map, O(rows + ticks)) when
+///   the ticks change, the row vec changes identity/length, any cached pair
+///   no longer points at a row with its tick's id, or some tick was unmapped
+///   (rows lagging state). Otherwise it is revalidated in O(ticks).
+#[derive(Default)]
+pub struct RailTickCache {
+    ticks_key: Option<(u64, u64)>,
+    ticks: Rc<Vec<RailTick>>,
+    /// `(rows.len(), rows.as_ptr())` the mapping was built against.
+    rows_key: Option<(usize, usize)>,
+    /// `(tick index, transcript row)` per tick that has a row, in tick order.
+    pairs: Rc<Vec<(usize, usize)>>,
+    unmapped: bool,
+    #[cfg(test)]
+    tick_builds: usize,
+    #[cfg(test)]
+    map_builds: usize,
+}
+
+impl RailTickCache {
+    /// The ticks for `key`, calling `extract` only when the key changed.
+    pub fn ticks(
+        &mut self,
+        key: (u64, u64),
+        extract: impl FnOnce() -> Vec<RailTick>,
+    ) -> Rc<Vec<RailTick>> {
+        if self.ticks_key != Some(key) {
+            self.ticks = Rc::new(extract());
+            self.ticks_key = Some(key);
+            self.rows_key = None;
+            #[cfg(test)]
+            {
+                self.tick_builds += 1;
+            }
+        }
+        self.ticks.clone()
+    }
+
+    /// `(tick index, row index)` for each cached tick whose id matches a row —
+    /// the FIRST such row, exactly like a per-tick `rows.position(..)`.
+    pub fn pairs<R>(
+        &mut self,
+        rows: &[R],
+        row_id: impl Fn(&R) -> &str,
+    ) -> Rc<Vec<(usize, usize)>> {
+        let rows_key = (rows.len(), rows.as_ptr() as usize);
+        let valid = self.rows_key == Some(rows_key)
+            && !self.unmapped
+            && self.pairs.iter().all(|&(tick, row)| {
+                rows.get(row)
+                    .is_some_and(|r| row_id(r) == self.ticks[tick].message_id.as_str())
+            });
+        if !valid {
+            let mut index: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
+            for (ix, row) in rows.iter().enumerate() {
+                index.entry(row_id(row)).or_insert(ix);
+            }
+            let pairs: Vec<(usize, usize)> = self
+                .ticks
+                .iter()
+                .enumerate()
+                .filter_map(|(tick, t)| index.get(t.message_id.as_str()).map(|&row| (tick, row)))
+                .collect();
+            self.unmapped = pairs.len() != self.ticks.len();
+            self.pairs = Rc::new(pairs);
+            self.rows_key = Some(rows_key);
+            #[cfg(test)]
+            {
+                self.map_builds += 1;
+            }
+        }
+        self.pairs.clone()
+    }
+}
+
+/// Most views ever alive at once (split panes, subagent tabs); least-recently
+/// rendered is evicted past this.
+const RAIL_CACHE_SLOTS: usize = 8;
+
+thread_local! {
+    /// Per-transcript-view caches (UI thread only). Lives here rather than on
+    /// `Transcript` so the rail stays self-contained.
+    static RAIL_CACHES: RefCell<Vec<(EntityId, RailTickCache)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_rail_cache<T>(view: EntityId, f: impl FnOnce(&mut RailTickCache) -> T) -> T {
+    RAIL_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let slot = match caches.iter().position(|(id, _)| *id == view) {
+            Some(ix) => caches.remove(ix),
+            None => {
+                if caches.len() >= RAIL_CACHE_SLOTS {
+                    caches.remove(0);
+                }
+                (view, RailTickCache::default())
+            }
+        };
+        caches.push(slot);
+        let last = caches.len() - 1;
+        f(&mut caches[last].1)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -412,28 +557,30 @@ impl Transcript {
         if !self.rail_enabled() {
             return gpui::Empty.into_any_element();
         }
-        let (entries, echoes) = {
-            let state = self.state_entity().read(cx);
-            (state.transcript.clone(), state.pending_echoes().to_vec())
-        };
-        let ticks = rail_ticks(&entries, &echoes);
-        // Map each tick to its transcript row (user rows share the entry id).
-        let pairs: Vec<(RailTick, usize)> = ticks
-            .into_iter()
-            .filter_map(|tick| {
-                let row = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
-                Some((tick, row))
+        // Ticks are extracted inside the state borrow (no transcript clone)
+        // and memoized per view on `transcript_revision`; each tick maps to
+        // its transcript row (user rows share the entry id) via a cached
+        // id→index map. See `RailTickCache`.
+        let view = cx.entity_id();
+        let (ticks, pairs) = {
+            let state_entity = self.state_entity();
+            let state = state_entity.read(cx);
+            let key = (state_entity.entity_id().as_u64(), state.transcript_revision);
+            let rows = self.rows();
+            with_rail_cache(view, |cache| {
+                let ticks = cache.ticks(key, || {
+                    rail_ticks(&state.transcript, state.pending_echoes())
+                });
+                let pairs = cache.pairs(rows, |r| r.id.as_ref());
+                (ticks, pairs)
             })
-            .collect();
+        };
         // A minimap of one exchange is noise, not navigation — the original
         // rail hides below two marks (message-rail.tsx `marks.length < 2`).
         if pairs.len() < 2 {
             return gpui::Empty.into_any_element();
         }
-        let tick_rows: Vec<usize> = pairs.iter().map(|(_, row)| *row).collect();
+        let tick_rows: Vec<usize> = pairs.iter().map(|&(_, row)| row).collect();
         // Active detection reads from the READING line, not the raw clip top:
         // the titlebar overlays the list, so a row whose top sits within that
         // chrome band is what you're reading — the sliver of the previous row
@@ -484,8 +631,8 @@ impl Transcript {
                 // falls inside (hover then previews what you're reading),
                 // the first prompt of the range otherwise.
                 let rep = active.filter(|&a| a >= start && a < end).unwrap_or(start);
-                let (tick, row) = &pairs[rep];
-                let (tick, row) = (tick.clone(), *row);
+                let (tick_ix, row) = pairs[rep];
+                let tick = &ticks[tick_ix];
                 let bucket_len = end - start;
                 let is_active = active_bucket == Some(ix);
                 let is_hovered = hover == Some(ix);
@@ -497,11 +644,7 @@ impl Transcript {
                 } else {
                     crate::theme::ink(0.16)
                 };
-                let prompt = truncate_preview(&tick.prompt, PREVIEW_PROMPT_CHARS);
-                let reply = tick
-                    .reply
-                    .as_deref()
-                    .map(|r| truncate_preview(r, PREVIEW_REPLY_CHARS));
+                // Previews were flattened + capped once at tick extraction.
                 let card: Option<AnyElement> = is_hovered.then(|| {
                     let theme = theme.for_popup();
                     let card = popover::popover_card(&theme)
@@ -514,9 +657,9 @@ impl Transcript {
                             div()
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text)
-                                .child(SharedString::from(prompt.clone())),
+                                .child(SharedString::from(tick.prompt.clone())),
                         )
-                        .when_some(reply.clone(), |el, reply| {
+                        .when_some(tick.reply.clone(), |el, reply| {
                             el.child(
                                 div()
                                     .text_size(crate::typography::ui_rems(11.0))
@@ -801,5 +944,141 @@ mod tests {
         let uni = "héllo wörld attaché case overflowing";
         let cut = truncate_preview(uni, 12);
         assert!(cut.ends_with('…'));
+    }
+
+    /// The lazy flattening is output-identical to the eager
+    /// `single_line`-then-cap definition it replaced.
+    #[test]
+    fn preview_truncation_matches_eager_reference() {
+        fn reference(text: &str, max_chars: usize) -> String {
+            let flat = crate::transcript::single_line(text);
+            if flat.chars().count() <= max_chars {
+                return flat;
+            }
+            let cut: String = flat.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{}…", cut.trim_end())
+        }
+        let inputs = [
+            "",
+            "   ",
+            "\n\n",
+            "a",
+            "ab cd",
+            "ab  cd",
+            "  ab \t\r\n cd  ",
+            "abcd efgh",
+            "abcd  efgh ijkl",
+            "héllo wörld attaché case overflowing",
+            "日本語 テキスト の プレビュー",
+            "word\n\nnext paragraph\n\n- bullet\n- bullet two",
+        ];
+        for text in inputs {
+            for max in 0..=40 {
+                assert_eq!(
+                    truncate_preview(text, max),
+                    reference(text, max),
+                    "text {text:?} max {max}"
+                );
+            }
+        }
+        let long = format!("  {}  ", "lorem ipsum\n dolor ".repeat(500));
+        for max in [0, 1, 2, 5, 159, 160, 199, 200, 201] {
+            assert_eq!(truncate_preview(&long, max), reference(&long, max));
+        }
+    }
+
+    #[test]
+    fn tick_previews_are_bounded() {
+        let long_reply = "streaming ".repeat(10_000);
+        let long_prompt = "why ".repeat(1_000);
+        let entries = vec![
+            entry("u1", MessageRole::User, &long_prompt),
+            entry("a1", MessageRole::Assistant, &long_reply),
+        ];
+        let ticks = rail_ticks(&entries, &[]);
+        let reply = ticks[0].reply.as_deref().unwrap();
+        assert_eq!(reply, truncate_preview(&long_reply, PREVIEW_REPLY_CHARS));
+        assert!(reply.chars().count() <= PREVIEW_REPLY_CHARS);
+        assert!(ticks[0].prompt.chars().count() <= PREVIEW_PROMPT_CHARS);
+    }
+
+    /// Reference mapping: the per-tick linear scan the cache replaced.
+    fn reference_pairs(ticks: &[RailTick], rows: &[&str]) -> Vec<(usize, usize)> {
+        ticks
+            .iter()
+            .enumerate()
+            .filter_map(|(t, tick)| {
+                rows.iter()
+                    .position(|r| *r == tick.message_id.as_str())
+                    .map(|row| (t, row))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tick_cache_invalidates_on_revision() {
+        let mut cache = RailTickCache::default();
+        let v1 = vec![
+            entry("u1", MessageRole::User, "one"),
+            entry("a1", MessageRole::Assistant, "first"),
+        ];
+        let t = cache.ticks((1, 7), || rail_ticks(&v1, &[]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(cache.tick_builds, 1);
+        // Same revision: no re-extraction, even if the closure would differ.
+        let t = cache.ticks((1, 7), || unreachable!("cached"));
+        assert_eq!(t.len(), 1);
+        assert_eq!(cache.tick_builds, 1);
+        // Revision bump (a streamed delta): re-extracted, new reply seen.
+        let mut v2 = v1.clone();
+        v2[1] = entry("a1", MessageRole::Assistant, "first, longer");
+        v2.push(entry("u2", MessageRole::User, "two"));
+        let t = cache.ticks((1, 8), || rail_ticks(&v2, &[]));
+        assert_eq!(cache.tick_builds, 2);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].reply.as_deref(), Some("first, longer"));
+        // A different state entity at the same revision is a different key.
+        cache.ticks((2, 8), || rail_ticks(&v2, &[]));
+        assert_eq!(cache.tick_builds, 3);
+    }
+
+    #[test]
+    fn tick_cache_row_mapping_matches_linear_scan() {
+        let mut cache = RailTickCache::default();
+        let entries = vec![
+            entry("u1", MessageRole::User, "one"),
+            entry("a1", MessageRole::Assistant, "first"),
+            entry("u2", MessageRole::User, "two"),
+            entry("u3", MessageRole::User, "three"),
+        ];
+        let ticks = cache.ticks((1, 1), || rail_ticks(&entries, &[]));
+        let rows = vec!["u1", "a1#0", "a1#1", "u2", "u3"];
+        let pairs = cache.pairs(&rows, |r| *r);
+        assert_eq!(*pairs, reference_pairs(&ticks, &rows));
+        assert_eq!(cache.map_builds, 1);
+        // Same rows: reused.
+        cache.pairs(&rows, |r| *r);
+        assert_eq!(cache.map_builds, 1);
+        // New row set (fold / re-sync) with shifted positions: remapped.
+        let rows2 = vec!["u1", "a1#0", "u2", "x", "u3", "y"];
+        let pairs = cache.pairs(&rows2, |r| *r);
+        assert_eq!(*pairs, reference_pairs(&ticks, &rows2));
+        assert_eq!(cache.map_builds, 2);
+        // Rows lagging state (u3 missing): keeps remapping until it lands.
+        let lagging = vec!["u1", "a1#0", "u2"];
+        let pairs = cache.pairs(&lagging, |r| *r);
+        assert_eq!(*pairs, reference_pairs(&ticks, &lagging));
+        cache.pairs(&lagging, |r| *r);
+        assert_eq!(cache.map_builds, 4);
+        // Duplicate ids resolve to the FIRST row, like `position`.
+        let dup = vec!["u1", "u2", "u1", "u3", "u2"];
+        let pairs = cache.pairs(&dup, |r| *r);
+        assert_eq!(*pairs, reference_pairs(&ticks, &dup));
+        // New ticks (revision bump) force a remap even over the same rows.
+        let builds = cache.map_builds;
+        cache.ticks((1, 2), || rail_ticks(&entries[..2], &[]));
+        let pairs = cache.pairs(&dup, |r| *r);
+        assert_eq!(*pairs, vec![(0, 0)]);
+        assert_eq!(cache.map_builds, builds + 1);
     }
 }

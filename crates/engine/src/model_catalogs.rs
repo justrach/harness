@@ -65,9 +65,19 @@ fn save(path: &Path, context: &ModelContext, models: &[Model]) -> std::io::Resul
     }
     result
 }
-fn unchanged(harness: &dyn Harness, context: &ModelContext) -> bool {
-    harness
-        .model_context()
+/// `model_context` resolves the binary (which can wait on the login-shell
+/// PATH probe), may spawn `--version`, and hashes auth files: blocking work
+/// that must stay off the async workers serving RPC.
+async fn blocking_context(harness: &Arc<dyn Harness>) -> Result<Option<ModelContext>, HarnessError> {
+    let harness = harness.clone();
+    tokio::task::spawn_blocking(move || harness.model_context())
+        .await
+        .map_err(|error| HarnessError::Protocol(format!("model discovery context task failed: {error}")))?
+}
+
+async fn unchanged(harness: &Arc<dyn Harness>, context: &ModelContext) -> bool {
+    blocking_context(harness)
+        .await
         .ok()
         .flatten()
         .is_some_and(|now| now.hash == context.hash)
@@ -78,7 +88,7 @@ pub(crate) async fn list(
     harness: Arc<dyn Harness>,
     force: bool,
 ) -> Result<Vec<Model>, HarnessError> {
-    let Some(context) = harness.model_context().map_err(|error| {
+    let Some(context) = blocking_context(&harness).await.map_err(|error| {
         let failure = CatalogFailure::from(error);
         tracing::warn!(code = %failure.code, error = %failure, "Model discovery context unavailable");
         HarnessError::from(failure)
@@ -97,7 +107,7 @@ pub(crate) async fn list(
         let path = path.clone();
         async move {
             let result = harness.model_catalog(force).await;
-            if !unchanged(harness.as_ref(), &context) {
+            if !unchanged(&harness, &context).await {
                 return Err(HarnessError::Protocol(
                     "model discovery context changed; retry".into(),
                 ));
@@ -132,7 +142,7 @@ pub(crate) async fn list(
     } else {
         Some(refresh.await)
     };
-    if !unchanged(harness.as_ref(), &context) {
+    if !unchanged(&harness, &context).await {
         return Err(HarnessError::Protocol(
             "model discovery context changed; retry".into(),
         ));

@@ -33,9 +33,14 @@
 ## The workspace
 
 Harness brings **CodeGraff (graff)**, Claude Code, Codex, Cursor, Devin, Grok,
-Hermes, Pi, OpenCode, and Antigravity into one desktop app. Pick the agent and
-model for each conversation, keep workspaces and sessions together, and review
-changes beside the chat. Files, a browser, and terminals stay close at hand.
+Hermes, Pi, OpenCode, Antigravity, and [Exo](https://github.com/exoharness/exo)
+into one desktop app. Pick the agent and model for each conversation, keep
+workspaces and sessions together, and review changes beside the chat. Files, a
+browser, and terminals stay close at hand.
+
+Exo is off by default. Harness reaches it through Exo's agent-cli adapter
+(`./exo.sh --setup agent-cli`) via a built-in ACP bridge; once the adapter's
+socket is up, turn Exo on in **Settings → Agents**.
 
 <p align="center">
   <img src="docs/media/readme/codegraff-agents-dark.png" width="960" alt="Current Harness Agents settings in the Codegraff Dark theme, with graff listed first">
@@ -99,7 +104,13 @@ Each desktop device runs an engine and stores its local sessions. The GUI
 connects to an engine on the local IPC port or starts one in the app process.
 `harness headless` runs the engine without a window.
 
-To use device sync, stop the engine before changing profiles:
+In the desktop app, open the account menu and choose **Enable sync**. Sign in
+with your CodeGraff account, then choose whether to bring existing local work
+into the synced workspace or start fresh. Harness does not upload existing local
+sessions until you choose **Bring my work**. New work in the synced workspace is
+stored at `edge.codegraff.com` and appears on your other signed-in devices.
+
+For a headless device, stop the engine before changing profiles:
 
 ```sh
 harness daemon stop
@@ -107,12 +118,13 @@ harness login
 harness daemon start
 ```
 
-Harness sign-in uses CodeGraff OAuth. Coding agents keep their own provider
-credentials and transport. A trusted remote device can read and write
-workspace files; **Show ignored files** also exposes ignored files such as
-`.env`. Sign in only devices you trust with those files. Existing local
-sessions remain in the local profile. To return to it, stop the daemon, run
-`harness logout`, and restart the daemon.
+Harness sync uses CodeGraff OAuth; signing in to the `graff` agent is a separate
+step. Coding agents keep their own provider credentials on the host device.
+Synced chat content and workspace metadata go to the Harness edge service. A
+trusted remote device can ask an online host to read and write workspace files;
+**Show ignored files** also exposes ignored files such as `.env`. Sign in only
+devices you trust with those files. To return to the local profile on a
+headless device, stop the daemon, run `harness logout`, and restart it.
 
 For the internals, see [architecture](ARCHITECTURE.md). For appearance and
 theme import, see [the theme guide](docs/theme-system.md).

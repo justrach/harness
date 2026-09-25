@@ -51,6 +51,10 @@ enum Command {
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
+    /// Serve Exo over ACP on stdin/stdout, bridging to Exo's agent-cli socket.
+    /// Spawned by the engine for Exo chats; stdout is the protocol.
+    #[command(name = "exo-acp", hide = true)]
+    ExoAcp,
     /// Manage `harness headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
@@ -120,6 +124,9 @@ fn codegraff_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
+    // Pin the launch clock first so `app_launch_ms` covers argument parsing,
+    // logging setup and pre-UI work too (the later call in `run_app` no-ops).
+    harness_ui::perf_stats::mark_process_start();
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
@@ -159,9 +166,9 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `harness mcp` owns stdout for the protocol: a single log line on it
+        // `harness mcp` and `harness exo-acp` own stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
-        if matches!(&cli.command, Some(Command::Mcp)) {
+        if matches!(&cli.command, Some(Command::Mcp | Command::ExoAcp)) {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(
@@ -227,6 +234,10 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(harness_mcp::run(harness_mcp::McpConfig::from_env()))
         }
+        Some(Command::ExoAcp) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            Ok(runtime.block_on(harness_adapters::serve_exo_acp())?)
+        }
         #[cfg(target_os = "linux")]
         Some(Command::Appshot) => {
             harness_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
@@ -256,9 +267,15 @@ fn main() -> anyhow::Result<()> {
             if launch::hand_off_to_bundle(initial_url.as_deref()) {
                 return Ok(());
             }
-            bundled_graff::prepare();
-            // Off the launch path: seeding graff runs `graff --version`.
-            std::thread::spawn(launch::install_path_shims_and_auto_update_graff);
+            // Off the launch path: installing the bundled graff runs
+            // `graff --version` twice and compares two ~8MB binaries, and
+            // seeding runs it again. The copy lands by atomic rename and the
+            // engine falls back to the bundled binary meanwhile; the shims
+            // still follow the install, as before.
+            std::thread::spawn(|| {
+                bundled_graff::prepare();
+                launch::install_path_shims_and_auto_update_graff();
+            });
             let edge_token = paths::var("HARNESS_EDGE_TOKEN").ok();
             // Headed: the UI probes HARNESS_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
@@ -342,6 +359,7 @@ fn harness_from_env() -> harness_engine::HarnessId {
         Some("claude-code") => harness_engine::HarnessId::ClaudeCode,
         Some("pi") => harness_engine::HarnessId::Pi,
         Some("antigravity") => harness_engine::HarnessId::Antigravity,
+        Some("exo") => harness_engine::HarnessId::Exo,
         _ => harness_engine::HarnessId::Graff,
     }
 }

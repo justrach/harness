@@ -222,6 +222,8 @@ icon_assets![
     (PI_MARK, "pi-mark"),
     (OPENCODE_MARK, "opencode-mark"),
     (ANTIGRAVITY_MARK, "antigravity-mark"),
+    // Exo's four-facet mark (exoharness/exo docs/images/exo_logo.svg, MIT).
+    (EXO_MARK, "exo-mark"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

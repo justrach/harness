@@ -17,7 +17,7 @@ use harness_rpc::{connect_ws, memory_client, methods};
 fn config(
     data_dir: &std::path::Path,
     edge_url: String,
-    workos_client_id: Option<&str>,
+    codegraff_client_id: Option<&str>,
     edge_token: Option<&str>,
 ) -> EngineConfig {
     EngineConfig {
@@ -27,7 +27,7 @@ fn config(
         ipc_port: 0,
         default_harness: HarnessId::Mock,
         org_id: None,
-        workos_client_id: workos_client_id.map(str::to_string),
+        codegraff_client_id: codegraff_client_id.map(str::to_string),
     }
 }
 
@@ -44,8 +44,13 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                // A Harness app running on this machine with this repo open
+                // probes the test's listener for local previews (`HEAD /`,
+                // every 2s): that is not traffic from the engine under test.
+                if !request[..read].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -259,7 +264,7 @@ async fn wait_until(mut check: impl FnMut() -> bool, message: &str) {
 }
 
 #[tokio::test]
-async fn signed_out_workos_boot_serves_local_data_without_dev_identity() {
+async fn signed_out_codegraff_boot_serves_local_data_without_dev_identity() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(
         dir.path(),
@@ -356,7 +361,7 @@ async fn revoked_captured_session_stays_on_its_synced_cache() {
         .unwrap()
         .expect("persisted org resolves before refresh");
 
-    assert!(auth.loaded_workos_session());
+    assert!(auth.loaded_codegraff_session());
     assert_eq!(scope, WorkspaceScope::Synced);
     let runtime = Engine::assemble_runtime(&config, auth.clone(), profile)
         .await
@@ -372,7 +377,7 @@ async fn revoked_captured_session_stays_on_its_synced_cache() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert_eq!(auth.state(), AuthState::SignedOut);
-    assert!(auth.loaded_workos_session());
+    assert!(auth.loaded_codegraff_session());
     assert_eq!(runtime.workspace_scope(), WorkspaceScope::Synced);
     assert!(dir.path().join("orgs/org_1/user_1").is_dir());
     assert!(!dir.path().join("profiles/local").exists());

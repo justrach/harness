@@ -1397,7 +1397,12 @@ mod generated_image_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn generated_image_chunk_reader_targets_owner_and_bounds_decode() {
+        // Current-thread runtime: holding the std guard across awaits is fine.
+        let _native = crate::NATIVE_PLATFORM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let executor = gpui_platform::background_executor();
         for (width, target, expected, succeeds) in [
             (64, Some("remote-owner"), "image/png", true),

@@ -2353,6 +2353,7 @@ impl Shell {
                 if let Some(prev) = prev
                     && let Some(sound) = status.sound_since(&prev, send_pending)
                 {
+                    crate::perf_stats::turn_finished(&chat_id, sound == crate::sound::Sound::Done);
                     if self.settings.session_sound_enabled(sound) {
                         let should_play = sound != crate::sound::Sound::Attention
                             || self
@@ -4124,6 +4125,7 @@ impl Shell {
                             self.settings.sound_attention_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
+                            self.settings.share_performance_stats,
                             cx,
                         )
                     });
@@ -4138,6 +4140,7 @@ impl Shell {
                                 attention_sound,
                                 desktop,
                                 background_only,
+                                performance_stats,
                             } = *event;
                             this.settings.sound_enabled = sound;
                             this.settings.sound_completion_enabled = completion_sound;
@@ -4145,6 +4148,7 @@ impl Shell {
                             this.settings.sound_attention_enabled = attention_sound;
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
+                            this.settings.share_performance_stats = performance_stats;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -7312,13 +7316,7 @@ impl Shell {
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow)
-            // Cloud sync sign-in is parked for now: `HARNESS_ENABLE_SYNC=1`
-            // brings "Enable sync" (and its browser login) back.
-            .filter(|action| {
-                !matches!(action, AccountMenuAction::EnableSync)
-                    || std::env::var("HARNESS_ENABLE_SYNC").is_ok_and(|v| v == "1")
-            });
+        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
         // Only the compact avatar button is interactive; footer whitespace is not.
         let initial: SharedString = user_line
             .trim()
@@ -7531,7 +7529,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Harness will keep using this local workspace until you quit and reopen.",
+                        "Sign in with CodeGraff in your browser. Your work stays local until you choose whether to bring it into your synced workspace.",
                     )),
                 )
                 .child(
@@ -7571,18 +7569,18 @@ impl Shell {
                 let has_local_work = work_phrase.is_some();
                 let body: SharedString = match (&signed_in_email, &work_phrase) {
                     (Some(email), Some(phrase)) => format!(
-                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
+                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start fresh. Synced chats are stored at edge.codegraff.com; your other signed-in devices can also request access to this device's workspace while it is online."
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Harness can switch to your synced workspace now."
+                        "You're signed in as {email}. Harness can switch to your synced workspace now. New chats will sync at edge.codegraff.com, and your other signed-in devices can request access to this device's workspace while it is online."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
-                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
+                        "Bring {phrase} from this device into your synced workspace, or start fresh. Synced chats are stored at edge.codegraff.com; your other signed-in devices can also request access to this device's workspace while it is online."
                     )
                     .into(),
-                    (None, None) => "Harness can switch to your synced workspace now.".into(),
+                    (None, None) => "Harness can switch to your synced workspace now. New chats will sync at edge.codegraff.com, and your other signed-in devices can request access to this device's workspace while it is online.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))

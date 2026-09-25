@@ -50,12 +50,15 @@ enum Method {
 // https://docs.x.ai/developers/release-notes and https://docs.x.ai/build/enterprise
 // https://hermes-agent.nousresearch.com/docs/getting-started/installation
 // https://cli.devin.ai/
+// https://github.com/exoharness/exo/blob/main/README.md
 fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
     use HarnessId::*;
     use Method::*;
     let windows = platform == Platform::Windows;
     match id {
-        Mock => vec![],
+        // Exo's setup is interactive (API key, names) and needs Docker: the
+        // user runs it; Settings shows the documented command.
+        Mock | Exo => vec![],
         Graff if windows => vec![],
         Graff => vec![GraffRelease],
         Antigravity => vec![Archive],
@@ -164,6 +167,9 @@ pub fn manual_command(id: HarnessId) -> Option<&'static str> {
         Grok => "npm install -g @xai-official/grok",
         Hermes => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
         Devin => "curl -fsSL https://cli.devin.ai/install.sh | bash",
+        Exo => {
+            "curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o setup.sh && bash setup.sh"
+        }
         Antigravity | Graff | Mock => return None,
     })
 }
@@ -181,6 +187,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
         Graff => ("graff", "~/.harness/bin"),
         Devin => ("devin", "~/.local/bin"),
         Antigravity => ("agy_acp_server", "~/.harness/adapters"),
+        Exo => ("exo-cli", "~/bin"),
         Mock => ("mock", "PATH"),
     }
 }
@@ -198,6 +205,7 @@ pub fn installed(id: HarnessId) -> bool {
         Graff => crate::AcpHarness::graff().installed(),
         Devin => crate::AcpHarness::devin().installed(),
         Antigravity => crate::AcpHarness::antigravity().installed(),
+        Exo => crate::AcpHarness::exo().installed(),
         Mock => false,
     }
 }

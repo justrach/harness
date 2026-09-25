@@ -5720,6 +5720,9 @@ rename to new_name.rs
     /// Uses the native font backend, not TestAppContext's simulated metrics.
     #[test]
     fn native_diff_font_geometry() {
+        let _native = crate::NATIVE_PLATFORM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Windows headless mode uses NoopTextSystem. This regression needs
         // actual DirectWrite metrics, as it does CoreText/fontconfig elsewhere.
         let platform = gpui_platform::current_platform(!cfg!(windows));

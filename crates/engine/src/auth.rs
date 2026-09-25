@@ -318,8 +318,9 @@ impl Auth {
         let (retry_tx, _) = watch::channel(0);
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("construct Harness auth HTTP client");
         Self {
             inner: Arc::new(AuthInner {
                 config,
@@ -340,11 +341,10 @@ impl Auth {
         }
     }
 
-    /// Like [`Auth::new`], but additionally probes `{edge}/health`: an edge running in
-    /// dev auth mode forces dev mode even when a client id is configured (matching the
-    /// edge's "bearer = user id" verification).
+    /// Like [`Auth::new`], but a loopback development edge may advertise dev
+    /// auth. A remote edge cannot downgrade a CodeGraff session to a dev bearer.
     pub async fn detect(mut config: AuthConfig) -> Self {
-        if config.codegraff_client_id.is_some() {
+        if config.codegraff_client_id.is_some() && is_loopback_http_url(&config.edge_url) {
             #[derive(Deserialize)]
             struct Health {
                 auth: Option<String>,
@@ -410,6 +410,8 @@ impl Auth {
         if self.inner.codegraff.is_none() {
             return Ok(self.inner.config.dev_user_id.clone());
         }
+        self.ensure_secure_transport()
+            .map_err(|e| TokenError::TemporarilyUnavailable(e.to_string()))?;
         if let Some(entry) = &*lock(&self.inner.access)
             && entry.remaining() > TOKEN_SLACK
         {
@@ -518,6 +520,7 @@ impl Auth {
         if self.inner.codegraff.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
+        self.ensure_secure_transport()?;
         let port = self.ensure_loopback().await?;
         Ok(self.begin_sign_in(&format!("http://127.0.0.1:{port}/callback")))
     }
@@ -530,6 +533,25 @@ impl Auth {
         }
         let edge = self.inner.config.edge_url.trim_end_matches('/');
         self.begin_sign_in(&format!("{edge}/auth/cli/callback"))
+    }
+
+    /// CodeGraff OAuth codes, refresh credentials, and room bearers must only
+    /// travel over TLS. Plain HTTP remains available for an explicitly local
+    /// development edge on a numeric loopback address.
+    pub fn ensure_secure_transport(&self) -> Result<(), EngineError> {
+        if self.inner.codegraff.is_none() {
+            return Ok(());
+        }
+        for (name, raw) in [
+            ("Harness edge", self.inner.config.edge_url.as_str()),
+            (
+                "CodeGraff OAuth",
+                self.inner.config.codegraff_api_base.as_str(),
+            ),
+        ] {
+            validate_secure_url(name, raw).map_err(EngineError::Other)?;
+        }
+        Ok(())
     }
 
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
@@ -678,6 +700,7 @@ impl Auth {
     }
 
     async fn exchange_code(&self, code: &str, pending: &PendingSignIn, nonce: &str) -> Result<SignInResult, EngineError> {
+        self.ensure_secure_transport()?;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct WireUser {
@@ -781,6 +804,7 @@ impl Auth {
     /// session to that org; routine refreshes keep the current scope. Returns the new
     /// access token, `None` when signed out / the refresh could not run.
     async fn refresh(&self, organization_id: Option<&str>) -> Result<Option<String>, EngineError> {
+        self.ensure_secure_transport()?;
         if organization_id.is_some() {
             return self.refresh_serialized(organization_id).await;
         }
@@ -1291,21 +1315,46 @@ fn url_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Write a file readable only by the owner (0600). On non-unix targets a plain write.
+pub(crate) fn is_loopback_http_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+}
+
+pub(crate) fn validate_secure_url(name: &str, raw: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| format!("{name} URL is invalid"))?;
+    if url.scheme() == "https" || is_loopback_http_url(raw) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name} must use HTTPS (plain HTTP is allowed only on loopback)"
+        ))
+    }
+}
+
+/// Atomically replace a refresh-credential file, readable only by its owner.
+/// A pre-existing symlink is replaced rather than followed.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        // An existing file keeps its old mode through OpenOptions — enforce 0600 anyway.
-        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.write_all(bytes)
+        let temp = path.with_file_name(format!(".session-{}.tmp", uuid::Uuid::new_v4().simple()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
     }
     #[cfg(not(unix))]
     {
@@ -1316,6 +1365,45 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_transport_requires_tls_outside_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AuthConfig::new("http://edge.example", dir.path());
+        config.codegraff_client_id = Some("cg_client_test".into());
+        let auth = Auth::new(config);
+        assert!(auth.ensure_secure_transport().is_err());
+
+        let mut local = AuthConfig::new("http://127.0.0.1:8787", dir.path());
+        local.codegraff_client_id = Some("cg_client_test".into());
+        assert!(Auth::new(local).ensure_secure_transport().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_session_write_replaces_symlink_without_following_it() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let session = dir.path().join("session.json");
+        symlink(&outside, &session).unwrap();
+
+        write_private(&session, b"private-token").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read(&session).unwrap(), b"private-token");
+        assert!(
+            !std::fs::symlink_metadata(&session)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&session).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[tokio::test]
     async fn concurrent_dns_failure_is_shared_with_http_and_room_consumers() {

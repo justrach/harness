@@ -34,6 +34,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tempfile.workspace = true
+harness-proto.workspace = true
+futures.workspace = true
 
 [build-dependencies]
 embed-resource = "3.0.11"

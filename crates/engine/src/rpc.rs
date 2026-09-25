@@ -1184,6 +1184,7 @@ fn forwardable(method: &str) -> bool {
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
+            | methods::CODEGRAFF_USAGE
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
             | methods::START_AGENT_LOGIN
@@ -1394,6 +1395,9 @@ impl RpcService for AuthRpc {
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
             methods::SIGN_IN_HEADLESS => {
+                self.auth
+                    .ensure_secure_transport()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let url = self.auth.start_headless_sign_in();
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
@@ -1477,6 +1481,13 @@ impl RpcService for EngineRpc {
             methods::CODEGRAFF_AUTH_STATUS => RpcReply::value(
                 &crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir()).status(),
             ),
+            methods::CODEGRAFF_USAGE => {
+                let usage = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .usage()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&usage)
+            }
             methods::CODEGRAFF_SIGN_OUT => {
                 crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
                     .sign_out()
@@ -1649,9 +1660,13 @@ impl RpcService for EngineRpc {
             }
             methods::WATCH_QUEUE => {
                 let p: ChatParams = parse_params(params)?;
-                let handle = self
-                    .doc_host
-                    .open(&p.chat_id)
+                // Opening a cold chat imports its whole doc; selecting a chat
+                // starts this watch alongside the transcript's, so keep that
+                // import off the async workers like the transcript path does.
+                let host = self.doc_host.clone();
+                let handle = tokio::task::spawn_blocking(move || host.open(&p.chat_id))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
                 Ok(RpcReply::Stream(

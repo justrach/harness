@@ -10,10 +10,11 @@
 
 use super::*;
 
-/// More panes would each hold another engine doc watch; Ghostty-scale
-/// grids aren't the point of a chat column.
-pub(super) const MAX_CHAT_PANES: usize = 4;
-/// No pane gets squeezed below this share of the split.
+/// Every pane holds another engine doc watch; Ghostty-scale grids aren't
+/// the point of a chat column.
+pub(super) const MAX_CHAT_PANES: usize = 8;
+/// No pane gets squeezed below this share of the split (less once so many
+/// panes are open that equal shares fall under it; see `min_share`).
 const MIN_PANE_SHARE: f32 = 0.15;
 /// One ⌘⌃+arrow press moves the divider by this share.
 const RESIZE_STEP: f32 = 0.05;
@@ -22,6 +23,10 @@ const JUMP_KEYS: [(&str, &str); MAX_CHAT_PANES] = [
     ("chat-pane-jump-1", "chat-pane-jump-pill-1"),
     ("chat-pane-jump-2", "chat-pane-jump-pill-2"),
     ("chat-pane-jump-3", "chat-pane-jump-pill-3"),
+    ("chat-pane-jump-4", "chat-pane-jump-pill-4"),
+    ("chat-pane-jump-5", "chat-pane-jump-pill-5"),
+    ("chat-pane-jump-6", "chat-pane-jump-pill-6"),
+    ("chat-pane-jump-7", "chat-pane-jump-pill-7"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,11 +75,15 @@ impl ChatSplit {
         }
         split.panes[split.focus] = selected;
         let at = split.focus + 1;
-        // The new pane takes half of the pane it split, like Ghostty.
+        // The new pane takes half of the pane it split, like Ghostty — until
+        // that half would be a sliver, then every pane gets an equal share.
         let half = split.shares[split.focus] / 2.0;
         split.shares[split.focus] = half;
         split.panes.insert(at, None);
         split.shares.insert(at, half);
+        if half < MIN_PANE_SHARE {
+            split.equalize();
+        }
         // The new pane starts in the project of the pane it split from.
         let project = split.projects[split.focus].clone();
         split.projects.insert(at, project);
@@ -94,6 +103,12 @@ impl ChatSplit {
         self.focus = ix;
         self.zoomed = false;
         Some(target)
+    }
+
+    /// The smallest share a divider may leave a pane: `MIN_PANE_SHARE`, or
+    /// half an equal share when that many panes can't all reach it.
+    fn min_share(&self) -> f32 {
+        MIN_PANE_SHARE.min(0.5 / self.panes.len() as f32)
     }
 
     pub fn cycled(&self, forward: bool) -> usize {
@@ -131,6 +146,9 @@ impl ChatSplit {
             | (SplitAxis::Vertical, PaneDirection::Up) => false,
             _ => return false,
         };
+        if self.panes.len() < 2 {
+            return false;
+        }
         // The divider after the focused pane, or before it for the last one.
         let (a, b) = if self.focus + 1 < self.panes.len() {
             (self.focus, self.focus + 1)
@@ -139,7 +157,11 @@ impl ChatSplit {
         };
         let delta = if grow { RESIZE_STEP } else { -RESIZE_STEP };
         let total = self.shares[a] + self.shares[b];
-        let first = (self.shares[a] + delta).clamp(MIN_PANE_SHARE, total - MIN_PANE_SHARE);
+        // Repeated splits halve shares (4 panes: 0.5/0.25/0.125/0.125), so
+        // two neighbors can sum below 2×MIN; an unguarded clamp(min > max)
+        // panicked and took the whole app down. Same guard as drag_divider.
+        let min = self.min_share().min(total / 2.0);
+        let first = (self.shares[a] + delta).clamp(min, total - min);
         self.shares[a] = first;
         self.shares[b] = total - first;
         self.zoomed = false;
@@ -155,7 +177,7 @@ impl ChatSplit {
         }
         self.shares.copy_from_slice(start);
         let total = start[divider - 1] + start[divider];
-        let min = MIN_PANE_SHARE.min(total / 2.0);
+        let min = self.min_share().min(total / 2.0);
         let first = (start[divider - 1] + delta).clamp(min, total - min);
         self.shares[divider - 1] = first;
         self.shares[divider] = total - first;
@@ -323,8 +345,9 @@ impl Shell {
         // Dragging the chat you are in moves it; the pane it leaves empties.
         let parked = selected.clone().filter(|id| open.as_ref() != Some(id));
         let project = self.settings.space_filter.clone();
-        let Some(split) = ChatSplit::split(self.chat_split.take(), axis, parked, project) else {
-            // At the cap or across axes: keep what exists.
+        // Split a copy: a refused split (at the cap, or across axes) must
+        // leave the existing layout alone, not drop every pane.
+        let Some(split) = ChatSplit::split(self.chat_split.clone(), axis, parked, project) else {
             return;
         };
         self.chat_split = Some(split);
@@ -1163,6 +1186,49 @@ mod chat_split_tests {
         assert!(!split.resize(PaneDirection::Up), "wrong axis");
         split.equalize();
         assert_eq!(split.shares, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn resizing_small_neighbors_after_four_splits_does_not_panic() {
+        let mut split = two("a");
+        for _ in 0..2 {
+            split = ChatSplit::split(Some(split), SplitAxis::Horizontal, None, None).unwrap();
+        }
+        assert_eq!(split.panes.len(), 4);
+        // Ghostty-style halving (or a drag) can leave two small neighbors.
+        split.shares = vec![0.5, 0.25, 0.125, 0.125];
+        assert!(split.shares[split.focus] + split.shares[split.focus - 1] < 2.0 * MIN_PANE_SHARE);
+        for direction in [PaneDirection::Left, PaneDirection::Right] {
+            for _ in 0..10 {
+                assert!(split.resize(direction));
+            }
+        }
+        assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(split.shares.iter().all(|&s| s > 0.0));
+    }
+
+    #[test]
+    fn splits_past_four_panes_share_the_column_evenly() {
+        let mut split = two("a");
+        let mut sizes = vec![split.panes.len()];
+        while let Some(next) = ChatSplit::split(Some(split.clone()), SplitAxis::Horizontal, None, None) {
+            split = next;
+            sizes.push(split.panes.len());
+            assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            assert!(
+                split.shares.iter().all(|&s| s >= 1.0 / MAX_CHAT_PANES as f32 - 1e-5),
+                "no sliver panes: {:?}",
+                split.shares
+            );
+        }
+        assert_eq!(sizes, (2..=MAX_CHAT_PANES).collect::<Vec<_>>());
+        assert_eq!(split.focus, MAX_CHAT_PANES - 1, "the newest pane takes focus");
+        // Every divider still drags, even with the column full.
+        let start = split.shares.clone();
+        split.drag_divider(&start, 1, 0.02);
+        assert!(split.shares[0] > start[0] && split.shares[1] < start[1]);
+        assert!(split.resize(PaneDirection::Left));
+        assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
     }
 
     #[test]

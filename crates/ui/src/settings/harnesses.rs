@@ -52,6 +52,7 @@ pub fn blurb(harness: HarnessId) -> &'static str {
         HarnessId::Pi => "The pi coding agent (pi CLI).",
         HarnessId::Opencode => "SST's opencode agent (opencode CLI).",
         HarnessId::Antigravity => "Google's Antigravity agent (Antigravity ACP server).",
+        HarnessId::Exo => "Exo, the self-improving agent, over ACP via its agent-cli adapter.",
         HarnessId::Mock => "Scripted test harness.",
     }
 }
@@ -72,6 +73,14 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
             "Set ANTIGRAVITY_ACP_EXECUTABLE to enable Antigravity"
         }
         .into();
+    }
+    if harness == HarnessId::Exo {
+        // Exo is a whole stack (Docker sandbox + adapters), not one CLI:
+        // what Harness needs is its agent-cli socket.
+        return "Start Exo with its agent-cli adapter to enable \
+            (`./exo.sh --setup agent-cli`; first install: \
+            https://github.com/exoharness/exo)"
+            .into();
     }
     let hint = if enabled {
         format!(
@@ -110,6 +119,7 @@ pub fn executable_override(harness: HarnessId) -> Option<&'static str> {
         HarnessId::Pi => Some("PI_ACP_EXECUTABLE"),
         HarnessId::Opencode => Some("OPENCODE_EXECUTABLE"),
         HarnessId::Antigravity => Some("ANTIGRAVITY_ACP_EXECUTABLE"),
+        HarnessId::Exo => Some("EXO_ACP_EXECUTABLE"),
         HarnessId::Cursor | HarnessId::Mock => None,
     }
 }
@@ -126,6 +136,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Pi => "pi",
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
+        HarnessId::Exo => "exo-cli",
         HarnessId::Mock => "mock",
     }
 }
