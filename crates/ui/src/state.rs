@@ -2585,7 +2585,7 @@ fn spawn_transcript_watch(
             let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_scoped(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,
@@ -2681,7 +2681,7 @@ fn spawn_queue_watch(
             let params = serde_json::json!({ "chatId": chat_id });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_QUEUE, params)
+                .subscribe_scoped(methods::WATCH_QUEUE, params)
                 .await
             {
                 Ok(rx) => rx,
@@ -2735,7 +2735,7 @@ fn spawn_subagent_watch(
             let params = serde_json::json!({ "chatId": doc_id });
             let mut rx = match handle
                 .client()
-                .subscribe(methods::WATCH_DOC_MESSAGES, params)
+                .subscribe_scoped(methods::WATCH_DOC_MESSAGES, params)
                 .await
             {
                 Ok(rx) => rx,

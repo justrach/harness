@@ -1946,6 +1946,14 @@ impl DocHost {
     }
 
     async fn salvage_chat_transcript(&self, chat_id: &str) -> Result<(), String> {
+        // Only the M3 adopt's rollback copy can refill a blank doc. Check it
+        // exists (a presence query, no blob read) before opening: opening
+        // loads the doc and joins its room, and boot must not do that for
+        // every chat that ever ran here.
+        let rollback_id = format!("{chat_id}.pre-chat2");
+        if !self.inner.store.has_snapshot(&rollback_id).unwrap_or(true) {
+            return Ok(());
+        }
         let handle = self.open(chat_id).map_err(|e| e.to_string())?;
         if !handle
             .doc()
@@ -1959,7 +1967,6 @@ impl DocHost {
         // source — the legacy s2 room — went away with the s2 client; any
         // transcript that existed only there was salvaged by earlier
         // releases or is reachable in the room's storage server-side.)
-        let rollback_id = format!("{chat_id}.pre-chat2");
         let fat_bytes = self.inner.store.load_snapshot(&rollback_id).ok().flatten();
         let Some(bytes) = fat_bytes else {
             return Ok(()); // no fat lineage anywhere — genuinely empty chat

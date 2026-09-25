@@ -321,7 +321,7 @@ mod tests {
             method: &str,
             _params: serde_json::Value,
         ) -> Result<RpcReply, RpcError> {
-            if method != methods::WATCH_CHECKOUT_CHANGE_REQUEST {
+            if method != methods::WATCH_CHECKOUT_CHANGE_REQUEST && method != "Silent" {
                 return Err(RpcError::UnknownMethod(method.into()));
             }
             let guard = DropSignal(self.dropped.lock().unwrap().take());
@@ -495,6 +495,30 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
             .await
             .expect("server stream cancelled")
+            .expect("drop signal");
+    }
+
+    #[tokio::test]
+    async fn scoped_subscription_returns_before_first_item_and_cancels_silence() {
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let service = Arc::new(CancelAwareService {
+            dropped: Mutex::new(Some(dropped_tx)),
+        });
+        let client = memory_client(service.clone());
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.subscribe_scoped("Silent", serde_json::Value::Null),
+        )
+        .await
+        .expect("no wait for a first item")
+        .unwrap();
+        while service.dropped.lock().unwrap().is_some() {
+            tokio::task::yield_now().await;
+        }
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("silent server stream cancelled on drop")
             .expect("drop signal");
     }
 

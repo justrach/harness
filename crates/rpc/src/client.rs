@@ -126,7 +126,7 @@ pub struct RpcClient {
     reader: tokio::task::JoinHandle<()>,
 }
 
-/// Checked stream receiver whose drop immediately cancels the server task.
+/// Owned stream receiver whose drop immediately cancels the server task.
 pub struct RpcSubscription {
     id: u64,
     items: mpsc::Receiver<serde_json::Value>,
@@ -254,7 +254,9 @@ impl RpcClient {
 
     /// Streaming request: items arrive on the receiver; it closes when the server sends
     /// `{done}` or `{err}`, or the connection drops. Dropping the receiver cancels the
-    /// stream server-side (the reader notices the dead channel and sends `{id, cancel}`).
+    /// stream server-side only once the reader notices the dead channel — when the
+    /// next item arrives, so a quiet stream lingers. Prefer [`Self::subscribe_scoped`]
+    /// for streams a caller drops early (one-shot snapshots, deselected chats).
     pub async fn subscribe(
         &self,
         method: &str,
@@ -276,6 +278,36 @@ impl RpcClient {
             self.shared.lock().remove(&id);
         })?;
         Ok(rx)
+    }
+
+    /// A stream whose drop cancels it server-side at once, without waiting for
+    /// an acknowledgement or first item (so legitimately silent streams work).
+    pub async fn subscribe_scoped(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcSubscription, RpcError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel(STREAM_QUEUE_CAP);
+        self.shared
+            .lock()
+            .insert(id, Pending::Stream(StreamSink::new(tx)));
+        // Own the cancellation before sending, so dropping this future while
+        // the outbound channel is backpressured still cancels the stream.
+        let subscription = RpcSubscription {
+            id,
+            items: rx,
+            out: self.out.clone(),
+            shared: self.shared.clone(),
+        };
+        self.send(ClientFrame {
+            id,
+            method: Some(method.into()),
+            params,
+            cancel: false,
+        })
+        .await?;
+        Ok(subscription)
     }
 
     /// Streaming request with a server acknowledgement before returning.

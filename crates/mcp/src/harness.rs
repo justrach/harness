@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use harness_doc::{
     SessionCommandPayload, SessionMessageEntry, TranscriptFrame, apply_transcript_frame,
 };
 use harness_proto::{
     Chat, Device, HarnessId, Model, ReasoningLevel, Session, SessionStatus, Space, SteeringMode,
 };
-use harness_rpc::{RpcClient, RpcError, connect_ws, methods};
+use harness_rpc::{RpcClient, RpcError, RpcSubscription, connect_ws, methods};
 
 /// First-item wait for a watch snapshot. Localhost; the engine answers
 /// watch attaches in milliseconds unless it is still assembling stores.
@@ -175,18 +175,16 @@ impl Harness {
     }
 
     /// Open a watch stream (reconnecting once if the socket is gone).
-    pub async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> anyhow::Result<mpsc::Receiver<Value>> {
+    /// Scoped: dropping it (every snapshot does) cancels the engine-side
+    /// watch at once, even when the stream is quiet.
+    pub async fn subscribe(&self, method: &str, params: Value) -> anyhow::Result<RpcSubscription> {
         let client = self.client().await?;
-        match client.subscribe(method, params.clone()).await {
+        match client.subscribe_scoped(method, params.clone()).await {
             Err(RpcError::Closed) => {
                 self.forget_client().await;
                 let client = self.client().await?;
                 client
-                    .subscribe(method, params)
+                    .subscribe_scoped(method, params)
                     .await
                     .map_err(|e| anyhow!("{method}: {e}"))
             }
@@ -584,6 +582,51 @@ pub fn short(id: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    /// A snapshot read drops its watch after the first item; the engine-side
+    /// stream must end then, not linger until the chat's next change.
+    #[tokio::test]
+    async fn one_shot_reads_release_quiet_watches() {
+        use futures::StreamExt;
+        struct Service(tokio::sync::watch::Sender<()>);
+        #[async_trait::async_trait]
+        impl harness_rpc::RpcService for Service {
+            async fn handle(&self, method: &str, _: Value) -> Result<harness_rpc::RpcReply, RpcError> {
+                let first = if method == methods::WATCH_DOC_MESSAGES {
+                    json!({"reset": []})
+                } else {
+                    json!([])
+                };
+                let rx = self.0.subscribe();
+                Ok(harness_rpc::RpcReply::Stream(
+                    futures::stream::unfold((Some(first), rx), |(first, mut rx)| async move {
+                        if let Some(item) = first {
+                            return Some((item, (None, rx)));
+                        }
+                        rx.changed().await.ok()?;
+                        Some((json!([]), (None, rx)))
+                    })
+                    .boxed(),
+                ))
+            }
+        }
+        let (watched, _) = tokio::sync::watch::channel(());
+        let rpc = harness_rpc::memory_client(Arc::new(Service(watched.clone())));
+        let client = Harness::with_client(rpc, Origin::default());
+        for _ in 0..16 {
+            assert!(client.transcript("quiet").await.unwrap().is_empty());
+            client.snapshot(methods::WATCH_CHATS, json!({})).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while watched.receiver_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("one-shot watch cancelled without another event");
+        }
+        // The connection stays up throughout: disconnecting is not the cleanup.
+        client.snapshot(methods::WATCH_DEVICES, json!({})).await.unwrap();
+    }
 
     fn chat(id: &str, title: Option<&str>) -> Chat {
         Chat {
