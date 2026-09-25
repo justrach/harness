@@ -28,7 +28,9 @@ pub const BUCKETS_MS: [f64; 22] = [
 ];
 const BUCKET_COUNT: usize = BUCKETS_MS.len() + 1;
 
-const DEFAULT_ENDPOINT: &str = "https://harness-telemetry.rachpradhan.workers.dev/v1/harness/stats";
+/// The harness-telemetry worker on its codegraff.com domain (the
+/// workers.dev address serves the same worker, for older builds).
+const DEFAULT_ENDPOINT: &str = "https://otel.codegraff.com/v1/harness/stats";
 const SCHEMA: &str = "harness.desktop.stats.v1";
 const INSTALL_ID_FILE: &str = "stats-install-id";
 /// First upload soon after launch so short sessions still report; then a
