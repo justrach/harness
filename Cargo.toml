@@ -19,7 +19,7 @@ members = [
 exclude = ["vendor/zui", "vendor/gpui-component"]
 
 [workspace.package]
-version = "0.2.85"
+version = "0.2.86"
 edition = "2024"
 license = "AGPL-3.0-only"
 publish = false
