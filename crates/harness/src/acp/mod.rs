@@ -2870,16 +2870,63 @@ fn prompt_turn(
     text: String,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    prompt_turn_with_images(client, session_id, text, Vec::new(), prompt_id)
+}
+
+/// [`prompt_turn`] plus ACP `image` content blocks after the text (the
+/// run's first prompt, for agents advertising `promptCapabilities.image`).
+fn prompt_turn_with_images(
+    client: RpcClient,
+    session_id: String,
+    text: String,
+    images: Vec<Value>,
+    prompt_id: Option<String>,
+) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
+        let mut prompt = vec![json!({ "type": "text", "text": text })];
+        prompt.extend(images);
         let mut params = json!({
             "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": text }],
+            "prompt": prompt,
         });
         if let Some(id) = prompt_id {
             params["_meta"] = json!({ "promptId": id, "requestId": id });
         }
         client.request("session/prompt", params).await
     })
+}
+
+/// Whether the agent takes ACP `image` prompt blocks.
+fn accepts_images(init: &Value) -> bool {
+    init.pointer("/agentCapabilities/promptCapabilities/image")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The run's staged image attachments as ACP `image` blocks, best-effort:
+/// an unreadable, oversized or non-image file is skipped — its path ref
+/// still rides the prompt text — never fatal to the run.
+async fn acp_image_blocks(paths: &[String]) -> Vec<Value> {
+    use base64::Engine as _;
+    let mut blocks = Vec::new();
+    for path in paths {
+        let Ok(bytes) = tokio::fs::read(path).await else {
+            tracing::warn!(target: "harness_adapters::acp", %path, "attachment unreadable; path ref only");
+            continue;
+        };
+        if bytes.len() as u64 > crate::claude::MAX_INLINE_IMAGE_BYTES {
+            continue;
+        }
+        let Some(mime) = crate::claude::image_media_type(Path::new(path), &bytes) else {
+            continue;
+        };
+        blocks.push(json!({
+            "type": "image",
+            "mimeType": mime,
+            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+    }
+    blocks
 }
 
 /// Answer a server→client request. Permission requests are auto-accepted with
@@ -3383,6 +3430,7 @@ async fn run_session(session: Session) {
             })?;
         }
         let steer_ext = steering_supported(&init);
+        let images_supported = accepts_images(&init);
         let init_commands = scan_available_commands(&init);
 
         let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
@@ -3584,15 +3632,16 @@ async fn run_session(session: Session) {
         let session_cwd = (harness == HarnessId::Graff)
             .then(|| graff_worktree::session_worktree(&options_snapshot))
             .flatten();
-        Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>), HarnessError>((
+        Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>, bool), HarnessError>((
             session_id,
             steer_ext,
             init_commands,
             initial_effort,
             session_cwd,
+            images_supported,
         ))
     };
-    let (session_id, steer_ext, init_commands, initial_effort, session_cwd) = tokio::select! {
+    let (session_id, steer_ext, init_commands, initial_effort, session_cwd, images_supported) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -3726,11 +3775,19 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    // Pasted/dropped images ride the first prompt as ACP image blocks when
+    // the agent takes them; the text keeps its path refs either way.
+    let images = if images_supported && !request.attachments.is_empty() {
+        acp_image_blocks(&request.attachments).await
+    } else {
+        Vec::new()
+    };
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
-        prompt_turn(
+        prompt_turn_with_images(
             client.clone(),
             session_id.clone(),
             prompt_transform(request.reasoning, &request.prompt),
+            images,
             current_prompt_id.clone(),
         )
     });
