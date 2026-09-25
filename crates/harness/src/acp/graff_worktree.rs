@@ -87,6 +87,16 @@ pub fn classify_worktree_output(output: &str) -> GraffWorktreeOutcome {
     }
 }
 
+/// Newer Graff (codegraff#1263) exits 0 on ✓, 2 on kept/⚠ and 1 on ✗;
+/// older builds always exit 0, so a zero exit still defers to the marker.
+fn outcome_for(code: Option<i32>, output: &str) -> GraffWorktreeOutcome {
+    match code {
+        Some(0) => classify_worktree_output(output),
+        Some(2) => GraffWorktreeOutcome::Kept,
+        _ => GraffWorktreeOutcome::Failed,
+    }
+}
+
 /// Run a `graff worktree` lifecycle command for tree `name` from its main
 /// checkout `root` (Graff resolves `.graff/worktrees/<name>` from there).
 pub async fn run_graff_worktree_action(
@@ -111,10 +121,7 @@ pub async fn run_graff_worktree_action(
     if text.is_empty() {
         text = stderr;
     }
-    let mut outcome = classify_worktree_output(&text);
-    if !output.status.success() {
-        outcome = GraffWorktreeOutcome::Failed;
-    }
+    let outcome = outcome_for(output.status.code(), &text);
     if text.is_empty() {
         text = format!("graff worktree exited with {}", output.status);
     }
@@ -141,6 +148,16 @@ mod tests {
         for (text, want) in cases {
             assert_eq!(classify_worktree_output(text), want, "{text:?}");
         }
+    }
+
+    #[test]
+    fn exit_codes_from_newer_graff_agree_with_markers() {
+        use GraffWorktreeOutcome::*;
+        assert_eq!(outcome_for(Some(0), "✓ landed"), Done);
+        assert_eq!(outcome_for(Some(0), "✗ refused (old graff exits 0)"), Failed);
+        assert_eq!(outcome_for(Some(2), "kept /r/.graff/worktrees/x"), Kept);
+        assert_eq!(outcome_for(Some(1), "✗ workspace has uncommitted files"), Failed);
+        assert_eq!(outcome_for(None, "killed"), Failed);
     }
 
     #[test]
