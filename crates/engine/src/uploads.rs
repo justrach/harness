@@ -162,23 +162,37 @@ impl Uploads {
         &self.inner.dir
     }
 
-    /// The prompt's trailer attachments that live in this device's durable
-    /// uploads dir, canonicalized. Anything else a prompt names (a synced or
-    /// pasted path) is dropped: only composer uploads may be read and inlined.
+    /// The prompt's trailer attachments that live in this device's uploads,
+    /// canonicalized. Anything else a prompt names (a synced or pasted path)
+    /// is dropped: only composer uploads may be read and inlined.
     pub fn owned_attachments(&self, prompt: &str) -> Vec<String> {
-        let Ok(root) = std::fs::canonicalize(self.dir()) else {
-            return Vec::new();
-        };
+        self.owned_paths(attachment_refs_in(prompt))
+    }
+
+    /// `paths` that are files inside this device's uploads (the durable dir
+    /// or a read-only historical root), deduplicated by canonical path but
+    /// kept in their original spelling (so they still match the prompt
+    /// text). The path jail every harness-bound attachment passes through.
+    pub fn owned_paths(&self, paths: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut roots: Vec<PathBuf> = std::fs::canonicalize(self.dir()).into_iter().collect();
+        roots.extend(
+            self.inner
+                .read_only_roots
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter_map(|root| std::fs::canonicalize(root).ok()),
+        );
+        let mut seen: Vec<PathBuf> = Vec::new();
         let mut out: Vec<String> = Vec::new();
-        for path in attachment_refs_in(prompt) {
+        for path in paths {
+            let path = self.resolve_pending(&path).unwrap_or(path);
             let Ok(real) = std::fs::canonicalize(&path) else {
                 continue;
             };
-            if real.starts_with(&root) && real.is_file() {
-                let real = real.to_string_lossy().into_owned();
-                if !out.contains(&real) {
-                    out.push(real);
-                }
+            if real.is_file() && roots.iter().any(|root| real.starts_with(root)) && !seen.contains(&real) {
+                seen.push(real);
+                out.push(path);
             }
         }
         out
@@ -511,8 +525,7 @@ mod tests {
             uploads_dir.join("missing.png").display(),
         );
         let owned = uploads.owned_attachments(&prompt);
-        let real = std::fs::canonicalize(&inside).unwrap();
-        assert_eq!(owned, [real.to_string_lossy().into_owned()]);
+        assert_eq!(owned, [inside.to_string_lossy().into_owned()]);
         assert!(uploads.owned_attachments("no trailer - /etc/passwd").is_empty());
     }
     use super::*;

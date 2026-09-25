@@ -4006,13 +4006,19 @@ impl DocHost {
         // anchor the prompt only once this exact row reaches the transcript.
         let message_id = item.id.clone();
         let prompt = queued_message_prompt(&item.text, &item.attachments);
+        // Same jail as a Run command's attachments: harnesses only ever read
+        // files inside this device's uploads.
+        let attachments = match self.inner.uploads.get() {
+            Some(uploads) => uploads.owned_paths(item.attachments.iter().cloned()),
+            None => item.attachments.clone(),
+        };
         if send == QueueSend::Steer {
             match sessions
                 .steer_with_attachments(
                     chat_id,
                     &prompt,
                     Some(message_id.clone()),
-                    item.attachments.clone(),
+                    attachments.clone(),
                 )
                 .await?
             {
@@ -4046,6 +4052,8 @@ impl DocHost {
         request.prompt = prompt;
         request.resume = None; // dispatch re-derives the harness session
         request.attachments = item.attachments.clone();
+        // Resolves landed `pending://` refs (text and list), then jails.
+        self.resolve_request_attachments(&mut request);
         let harness = self.harness_for_request(chat_id, &request);
         self.dispatch_with_source_context(&sessions, chat_id, harness, request, Some(message_id))
             .await?;
@@ -4945,7 +4953,8 @@ impl DocHost {
     /// Rewrite a request's landed `pending://` refs to this device's absolute
     /// paths — in the attachments list AND the prompt text — so the harness
     /// (and the persisted user entry) see ordinary local files, exactly like
-    /// the legacy pre-upload flow produced.
+    /// the legacy pre-upload flow produced. Then drop every attachment that
+    /// is not a file inside this device's uploads.
     fn resolve_request_attachments(&self, request: &mut harness_proto::RunRequest) {
         let Some(uploads) = self.inner.uploads.get() else {
             return;
@@ -4956,6 +4965,10 @@ impl DocHost {
                 *path = abs;
             }
         }
+        // Harnesses read and inline these files. A synced Run can name any
+        // absolute path, so only files inside this device's uploads survive;
+        // anything else stays a text-only ref in the prompt.
+        request.attachments = uploads.owned_paths(std::mem::take(&mut request.attachments));
     }
 
     /// [`Self::resolve_request_attachments`] for a bare prompt (Steer).
