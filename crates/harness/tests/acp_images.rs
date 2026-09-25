@@ -89,9 +89,36 @@ async fn images_ride_the_first_prompt_only_when_the_agent_takes_them() {
 
 /// A follow-up sent while the first turn runs becomes the next
 /// `session/prompt`; its `Attached images` refs ride as `image` blocks and
-/// the wire text tells the model they are already inline.
+/// the wire text is just the message.
 #[tokio::test]
 async fn follow_up_turn_images_ride_as_blocks() {
+    let second = follow_up_prompt(true).await;
+    let blocks = second.as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "text + image: {second}");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(
+        blocks[0]["text"], "can you see this?",
+        "no path trailer: {second}"
+    );
+    assert!(blocks[1]["uri"].as_str().unwrap().ends_with("/follow.png"));
+}
+
+/// A path that is only written in the prompt text (synced or pasted, not
+/// resolved by the engine) is never read or sent.
+#[tokio::test]
+async fn follow_up_text_paths_alone_are_not_read() {
+    let second = follow_up_prompt(false).await;
+    let blocks = second.as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "text only: {second}");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("open them to view")
+    );
+}
+
+async fn follow_up_prompt(authorized: bool) -> serde_json::Value {
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("follow.png");
     std::fs::write(&image, PNG).unwrap();
@@ -136,6 +163,12 @@ async fn follow_up_turn_images_ride_as_blocks() {
             .send(SteerMessage {
                 prompt: follow_up,
                 message_id: None,
+                // The engine resolved this upload; that is what authorizes it.
+                attachments: if authorized {
+                    vec![path.clone()]
+                } else {
+                    Vec::new()
+                },
             })
             .await
             .unwrap();
@@ -152,14 +185,6 @@ async fn follow_up_turn_images_ride_as_blocks() {
         1,
         "no attachments on turn one: {first}"
     );
-    let second: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.path().join("prompt-2.json")).unwrap())
-            .unwrap();
-    let blocks = second.as_array().unwrap();
-    assert_eq!(blocks.len(), 2, "text + image: {second}");
-    assert_eq!(blocks[1]["type"], "image");
-    let text = blocks[0]["text"].as_str().unwrap();
-    assert!(text.contains("already attached inline"), "{text}");
-    assert!(!text.contains("open them to view"), "{text}");
-    assert!(text.contains(&path), "path ref kept: {text}");
+    serde_json::from_str(&std::fs::read_to_string(dir.path().join("prompt-2.json")).unwrap())
+        .unwrap()
 }

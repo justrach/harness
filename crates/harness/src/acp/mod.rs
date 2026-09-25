@@ -2865,18 +2865,20 @@ fn stop_outcome(
 /// `prompt_id` (agents with the prompt-complete extension) rides `_meta` so
 /// the `_x.ai/session/prompt_complete` notification can be matched exactly —
 /// grok echoes it back (verified live, 1.0.4). `images` is the agent's
-/// `promptCapabilities.image`: attachments (the text's path refs plus
-/// `attachments`) then ride as `image` blocks on every turn, not just the first.
+/// `promptCapabilities.image`: attachments then ride as `image` blocks on
+/// every turn, not just the first — `extra` plus the text's path refs, read
+/// only when `allowed` (engine-resolved uploads) names them.
 fn prompt_turn(
     client: RpcClient,
     session_id: String,
     text: String,
-    attachments: Vec<String>,
+    extra: Vec<String>,
+    allowed: Vec<String>,
     images: bool,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
-        let prompt = prompt_images::prompt_blocks(text, &attachments, images).await;
+        let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
             "prompt": prompt,
@@ -3741,12 +3743,16 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
+    // Engine-resolved uploads this run may inline: the request's, plus each
+    // steer's as it arrives. Paths only written in prompt text are never read.
+    let mut allowed_images: Vec<String> = request.attachments.clone();
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_turn(
             client.clone(),
             session_id.clone(),
             prompt_transform(request.reasoning, &request.prompt),
             request.attachments.clone(),
+            allowed_images.clone(),
             images_supported,
             current_prompt_id.clone(),
         )
@@ -3991,6 +3997,7 @@ async fn run_session(session: Session) {
                         session_id.clone(),
                         text,
                         Vec::new(),
+                        allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
                     ));
@@ -4280,6 +4287,7 @@ async fn run_session(session: Session) {
                         session_id.clone(),
                         text,
                         Vec::new(),
+                        allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
                     ));
@@ -4331,6 +4339,7 @@ async fn run_session(session: Session) {
                         session_id.clone(),
                         text,
                         Vec::new(),
+                        allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
                     ));
@@ -4406,6 +4415,7 @@ async fn run_session(session: Session) {
                         session_id.clone(),
                         text,
                         Vec::new(),
+                        allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
                     ));
@@ -4418,6 +4428,7 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    allowed_images.extend(msg.attachments.iter().cloned());
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
@@ -4471,6 +4482,7 @@ async fn run_session(session: Session) {
                         session_id.clone(),
                         text,
                         Vec::new(),
+                        allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
                     ));

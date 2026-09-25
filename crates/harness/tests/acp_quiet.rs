@@ -125,6 +125,7 @@ async fn delayed_turn(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "second".into(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -132,6 +133,7 @@ async fn delayed_turn(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "third".into(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -158,6 +160,7 @@ async fn delayed_turn(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "fourth".into(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -222,6 +225,7 @@ async fn cancel_quiet(scenario: &str) {
         .send(SteerMessage {
             message_id: None,
             prompt: "must not run".into(),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();

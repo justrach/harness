@@ -308,6 +308,7 @@ async fn steering_uses_turn_steer_with_expected_turn_id() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");
@@ -359,6 +360,7 @@ async fn rejected_steer_falls_back_to_a_follow_up_turn() {
                 .link()
             ),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");
@@ -998,6 +1000,7 @@ async fn live_subagent_spawn_and_followup_keep_one_transcript() {
             steer.send(SteerMessage {
                 prompt: "Reuse the SAME existing subagent for one more task: reply exactly child-second. Use followup_task if available, otherwise send_input. Do not spawn a new agent. Wait for it to finish, then reply exactly parent-second. Do not inspect or change files.".into(),
                 message_id: None,
+                attachments: Vec::new(),
             }).await.unwrap();
         }
         if turn == 2 {
@@ -1405,6 +1408,7 @@ async fn native_command_during_a_turn_waits_for_its_boundary() {
                         .send(SteerMessage {
                             prompt: "/review".into(),
                             message_id: None,
+                            attachments: Vec::new(),
                         })
                         .await
                         .unwrap();
@@ -1440,6 +1444,7 @@ async fn native_skill_and_file_references_survive_initial_and_steered_turns() {
         .send(SteerMessage {
             prompt: harness_prompt(&format!("Also {}", followup.link()), HarnessId::Codex),
             message_id: Some("skill-steer".into()),
+            attachments: Vec::new(),
         })
         .await
         .unwrap();
@@ -1489,6 +1494,7 @@ async fn ordinary_followup_cannot_overtake_a_queued_native_command() {
                             .send(SteerMessage {
                                 prompt: prompt.into(),
                                 message_id: None,
+                                attachments: Vec::new(),
                             })
                             .await
                             .unwrap();

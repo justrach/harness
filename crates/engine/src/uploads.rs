@@ -77,6 +77,26 @@ pub fn pending_refs_in(text: &str) -> Vec<String> {
         })
         .collect()
 }
+/// Paths on a text's `Attached images (local files …):` trailer (the
+/// composer's `- <path>` lines after that header). Line-wise like
+/// [`pending_refs_in`]; says nothing about whether a path is trustworthy.
+pub fn attachment_refs_in(text: &str) -> Vec<String> {
+    let mut lines = text.lines().skip_while(|line| {
+        let line = line.trim();
+        !(line
+            .to_ascii_lowercase()
+            .starts_with("attached images (local files")
+            && line.ends_with("):"))
+    });
+    if lines.next().is_none() {
+        return Vec::new();
+    }
+    lines
+        .map_while(|line| line.trim_start().strip_prefix("- "))
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect()
+}
 /// Hard cap on an assembled file.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Multiple of 3 so independent base64 chunks concatenate losslessly.
@@ -140,6 +160,28 @@ impl Uploads {
     /// The durable uploads dir (a path-jail root).
     pub fn dir(&self) -> &Path {
         &self.inner.dir
+    }
+
+    /// The prompt's trailer attachments that live in this device's durable
+    /// uploads dir, canonicalized. Anything else a prompt names (a synced or
+    /// pasted path) is dropped: only composer uploads may be read and inlined.
+    pub fn owned_attachments(&self, prompt: &str) -> Vec<String> {
+        let Ok(root) = std::fs::canonicalize(self.dir()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for path in attachment_refs_in(prompt) {
+            let Ok(real) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            if real.starts_with(&root) && real.is_file() {
+                let real = real.to_string_lossy().into_owned();
+                if !out.contains(&real) {
+                    out.push(real);
+                }
+            }
+        }
+        out
     }
 
     /// Accept `root` for reads from now on (idempotent). Profile import calls
@@ -450,6 +492,29 @@ fn mime_by_ext(path: &Path) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_attachments_keep_only_files_inside_the_uploads_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let uploads_dir = home.path().join("uploads");
+        std::fs::create_dir_all(&uploads_dir).unwrap();
+        let uploads = super::Uploads::from_root(&uploads_dir);
+        let inside = uploads_dir.join("abcd1234-shot.png");
+        std::fs::write(&inside, b"png").unwrap();
+        let outside = home.path().join("secret.png");
+        std::fs::write(&outside, b"png").unwrap();
+        let escape = uploads_dir.join("..").join("secret.png");
+        let prompt = format!(
+            "look\n\nAttached images (local files — open them to view):\n- {}\n- {}\n- {}\n- {}",
+            inside.display(),
+            outside.display(),
+            escape.display(),
+            uploads_dir.join("missing.png").display(),
+        );
+        let owned = uploads.owned_attachments(&prompt);
+        let real = std::fs::canonicalize(&inside).unwrap();
+        assert_eq!(owned, [real.to_string_lossy().into_owned()]);
+        assert!(uploads.owned_attachments("no trailer - /etc/passwd").is_empty());
+    }
     use super::*;
 
     #[test]

@@ -76,6 +76,7 @@ async fn real_pi_mock_lifecycle() {
                                 .send(SteerMessage {
                                     prompt: "second".into(),
                                     message_id: None,
+                                    attachments: Vec::new(),
                                 })
                                 .await
                                 .unwrap();

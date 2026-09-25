@@ -4008,7 +4008,12 @@ impl DocHost {
         let prompt = queued_message_prompt(&item.text, &item.attachments);
         if send == QueueSend::Steer {
             match sessions
-                .steer(chat_id, &prompt, Some(message_id.clone()))
+                .steer_with_attachments(
+                    chat_id,
+                    &prompt,
+                    Some(message_id.clone()),
+                    item.attachments.clone(),
+                )
                 .await?
             {
                 SteerOutcome::Accepted => return Ok(()),
@@ -5225,7 +5230,18 @@ impl DocHost {
         {
             tracing::warn!(chat = %chat_id, error = %err, "canonical user-message write failed");
         }
-        match sessions.steer(chat_id, &prompt, message_id.clone()).await? {
+        // This prompt's own images: composer uploads named on its trailer,
+        // kept only when they resolve inside this device's uploads dir.
+        let attachments = self
+            .inner
+            .uploads
+            .get()
+            .map(|uploads| uploads.owned_attachments(&prompt))
+            .unwrap_or_default();
+        match sessions
+            .steer_with_attachments(chat_id, &prompt, message_id.clone(), attachments.clone())
+            .await?
+        {
             SteerOutcome::Accepted => {
                 handle.queue_paused.store(false, Ordering::Release);
                 Ok((SessionCommandStatus::Applied, None))
@@ -5243,8 +5259,8 @@ impl DocHost {
                 request.prompt = prompt;
                 request.resume = None; // dispatch re-derives the harness session
                 // A reused config must not re-inline the PREVIOUS turn's
-                // images; this prompt's own refs (if any) ride its text.
-                request.attachments = Vec::new();
+                // images: only this prompt's own validated uploads ride.
+                request.attachments = attachments;
                 let harness = self.harness_for_request(chat_id, &request);
                 self.dispatch_with_source_context(sessions, chat_id, harness, request, message_id)
                     .await?;
