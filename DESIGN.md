@@ -19,7 +19,7 @@ New installs select **Codegraff Light** and **Codegraff Dark**. These are two au
 | Muted text | `#6b6557` | `#9a9384` |
 | Accent | `#c77d20` | `#e8a33d` |
 
-The Codegraff palettes recommend frosted surfaces, like the Harness palettes before them: the window blurs what sits behind it, tinted from the mapped shell roles. The **Frosted glass** switch in Settings → Appearance turns that off. In light mode the white content plane advances and the warmer sidebar recedes; in dark mode the content plane is darkest and raised controls get lighter. Borders and restrained shadows separate light cards. Accent marks actions, focus, selection, activity, and usage below warning thresholds. Warning, danger, success, diff, syntax, and terminal colors keep their own meanings. Palette definitions live in [`crates/theme/src/builtins.rs`](crates/theme/src/builtins.rs).
+The Codegraff palettes start opaque. The **Frosted glass** switch in Settings → Appearance turns on frost: the window blurs what sits behind it, tinted from the mapped shell roles. In light mode the white content plane advances and the warmer sidebar recedes; in dark mode the content plane is darkest and raised controls get lighter. Borders and restrained shadows separate light cards. Accent marks actions, focus, selection, activity, and usage below warning thresholds. Warning, danger, success, diff, syntax, and terminal colors keep their own meanings. Palette definitions live in [`crates/theme/src/builtins.rs`](crates/theme/src/builtins.rs).
 
 ## Type, rhythm, and shape
 
