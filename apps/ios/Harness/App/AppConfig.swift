@@ -1,9 +1,29 @@
 // Session-wide connection config: edge base URL, identity, token minting for
-// room sockets (WS auth rides the URL query — sockets can't set headers), and
-// the durable-nudge POST. Thread-safe (rooms call in from their actors).
+// room sockets, and the durable-nudge POST. Socket URL providers still mint
+// `?token=` URLs; `URLRequest.bearerWebSocket` moves the token into an
+// Authorization header before the upgrade is sent. Thread-safe (rooms call
+// in from their actors).
 
 import Foundation
 
+extension URLRequest {
+    /// A WebSocket upgrade request with any `token` query item moved into an
+    /// `Authorization: Bearer` header: a URL can reach request logs, a header
+    /// does not. The edge reads the header first and still accepts the query
+    /// form, so this works against every deployed edge.
+    static func bearerWebSocket(_ url: URL) -> URLRequest {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems,
+              let token = items.first(where: { $0.name == "token" })?.value else {
+            return URLRequest(url: url)
+        }
+        let kept = items.filter { $0.name != "token" }
+        components.queryItems = kept.isEmpty ? nil : kept
+        var request = URLRequest(url: components.url ?? url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+}
 final class AppConfig: @unchecked Sendable {
     enum Mode: String {
         case codegraff
