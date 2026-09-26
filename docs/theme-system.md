@@ -11,12 +11,13 @@ Code workbench ids and TextMate selectors stop at the source compiler.
 - `ThemeSelection` stores independent light and dark variant ids.
 - `AccentSelection::ThemeDefault` preserves the variant's authored accent.
 - `AccentSelection::Preset` derives a contrast-checked interaction overlay.
-- Every variant records a recommended `SurfaceTreatment`: Harness recommends
-  frost, while VS Code-derived themes recommend opaque surfaces because that is
-  what their authors targeted.
+- Every variant records a recommended `SurfaceTreatment`: Harness and
+  Codegraff recommend frost, while VS Code-derived themes recommend opaque
+  surfaces because that is what their authors targeted.
 - `SurfacePreference` is a separate device-local choice: `Theme default`,
   `Frosted`, or `Opaque`. It does not change appearance, theme, or accent
-  selection.
+  selection. Settings shows it as one **Frosted glass** switch reflecting the
+  look in effect; flipping it stores `Frosted` or `Opaque`.
 - Terminal background, foreground, selection and ANSI16 colors belong to the
   variant instead of the terminal renderer.
 

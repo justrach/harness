@@ -1230,66 +1230,13 @@ fn accent_helper(accent: AccentSelection) -> String {
     }
 }
 
-fn surface_label(surface: SurfacePreference) -> &'static str {
-    match surface {
-        SurfacePreference::ThemeDefault => "Theme default",
-        SurfacePreference::Frosted => "Frosted",
-        SurfacePreference::Opaque => "Opaque",
+/// Copy under the Frosted glass switch, from the treatment actually in effect.
+fn frosted_helper(frosted: bool) -> &'static str {
+    if frosted {
+        "Blurs and tints what sits behind the window, where supported."
+    } else {
+        "Solid surfaces in every theme."
     }
-}
-
-fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> String {
-    match surface {
-        SurfacePreference::ThemeDefault => format!(
-            "Uses this theme's {} default.",
-            match resolved {
-                SurfaceTreatment::Frosted => "frosted",
-                SurfaceTreatment::Opaque => "opaque",
-            }
-        ),
-        SurfacePreference::Frosted => "Theme-colored glass where supported.".into(),
-        SurfacePreference::Opaque => "Solid surfaces for every theme.".into(),
-    }
-}
-
-fn surface_choice(
-    theme: &Theme,
-    surface: SurfacePreference,
-    selected: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "appearance-surface-{}",
-            surface_label(surface).to_lowercase().replace(' ', "-")
-        )))
-        .h(px(30.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.5))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
-        .child(surface_label(surface))
 }
 
 fn background_effect_choice(
@@ -3042,17 +2989,9 @@ impl Render for AppearancePage {
                 ))
             })
             .collect::<Vec<_>>();
-        let surface_controls = SurfacePreference::ALL
-            .into_iter()
-            .map(|surface| {
-                surface_choice(&theme, surface, surface == current_surface).on_click(cx.listener(
-                    move |_, _, _, cx| {
-                        appearance::set_surface(surface, cx);
-                        cx.notify();
-                    },
-                ))
-            })
-            .collect::<Vec<_>>();
+        // The switch shows what is on screen, so "theme default" reads as the
+        // theme's own recommendation; flipping it stores an explicit choice.
+        let frosted = theme.surface_treatment == SurfaceTreatment::Frosted;
         let mut settings_rows = theme_rows;
         settings_rows.push(
             widgets::card_row(&theme, false)
@@ -3089,27 +3028,32 @@ impl Render for AppearancePage {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(widgets::row_title(&theme, "Glass"))
+                        .child(widgets::row_title(&theme, "Frosted glass"))
                         .child(widgets::meta_line(
                             &theme,
                             vec![
                                 div()
-                                    .child(SharedString::from(surface_helper(
-                                        current_surface,
-                                        theme.surface_treatment,
-                                    )))
+                                    .child(SharedString::from(frosted_helper(frosted)))
                                     .into_any_element(),
                             ],
                         )),
                 )
                 .child(
-                    div()
-                        .flex_none()
+                    widgets::toggle_switch(&theme, frosted)
+                        .id("appearance-frosted-glass-toggle")
                         .ml(px(10.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .children(surface_controls),
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            appearance::set_surface(
+                                if frosted {
+                                    SurfacePreference::Opaque
+                                } else {
+                                    SurfacePreference::Frosted
+                                },
+                                cx,
+                            );
+                            cx.notify();
+                        })),
                 )
                 .into_any_element(),
         );
@@ -3493,17 +3437,9 @@ mod tests {
     }
 
     #[test]
-    fn surface_helper_explains_theme_default_and_global_overrides() {
-        let default = surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Opaque);
-        assert!(default.contains("opaque default"));
-        assert!(
-            surface_helper(SurfacePreference::Frosted, SurfaceTreatment::Opaque)
-                .contains("where supported")
-        );
-        assert!(
-            surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted)
-                .contains("every theme")
-        );
+    fn frosted_helper_describes_the_look_in_effect() {
+        assert!(frosted_helper(true).contains("where supported"));
+        assert!(frosted_helper(false).contains("every theme"));
     }
 
     #[test]
