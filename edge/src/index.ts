@@ -45,9 +45,10 @@ import { PreviewRoom } from "./preview-room";
 import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
+import { VaultRoom } from "./vault-room";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom };
 
 const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 
@@ -168,6 +169,14 @@ export default {
 
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
+
+    // ── login vault (docs/adr/0005): one room per user, named from the
+    //    verified bearer only. The DO additionally requires a device
+    //    signature on every write; path and query pass through unchanged
+    //    because they are part of the signed string. ────────────────────────
+    if (parts[0] === "vault") {
+      return forward(env.VAULT_ROOMS, `vault1/${auth.userId}`, request, auth.userId, url.pathname, url.search);
+    }
 
     // ── session rooms ───────────────────────────────────────────────────────
     if (parts[0] === "session" && parts[1] && ID_RE.test(parts[1]) && parts[2] === "ws") {
