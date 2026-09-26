@@ -3359,6 +3359,8 @@ impl Shell {
                 harness: Some(harness_proto::HarnessId::Graff),
                 model: Some(model),
                 reasoning,
+                // The project was just picked above.
+                target: None,
             }),
             cx,
         );
@@ -13148,6 +13150,105 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn split_canvases_keep_their_own_project(cx: &mut TestAppContext) {
+        use harness_proto::HarnessId;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let space = |id: &str| harness_proto::Space {
+                    id: id.into(),
+                    device_id: "local".into(),
+                    path: format!("/p/{id}"),
+                    name: None,
+                    git_detected: false,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    created_at: Utc::now(),
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![space("harness"), space("folio")]);
+                    state.chats = vec![harness_proto::Chat {
+                        id: "harness-chat".into(),
+                        device_id: "local".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        parent_chat_id: None,
+                        space_id: Some("harness".into()),
+                        last_seen_at: None,
+                        room_gen: None,
+                    }];
+                    state.select_chat(Some("harness-chat".into()), cx);
+                });
+                shell.set_space_filter(Some("harness".into()), cx);
+                let project = |shell: &Shell, cx: &App| shell.state.read(cx).selected_space.clone();
+                assert_eq!(project(shell, cx).as_deref(), Some("harness"));
+
+                // ⌘D from the harness chat, then pick folio in the new pane.
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_space(Some("folio".into()), cx));
+
+                // Visiting the harness pane moves the project to harness...
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(project(shell, cx).as_deref(), Some("harness"));
+                // ...and coming back restores the canvas's own pick.
+                shell.focus_chat_pane(1, window, cx);
+                assert_eq!(
+                    project(shell, cx).as_deref(),
+                    Some("folio"),
+                    "the new pane used to come back as harness (user report)"
+                );
+                // Same across tabs.
+                shell.new_chat_tab(Some("harness-chat".into()), window, cx);
+                assert_eq!(project(shell, cx).as_deref(), Some("harness"));
+                shell.switch_chat_tab(0, window, cx);
+                assert_eq!(project(shell, cx).as_deref(), Some("folio"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn split_and_tab_canvases_keep_their_own_model_picks(cx: &mut TestAppContext) {
         use harness_proto::{HarnessId, ReasoningLevel};
         let dir = tempfile::tempdir().unwrap();
@@ -13246,6 +13347,7 @@ mod exit_regressions {
                         harness: Some(HarnessId::Codex),
                         model: Some("gpt-6-sol".into()),
                         reasoning: Some(ReasoningLevel::Low),
+                        target: None,
                     }),
                     cx,
                 );

@@ -111,6 +111,21 @@ pub struct CanvasDraft {
     pub harness: Option<HarnessId>,
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
+    /// Where the canvas's session would run. `None` leaves the current pick.
+    pub target: Option<CanvasTarget>,
+}
+
+/// A canvas's "New session in …" pick. The project is one app-wide
+/// selection, and selecting a chat moves it to that chat's project, so a
+/// canvas pane or tab that didn't park its own came back showing whatever
+/// chat was last focused (user report, 2026-09-26: a ⌘D pane set to folio
+/// turned back into harness).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CanvasTarget {
+    pub space: Option<String>,
+    /// "Don't work in a project".
+    pub no_project: bool,
+    pub device: Option<String>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -822,10 +837,16 @@ impl Pickers {
     /// picks), for the tab or pane about to be parked or split off.
     pub fn canvas_draft(&self, cx: &App) -> CanvasDraft {
         let resolved = self.resolved(cx);
+        let state = self.state.read(cx);
         CanvasDraft {
             harness: resolved.harness,
             model: resolved.model,
             reasoning: resolved.reasoning,
+            target: Some(CanvasTarget {
+                space: state.selected_space.clone(),
+                no_project: state.no_project,
+                device: state.selected_device.clone(),
+            }),
         }
     }
 
@@ -836,6 +857,19 @@ impl Pickers {
     /// the sticky last-used defaults. A harness the catalog no longer offers
     /// is dropped with its model rather than resurrected.
     pub fn adopt_canvas_draft(&mut self, draft: Option<CanvasDraft>, cx: &mut Context<Self>) {
+        // The project comes back even when the harness no longer does.
+        if let Some(target) = draft.as_ref().and_then(|d| d.target.clone()) {
+            self.state.update(cx, |state, cx| {
+                if target.no_project {
+                    state.select_space(None, cx);
+                    if target.device.is_some() {
+                        state.selected_device = target.device;
+                    }
+                } else if let Some(space) = target.space.filter(|id| state.space_row(id).is_some()) {
+                    state.select_space(Some(space), cx);
+                }
+            });
+        }
         let offered = |harness: HarnessId| match self.harnesses.ready() {
             Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
             None => true,
