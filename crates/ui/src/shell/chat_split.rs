@@ -80,15 +80,11 @@ impl ChatSplit {
         }
         split.panes[split.focus] = selected;
         let at = split.focus + 1;
-        // The new pane takes half of the pane it split, like Ghostty — until
-        // that half would be a sliver, then every pane gets an equal share.
-        let half = split.shares[split.focus] / 2.0;
-        split.shares[split.focus] = half;
+        // Every ⌘D leaves all panes the same size, rather than halving the
+        // pane it split (user request, 2026-09-26).
         split.panes.insert(at, None);
-        split.shares.insert(at, half);
-        if half < MIN_PANE_SHARE {
-            split.equalize();
-        }
+        split.shares.insert(at, 0.0);
+        split.equalize();
         // The new pane starts in the project of the pane it split from.
         let project = split.projects[split.focus].clone();
         split.projects.insert(at, project);
@@ -197,13 +193,15 @@ impl ChatSplit {
         self.shares.iter_mut().for_each(|s| *s = share);
     }
 
-    /// Close the focused pane. Its share goes to the neighbor that takes
-    /// focus, whose chat is returned for selection. `None` means the split
-    /// is down to one pane and should be dropped.
+    /// Close the focused pane. An even split stays even; otherwise its share
+    /// goes to the neighbor that takes focus, keeping dragged sizes. The
+    /// neighbor's chat is returned for selection. `None` means the split is
+    /// down to one pane and should be dropped.
     pub fn close_focused(&mut self) -> Option<Option<String>> {
         if self.panes.len() <= 1 {
             return None;
         }
+        let even = self.is_even();
         let closed = self.focus;
         let share = self.shares.remove(closed);
         self.panes.remove(closed);
@@ -211,9 +209,17 @@ impl ChatSplit {
         self.drafts.remove(closed);
         let next = closed.saturating_sub(1).min(self.panes.len() - 1);
         self.shares[next] += share;
+        if even {
+            self.equalize();
+        }
         self.focus = next;
         self.zoomed = false;
         Some(self.panes[next].take())
+    }
+
+    fn is_even(&self) -> bool {
+        let share = 1.0 / self.shares.len() as f32;
+        self.shares.iter().all(|s| (s - share).abs() < 1e-3)
     }
 
     /// The selection moved from `previous` to `selected` outside the split
@@ -1259,6 +1265,31 @@ mod chat_split_tests {
         }
         assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         assert!(split.shares.iter().all(|&s| s > 0.0));
+    }
+
+    #[test]
+    fn every_split_leaves_panes_the_same_size() {
+        let mut split = two("a");
+        for panes in 3..=4 {
+            split = ChatSplit::split(Some(split), SplitAxis::Horizontal, None, None).unwrap();
+            let share = 1.0 / panes as f32;
+            assert!(
+                split.shares.iter().all(|s| (s - share).abs() < 1e-5),
+                "{panes} panes: {:?}",
+                split.shares
+            );
+        }
+        // Closing from an even split keeps it even.
+        split.close_focused();
+        assert!(split.shares.iter().all(|s| (s - 1.0 / 3.0).abs() < 1e-5), "{:?}", split.shares);
+        // A dragged layout keeps its sizes: the closed share goes to the neighbor.
+        let start = split.shares.clone();
+        split.drag_divider(&start, 1, 0.1);
+        let dragged = split.shares.clone();
+        split.focus = 2;
+        split.close_focused();
+        assert!((split.shares[0] - dragged[0]).abs() < 1e-5);
+        assert!((split.shares[1] - (dragged[1] + dragged[2])).abs() < 1e-5);
     }
 
     #[test]
