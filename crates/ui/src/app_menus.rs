@@ -32,6 +32,7 @@ actions!(
         AppearanceSystem,
         AppearanceLight,
         AppearanceDark,
+        ClearBrowsingData,
     ]
 );
 
@@ -43,6 +44,9 @@ pub fn init(cx: &mut App) {
     cx.on_action(quit);
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &About, _| about_panel::show());
+    // The browser pane keeps sign-ins across restarts; this forgets them.
+    #[cfg(target_os = "macos")]
+    cx.on_action(|_: &ClearBrowsingData, _| crate::browser::clear_browsing_data());
     // Application-menu verbs — gpui wraps NSApp `hide` / `hideOtherApplications`
     // / `unhideAllApplications` (zed registers the same trio in
     // crates/zed/src/zed.rs `init`).
@@ -176,6 +180,8 @@ pub fn app_menus() -> Vec<Menu> {
     ];
     if macos {
         app_items.extend([
+            MenuItem::action("Clear Browsing Data", ClearBrowsingData),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Hide Harness", Hide),

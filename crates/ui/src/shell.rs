@@ -575,6 +575,27 @@ fn workspace_file_title(path: &str) -> SharedString {
     path.rsplit('/').next().unwrap_or(path).to_string().into()
 }
 
+/// The text of the latest user message: the prompt a failed turn carries to
+/// wherever it can run next.
+fn last_user_prompt(transcript: &[harness_doc::SessionMessageEntry]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .find(|entry| entry.role == harness_doc::MessageRole::User)
+        .map(|entry| {
+            entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    harness_doc::MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
 /// Per-chat panel open flags (harness parity: `sessionPanels` — the terminal and
 /// changes panels open *per session*, in memory only; heights and every other
 /// persisted setting stay global).
@@ -1596,8 +1617,6 @@ pub struct Shell {
     /// at `chat_tab` is stale; the active tab lives in the fields above.
     chat_tabs: Vec<chat_tabs::ChatTab>,
     chat_tab: usize,
-    /// Width of the conversation column the split divides, last frame.
-    chat_column_width: f32,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
     /// Which pane card the sidebar strip last had under the pointer.
@@ -2027,7 +2046,6 @@ impl Shell {
             chat_split_selected: None,
             chat_tabs: Vec::new(),
             chat_tab: 0,
-            chat_column_width: 0.0,
             peer_chat_views: std::collections::HashMap::new(),
             pane_strip_hovered: 0,
             chat_split_drag: None,
@@ -3309,7 +3327,49 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::NewChatWithModel { model } => {
+                self.new_chat_with_model(model.clone(), cx);
+            }
+            TranscriptEvent::KeepChatModel { model } => {
+                let prompt = last_user_prompt(&self.state.read(cx).transcript);
+                let pickers = self.composer.read(cx).pickers().clone();
+                pickers.update(cx, |pickers, cx| pickers.keep_chat_model(model.clone(), cx));
+                self.composer
+                    .update(cx, |composer, cx| composer.prefill(prompt, cx));
+            }
         }
+    }
+
+    /// The model-mismatch card's "New chat with …": a new-session canvas in
+    /// the same project, on graff with `model` (the chat's reasoning kept),
+    /// the failed prompt waiting in the composer. Nothing is sent.
+    fn new_chat_with_model(&mut self, model: String, cx: &mut Context<Self>) {
+        let (prompt, space, reasoning) = {
+            let state = self.state.read(cx);
+            let chat = state.selected_chat_row();
+            (
+                last_user_prompt(&state.transcript),
+                chat.and_then(|c| c.space_id.clone()),
+                chat.and_then(|c| c.config.as_ref()).and_then(|c| c.reasoning),
+            )
+        };
+        self.open_new_session(cx);
+        if space.is_some() {
+            self.state.update(cx, |s, cx| s.select_space(space, cx));
+        }
+        self.adopt_canvas_draft(
+            Some(crate::pickers::CanvasDraft {
+                harness: Some(harness_proto::HarnessId::Graff),
+                model: Some(model),
+                reasoning,
+            }),
+            cx,
+        );
+        // After the composer's draft swap for the new canvas has run.
+        let composer = self.composer.clone();
+        cx.defer(move |cx| {
+            composer.update(cx, |composer, cx| composer.prefill(prompt, cx));
+        });
     }
 
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
@@ -11008,8 +11068,12 @@ impl Render for Shell {
             }))
             // Chat-scoped, unlike new-session — `cycle_session` holds the guard
             // and says why.
-            .on_action(cx.listener(|this, _: &NextSession, _, cx| this.cycle_session(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevSession, _, cx| this.cycle_session(false, cx)))
+            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
+                this.cycle_tab_or_session(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
+                this.cycle_tab_or_session(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);
@@ -11138,7 +11202,6 @@ impl Render for Shell {
                     self.sidebar_target(),
                     right_target_width,
                 );
-                self.chat_column_width = split_total_width;
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
                 let main_target_width = split_total_width * self.focused_chat_pane_share();
@@ -13083,6 +13146,269 @@ mod exit_regressions {
                 shell.on_state_changed(&shell.state.clone(), cx);
                 assert!(shell.settings.space_filter.is_none());
                 assert!(shell.state.read(cx).no_project);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn split_and_tab_canvases_keep_their_own_model_picks(cx: &mut TestAppContext) {
+        use harness_proto::{HarnessId, ReasoningLevel};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![harness_proto::Chat {
+                        id: "graff-chat".into(),
+                        device_id: "local".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: Some(harness_proto::ChatConfig {
+                            harness: HarnessId::Graff,
+                            model: Some("codex/gpt-6-luna".into()),
+                            reasoning: Some(ReasoningLevel::High),
+                            model_options: Default::default(),
+                            sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+                        }),
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        parent_chat_id: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                    }];
+                    state.selected_chat = Some("graff-chat".into());
+                });
+                let picks = |shell: &Shell, cx: &App| {
+                    let draft = shell.current_canvas_draft(cx);
+                    (draft.harness, draft.model, draft.reasoning)
+                };
+                let luna = (
+                    Some(HarnessId::Graff),
+                    Some("codex/gpt-6-luna".to_string()),
+                    Some(ReasoningLevel::High),
+                );
+                let other = (
+                    Some(HarnessId::Codex),
+                    Some("gpt-6-sol".to_string()),
+                    Some(ReasoningLevel::Low),
+                );
+
+                // ⌘D from the chat: the fresh pane starts from its picks.
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                assert_eq!(picks(shell, cx), luna);
+
+                // Pane round trip: the canvas keeps them.
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("graff-chat"));
+                shell.focus_chat_pane(1, window, cx);
+                assert_eq!(picks(shell, cx), luna);
+
+                // ⌘T from that canvas inherits too; each tab keeps its own
+                // after the other one's picks change.
+                shell.new_chat_tab(None, window, cx);
+                assert_eq!(picks(shell, cx), luna);
+                shell.adopt_canvas_draft(
+                    Some(crate::pickers::CanvasDraft {
+                        harness: Some(HarnessId::Codex),
+                        model: Some("gpt-6-sol".into()),
+                        reasoning: Some(ReasoningLevel::Low),
+                    }),
+                    cx,
+                );
+                assert_eq!(picks(shell, cx), other);
+                shell.switch_chat_tab(0, window, cx);
+                assert_eq!(picks(shell, cx), luna);
+                shell.switch_chat_tab(1, window, cx);
+                assert_eq!(picks(shell, cx), other);
+
+                // ⌃Tab with two tabs open cycles tabs, wrapping both ways.
+                shell.cycle_tab_or_session(true, window, cx);
+                assert_eq!(shell.chat_tab, 0);
+                assert_eq!(picks(shell, cx), luna);
+                shell.cycle_tab_or_session(false, window, cx);
+                assert_eq!(shell.chat_tab, 1);
+                assert_eq!(picks(shell, cx), other);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn model_mismatch_card_actions_carry_the_prompt_without_sending(cx: &mut TestAppContext) {
+        use harness_proto::{HarnessId, ReasoningLevel};
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let entry = |id: &str, role, part| harness_doc::SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![part],
+            created_at: 0,
+            device_id: "local".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let reset = |shell: &mut Shell, cx: &mut Context<Shell>| {
+            shell.state.update(cx, |state, _| {
+                state.chats = vec![harness_proto::Chat {
+                    id: "graff-chat".into(),
+                    device_id: "local".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: Some(harness_proto::ChatConfig {
+                        harness: HarnessId::Graff,
+                        model: Some("kimi/k3".into()),
+                        reasoning: Some(ReasoningLevel::High),
+                        model_options: Default::default(),
+                        sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+                    }),
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: Utc::now(),
+                    harness_session_id: Some("s".into()),
+                    harness_session_cwd: None,
+                    parent_chat_id: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                }];
+                state.selected_chat = Some("graff-chat".into());
+                state.transcript = vec![
+                    entry(
+                        "u",
+                        harness_doc::MessageRole::User,
+                        harness_doc::MessagePart::Text {
+                            id: "t".into(),
+                            text: "fix the build".into(),
+                        },
+                    ),
+                    entry(
+                        "a",
+                        harness_doc::MessageRole::Assistant,
+                        harness_doc::MessagePart::Error {
+                            id: "e".into(),
+                            message: "harness protocol error: graff restored a different model \
+                                      (codex/gpt-6-sol); kimi/k3 requires a new session"
+                                .into(),
+                        },
+                    ),
+                ];
+            });
+        };
+
+        // "New chat with kimi/k3": a canvas on graff + kimi/k3, prompt waiting.
+        window
+            .update(cx, |shell, _, cx| {
+                reset(shell, cx);
+                let transcript = shell.transcript.clone();
+                shell.on_transcript_event(
+                    transcript,
+                    &TranscriptEvent::NewChatWithModel {
+                        model: "kimi/k3".into(),
+                    },
+                    cx,
+                );
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                let draft = shell.current_canvas_draft(cx);
+                assert_eq!(draft.harness, Some(HarnessId::Graff));
+                assert_eq!(draft.model.as_deref(), Some("kimi/k3"));
+                assert_eq!(draft.reasoning, Some(ReasoningLevel::High));
+            })
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.composer.read(cx).input.read(cx).text(), "fix the build");
+            })
+            .unwrap();
+
+        // "Keep codex/gpt-6-sol": the chat follows its session, prompt back.
+        window
+            .update(cx, |shell, _, cx| {
+                reset(shell, cx);
+                let transcript = shell.transcript.clone();
+                shell.on_transcript_event(
+                    transcript,
+                    &TranscriptEvent::KeepChatModel {
+                        model: "codex/gpt-6-sol".into(),
+                    },
+                    cx,
+                );
+                let model = shell
+                    .state
+                    .read(cx)
+                    .selected_chat_row()
+                    .and_then(|c| c.config.as_ref())
+                    .and_then(|c| c.model.clone());
+                assert_eq!(model.as_deref(), Some("codex/gpt-6-sol"));
+                assert_eq!(shell.composer.read(cx).input.read(cx).text(), "fix the build");
             })
             .unwrap();
     }

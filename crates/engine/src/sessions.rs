@@ -143,6 +143,14 @@ struct Inner {
     /// chat_id → broadcast hub (retained across runs so subscribers survive turns).
     hubs: Mutex<HashMap<String, broadcast::Sender<JournaledEvent>>>,
     statuses: Mutex<HashMap<String, Session>>,
+    /// chat_id → when the current wait on the user began. Leaving the wait
+    /// moves `started_at` forward by its length, so the elapsed timer bills
+    /// only the agent's work, never the user's think-time.
+    awaiting_since: Mutex<HashMap<String, chrono::DateTime<Utc>>>,
+    /// chat_id → its running tools' latest live output. Never journaled or
+    /// folded (see `AgentEvent::ToolProgress`); a tool's result or the end of
+    /// the turn drops it.
+    tool_progress: Mutex<HashMap<String, watch::Sender<Vec<harness_proto::ToolProgressItem>>>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     /// Last dispatched request per chat — the steer→new-turn fallback re-derives its
     /// run config from this (chat config rows land with the workspace doc in M4).
@@ -206,6 +214,8 @@ impl SessionsEngine {
                 runs: Mutex::new(HashMap::new()),
                 hubs: Mutex::new(HashMap::new()),
                 statuses: Mutex::new(HashMap::new()),
+                awaiting_since: Mutex::new(HashMap::new()),
+                tool_progress: Mutex::new(HashMap::new()),
                 sessions_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
@@ -274,6 +284,12 @@ impl SessionsEngine {
 
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
+    }
+
+    /// Live output of `chat_id`'s running tools (graff's subagent logs):
+    /// the current list first, then every change.
+    pub fn watch_tool_progress(&self, chat_id: &str) -> watch::Receiver<Vec<harness_proto::ToolProgressItem>> {
+        self.inner.tool_progress_channel(chat_id).subscribe()
     }
 
     /// Whether this harness takes a prompt *during* a turn, rather than only at
@@ -1045,11 +1061,28 @@ impl Inner {
             }
             entry.status = status;
             entry.updated_at = now;
+            // The first AwaitingInput stamps the wait; any other status ends it.
+            let waited_since = {
+                let mut awaiting = lock(&self.awaiting_since);
+                if matches!(status, SessionStatus::AwaitingInput) {
+                    awaiting.entry(chat_id.to_string()).or_insert(now);
+                    None
+                } else {
+                    awaiting.remove(chat_id)
+                }
+            };
             match status {
                 SessionStatus::Working if fresh_start || !was_active => {
                     entry.started_at = Some(now);
                 }
-                SessionStatus::Working | SessionStatus::AwaitingInput => {}
+                SessionStatus::Working => {
+                    // Back to work after a question (answered, or steered past
+                    // it): skip the timer base over the wait.
+                    if let (Some(since), Some(started)) = (waited_since, entry.started_at) {
+                        entry.started_at = Some((started + (now - since).max(chrono::Duration::zero())).min(now));
+                    }
+                }
+                SessionStatus::AwaitingInput => {}
                 SessionStatus::Idle | SessionStatus::Errored => {
                     entry.started_at = None;
                 }
@@ -1067,6 +1100,44 @@ impl Inner {
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
         }
+    }
+
+    fn tool_progress_channel(&self, chat_id: &str) -> watch::Sender<Vec<harness_proto::ToolProgressItem>> {
+        lock(&self.tool_progress)
+            .entry(chat_id.to_string())
+            .or_insert_with(|| watch::channel(Vec::new()).0)
+            .clone()
+    }
+
+    /// A running tool's latest live output: replaces its previous one.
+    fn set_tool_progress(&self, chat_id: &str, tool_id: &str, output: &str, state: Option<&str>) {
+        let item = harness_proto::ToolProgressItem {
+            tool_id: tool_id.to_string(),
+            output: output.to_string(),
+            state: state.map(str::to_owned),
+        };
+        self.tool_progress_channel(chat_id).send_modify(|items| {
+            match items.iter_mut().find(|i| i.tool_id == tool_id) {
+                Some(existing) => *existing = item,
+                None => items.push(item),
+            }
+        });
+    }
+
+    /// Drop one tool's live output (its result arrived), or every tool's
+    /// (`None`: the turn ended).
+    fn clear_tool_progress(&self, chat_id: &str, tool_id: Option<&str>) {
+        let Some(tx) = lock(&self.tool_progress).get(chat_id).cloned() else {
+            return;
+        };
+        tx.send_if_modified(|items| {
+            let before = items.len();
+            match tool_id {
+                Some(id) => items.retain(|i| i.tool_id != id),
+                None => items.clear(),
+            }
+            items.len() != before
+        });
     }
 
     /// The doc host, once wired. `None` before assembly or after retirement.
@@ -2270,6 +2341,18 @@ async fn drive_run(
         if matches!(&event, AgentEvent::ReasoningDelta { text } if text.is_empty()) {
             continue;
         }
+        // A running tool's live output goes to its watchers only: never the
+        // journal or the doc, where a rolling log would bloat the chat's
+        // history for the whole subagent run.
+        match &event {
+            AgentEvent::ToolProgress { id, output, state } => {
+                inner.set_tool_progress(&chat_id, id, output, state.as_deref());
+                continue;
+            }
+            AgentEvent::ToolResult { id, .. } => inner.clear_tool_progress(&chat_id, Some(id)),
+            AgentEvent::Done { .. } => inner.clear_tool_progress(&chat_id, None),
+            _ => {}
+        }
 
         // Stale tool echoes: a ToolCall/ToolResult naming an id folded in a
         // PRIOR segment (the fold reset at a steer or park since) belongs to
@@ -2809,6 +2892,39 @@ mod tests {
 
     use super::{RuntimeConfig, subagent_doc_id};
     use harness_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[tokio::test]
+    async fn time_spent_on_a_question_stays_out_of_the_turn_timer() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let base = |sessions: &SessionsEngine| sessions.session_status("c").unwrap().started_at;
+        sessions.set_status("c", SessionStatus::Working, true);
+        let started = base(&sessions).unwrap();
+        sessions.set_status("c", SessionStatus::AwaitingInput, false);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // A repeated awaiting row keeps the wait's original start.
+        sessions.set_status("c", SessionStatus::AwaitingInput, false);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Answered, or steered past with the question still open.
+        sessions.set_status("c", SessionStatus::Working, false);
+        let resumed = base(&sessions).unwrap();
+        let skipped = resumed - started;
+        assert!(
+            skipped >= chrono::Duration::milliseconds(290),
+            "the timer base must skip the whole wait, moved {skipped}"
+        );
+        assert!(resumed <= Utc::now());
+        // Plain Working heartbeats afterwards leave the base alone.
+        sessions.set_status("c", SessionStatus::Working, false);
+        assert_eq!(base(&sessions), Some(resumed));
+        sessions.set_status("c", SessionStatus::Idle, false);
+        assert_eq!(base(&sessions), None);
+    }
 
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {

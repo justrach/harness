@@ -363,7 +363,7 @@ impl HarnessesPage {
                     .child(div().flex_1().min_w_0().flex().flex_col()
                         .child(widgets::row_title(theme, "Experimental Graff ACP child agents"))
                         .child(widgets::page_subtitle(theme,
-                            "Show live child-agent transcripts, including background agents after the parent turn ends. Requires a Graff build with ACP child events; Graff cannot replay those events after session reload yet.")))
+                            "Show live transcripts of Graff's foreground child agents while the parent turn runs. Background agents still show only in their parent's tool row. Needs Graff 0.0.302.5 or later; transcripts aren't restored when a session reloads yet.")))
                     .child(widgets::toggle_switch(theme, enabled)
                         .id("graff-draft-subagents-toggle")
                         .when(!ready || self.graff_draft_subagents_saving, |el| el.opacity(0.35))

@@ -142,26 +142,57 @@ pub(super) fn verify_effort_set(response: &Value, wanted: &str) -> Result<(), Ha
     }
 }
 
+const MISMATCH_PREFIX: &str = "graff restored a different model";
+const MISMATCH_SUFFIX: &str = " requires a new session";
+
 pub(super) fn verify_resumed_model(catalog: &Value, requested: &str) -> Result<(), HarnessError> {
     let Some((provider, name)) = requested.split_once('/') else {
         return Ok(()); // Preserve legacy bare-name resolution.
     };
     let current = catalog.get("current");
-    if current
+    let current_provider = current
         .and_then(|value| value.get("provider"))
-        .and_then(Value::as_str)
-        == Some(provider)
-        && current
-            .and_then(|value| value.get("model"))
-            .and_then(Value::as_str)
-            == Some(name)
-    {
-        Ok(())
-    } else {
-        Err(HarnessError::Protocol(format!(
-            "graff restored a different model; {requested} requires a new session"
-        )))
+        .and_then(Value::as_str);
+    let current_model = current
+        .and_then(|value| value.get("model"))
+        .and_then(Value::as_str);
+    if current_provider == Some(provider) && current_model == Some(name) {
+        return Ok(());
     }
+    let restored = match (current_provider, current_model) {
+        (Some(provider), Some(model)) => format!(" ({provider}/{model})"),
+        _ => String::new(),
+    };
+    Err(HarnessError::Protocol(format!(
+        "{MISMATCH_PREFIX}{restored}; {requested}{MISMATCH_SUFFIX}"
+    )))
+}
+
+/// A resumed graff chat that restored a model other than the one picked.
+/// The run can't proceed on it, but the chat can: start a new chat on
+/// `requested`, or keep `restored` (unknown in messages from older builds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelMismatch {
+    pub requested: String,
+    pub restored: Option<String>,
+}
+
+/// Recognize [`verify_resumed_model`]'s failure in a run's error text (it
+/// may arrive wrapped, e.g. behind "harness protocol error: ").
+pub fn parse_model_mismatch(message: &str) -> Option<ModelMismatch> {
+    let rest = &message[message.find(MISMATCH_PREFIX)? + MISMATCH_PREFIX.len()..];
+    let (restored, rest) = match rest.strip_prefix(" (") {
+        Some(inner) => {
+            let (restored, rest) = inner.split_once(')')?;
+            (Some(restored.to_owned()), rest)
+        }
+        None => (None, rest),
+    };
+    let requested = rest.strip_prefix("; ")?.split(MISMATCH_SUFFIX).next()?.trim();
+    (!requested.is_empty()).then(|| ModelMismatch {
+        requested: requested.to_owned(),
+        restored,
+    })
 }
 
 pub(super) async fn discover(
@@ -622,6 +653,31 @@ mod tests {
         codegraff    OAuth/login    metered        claude-opus-5 / gpt-5.6-sol / gpt-5.6-luna\n\
         codex        OAuth/login    subscription   gpt-5.6-sol / - / gpt-5.6-luna\n\n\
         usage: graff route <model> [<model>…]\n";
+
+    #[test]
+    fn resumed_model_mismatch_names_both_models_and_parses_back() {
+        let catalog = json!({"current": {"provider": "codex", "model": "gpt-6-sol"}});
+        assert!(verify_resumed_model(&catalog, "codex/gpt-6-sol").is_ok());
+        let error = verify_resumed_model(&catalog, "kimi/k3").unwrap_err().to_string();
+        assert_eq!(
+            parse_model_mismatch(&error),
+            Some(ModelMismatch {
+                requested: "kimi/k3".into(),
+                restored: Some("codex/gpt-6-sol".into()),
+            })
+        );
+        // Older builds didn't name the restored model.
+        assert_eq!(
+            parse_model_mismatch(
+                "harness protocol error: graff restored a different model; kimi/k3 requires a new session"
+            ),
+            Some(ModelMismatch {
+                requested: "kimi/k3".into(),
+                restored: None,
+            })
+        );
+        assert_eq!(parse_model_mismatch("graff did not apply thought level high"), None);
+    }
 
     #[test]
     fn parses_route_table() {

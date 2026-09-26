@@ -630,7 +630,33 @@ impl Render for BrowserSurface {
                             && u.host_str()
                                 .is_some_and(|host| host.ends_with(".localhost")))
                 });
-        div().id("browser-surface").size_full().flex().flex_col().track_focus(&self.focus)
+        // Clicks on the page go straight to WebKit and never reach GPUI, whose
+        // view does not take the keyboard back on a click. So a click anywhere
+        // outside this pane hands it back; otherwise Space in a chat keeps
+        // scrolling the page. Toolbar clicks inside the pane leave it alone.
+        #[cfg(target_os = "macos")]
+        let reclaim_keyboard = self.native.as_ref().map(|native| {
+            let native = std::rc::Rc::downgrade(&native.handle());
+            gpui::canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, _| {
+                        if phase == gpui::DispatchPhase::Capture
+                            && !bounds.contains(&event.position)
+                            && let Some(native) = native.upgrade()
+                        {
+                            native.borrow().release_focus();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+        });
+        #[cfg(not(target_os = "macos"))]
+        let reclaim_keyboard: Option<gpui::Div> = None;
+        div().id("browser-surface").size_full().relative().flex().flex_col().track_focus(&self.focus)
+            .children(reclaim_keyboard)
             .key_context("Browser").on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
                 #[cfg(target_os = "linux")]

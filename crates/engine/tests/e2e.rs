@@ -2804,3 +2804,92 @@ async fn real_image_generation_profile_smoke() {
     );
     core.sessions.shutdown().await;
 }
+
+/// graff streams a subagent's rolling log as `ToolProgress`: viewers get the
+/// latest one live, the tool's result clears it, and it never reaches the
+/// chat's doc (a live tail there bloated its history — rejected 2026-08-18).
+#[tokio::test]
+async fn tool_progress_streams_live_and_never_reaches_the_doc() {
+    let progress = |output: &str| AgentEvent::ToolProgress {
+        id: "tool-1".into(),
+        output: output.into(),
+        state: Some("running".into()),
+    };
+    let script = vec![
+        AgentEvent::SessionStarted {
+            harness: HarnessId::Mock,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: "/tmp".into(),
+            session_id: "hs-1".into(),
+            assistant_message_id: "a-1".into(),
+        },
+        AgentEvent::ToolCall {
+            id: "tool-1".into(),
+            call: ToolCall::WriteFile {
+                path: "/tmp/x".into(),
+                content: None,
+            },
+        },
+        progress("▸ LIVE-LOG-ONE"),
+        progress("▸ LIVE-LOG-ONE\n▸ LIVE-LOG-TWO"),
+        AgentEvent::ToolResult {
+            id: "tool-1".into(),
+            is_error: false,
+            output: None,
+            diff: None,
+        },
+        done(DoneStatus::Completed),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script,
+            step_delay: Duration::from_millis(120),
+            hang_until_interrupt: false,
+        }),
+    );
+    let mut rx = core.sessions.watch_tool_progress(CHAT);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<harness_proto::ToolProgressItem>>::new()));
+    let record = seen.clone();
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            record.lock().unwrap().push(rx.borrow_and_update().clone());
+        }
+    });
+
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-progress",
+        SessionCommandPayload::Run {
+            request: run_request("go"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            seen.lock().unwrap().iter().any(|items| {
+                items.len() == 1
+                    && items[0].tool_id == "tool-1"
+                    && items[0].output == "▸ LIVE-LOG-ONE\n▸ LIVE-LOG-TWO"
+                    && items[0].state.as_deref() == Some("running")
+            })
+        },
+        "the latest rolling log, replacing the first",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "the turn to settle",
+    )
+    .await;
+    assert!(
+        core.sessions.watch_tool_progress(CHAT).borrow().is_empty(),
+        "the tool's result and the turn's end clear the live log"
+    );
+    let doc = serde_json::to_string(&entries(&core)).unwrap();
+    assert!(!doc.contains("LIVE-LOG"), "live output leaked into the doc: {doc}");
+    assert!(doc.contains("tool-1"), "the tool chip itself still folds");
+}

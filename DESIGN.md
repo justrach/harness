@@ -19,7 +19,7 @@ New installs select **Codegraff Light** and **Codegraff Dark**. These are two au
 | Muted text | `#6b6557` | `#9a9384` |
 | Accent | `#c77d20` | `#e8a33d` |
 
-The Codegraff palettes recommend opaque surfaces. In light mode the white content plane advances and the warmer sidebar recedes; in dark mode the content plane is darkest and raised controls get lighter. Borders and restrained shadows separate light cards. Accent marks actions, focus, selection, activity, and usage below warning thresholds. Warning, danger, success, diff, syntax, and terminal colors keep their own meanings. Palette definitions live in [`crates/theme/src/builtins.rs`](crates/theme/src/builtins.rs).
+The Codegraff palettes recommend frosted surfaces, like the Harness palettes before them: the window blurs what sits behind it, tinted from the mapped shell roles. The **Frosted glass** switch in Settings → Appearance turns that off. In light mode the white content plane advances and the warmer sidebar recedes; in dark mode the content plane is darkest and raised controls get lighter. Borders and restrained shadows separate light cards. Accent marks actions, focus, selection, activity, and usage below warning thresholds. Warning, danger, success, diff, syntax, and terminal colors keep their own meanings. Palette definitions live in [`crates/theme/src/builtins.rs`](crates/theme/src/builtins.rs).
 
 ## Type, rhythm, and shape
 
@@ -40,6 +40,18 @@ Usage belongs **inside the existing account row**. Each window uses a short labe
 The conversation is the primary work surface. User messages and agent output have distinct alignment and hierarchy; tool calls, code, files, errors, and timestamps remain readable within the same transcript. The composer shows the selected agent, model, and reasoning level without hiding the prompt. Once a chat exists, its agent is fixed; model and reasoning changes stay within that agent. Popovers and dialogs use the same theme roles and compact controls as the rest of the shell.
 
 Use plain, specific copy for actions with data consequences. Local versus synced workspace state belongs in the account area. Importing existing chats into sync requires an explicit choice, and the interface should state when another signed-in device can request access to the host's workspace.
+
+## Model picker
+
+One composer chip opens one card: a favorites star and one brand icon per offered agent across the top, a search row, the model list, and a pinned tray for reasoning and model options. An existing chat shows only its own agent. A search filters the viewed tab only; switching tabs re-scopes the same query. Rows on an agent tab are compact single lines: model name, muted attribution, a ⌘1–⌘9 chip, and a star. The favorites tab mixes agents, so its rows add a brand subline. Hover moves the one keyboard highlight; the selected model gets the stronger wash and ring.
+
+Some agents serve models from several providers at once. Graff lists every provider the account is signed in to, and opencode lists its connected providers, both as `provider/model` ids. When an agent tab spans two or more providers, its rows sit under provider headers in first-appearance order, so the current model's provider leads. Starred models get a **Starred** section on top. Headers are **11 px semibold** muted text at exactly the height of a row, because the list is virtualized and sizes every item from the first. They are never highlighted or picked, and arrows and ⌘N skip them. A row under a header drops the provider prefix from its attribution ("kimi · 262k context" reads "262k context"). Single-provider tabs and search results stay flat. See `scoped_model_rows` and `render_model_header` in [`crates/ui/src/pickers.rs`](crates/ui/src/pickers.rs).
+
+## Tabs, split panes, and composer picks
+
+⌘D and ⌘⇧D split the conversation column like Ghostty; ⌘T opens a tab. ⌘D always splits, however narrow the column; it never turns into a tab. The focused pane is the selected chat with the composer; other panes are dimmed, read-only transcripts, and clicking one moves focus there.
+
+Each tab and pane owns its selection, project filter, and composer picks (agent, model, reasoning). A new pane or tab starts from the picks of the pane it was opened from. Leaving a pane or tab parks its picks, and coming back restores them. The sticky last-used defaults only seed a new-session canvas with nothing parked, such as after a restart. An existing chat's picks live on the chat itself. See [`crates/ui/src/shell/chat_split.rs`](crates/ui/src/shell/chat_split.rs) and [`crates/ui/src/shell/chat_tabs.rs`](crates/ui/src/shell/chat_tabs.rs).
 
 ## Extending the design
 

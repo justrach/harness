@@ -74,6 +74,8 @@ loro-protocol = "0.3"
 # Harness vendors both forks (Apache-2.0; see vendor/README.md): zui at
 # gaelcado/zui 53869c2 (the text-fade patch harness pinned on top of
 # the pinned Zui revision c2d273d) and gpui-base from the pinned gpui-component revision 03cd994.
+# Synced with zeronsh/zui 18a89af on 2026-09-26: only its Windows drag
+# threshold (div.rs) was new; the edge-fade and Windows blur work was already here.
 gpui = { path = "vendor/zui/crates/gpui" }
 gpui_platform = { path = "vendor/zui/crates/gpui_platform", features = [
     "wayland",

@@ -520,9 +520,11 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NewProject => "Open the new project dialog.",
         ShortcutId::OpenModelPicker => "Open the model picker for the current session.",
-        ShortcutId::NextSession => "Select the next session in the sidebar, wrapping at the end.",
+        ShortcutId::NextSession => {
+            "Switch to the next tab when two or more are open; otherwise select the next session in the sidebar."
+        }
         ShortcutId::PrevSession => {
-            "Select the previous session in the sidebar, wrapping at the start."
+            "Switch to the previous tab when two or more are open; otherwise select the previous session in the sidebar."
         }
         ShortcutId::ArchiveSession => "Move the current session to the archived shelf.",
         // One line per slot would repeat itself nine times; the ordinal is

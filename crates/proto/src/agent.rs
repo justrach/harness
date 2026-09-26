@@ -399,6 +399,19 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
     },
+    /// Live output of a tool still running (an ACP `tool_call_update` with
+    /// content and no terminal status). `output` REPLACES the previous one —
+    /// graff sends its subagent's whole rolling log each time. Live-only:
+    /// never journaled or folded into docs; the tool's `ToolResult` ends it.
+    #[serde(rename_all = "camelCase")]
+    ToolProgress {
+        id: String,
+        output: String,
+        /// The child's lifecycle when the tool runs a subagent
+        /// (`running`/`completed`/`failed`/`cancelled`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
@@ -637,6 +650,17 @@ impl ContextUsage {
     pub fn fraction(self) -> Option<f64> {
         Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
     }
+}
+
+/// One running tool's latest [`AgentEvent::ToolProgress`], as the host
+/// serves it to viewers (`WatchToolProgress`). Live-only, never synced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolProgressItem {
+    pub tool_id: String,
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 #[cfg(test)]

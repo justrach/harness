@@ -718,6 +718,9 @@ pub struct AppState {
     /// agent was busy, in the order it will be sent. Device-agnostic: the
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<harness_doc::QueuedMessage>,
+    /// The selected chat's running tools' live output (graff subagent logs),
+    /// straight from its host. Live-only: never in the transcript's doc.
+    pub tool_progress: Vec<harness_proto::ToolProgressItem>,
     pub context_usage: Option<harness_proto::ContextUsage>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
@@ -762,6 +765,7 @@ pub struct AppState {
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
     queue_task: Option<Task<()>>,
+    tool_progress_task: Option<Task<()>>,
     change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
@@ -818,6 +822,7 @@ impl AppState {
             selected_chat: None,
             transcript: Vec::new(),
             queue: Vec::new(),
+            tool_progress: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
@@ -839,6 +844,7 @@ impl AppState {
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
             queue_task: None,
+            tool_progress_task: None,
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
@@ -979,6 +985,8 @@ impl AppState {
             self.transcript_task = None;
             self.queue.clear();
             self.queue_task = None;
+            self.tool_progress.clear();
+            self.tool_progress_task = None;
         }
     }
 
@@ -2023,6 +2031,13 @@ impl AppState {
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             if handle
                 .engine_info()
+                .supports(harness_proto::capabilities::TOOL_PROGRESS_V1)
+            {
+                self.tool_progress_task =
+                    Some(spawn_tool_progress_watch(cx, handle.clone(), chat_id.clone()));
+            }
+            if handle
+                .engine_info()
                 .supports(harness_proto::capabilities::MESSAGE_QUEUE_V1)
             {
                 self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
@@ -2228,6 +2243,8 @@ impl AppState {
         self.transcript_task = None;
         self.queue.clear();
         self.queue_task = None;
+        self.tool_progress.clear();
+        self.tool_progress_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.
@@ -2249,6 +2266,13 @@ impl AppState {
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
+            if handle
+                .engine_info()
+                .supports(harness_proto::capabilities::TOOL_PROGRESS_V1)
+            {
+                self.tool_progress_task =
+                    Some(spawn_tool_progress_watch(cx, handle.clone(), chat_id.clone()));
+            }
             if handle
                 .engine_info()
                 .supports(harness_proto::capabilities::MESSAGE_QUEUE_V1)
@@ -2782,6 +2806,59 @@ fn spawn_queue_watch(
                 }
             }
             if this.update(cx, |_, _| {}).is_err() {
+                return;
+            }
+            cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+/// The selected chat's running tools' live output, served by its host. Best
+/// effort: a host that can't serve it (an older engine behind forwarding)
+/// refuses the subscription and the watch stops — the chips still settle
+/// from the doc. A stream that was up and dropped (engine restart) retries.
+fn spawn_tool_progress_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    chat_id: String,
+) -> Task<()> {
+    #[derive(serde::Deserialize)]
+    struct ProgressFrame {
+        #[serde(default)]
+        items: Vec<harness_proto::ToolProgressItem>,
+    }
+    cx.spawn(async move |this, cx| {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+        loop {
+            let params = serde_json::json!({ "chatId": chat_id });
+            let Ok(mut rx) = handle
+                .client()
+                .subscribe_scoped(methods::WATCH_TOOL_PROGRESS, params)
+                .await
+            else {
+                tracing::debug!(%chat_id, "tool progress unavailable for this chat's host");
+                return;
+            };
+            while let Some(value) = rx.recv().await {
+                let Ok(frame) = serde_json::from_value::<ProgressFrame>(value) else {
+                    continue;
+                };
+                let alive = this.update(cx, |state, cx| {
+                    if state.selected_chat.as_deref() == Some(chat_id.as_str())
+                        && state.tool_progress != frame.items
+                    {
+                        state.tool_progress = frame.items;
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+            if this
+                .update(cx, |state, _| state.tool_progress.clear())
+                .is_err()
+            {
                 return;
             }
             cx.background_executor().timer(RETRY_DELAY).await;

@@ -6902,6 +6902,15 @@ impl Composer {
         cx.notify();
     }
 
+    /// Put `text` in the message box and focus it, without sending (a failed
+    /// turn's prompt carried to where it can run).
+    pub(crate) fn prefill(&mut self, text: String, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.on_input_edited(cx);
+        self.focus_pending = true;
+        cx.notify();
+    }
+
     /// Target "no project" (the session runs from the home folder) and focus
     /// the composer: the first-run screen's way in without adding a folder.
     pub(crate) fn start_outside_project(&mut self, cx: &mut Context<Self>) {

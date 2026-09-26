@@ -39,8 +39,10 @@ impl BrowserData {
     ) -> Retained<objc2_web_kit::WKWebViewConfiguration> {
         let mut data = self.0.borrow_mut();
         if data.store.is_none() {
-            data.store =
-                Some(unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) });
+            // Persistent, so sign-ins survive a restart. WebKit keeps the
+            // default store per app (not Safari's); Harness → Clear Browsing
+            // Data empties it.
+            data.store = Some(unsafe { objc2_web_kit::WKWebsiteDataStore::defaultDataStore(mtm) });
             if let Err(error) =
                 configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
             {
@@ -75,6 +77,22 @@ impl BrowserData {
                 tracing::warn!(%error, "preview hostname proxy unavailable");
             }
         }
+    }
+}
+
+/// Remove everything the browser pane has stored — cookies (sign-ins), local
+/// storage and caches — from this app's WebKit store. Open pages keep
+/// running; their next request goes out signed out.
+pub fn clear_browsing_data() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    unsafe {
+        let store = objc2_web_kit::WKWebsiteDataStore::defaultDataStore(mtm);
+        let types = objc2_web_kit::WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+        let since = objc2_foundation::NSDate::distantPast();
+        let done = block2::RcBlock::new(|| {});
+        store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &done);
     }
 }
 
@@ -147,7 +165,10 @@ pub(super) enum NativeEvent {
     Changed,
     Finished,
     NewTab(String),
-    Key(gpui::Keystroke),
+    /// A shortcut pressed while WebKit had the keyboard. `app` marks an app
+    /// shortcut (not a browser one like ⌘L or ⌘[): the keyboard goes back to
+    /// the app with it.
+    Key { key: gpui::Keystroke, app: bool },
     Favicon { page: String, url: String },
 }
 
@@ -298,7 +319,6 @@ impl NativePage {
             .with_webview_configuration(data.configuration(mtm))
             .with_visible(false)
             .with_focused(false)
-            .with_incognito(true)
             .with_new_window_req_handler(move |url, _| {
                 if allowed_navigation(&url) {
                     let _ = new_tab.try_send(NativeEvent::NewTab(url));
@@ -401,7 +421,11 @@ impl NativePage {
                 .iter()
                 .any(|s| gpui::Keystroke::parse(s).is_ok_and(|s| s == keystroke));
             if browser_key || app_key {
-                if monitor_tx.try_send(NativeEvent::Key(keystroke)).is_ok() {
+                let forwarded = NativeEvent::Key {
+                    key: keystroke,
+                    app: !browser_key,
+                };
+                if monitor_tx.try_send(forwarded).is_ok() {
                     std::ptr::null_mut()
                 } else {
                     event.as_ptr()
@@ -437,6 +461,10 @@ impl NativePage {
     }
     pub fn focus_chrome(&self) {
         let _ = self.0.borrow().web.focus_parent();
+    }
+    /// Hand the keyboard back to the app if WebKit holds it.
+    pub fn release_focus(&self) {
+        self.0.borrow().release_focus();
     }
     pub fn set_shortcuts(&self, shortcuts: Vec<String>) {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
@@ -530,6 +558,14 @@ fn has_focus(view: &NSView) -> bool {
 }
 
 impl Host {
+    /// GPUI's view never takes first responder on a click, so once WebKit
+    /// has the keyboard it keeps it until someone hands it back.
+    pub fn release_focus(&self) {
+        if has_focus(&self.view) {
+            let _ = self.web.focus_parent();
+        }
+    }
+
     pub fn sync(
         &mut self,
         bounds: Bounds<Pixels>,

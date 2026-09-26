@@ -830,6 +830,19 @@ mod tests {
     }
 
     #[test]
+    fn default_themes_recommend_frost() {
+        let registry = ThemeRegistry::builtin();
+        let defaults = ThemeSelection::default();
+        for id in [&defaults.light, &defaults.dark] {
+            assert_eq!(
+                registry.variant(id).unwrap().recommended_surface_treatment,
+                SurfaceTreatment::Frosted,
+                "{id} must keep the window frosted by default"
+            );
+        }
+    }
+
+    #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
         let variants = registry
