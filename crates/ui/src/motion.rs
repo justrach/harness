@@ -198,8 +198,7 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
                     // loaders at a third of the rate. Each tick redraws the
                     // whole window, so this is most of the background cost of
                     // a long agent run.
-                    if cx.active_window().is_none()
-                        && !tick.is_multiple_of(BACKGROUND_TICK_DIVISOR)
+                    if cx.active_window().is_none() && !tick.is_multiple_of(BACKGROUND_TICK_DIVISOR)
                     {
                         return false;
                     }

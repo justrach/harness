@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::state::EngineHandle;
-use std::collections::VecDeque;
 use harness_proto::{SidebarPinChange, SidebarPreferencesState};
+use std::collections::VecDeque;
 
 pub(super) struct PendingSidebarPins {
     pub id: u64,

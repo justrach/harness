@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{App, Global, Task};
-use serde::{Deserialize, Serialize};
 use harness_proto::{AuthState, WorkspaceScope};
+use serde::{Deserialize, Serialize};
 
 pub mod accounts;
 pub mod appearance;
@@ -2459,7 +2459,10 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.appearance, crate::appearance::AppearanceMode::System);
         assert_eq!(loaded.accent, harness_theme::AccentSelection::ThemeDefault);
-        assert_eq!(loaded.surface, harness_theme::SurfacePreference::ThemeDefault);
+        assert_eq!(
+            loaded.surface,
+            harness_theme::SurfacePreference::ThemeDefault
+        );
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(loaded.sidebar_pinned_session_ids_by_profile.is_empty());
         assert!(!loaded.sound_enabled, "other keys still parse");

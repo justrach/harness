@@ -258,8 +258,7 @@ pub fn match_rank(query: &str, label: &str) -> Option<usize> {
             && query.split_whitespace().all(|token| {
                 let token = token.to_lowercase();
                 let compact = compact_alnum(&token);
-                label.contains(&token)
-                    || (!compact.is_empty() && compact_label.contains(&compact))
+                label.contains(&token) || (!compact.is_empty() && compact_label.contains(&compact))
             })
         {
             Some(4)

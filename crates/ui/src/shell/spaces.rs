@@ -11,8 +11,8 @@
 use super::*;
 use crate::pickers::{breadcrumbs, browser_rows, completion_prefix_len, parent_path};
 use gpui::{FocusHandle, Window};
-use std::collections::HashSet;
 use harness_proto::{ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, Space};
+use std::collections::HashSet;
 
 /// Promote the user's ordered pins above the untouched activity projection.
 /// Every unpinned id keeps exactly the relative order supplied by recency.
@@ -460,7 +460,9 @@ mod pinned_session_tests {
     fn sidebar_unconfirmed_write_stops_the_queue_without_overwriting_observed_pins(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
         let (engine, _requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -502,7 +504,9 @@ mod pinned_session_tests {
     fn sidebar_optimistic_writes_preserve_newer_edits_and_watch_state_on_failure(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
         let (engine, mut requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -581,7 +585,9 @@ mod pinned_session_tests {
     fn sidebar_write_acknowledgements_ignore_older_watches_and_previous_operations(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
         let (engine, _requests, _replies) = pin_test_engine();
         let dir = tempfile::tempdir().unwrap();
@@ -622,7 +628,9 @@ mod pinned_session_tests {
     fn sidebar_write_replies_cannot_cross_profile_or_engine_boundaries(
         cx: &mut gpui::TestAppContext,
     ) {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         let window = pin_test_shell(cx, dir.path());
@@ -4426,14 +4434,15 @@ impl Shell {
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
-                let jump_label: Option<SharedString> = if jump_hints && let Some(slot) = jump_slot {
-                    let combo = keymap.get(ShortcutId::JumpSession(slot));
-                    (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
-                } else {
-                    None
-                }
-                // Open in another split pane: badge the row with that pane.
-                .or_else(|| self.peer_pane_badge(&chat.id));
+                let jump_label: Option<SharedString> =
+                    if jump_hints && let Some(slot) = jump_slot {
+                        let combo = keymap.get(ShortcutId::JumpSession(slot));
+                        (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
+                    } else {
+                        None
+                    }
+                    // Open in another split pane: badge the row with that pane.
+                    .or_else(|| self.peer_pane_badge(&chat.id));
                 let drag = (self.pinned_open || slot >= pinned_count)
                     .then(|| {
                         profile_key.as_ref().map(|profile_key| SidebarSessionDrag {

@@ -3692,12 +3692,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn split_terminal(
-        &mut self,
-        axis: SplitAxis,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn split_terminal(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
         if !self.terminal_open(cx) {
             self.toggle_terminal(window, cx);
         }
@@ -6706,12 +6701,19 @@ impl Shell {
         use harness_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
         let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat_state = conn.chats.iter()
-            .find(|c| Some(c.chat_id.as_str()) == selected).map(|c| c.sync_state);
+        let chat_state = conn
+            .chats
+            .iter()
+            .find(|c| Some(c.chat_id.as_str()) == selected)
+            .map(|c| c.sync_state);
         let (label, glyph): (SharedString, AnyElement) = match conn.state {
             _ if chat_state == Some(harness_proto::ChatSyncState::StorageError) => (
                 "Changes could not be saved".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
+                    .into_any_element(),
             ),
             S::Disabled => return None,
             S::Connected => {
@@ -6724,9 +6726,13 @@ impl Shell {
                 (
                     caption.into(),
                     loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                        "chat-sync-spinner",
+                        2.0,
+                        theme.text_muted,
+                        self.sidebar_pane.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
                 )
             }
             S::Offline => (
@@ -8586,12 +8592,18 @@ impl Shell {
             // existing folder is one card among them, not a gate.
             let _ = faint;
             let starter_cards = crate::starters::available(false).map(|starter| {
-                crate::starters::card(starter.id, starter.icon, starter.title, starter.blurb, &theme_owned)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.composer
-                            .update(cx, |composer, cx| composer.apply_starter(starter, cx));
-                    }))
-                    .into_any_element()
+                crate::starters::card(
+                    starter.id,
+                    starter.icon,
+                    starter.title,
+                    starter.blurb,
+                    &theme_owned,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.composer
+                        .update(cx, |composer, cx| composer.apply_starter(starter, cx));
+                }))
+                .into_any_element()
             });
             let existing_code = crate::starters::card(
                 "existing",
@@ -10230,10 +10242,10 @@ impl Shell {
             .shadow_lg()
             .flex()
             .flex_col()
-                .child(
-                    icon(icons::HARNESS_LOGO)
-                        .w(px(28.0))
-                        .h(px(28.0))
+            .child(
+                icon(icons::HARNESS_LOGO)
+                    .w(px(28.0))
+                    .h(px(28.0))
                     .text_color(theme.text),
             )
             .child(
@@ -10969,18 +10981,26 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ResizeChatPaneDown, _, cx| {
                 this.resize_chat_pane(chat_split::PaneDirection::Down, cx)
             }))
-            .on_action(cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)))
+            .on_action(
+                cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     window.focus(&this.composer.focus_handle(cx), cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| {
-                this.toggle_chat_pane_zoom(cx)
+            .on_action(
+                cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| this.toggle_chat_pane_zoom(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NextChatTab, window, cx| {
+                this.cycle_chat_tab(true, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)))
-            .on_action(cx.listener(|this, _: &NextChatTab, window, cx| this.cycle_chat_tab(true, window, cx)))
-            .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| this.cycle_chat_tab(false, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| {
+                this.cycle_chat_tab(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.close_terminal_split(window, cx);
@@ -13957,7 +13977,12 @@ impl Shell {
         }
     }
     /// Onboarding QA: ⌘D, or close the focused pane.
-    pub fn fixture_onboarding_split(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_onboarding_split(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if open {
             self.split_chat(SplitAxis::Horizontal, window, cx);
         } else {
@@ -13965,14 +13990,24 @@ impl Shell {
         }
     }
     /// Tabs QA: ⌘T (`None`), or switch to tab `ix`.
-    pub fn fixture_chat_tab(&mut self, switch_to: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_chat_tab(
+        &mut self,
+        switch_to: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match switch_to {
             None => self.new_chat_tab(None, window, cx),
             Some(ix) => self.switch_chat_tab(ix, window, cx),
         }
     }
     /// Pane-search QA: open ⌘K with `query` typed, or press Enter in it.
-    pub fn fixture_command_palette(&mut self, query: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_command_palette(
+        &mut self,
+        query: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match query {
             Some(query) => {
                 if self.command_palette.is_none() {
@@ -13986,7 +14021,12 @@ impl Shell {
         }
     }
     /// Onboarding QA: an agent in `chat_id` was refused a screenshot.
-    pub fn fixture_screen_access_notice(&mut self, chat_id: &str, requested: bool, cx: &mut Context<Self>) {
+    pub fn fixture_screen_access_notice(
+        &mut self,
+        chat_id: &str,
+        requested: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |state, cx| {
             state.screen_access_notice = Some(crate::screen_access::Notice {
                 chat_id: chat_id.into(),

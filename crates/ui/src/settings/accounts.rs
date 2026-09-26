@@ -991,41 +991,40 @@ impl AccountsPage {
         now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let header =
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::GRAFF_MARK)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("CodeGraff"),
-                )
-                .child(div().flex_1())
-                .child(
-                    widgets::ghost_action(theme)
-                        .id("codegraff-view-usage")
-                        .hover(|s| widgets::ghost_hover(theme, s))
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url("https://codegraff.com/dashboard/usage")
-                        }))
-                        .child("View usage"),
-                );
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::GRAFF_MARK)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("CodeGraff"),
+            )
+            .child(div().flex_1())
+            .child(
+                widgets::ghost_action(theme)
+                    .id("codegraff-view-usage")
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.open_url("https://codegraff.com/dashboard/usage")
+                    }))
+                    .child("View usage"),
+            );
 
         let body: AnyElement = match &self.codegraff_usage {
             Loadable::Idle | Loadable::Loading => {

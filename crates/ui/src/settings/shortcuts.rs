@@ -513,9 +513,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
         ShortcutId::ToggleFiles => "Show or hide the files panel for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
-        ShortcutId::SplitTerminal => {
-            "Split the focused terminal to the right, like Ghostty ⌘D."
-        }
+        ShortcutId::SplitTerminal => "Split the focused terminal to the right, like Ghostty ⌘D.",
         ShortcutId::SplitTerminalDown => "Split the focused terminal downward.",
         ShortcutId::NewSession => "Open a blank session canvas to start a new session.",
         ShortcutId::NewProject => "Open the new project dialog.",

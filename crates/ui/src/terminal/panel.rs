@@ -45,12 +45,7 @@ const SELECTION_SCROLL_TICK_MS: u64 = 24;
 
 actions!(
     terminal,
-    [
-        ToggleTerminal,
-        SplitRight,
-        SplitDown,
-        CloseSplit
-    ]
+    [ToggleTerminal, SplitRight, SplitDown, CloseSplit]
 );
 
 /// Bind the terminal keymap (global): Cmd+J on macOS, Ctrl+J elsewhere.

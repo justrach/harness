@@ -474,15 +474,18 @@ impl HarnessesPage {
             .flex_wrap()
             .items_center()
             .gap(px(8.0))
-            .child(widgets::badge(theme, if granted { "Allowed" } else { "Off" }));
+            .child(widgets::badge(
+                theme,
+                if granted { "Allowed" } else { "Off" },
+            ));
         if !granted && !self.screen_access_requested {
-            controls = controls.child(action("screen-access-allow", "Allow").on_click(cx.listener(
-                |page, _, _, cx| {
+            controls = controls.child(action("screen-access-allow", "Allow").on_click(
+                cx.listener(|page, _, _, cx| {
                     crate::screen_access::request();
                     page.screen_access_requested = true;
                     cx.notify();
-                },
-            )));
+                }),
+            ));
         } else if !granted {
             controls = controls
                 .children(crate::screen_access::SETTINGS_URL_OPT.map(|url| {

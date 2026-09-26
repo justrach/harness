@@ -2786,7 +2786,9 @@ impl ComposerInput {
             }
             text.push_str(&self.content[at..link.range.start]);
             text.push_str(&harness_proto::invocation::invocation_prompt(
-                &harness_proto::file_mentions::file_mention_prompt(&self.content[link.range.clone()]),
+                &harness_proto::file_mentions::file_mention_prompt(
+                    &self.content[link.range.clone()],
+                ),
             ));
             at = link.range.end;
         }
@@ -5332,6 +5334,11 @@ pub struct Composer {
     /// Whether the modifier overlay should currently reveal the queue hint.
     /// The shell owns modifier tracking and clears this on window deactivation.
     queue_shortcut_revealed: bool,
+    /// Empty-composer Enter with a message queued: the queued id it armed for
+    /// and when. A second Enter inside `ENTER_SEND_WINDOW` sends it now.
+    pub(crate) enter_send_armed: Option<(String, std::time::Instant)>,
+    /// Clears `enter_send_armed` when the window lapses, so the hint goes away.
+    pub(crate) enter_send_disarm: Option<Task<()>>,
     /// Interrupt/answer commands get their own slot: assigning `send_task`
     /// DROPPED an in-flight send future mid-upload — no banner, no cleanup,
     /// `sending` stuck true forever (2026-08-19 incident, "press Stop while
@@ -5574,6 +5581,8 @@ impl Composer {
             queue_previews: HashMap::new(),
             queue_removing: HashSet::new(),
             queue_shortcut_revealed: false,
+            enter_send_armed: None,
+            enter_send_disarm: None,
             expanded_mode: false,
             flip_epoch: 0,
             compact_capacity: 0.0,
@@ -6411,8 +6420,10 @@ impl Composer {
                         .await
                         .ok()
                         .and_then(|v| {
-                            serde_json::from_value::<Option<Vec<harness_proto::invocation::Skill>>>(v)
-                                .ok()
+                            serde_json::from_value::<Option<Vec<harness_proto::invocation::Skill>>>(
+                                v,
+                            )
+                            .ok()
                         })
                         .flatten()
                         .unwrap_or_default()
@@ -6788,7 +6799,11 @@ impl Composer {
     /// screenshot because Harness lacks Screen Recording access
     /// ([`crate::screen_access`]). Allow asks macOS (Harness itself can
     /// prompt; its agents can't), then the grant needs a relaunch.
-    fn render_screen_access_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_screen_access_notice(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let notice = {
             let state = self.state.read(cx);
             state
@@ -6823,9 +6838,13 @@ impl Composer {
                         }),
                 )
                 .children(crate::screen_access::SETTINGS_URL_OPT.map(|url| {
-                    crate::popover::btn_ghost(theme, "Open System Settings", "screen-access-settings")
-                        .id("screen-access-settings")
-                        .on_click(move |_, _, cx| cx.open_url(url))
+                    crate::popover::btn_ghost(
+                        theme,
+                        "Open System Settings",
+                        "screen-access-settings",
+                    )
+                    .id("screen-access-settings")
+                    .on_click(move |_, _, cx| cx.open_url(url))
                 }));
         } else {
             actions = actions.child(
@@ -6892,11 +6911,16 @@ impl Composer {
     /// it. Starters that make their own folder, and any starter picked before
     /// a project exists, run outside a project, which also brings the
     /// composer onto the first-run screen.
-    pub(crate) fn apply_starter(&mut self, starter: &'static crate::starters::Starter, cx: &mut Context<Self>) {
+    pub(crate) fn apply_starter(
+        &mut self,
+        starter: &'static crate::starters::Starter,
+        cx: &mut Context<Self>,
+    ) {
         if starter.fresh_folder || self.state.read(cx).spaces.is_empty() {
             self.start_outside_project(cx);
         }
-        self.input.update(cx, |input, cx| input.set_text(starter.prompt, cx));
+        self.input
+            .update(cx, |input, cx| input.set_text(starter.prompt, cx));
         self.on_input_edited(cx);
         self.focus_pending = true;
         cx.notify();
@@ -6906,14 +6930,19 @@ impl Composer {
     /// the composer: the first-run screen's way in without adding a folder.
     pub(crate) fn start_outside_project(&mut self, cx: &mut Context<Self>) {
         if !self.state.read(cx).no_project {
-            self.pickers.update(cx, |pickers, cx| pickers.pick_no_project(cx));
+            self.pickers
+                .update(cx, |pickers, cx| pickers.pick_no_project(cx));
         }
         self.focus_pending = true;
         cx.notify();
     }
 
     /// Starter chips under an empty new-session composer.
-    fn render_starter_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_starter_chips(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let empty = self.input.read(cx).text().is_empty()
             && self.staged().is_empty()
             && self.staged_appshots().is_empty();
@@ -6929,9 +6958,9 @@ impl Composer {
                 .justify_center()
                 .gap(px(6.0))
                 .children(crate::starters::available(has_project).map(|starter| {
-                    crate::starters::chip(starter, theme).on_click(cx.listener(
-                        move |this, _, _, cx| this.apply_starter(starter, cx),
-                    ))
+                    crate::starters::chip(starter, theme).on_click(
+                        cx.listener(move |this, _, _, cx| this.apply_starter(starter, cx)),
+                    )
                 }))
                 .into_any_element(),
         )
@@ -7701,6 +7730,14 @@ impl Composer {
             self.staged().len() + self.staged_appshots().len(),
             self.staged_comments(cx).len(),
         );
+        if no_content {
+            // With a message queued, the first empty Enter asks and a second
+            // one within the window sends it now. With nothing queued it is
+            // still a no-op (#406).
+            self.on_empty_enter(cx);
+            return;
+        }
+        self.disarm_enter_send(cx);
         match self.button_mode(cx) {
             // Enter never stops a run: Stop mode implies an empty composer,
             // so a stray extra Enter right after sending landed an interrupt
@@ -9160,6 +9197,16 @@ impl Render for Composer {
                 (text, offline)
             })
         };
+        let queue_notice = queue_notice.or_else(|| {
+            self.enter_send_armed.as_ref().map(|_| {
+                (
+                    SharedString::from(
+                        "Press Enter again to send the queued message now. It interrupts the current reply.",
+                    ),
+                    false,
+                )
+            })
+        });
         // The shell owns the width and its route animation. A route-dependent
         // cap here would cut a wide composer before its return glide finishes.
         let container = div()
@@ -9231,7 +9278,8 @@ impl Render for Composer {
         // What is waiting to be sent, stacked directly above the box it was
         // typed in — the queue is a property of this composer, not a panel
         // somewhere else.
-        let show_queue_latest_shortcut = self.queue_shortcut_revealed
+        let show_queue_latest_shortcut = (self.queue_shortcut_revealed
+            || self.enter_send_armed.is_some())
             && self.editing_queued.is_none()
             && !self.pickers.read(cx).is_open()
             && !composer_has_content(
@@ -9707,8 +9755,8 @@ impl Render for Composer {
                 })
             })
             .flatten();
-        let new_thread_heading = (new_thread_chrome_opacity > 0.0)
-            .then(|| self.render_new_thread_heading(&theme, cx));
+        let new_thread_heading =
+            (new_thread_chrome_opacity > 0.0).then(|| self.render_new_thread_heading(&theme, cx));
         let starter_chips = (new_thread_chrome_opacity > 0.0)
             .then(|| self.render_starter_chips(&theme, cx))
             .flatten();
@@ -9748,43 +9796,47 @@ impl Render for Composer {
         // row collapses so the pill never jumps at the route boundary.
         let container = if self.dock_frame.is_some() {
             // Floating selectors share the surface's origin and never change its height.
-            container.relative().child(
-                div()
-                    .id("dock-target-selectors")
-                    .absolute()
-                    .top(px(-28.0))
-                    .left(px(Theme::SPACE_LG + 10.0))
-                    .right(px(Theme::SPACE_LG + 10.0))
-                    .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
-                    .flex()
-                    .items_start()
-                    .justify_end()
-                    .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_target_selectors),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(-(28.0 + NEW_THREAD_HEADING_GAP + NEW_THREAD_HEADING_HEIGHT)))
-                    .left(px(Theme::SPACE_LG + 10.0))
-                    .right(px(Theme::SPACE_LG + 10.0))
-                    .h(px(NEW_THREAD_HEADING_HEIGHT))
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .opacity(new_thread_chrome_opacity)
-                    .children(new_thread_heading),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(-(STARTER_ROW_GAP + STARTER_ROW_HEIGHT)))
-                    .left(px(Theme::SPACE_LG))
-                    .right(px(Theme::SPACE_LG))
-                    .h(px(STARTER_ROW_HEIGHT))
-                    .opacity(new_thread_chrome_opacity)
-                    .children(starter_chips),
-            )
+            container
+                .relative()
+                .child(
+                    div()
+                        .id("dock-target-selectors")
+                        .absolute()
+                        .top(px(-28.0))
+                        .left(px(Theme::SPACE_LG + 10.0))
+                        .right(px(Theme::SPACE_LG + 10.0))
+                        .h(px(NEW_THREAD_SELECTOR_ROW_HEIGHT))
+                        .flex()
+                        .items_start()
+                        .justify_end()
+                        .opacity(new_thread_chrome_opacity)
+                        .children(new_thread_target_selectors),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(-(28.0
+                            + NEW_THREAD_HEADING_GAP
+                            + NEW_THREAD_HEADING_HEIGHT)))
+                        .left(px(Theme::SPACE_LG + 10.0))
+                        .right(px(Theme::SPACE_LG + 10.0))
+                        .h(px(NEW_THREAD_HEADING_HEIGHT))
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .opacity(new_thread_chrome_opacity)
+                        .children(new_thread_heading),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(-(STARTER_ROW_GAP + STARTER_ROW_HEIGHT)))
+                        .left(px(Theme::SPACE_LG))
+                        .right(px(Theme::SPACE_LG))
+                        .h(px(STARTER_ROW_HEIGHT))
+                        .opacity(new_thread_chrome_opacity)
+                        .children(starter_chips),
+                )
         } else if new_thread_chrome > 0.0 {
             container.child(
                 div()

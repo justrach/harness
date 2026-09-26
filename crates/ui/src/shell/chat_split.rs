@@ -237,7 +237,10 @@ impl ChatSplit {
 
     /// Rebuild a saved layout. Chats that no longer exist (`live` says
     /// no) come back as empty panes; a malformed save restores nothing.
-    pub fn from_saved(saved: &crate::settings::SavedChatLayout, live: impl Fn(&str) -> bool) -> Option<Self> {
+    pub fn from_saved(
+        saved: &crate::settings::SavedChatLayout,
+        live: impl Fn(&str) -> bool,
+    ) -> Option<Self> {
         let len = saved.panes.len();
         if !(2..=MAX_CHAT_PANES).contains(&len)
             || saved.shares.len() != len
@@ -250,7 +253,11 @@ impl ChatSplit {
         let mut projects = saved.projects.clone();
         projects.resize(len, None);
         Some(Self {
-            axis: if saved.vertical { SplitAxis::Vertical } else { SplitAxis::Horizontal },
+            axis: if saved.vertical {
+                SplitAxis::Vertical
+            } else {
+                SplitAxis::Horizontal
+            },
             panes: saved
                 .panes
                 .iter()
@@ -277,22 +284,56 @@ impl ChatSplit {
 /// Ghostty's split keys: its macOS defaults, and its GTK ones elsewhere
 /// (Ctrl+Shift/Super combos, so bare Ctrl+letter stays with text inputs).
 pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
-    let b = |mac_combo: &str, other: &str| if mac { mac_combo.to_owned() } else { other.to_owned() };
+    let b = |mac_combo: &str, other: &str| {
+        if mac {
+            mac_combo.to_owned()
+        } else {
+            other.to_owned()
+        }
+    };
     vec![
         KeyBinding::new(&b("cmd-d", "ctrl-shift-o"), SplitChatRight, None),
         KeyBinding::new(&b("cmd-shift-d", "ctrl-shift-e"), SplitChatDown, None),
         KeyBinding::new(&b("cmd-]", "ctrl-super-]"), FocusNextChatPane, None),
         KeyBinding::new(&b("cmd-[", "ctrl-super-["), FocusPrevChatPane, None),
         KeyBinding::new(&b("cmd-alt-left", "ctrl-alt-left"), FocusChatPaneLeft, None),
-        KeyBinding::new(&b("cmd-alt-right", "ctrl-alt-right"), FocusChatPaneRight, None),
+        KeyBinding::new(
+            &b("cmd-alt-right", "ctrl-alt-right"),
+            FocusChatPaneRight,
+            None,
+        ),
         KeyBinding::new(&b("cmd-alt-up", "ctrl-alt-up"), FocusChatPaneUp, None),
         KeyBinding::new(&b("cmd-alt-down", "ctrl-alt-down"), FocusChatPaneDown, None),
-        KeyBinding::new(&b("cmd-ctrl-left", "ctrl-super-shift-left"), ResizeChatPaneLeft, None),
-        KeyBinding::new(&b("cmd-ctrl-right", "ctrl-super-shift-right"), ResizeChatPaneRight, None),
-        KeyBinding::new(&b("cmd-ctrl-up", "ctrl-super-shift-up"), ResizeChatPaneUp, None),
-        KeyBinding::new(&b("cmd-ctrl-down", "ctrl-super-shift-down"), ResizeChatPaneDown, None),
-        KeyBinding::new(&b("cmd-ctrl-=", "ctrl-super-shift-="), EqualizeChatPanes, None),
-        KeyBinding::new(&b("cmd-shift-enter", "ctrl-shift-enter"), ToggleChatPaneZoom, None),
+        KeyBinding::new(
+            &b("cmd-ctrl-left", "ctrl-super-shift-left"),
+            ResizeChatPaneLeft,
+            None,
+        ),
+        KeyBinding::new(
+            &b("cmd-ctrl-right", "ctrl-super-shift-right"),
+            ResizeChatPaneRight,
+            None,
+        ),
+        KeyBinding::new(
+            &b("cmd-ctrl-up", "ctrl-super-shift-up"),
+            ResizeChatPaneUp,
+            None,
+        ),
+        KeyBinding::new(
+            &b("cmd-ctrl-down", "ctrl-super-shift-down"),
+            ResizeChatPaneDown,
+            None,
+        ),
+        KeyBinding::new(
+            &b("cmd-ctrl-=", "ctrl-super-shift-="),
+            EqualizeChatPanes,
+            None,
+        ),
+        KeyBinding::new(
+            &b("cmd-shift-enter", "ctrl-shift-enter"),
+            ToggleChatPaneZoom,
+            None,
+        ),
         // Jump to the message box from anywhere (the browser keeps ⌘L for
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
@@ -322,7 +363,12 @@ impl Shell {
         matches!(self.route, Route::Chat) && self.chat_split.is_some()
     }
 
-    pub(super) fn split_chat(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn split_chat(
+        &mut self,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.split_chat_opening(axis, None, window, cx);
     }
 
@@ -372,7 +418,12 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn focus_chat_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_chat_pane(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let selected = self.state.read(cx).selected_chat.clone();
         let Some(split) = self.chat_split.as_mut() else {
             return;
@@ -393,7 +444,12 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn cycle_chat_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cycle_chat_pane(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(ix) = self.chat_split.as_ref().map(|split| split.cycled(forward)) {
             self.focus_chat_pane(ix, window, cx);
         }
@@ -435,7 +491,11 @@ impl Shell {
     }
 
     /// ⌘W with a split open closes the focused pane (not the window).
-    pub(crate) fn close_focused_chat_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn close_focused_chat_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.chat_split_active() {
             // One pane left: close its tab while others remain.
             return self.close_chat_tab(window, cx);
@@ -522,9 +582,12 @@ impl Shell {
             if self.peer_chat_views.contains_key(&id) {
                 continue;
             }
-            let transcript = cx.new(|cx| Transcript::for_doc(self.state.clone(), id.clone(), true, cx));
+            let transcript =
+                cx.new(|cx| Transcript::for_doc(self.state.clone(), id.clone(), true, cx));
             let links = Self::session_links(Some(id.clone()), cx);
-            transcript.update(cx, |transcript, _| transcript.set_workspace_link_handler(links));
+            transcript.update(cx, |transcript, _| {
+                transcript.set_workspace_link_handler(links)
+            });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             self.state
                 .update(cx, |s, cx| s.watch_peer_chat(id.clone(), cx));
@@ -554,7 +617,12 @@ impl Shell {
     }
 
     /// Lay the focused column (`main`) out beside or above its peer panes.
-    pub(super) fn render_chat_split(&mut self, main: AnyElement, total_width: f32, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_chat_split(
+        &mut self,
+        main: AnyElement,
+        total_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(split) = self.chat_split.clone().filter(|s| !s.zoomed) else {
             return main;
         };
@@ -572,20 +640,33 @@ impl Shell {
             let share = split.shares[ix];
             if ix == split.focus {
                 let body = main.take().expect("one focused pane");
-                let slot = div().relative().flex().min_w_0().min_h_0().overflow_hidden();
+                let slot = div()
+                    .relative()
+                    .flex()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden();
                 children.push(
-                    if horizontal { slot.flex_1().h_full() } else { slot.w_full().h(gpui::relative(share)) }
-                        .child(body)
-                        .into_any_element(),
+                    if horizontal {
+                        slot.flex_1().h_full()
+                    } else {
+                        slot.w_full().h(gpui::relative(share))
+                    }
+                    .child(body)
+                    .into_any_element(),
                 );
                 continue;
             }
             let peer = self.render_peer_chat_pane(ix, pane.as_deref(), &theme, cx);
             let slot = div().relative().flex_none().overflow_hidden();
             children.push(
-                if horizontal { slot.h_full().w(px((total_width * share).max(0.0))) } else { slot.w_full().h(gpui::relative(share)) }
-                    .child(peer)
-                    .into_any_element(),
+                if horizontal {
+                    slot.h_full().w(px((total_width * share).max(0.0)))
+                } else {
+                    slot.w_full().h(gpui::relative(share))
+                }
+                .child(peer)
+                .into_any_element(),
             );
         }
         let measured = self.chat_split_bounds.clone();
@@ -597,31 +678,33 @@ impl Shell {
             .flex()
             .overflow_hidden()
             // Divider drags track the pointer across the whole split.
-            .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                let Some(drag) = this.chat_split_drag.as_ref() else {
-                    return;
-                };
-                if event.pressed_button != Some(gpui::MouseButton::Left) {
-                    this.chat_split_drag = None;
-                    return;
-                }
-                let Some(bounds) = this.chat_split_bounds.get() else {
-                    return;
-                };
-                let (pos, extent) = if horizontal {
-                    (f32::from(event.position.x), f32::from(bounds.size.width))
-                } else {
-                    (f32::from(event.position.y), f32::from(bounds.size.height))
-                };
-                if extent <= 0.0 {
-                    return;
-                }
-                let (divider, origin, start) = (drag.divider, drag.origin, drag.start.clone());
-                if let Some(split) = this.chat_split.as_mut() {
-                    split.drag_divider(&start, divider, (pos - origin) / extent);
-                    cx.notify();
-                }
-            }))
+            .on_mouse_move(
+                cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let Some(drag) = this.chat_split_drag.as_ref() else {
+                        return;
+                    };
+                    if event.pressed_button != Some(gpui::MouseButton::Left) {
+                        this.chat_split_drag = None;
+                        return;
+                    }
+                    let Some(bounds) = this.chat_split_bounds.get() else {
+                        return;
+                    };
+                    let (pos, extent) = if horizontal {
+                        (f32::from(event.position.x), f32::from(bounds.size.width))
+                    } else {
+                        (f32::from(event.position.y), f32::from(bounds.size.height))
+                    };
+                    if extent <= 0.0 {
+                        return;
+                    }
+                    let (divider, origin, start) = (drag.divider, drag.origin, drag.start.clone());
+                    if let Some(split) = this.chat_split.as_mut() {
+                        split.drag_divider(&start, divider, (pos - origin) / extent);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -631,24 +714,52 @@ impl Shell {
                 }),
             )
             .child(
-                gpui::canvas(move |bounds, _, _| measured.set(Some(bounds)), |_, _, _, _| {})
-                    .absolute()
-                    .inset_0(),
+                gpui::canvas(
+                    move |bounds, _, _| measured.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
             );
-        if horizontal { root.flex_row() } else { root.flex_col() }
-            .children(children)
-            .into_any_element()
+        if horizontal {
+            root.flex_row()
+        } else {
+            root.flex_col()
+        }
+        .children(children)
+        .into_any_element()
     }
 
     /// A 1px divider with a wider invisible grab area: drag to resize the two
     /// panes beside it, double-click to equalize (Ghostty).
-    fn render_split_divider(&mut self, ix: usize, horizontal: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let dragging = self.chat_split_drag.as_ref().is_some_and(|d| d.divider == ix);
+    fn render_split_divider(
+        &mut self,
+        ix: usize,
+        horizontal: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let dragging = self
+            .chat_split_drag
+            .as_ref()
+            .is_some_and(|d| d.divider == ix);
         let grab = div()
             .id(("chat-split-divider", ix))
             .absolute()
-            .when(horizontal, |el| el.top_0().bottom_0().left(px(-4.0)).w(px(9.0)).cursor_col_resize())
-            .when(!horizontal, |el| el.left_0().right_0().top(px(-4.0)).h(px(9.0)).cursor_row_resize())
+            .when(horizontal, |el| {
+                el.top_0()
+                    .bottom_0()
+                    .left(px(-4.0))
+                    .w(px(9.0))
+                    .cursor_col_resize()
+            })
+            .when(!horizontal, |el| {
+                el.left_0()
+                    .right_0()
+                    .top(px(-4.0))
+                    .h(px(9.0))
+                    .cursor_row_resize()
+            })
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -663,19 +774,28 @@ impl Shell {
                     };
                     this.chat_split_drag = Some(DividerDrag {
                         divider: ix,
-                        origin: if horizontal { f32::from(event.position.x) } else { f32::from(event.position.y) },
+                        origin: if horizontal {
+                            f32::from(event.position.x)
+                        } else {
+                            f32::from(event.position.y)
+                        },
                         start: split.shares.clone(),
                     });
                     cx.notify();
                 }),
             );
-        let line = div()
-            .relative()
-            .flex_none()
-            .bg(if dragging { theme.accent.opacity(0.7) } else { theme.border });
-        if horizontal { line.w(px(1.0)).h_full() } else { line.h(px(1.0)).w_full() }
-            .child(grab)
-            .into_any_element()
+        let line = div().relative().flex_none().bg(if dragging {
+            theme.accent.opacity(0.7)
+        } else {
+            theme.border
+        });
+        if horizontal {
+            line.w(px(1.0)).h_full()
+        } else {
+            line.h(px(1.0)).w_full()
+        }
+        .child(grab)
+        .into_any_element()
     }
 
     fn render_peer_chat_pane(
@@ -701,7 +821,14 @@ impl Shell {
             .chat_split
             .as_ref()
             .and_then(|split| split.projects.get(ix).cloned().flatten())
-            .and_then(|id| self.state.read(cx).spaces.iter().find(|s| s.id == id).map(space_label))
+            .and_then(|id| {
+                self.state
+                    .read(cx)
+                    .spaces
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(space_label)
+            })
             .map_or_else(
                 || "Click to start a session".into(),
                 |project| format!("Click to start a session in {project}").into(),
@@ -771,7 +898,15 @@ impl Shell {
                     .child(title),
             )
             // Ghostty dims unfocused splits.
-            .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .opacity(0.8)
+                    .child(body),
+            )
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, cx| this.focus_chat_pane(ix, window, cx)),
@@ -819,7 +954,11 @@ impl Shell {
     /// each shows its pane's session and workspace (project), the focused
     /// one lit. Click a card to move into that pane. Hovering the strip eases
     /// open a preview of the hovered card's conversation underneath.
-    pub(super) fn render_pane_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_pane_strip(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let split = self
             .chat_split
             .clone()
@@ -852,7 +991,11 @@ impl Shell {
                     Card {
                         title: pane_chat(ix)
                             .and_then(|id| state.chats.iter().find(|c| c.id == id))
-                            .map(|c| transcript::single_line(&c.title.clone().unwrap_or_else(|| "Untitled".into())))
+                            .map(|c| {
+                                transcript::single_line(
+                                    &c.title.clone().unwrap_or_else(|| "Untitled".into()),
+                                )
+                            })
                             .unwrap_or_else(|| "New session".into())
                             .into(),
                         project: project
@@ -886,8 +1029,16 @@ impl Shell {
                     .py(px(7.0))
                     .rounded(px(10.0))
                     .border_1()
-                    .border_color(if focused { theme.accent.opacity(0.55) } else { theme.border })
-                    .bg(if focused || lit { theme.ink(0.05) } else { theme.ink(0.015) })
+                    .border_color(if focused {
+                        theme.accent.opacity(0.55)
+                    } else {
+                        theme.border
+                    })
+                    .bg(if focused || lit {
+                        theme.ink(0.05)
+                    } else {
+                        theme.ink(0.015)
+                    })
                     .cursor_pointer()
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered && this.pane_strip_hovered != ix {
@@ -911,7 +1062,11 @@ impl Shell {
                                 div()
                                     .flex_none()
                                     .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(if focused { theme.accent } else { theme.text_muted })
+                                    .text_color(if focused {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    })
                                     .child(SharedString::from(pane_glyph(split.axis, ix, len))),
                             )
                             .child(
@@ -921,7 +1076,11 @@ impl Shell {
                                     .truncate()
                                     .text_size(crate::typography::ui_rems(12.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(if focused { theme.text } else { theme.text_muted })
+                                    .text_color(if focused {
+                                        theme.text
+                                    } else {
+                                        theme.text_muted
+                                    })
                                     .child(card.title),
                             ),
                     )
@@ -974,7 +1133,15 @@ impl Shell {
                         .flex_col()
                         .gap(px(6.0))
                         .child(line("You", preview.prompt, 1))
-                        .child(line(if preview.streaming { "Working…" } else { "Reply" }, preview.reply, 3)),
+                        .child(line(
+                            if preview.streaming {
+                                "Working…"
+                            } else {
+                                "Reply"
+                            },
+                            preview.reply,
+                            3,
+                        )),
                 )
         });
 
@@ -986,7 +1153,15 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .on_hover(motion::reveal_listener(STRIP_REVEAL_KEY))
-                .child(div().flex().flex_row().flex_wrap().items_start().gap(px(6.0)).children(row))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_start()
+                        .gap(px(6.0))
+                        .children(row),
+                )
                 .children(panel)
                 .into_any_element(),
         )
@@ -997,7 +1172,11 @@ impl Shell {
     /// While a sidebar session is being dragged, Ghostty-style drop targets
     /// over the chat area: the right edge opens it in a new pane to the
     /// right, the bottom edge in a new pane below.
-    pub(super) fn render_split_drop_zones(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_split_drop_zones(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         if !matches!(self.route, Route::Chat) || self.sidebar_session_transfer.is_none() {
             return Vec::new();
         }
@@ -1023,23 +1202,29 @@ impl Shell {
                         .border_color(accent.opacity(0.7))
                         .text_color(accent)
                 })
-                .on_drop(cx.listener(move |this, payload: &SidebarSessionDrag, window, cx| {
-                    let chat = payload.chat_id.clone();
-                    this.cancel_sidebar_session_transfer(cx);
-                    this.split_chat_opening(axis, Some(chat), window, cx);
-                }))
+                .on_drop(
+                    cx.listener(move |this, payload: &SidebarSessionDrag, window, cx| {
+                        let chat = payload.chat_id.clone();
+                        this.cancel_sidebar_session_transfer(cx);
+                        this.split_chat_opening(axis, Some(chat), window, cx);
+                    }),
+                )
         };
         let mut zones = Vec::new();
         let right = self.can_split(SplitAxis::Horizontal);
         let below = self.can_split(SplitAxis::Vertical);
         if right {
             zones.push(
-                zone("chat-drop-right", SplitAxis::Horizontal, "Open to the right ◨")
-                    .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
-                    .bottom(px(8.0))
-                    .right(px(8.0))
-                    .w(gpui::relative(0.3))
-                    .into_any_element(),
+                zone(
+                    "chat-drop-right",
+                    SplitAxis::Horizontal,
+                    "Open to the right ◨",
+                )
+                .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
+                .bottom(px(8.0))
+                .right(px(8.0))
+                .w(gpui::relative(0.3))
+                .into_any_element(),
             );
         }
         if below {
@@ -1048,7 +1233,11 @@ impl Shell {
                 .bottom(px(8.0))
                 .h(gpui::relative(0.28));
             // Leave the right column to the right-hand target.
-            let zone = if right { zone.right(gpui::relative(0.33)) } else { zone.right(px(8.0)) };
+            let zone = if right {
+                zone.right(gpui::relative(0.33))
+            } else {
+                zone.right(px(8.0))
+            };
             zones.push(zone.into_any_element());
         }
         zones
@@ -1071,7 +1260,11 @@ fn plain_text(markdown: &str) -> String {
                 .strip_prefix("- ")
                 .or_else(|| line.strip_prefix("* "))
                 .unwrap_or(line);
-            if line.trim_start().starts_with("```") { "" } else { line }
+            if line.trim_start().starts_with("```") {
+                ""
+            } else {
+                line
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1114,8 +1307,12 @@ fn conversation_preview(entries: &[harness_doc::SessionMessageEntry]) -> Convers
     };
     for entry in entries.iter().rev() {
         match entry.role {
-            harness_doc::MessageRole::User if preview.prompt.is_none() => preview.prompt = text(entry),
-            harness_doc::MessageRole::Assistant if preview.reply.is_none() && preview.prompt.is_none() => {
+            harness_doc::MessageRole::User if preview.prompt.is_none() => {
+                preview.prompt = text(entry)
+            }
+            harness_doc::MessageRole::Assistant
+                if preview.reply.is_none() && preview.prompt.is_none() =>
+            {
                 preview.reply = text(entry)
             }
             _ => {}
@@ -1142,17 +1339,31 @@ mod chat_split_tests {
     #[test]
     fn preview_takes_the_latest_prompt_and_its_reply() {
         use harness_doc::MessageRole::{Assistant, User};
-        let entries = [entry(User, "old"), entry(Assistant, "old reply"), entry(User, "fix  the\nbuild"), entry(Assistant, "done")];
+        let entries = [
+            entry(User, "old"),
+            entry(Assistant, "old reply"),
+            entry(User, "fix  the\nbuild"),
+            entry(Assistant, "done"),
+        ];
         let p = conversation_preview(&entries);
         assert_eq!(p.prompt.as_deref(), Some("fix the build"));
         assert_eq!(p.reply.as_deref(), Some("done"));
         let p = conversation_preview(&entries[..3]);
         assert_eq!(p.reply, None, "no reply to the latest prompt yet");
-        assert_eq!(plain_text("## Plan\n- **fix** the `build`\n```rust\nlet x;\n```"), "Plan fix the build let x;");
+        assert_eq!(
+            plain_text("## Plan\n- **fix** the `build`\n```rust\nlet x;\n```"),
+            "Plan fix the build let x;"
+        );
     }
 
     fn two(selected: &str) -> ChatSplit {
-        ChatSplit::split(None, SplitAxis::Horizontal, Some(selected.into()), Some("p".into())).unwrap()
+        ChatSplit::split(
+            None,
+            SplitAxis::Horizontal,
+            Some(selected.into()),
+            Some("p".into()),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1162,7 +1373,11 @@ mod chat_split_tests {
         assert_eq!(split.focus, 1);
         assert_eq!(split.shares, vec![0.5, 0.5]);
         assert_eq!(split.peer_chats().collect::<Vec<_>>(), ["a"]);
-        assert_eq!(split.projects, vec![Some("p".into()), Some("p".into())], "new pane inherits the project");
+        assert_eq!(
+            split.projects,
+            vec![Some("p".into()), Some("p".into())],
+            "new pane inherits the project"
+        );
     }
 
     #[test]
@@ -1181,7 +1396,10 @@ mod chat_split_tests {
     #[test]
     fn focus_swaps_the_selection_into_the_pane_left_behind() {
         let mut split = two("a");
-        assert_eq!(split.focus_pane(0, Some("b".into())), Some(Some("a".into())));
+        assert_eq!(
+            split.focus_pane(0, Some("b".into())),
+            Some(Some("a".into()))
+        );
         assert_eq!(split.panes, vec![None, Some("b".into())]);
         assert_eq!(split.focus, 0);
         assert_eq!(split.focus_pane(0, None), None, "already focused");
@@ -1236,18 +1454,27 @@ mod chat_split_tests {
     fn splits_past_four_panes_share_the_column_evenly() {
         let mut split = two("a");
         let mut sizes = vec![split.panes.len()];
-        while let Some(next) = ChatSplit::split(Some(split.clone()), SplitAxis::Horizontal, None, None) {
+        while let Some(next) =
+            ChatSplit::split(Some(split.clone()), SplitAxis::Horizontal, None, None)
+        {
             split = next;
             sizes.push(split.panes.len());
             assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
             assert!(
-                split.shares.iter().all(|&s| s >= 1.0 / MAX_CHAT_PANES as f32 - 1e-5),
+                split
+                    .shares
+                    .iter()
+                    .all(|&s| s >= 1.0 / MAX_CHAT_PANES as f32 - 1e-5),
                 "no sliver panes: {:?}",
                 split.shares
             );
         }
         assert_eq!(sizes, (2..=MAX_CHAT_PANES).collect::<Vec<_>>());
-        assert_eq!(split.focus, MAX_CHAT_PANES - 1, "the newest pane takes focus");
+        assert_eq!(
+            split.focus,
+            MAX_CHAT_PANES - 1,
+            "the newest pane takes focus"
+        );
         // Every divider still drags, even with the column full.
         let start = split.shares.clone();
         split.drag_divider(&start, 1, 0.02);
@@ -1258,15 +1485,22 @@ mod chat_split_tests {
 
     #[test]
     fn dragging_a_divider_moves_only_its_two_panes() {
-        let mut split = ChatSplit::split(Some(two("a")), SplitAxis::Horizontal, None, None).unwrap();
+        let mut split =
+            ChatSplit::split(Some(two("a")), SplitAxis::Horizontal, None, None).unwrap();
         split.equalize();
         let start = split.shares.clone();
         split.drag_divider(&start, 1, 0.1);
         assert!((split.shares[0] - (1.0 / 3.0 + 0.1)).abs() < 1e-5);
         assert!((split.shares[1] - (1.0 / 3.0 - 0.1)).abs() < 1e-5);
-        assert!((split.shares[2] - 1.0 / 3.0).abs() < 1e-5, "far pane untouched");
+        assert!(
+            (split.shares[2] - 1.0 / 3.0).abs() < 1e-5,
+            "far pane untouched"
+        );
         split.drag_divider(&start, 1, 5.0);
-        assert!((split.shares[1] - MIN_PANE_SHARE).abs() < 1e-5, "clamped at the minimum");
+        assert!(
+            (split.shares[1] - MIN_PANE_SHARE).abs() < 1e-5,
+            "clamped at the minimum"
+        );
         assert!((split.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         split.drag_divider(&start, 0, 0.1);
         split.drag_divider(&start, 9, 0.1);
@@ -1307,12 +1541,17 @@ mod chat_split_tests {
 
     #[test]
     fn layouts_round_trip_and_drop_vanished_chats() {
-        let mut split = ChatSplit::split(Some(two("a")), SplitAxis::Horizontal, None, None).unwrap();
+        let mut split =
+            ChatSplit::split(Some(two("a")), SplitAxis::Horizontal, None, None).unwrap();
         split.panes[1] = Some("gone".into());
         split.equalize();
         let saved = split.to_saved();
         let back = ChatSplit::from_saved(&saved, |id| id == "a").unwrap();
-        assert_eq!(back.panes, vec![Some("a".into()), None, None], "vanished chat → empty pane");
+        assert_eq!(
+            back.panes,
+            vec![Some("a".into()), None, None],
+            "vanished chat → empty pane"
+        );
         assert_eq!(back.focus, split.focus);
         assert!((back.shares.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         let mut broken = saved.clone();
@@ -1329,6 +1568,10 @@ mod chat_split_tests {
         split.selection_changed(Some("c".into()), Some("a"));
         assert_eq!(split.panes[0].as_deref(), Some("c"));
         split.selection_changed(Some("a".into()), Some("z"));
-        assert_eq!(split.panes[0].as_deref(), Some("c"), "unrelated picks load in place");
+        assert_eq!(
+            split.panes[0].as_deref(),
+            Some("c"),
+            "unrelated picks load in place"
+        );
     }
 }

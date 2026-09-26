@@ -20,8 +20,8 @@
 //! already-laid-out elements to re-run their paint with the new palette.
 
 use gpui::{App, Global, Subscription, Window};
-use serde::{Deserialize, Serialize};
 use harness_theme::{AccentSelection, SurfacePreference, ThemeSelection};
+use serde::{Deserialize, Serialize};
 
 use crate::settings::{self, SavePolicy};
 use crate::theme::{Appearance, Theme};

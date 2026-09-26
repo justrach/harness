@@ -35,12 +35,12 @@
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gpui::{App, Global, Hsla, SharedString, hsla};
-use serde::{Deserialize, Serialize};
 use harness_syntax::HighlightKind;
 use harness_theme::{
     AccentPreset, AccentSelection, Color as ModelColor, SurfacePreference, SurfaceTreatment,
     ThemeRegistry, ThemeVariant,
 };
+use serde::{Deserialize, Serialize};
 
 /// User-selectable accent family. A choice is one color identity, not a
 /// miniature multi-hue theme: every interactive accent role stays on the same
@@ -776,7 +776,11 @@ impl TerminalColors {
             Appearance::Light => "harnesser-light",
         };
         let registry = ThemeRegistry::active();
-        Self::from_variant(registry.variant(id).expect("Harness terminal palette exists"))
+        Self::from_variant(
+            registry
+                .variant(id)
+                .expect("Harness terminal palette exists"),
+        )
     }
 }
 

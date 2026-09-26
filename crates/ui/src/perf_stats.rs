@@ -23,8 +23,8 @@ use gpui::App;
 /// Bucket upper bounds in ms; the last bucket is everything above. Must stay
 /// identical to zigrepper services/harness-telemetry/src/desktop_stats.ts.
 pub const BUCKETS_MS: [f64; 22] = [
-    1.0, 2.0, 4.0, 8.33, 16.67, 33.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 750.0,
-    1000.0, 1500.0, 2000.0, 3000.0, 5000.0, 10000.0, 20000.0, 60000.0,
+    1.0, 2.0, 4.0, 8.33, 16.67, 33.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 750.0, 1000.0,
+    1500.0, 2000.0, 3000.0, 5000.0, 10000.0, 20000.0, 60000.0,
 ];
 const BUCKET_COUNT: usize = BUCKETS_MS.len() + 1;
 
@@ -498,8 +498,16 @@ mod tests {
         let count = |name: &str| metrics.iter().find(|m| m.name == name).map(|m| m.count);
         assert_eq!(count("message_send_ms"), Some(1));
         assert_eq!(count("first_token_ms"), Some(1));
-        assert_eq!(count("turn_ms"), Some(1), "failed runs are not turn latencies");
-        assert_eq!(count("conversation_load_ms"), Some(1), "only the latest selection");
+        assert_eq!(
+            count("turn_ms"),
+            Some(1),
+            "failed runs are not turn latencies"
+        );
+        assert_eq!(
+            count("conversation_load_ms"),
+            Some(1),
+            "only the latest selection"
+        );
         assert!(take_window().is_none(), "a drained window sends nothing");
     }
 

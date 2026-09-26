@@ -395,39 +395,43 @@ impl Render for NotificationsPage {
                         }),
                     ),
             );
-        let privacy_card = widgets::section_card(&theme).child(
-            widgets::card_row(&theme, true)
-                .child(widgets::row_tile(&theme, icons::FAST_TIER))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(widgets::row_title(&theme, "Share anonymous performance stats"))
-                        .child(widgets::meta_line(
-                            &theme,
-                            vec![div()
+        let privacy_card =
+            widgets::section_card(&theme).child(
+                widgets::card_row(&theme, true)
+                    .child(widgets::row_tile(&theme, icons::FAST_TIER))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(
+                                &theme,
+                                "Share anonymous performance stats",
+                            ))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![div()
                                 .child(SharedString::from(
                                     "Send launch, load, send, and streaming timings so Harness \
                                      can get faster. Timings only: no account, chats, paths, \
                                      or content.",
                                 ))
                                 .into_any_element()],
-                        )),
-                )
-                .child(interactive_switch(
-                    toggle(
-                        "notifications-performance-stats-toggle",
-                        "Share anonymous performance stats",
-                        performance_stats,
-                        true,
-                    ),
-                    accent,
-                    NotificationPreference::PerformanceStats,
-                    cx,
-                )),
-        );
+                            )),
+                    )
+                    .child(interactive_switch(
+                        toggle(
+                            "notifications-performance-stats-toggle",
+                            "Share anonymous performance stats",
+                            performance_stats,
+                            true,
+                        ),
+                        accent,
+                        NotificationPreference::PerformanceStats,
+                        cx,
+                    )),
+            );
 
         let scrollbar = popover::rail(self, "notifications-page-scrollbar", &theme, cx);
         div()

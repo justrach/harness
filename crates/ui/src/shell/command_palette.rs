@@ -110,7 +110,11 @@ impl Shell {
             return;
         }
         self.add_space = None;
-        let placeholder = if self.chat_split.as_ref().is_some_and(|split| split.panes.len() > 1) {
+        let placeholder = if self
+            .chat_split
+            .as_ref()
+            .is_some_and(|split| split.panes.len() > 1)
+        {
             "Search open panes, commands and chats…"
         } else {
             "Search commands and chats…"
@@ -157,7 +161,11 @@ impl Shell {
         // one" is the common search. Their chats leave the history list.
         let mut entries = Vec::new();
         let mut in_panes: Vec<String> = Vec::new();
-        if let Some(split) = self.chat_split.as_ref().filter(|_| matches!(self.route, Route::Chat)) {
+        if let Some(split) = self
+            .chat_split
+            .as_ref()
+            .filter(|_| matches!(self.route, Route::Chat))
+        {
             for ix in (0..split.panes.len()).filter(|&ix| ix != split.focus) {
                 in_panes.extend(split.panes[ix].clone());
                 let (title, project) = self.pane_label(ix, cx);
@@ -289,153 +297,156 @@ impl Shell {
             if ix > 0 && entries[ix - 1].section() != entry.section() {
                 row = row.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
             }
-            let content = if let Entry::Pane(pane) = entry {
-                let pane = *pane;
-                let (title, project) = self.pane_label(pane, cx);
-                let glyph = self
-                    .chat_split
-                    .as_ref()
-                    .map(|split| chat_split::pane_glyph(split.axis, pane, split.panes.len()))
-                    .unwrap_or("▣");
-                popover::menu_row(&theme, ix == active, format!("command-pane-{ix}"))
-                    .id(("command-pane", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Go to pane: {title}"))
-                    .min_h(px(30.0))
-                    .py(px(4.0))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_command(Entry::Pane(pane), window, cx)
-                    }))
-                    .child(
-                        div()
-                            .w(px(16.0))
-                            .flex_none()
-                            .text_center()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(glyph)),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(popover::search_highlight(
-                        title.into(),
-                        Some(&query),
-                        &theme,
-                    )))
-                    .when(!project.is_empty(), |row| {
-                        row.child(
+            let content =
+                if let Entry::Pane(pane) = entry {
+                    let pane = *pane;
+                    let (title, project) = self.pane_label(pane, cx);
+                    let glyph = self
+                        .chat_split
+                        .as_ref()
+                        .map(|split| chat_split::pane_glyph(split.axis, pane, split.panes.len()))
+                        .unwrap_or("▣");
+                    popover::menu_row(&theme, ix == active, format!("command-pane-{ix}"))
+                        .id(("command-pane", ix))
+                        .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Go to pane: {title}"))
+                        .min_h(px(30.0))
+                        .py(px(4.0))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.activate_command(Entry::Pane(pane), window, cx)
+                        }))
+                        .child(
+                            div()
+                                .w(px(16.0))
+                                .flex_none()
+                                .text_center()
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(glyph)),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(
+                            popover::search_highlight(title.into(), Some(&query), &theme),
+                        ))
+                        .when(!project.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(160.0))
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(project)),
+                            )
+                        })
+                        .child(
                             div()
                                 .flex_none()
-                                .max_w(px(160.0))
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(project)),
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted.opacity(0.7))
+                                .child(SharedString::from("Go to pane")),
                         )
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(SharedString::from("Go to pane")),
-                    )
-                    .into_any_element()
-            } else if let Some((label, glyph)) = entry.action() {
-                let shortcut = match entry {
-                    Entry::NewChat | Entry::NewProject => {
-                        let id = if *entry == Entry::NewChat {
-                            ShortcutId::NewSession
-                        } else {
-                            ShortcutId::NewProject
-                        };
-                        let combo = self.settings.keymap.get(id);
-                        let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
-                        Some(crate::settings::badge_combo(if valid {
-                            combo
-                        } else {
-                            id.default_combo()
+                        .into_any_element()
+                } else if let Some((label, glyph)) = entry.action() {
+                    let shortcut = match entry {
+                        Entry::NewChat | Entry::NewProject => {
+                            let id = if *entry == Entry::NewChat {
+                                ShortcutId::NewSession
+                            } else {
+                                ShortcutId::NewProject
+                            };
+                            let combo = self.settings.keymap.get(id);
+                            let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
+                            Some(crate::settings::badge_combo(if valid {
+                                combo
+                            } else {
+                                id.default_combo()
+                            }))
+                        }
+                        Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
+                        _ => None,
+                    };
+                    let entry = entry.clone();
+                    popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
+                        .id(("command-action", ix))
+                        .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                        .role(gpui::Role::Button)
+                        .aria_label(label)
+                        .min_h(px(30.0))
+                        .py(px(4.0))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.activate_command(entry.clone(), window, cx)
                         }))
-                    }
-                    Entry::Settings => Some(crate::settings::badge_combo("mod-,")),
-                    _ => None,
-                };
-                let entry = entry.clone();
-                popover::menu_row(&theme, ix == active, format!("command-action-{ix}"))
-                    .id(("command-action", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .min_h(px(30.0))
-                    .py(px(4.0))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_command(entry.clone(), window, cx)
-                    }))
-                    .child(
-                        icon(glyph)
-                            .size(px(16.0))
-                            .flex_none()
-                            .text_color(theme.text_muted),
-                    )
-                    .child(div().flex_1().min_w_0().child(popover::search_highlight(
-                        label.into(),
+                        .child(
+                            icon(glyph)
+                                .size(px(16.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().flex_1().min_w_0().child(popover::search_highlight(
+                            label.into(),
+                            Some(&query),
+                            &theme,
+                        )))
+                        .when_some(shortcut, |row, shortcut| {
+                            row.child(popover::kbd_hint(&theme, &shortcut))
+                        })
+                        .into_any_element()
+                } else if let Entry::Chat(id) = entry {
+                    let state = self.state.read(cx);
+                    let chat = state.chats.iter().find(|chat| &chat.id == id)?;
+                    let project = match (state.space_for_chat(chat), chat.space_id.as_deref()) {
+                        (Some(space), _) => space.display_name(),
+                        (None, None) => "~",
+                        _ => "?",
+                    };
+                    let folder = match state.device_name(&chat.device_id) {
+                        Some(device) => format!("{project} @ {device}"),
+                        None => project.to_string(),
+                    };
+                    let branch = self
+                        .settings
+                        .sidebar_show_branch
+                        .then(|| crate::change_requests::conversation_branch(chat, &state.spaces))
+                        .flatten()
+                        .map(str::trim)
+                        .filter(|branch| !branch.is_empty())
+                        .map(SharedString::from);
+                    let pr = self
+                        .settings
+                        .sidebar_show_pull_request
+                        .then(|| state.change_request_for_chat(chat).cloned())
+                        .flatten();
+                    let harness = self
+                        .settings
+                        .sidebar_show_harness
+                        .then(|| chat.config.as_ref().map(|c| c.harness))
+                        .flatten();
+                    self.render_chat_row(
+                        id.clone(),
+                        transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+                            .into(),
+                        format_time_ago(
+                            chat.last_message_at.unwrap_or(chat.created_at),
+                            Utc::now(),
+                        )
+                        .into(),
+                        folder.into(),
+                        branch,
+                        pr,
+                        harness,
+                        state.display_status_for(chat, Utc::now()),
+                        ix == active,
+                        chat.archived,
+                        false,
+                        None,
+                        None,
                         Some(&query),
                         &theme,
-                    )))
-                    .when_some(shortcut, |row, shortcut| {
-                        row.child(popover::kbd_hint(&theme, &shortcut))
-                    })
-                    .into_any_element()
-            } else if let Entry::Chat(id) = entry {
-                let state = self.state.read(cx);
-                let chat = state.chats.iter().find(|chat| &chat.id == id)?;
-                let project = match (state.space_for_chat(chat), chat.space_id.as_deref()) {
-                    (Some(space), _) => space.display_name(),
-                    (None, None) => "~",
-                    _ => "?",
+                        cx,
+                    )
+                } else {
+                    unreachable!()
                 };
-                let folder = match state.device_name(&chat.device_id) {
-                    Some(device) => format!("{project} @ {device}"),
-                    None => project.to_string(),
-                };
-                let branch = self
-                    .settings
-                    .sidebar_show_branch
-                    .then(|| crate::change_requests::conversation_branch(chat, &state.spaces))
-                    .flatten()
-                    .map(str::trim)
-                    .filter(|branch| !branch.is_empty())
-                    .map(SharedString::from);
-                let pr = self
-                    .settings
-                    .sidebar_show_pull_request
-                    .then(|| state.change_request_for_chat(chat).cloned())
-                    .flatten();
-                let harness = self
-                    .settings
-                    .sidebar_show_harness
-                    .then(|| chat.config.as_ref().map(|c| c.harness))
-                    .flatten();
-                self.render_chat_row(
-                    id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
-                        .into(),
-                    folder.into(),
-                    branch,
-                    pr,
-                    harness,
-                    state.display_status_for(chat, Utc::now()),
-                    ix == active,
-                    chat.archived,
-                    false,
-                    None,
-                    None,
-                    Some(&query),
-                    &theme,
-                    cx,
-                )
-            } else {
-                unreachable!()
-            };
             rows.push(row.child(div().px(px(8.0)).child(content)));
         }
         let height = (f32::from(viewport.height) - 180.0).clamp(100.0, 360.0);
@@ -604,15 +615,25 @@ impl Shell {
 #[cfg(feature = "appshots-fixture")]
 impl CommandPalette {
     pub(super) fn fixture_type(&self, query: &str, cx: &mut App) {
-        self.search.update(cx, |input, cx| input.set_text(query, cx));
+        self.search
+            .update(cx, |input, cx| input.set_text(query, cx));
     }
 }
 
 #[cfg(feature = "appshots-fixture")]
 impl Shell {
-    pub(super) fn fixture_command_palette_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn fixture_command_palette_enter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let entries = self.command_entries(cx);
-        if let Some(entry) = self.command_palette.as_ref().and_then(|p| entries.get(p.active)).cloned() {
+        if let Some(entry) = self
+            .command_palette
+            .as_ref()
+            .and_then(|p| entries.get(p.active))
+            .cloned()
+        {
             self.activate_command(entry, window, cx);
         }
     }
@@ -705,11 +726,7 @@ mod tests {
 
     #[test]
     fn open_panes_lead_then_actions_then_history() {
-        let order = [
-            Entry::Pane(2),
-            Entry::NewChat,
-            Entry::Chat("a".into()),
-        ];
+        let order = [Entry::Pane(2), Entry::NewChat, Entry::Chat("a".into())];
         assert!(order.windows(2).all(|w| w[0].section() < w[1].section()));
         assert_eq!(Entry::Pane(0).action(), None);
     }

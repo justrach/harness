@@ -130,8 +130,14 @@ mod tests {
     #[test]
     fn ignores_unrelated_output() {
         assert!(!is_denial(&exec("screencapture -x a.png"), None));
-        assert!(!is_denial(&exec("cargo build"), Some("error[E0609]: no field")));
-        assert!(!is_denial(&exec("cat notes.md"), Some("the user declined TCCs")));
+        assert!(!is_denial(
+            &exec("cargo build"),
+            Some("error[E0609]: no field")
+        ));
+        assert!(!is_denial(
+            &exec("cat notes.md"),
+            Some("the user declined TCCs")
+        ));
         assert!(!is_denial(
             &ToolCall::ReadFile {
                 path: "screen_access.rs".into()

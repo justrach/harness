@@ -46,7 +46,8 @@ impl Shell {
         if self.chat_split.is_none() {
             motion::reveal_reset(chat_split::STRIP_REVEAL_KEY);
         }
-        self.state.update(cx, |s, cx| s.select_chat(tab.selected, cx));
+        self.state
+            .update(cx, |s, cx| s.select_chat(tab.selected, cx));
         self.set_space_filter(tab.project, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
@@ -56,7 +57,12 @@ impl Shell {
     /// ⌘T: a new tab with one pane showing `open` (`None` = a fresh
     /// new-session canvas in the current project). The layout you were in
     /// stays whole in its own tab.
-    pub(super) fn new_chat_tab(&mut self, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_chat_tab(
+        &mut self,
+        open: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !matches!(self.route, Route::Chat) {
             return;
         }
@@ -85,7 +91,12 @@ impl Shell {
         self.load_chat_tab(tab, window, cx);
     }
 
-    pub(super) fn switch_chat_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn switch_chat_tab(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ix == self.chat_tab || ix >= self.chat_tabs.len() || !matches!(self.route, Route::Chat) {
             return;
         }
@@ -95,7 +106,12 @@ impl Shell {
         self.load_chat_tab(tab, window, cx);
     }
 
-    pub(super) fn cycle_chat_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cycle_chat_tab(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let len = self.chat_tabs.len();
         if len < 2 {
             return;
@@ -150,7 +166,12 @@ impl Shell {
     /// Opening a chat that already lives in another tab goes THERE (its
     /// tab, then its pane) instead of showing it twice. False when it isn't
     /// open in another tab.
-    pub(super) fn reveal_chat_in_tabs(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn reveal_chat_in_tabs(
+        &mut self,
+        chat_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some((tab, pane)) = self.chat_in_other_tab(chat_id) else {
             return false;
         };
@@ -193,7 +214,11 @@ impl Shell {
 
     /// The tab row above the sidebar's pane strip, shown once there are two
     /// or more tabs. Click to switch; the lit tab is the one on screen.
-    pub(super) fn render_chat_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_chat_tabs(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.chat_tabs.len() < 2 || !matches!(self.route, Route::Chat) {
             return None;
         }
@@ -233,12 +258,18 @@ impl Shell {
                         .bg(if lit {
                             theme.element_hover
                         } else {
-                            motion::hover_blend(&key, gpui::transparent_black(), theme.element_hover)
+                            motion::hover_blend(
+                                &key,
+                                gpui::transparent_black(),
+                                theme.element_hover,
+                            )
                         })
                         .on_hover(motion::hover_listener(key))
                         .text_size(crate::typography::ui_rems(12.5))
                         .text_color(if lit { theme.text } else { theme.text_muted })
-                        .on_click(cx.listener(move |this, _, window, cx| this.switch_chat_tab(ix, window, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.switch_chat_tab(ix, window, cx)
+                        }))
                         .child(
                             div()
                                 .flex_none()

@@ -1030,13 +1030,10 @@ impl FilesSurface {
                     .cursor_text()
                     .hover(|style| style.bg(crate::theme::ink(0.055)))
                     // Clicking the field's padding focuses the input too.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        move |_, window, cx| {
-                            window.focus(&search_focus, cx);
-                            cx.stop_propagation();
-                        },
-                    )
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        window.focus(&search_focus, cx);
+                        cx.stop_propagation();
+                    })
                     .child(
                         crate::icons::icon(crate::icons::MAGNIFER)
                             .size(px(12.0))
@@ -1117,10 +1114,7 @@ mod explorer_tests {
         cx.update(|window, cx| window.draw(cx).clear());
         // The explorer header is the same band as the editor header.
         let header = cx.debug_bounds("files-explorer-header").unwrap();
-        assert_eq!(
-            header.size.height,
-            px(crate::surface_chrome::HEADER_HEIGHT)
-        );
+        assert_eq!(header.size.height, px(crate::surface_chrome::HEADER_HEIGHT));
         let bounds = cx.debug_bounds("files-search").unwrap();
         assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
         // Click the field padding, not just the input's text hitbox.

@@ -74,7 +74,9 @@ pub(crate) const STARTERS: &[Starter] = &[
 
 /// The starters offered right now.
 pub(crate) fn available(has_project: bool) -> impl Iterator<Item = &'static Starter> {
-    STARTERS.iter().filter(move |s| has_project || !s.needs_project)
+    STARTERS
+        .iter()
+        .filter(move |s| has_project || !s.needs_project)
 }
 
 /// A compact pill (icon + title) for the row under the composer.
@@ -93,13 +95,22 @@ pub(crate) fn chip(starter: &Starter, theme: &Theme) -> gpui::Stateful<gpui::Div
         .rounded(px(14.0))
         .border_1()
         .border_color(theme.border)
-        .bg(motion::hover_blend(&id, gpui::transparent_black(), theme.element_hover))
+        .bg(motion::hover_blend(
+            &id,
+            gpui::transparent_black(),
+            theme.element_hover,
+        ))
         .on_hover(motion::hover_listener(id.clone()))
         .cursor_pointer()
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(ink)
         // Icons don't inherit the text color; without their own they vanish.
-        .child(crate::icons::icon(starter.icon).size(px(13.0)).flex_none().text_color(ink))
+        .child(
+            crate::icons::icon(starter.icon)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(ink),
+        )
         .child(SharedString::from(starter.title))
 }
 
@@ -122,7 +133,11 @@ pub(crate) fn card(
         .rounded(px(12.0))
         .border_1()
         .border_color(theme.border)
-        .bg(motion::hover_blend(&id, theme.surface_card, theme.surface_raised_hover))
+        .bg(motion::hover_blend(
+            &id,
+            theme.surface_card,
+            theme.surface_raised_hover,
+        ))
         .on_hover(motion::hover_listener(id))
         .cursor_pointer()
         .child(
@@ -163,6 +178,10 @@ mod tests {
 
     #[test]
     fn fresh_folder_starters_never_need_a_project() {
-        assert!(STARTERS.iter().all(|s| !(s.fresh_folder && s.needs_project)));
+        assert!(
+            STARTERS
+                .iter()
+                .all(|s| !(s.fresh_folder && s.needs_project))
+        );
     }
 }

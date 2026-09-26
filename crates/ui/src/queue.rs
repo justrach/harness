@@ -121,6 +121,30 @@ fn latest_queued_message(items: &[QueuedMessage]) -> Option<&QueuedMessage> {
     items.last()
 }
 
+/// How long the first empty-composer Enter stays armed.
+pub(crate) const ENTER_SEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyEnter {
+    /// First press, a lapsed window, or a different message queued since.
+    Arm,
+    /// Second press inside the window for the same queued message.
+    SendNow,
+}
+
+fn empty_enter(
+    armed: Option<(&str, std::time::Instant)>,
+    latest: &str,
+    now: std::time::Instant,
+) -> EmptyEnter {
+    match armed {
+        Some((id, at)) if id == latest && now.duration_since(at) < ENTER_SEND_WINDOW => {
+            EmptyEnter::SendNow
+        }
+        _ => EmptyEnter::Arm,
+    }
+}
+
 /// Translate a pointer inside the whole panel into a row slot. The top pad
 /// belongs to slot zero; the bottom pad clamps to the final row.
 fn queue_drop_index(panel_y: f32, count: usize) -> usize {
@@ -1013,7 +1037,13 @@ impl Composer {
                 .into()
             })
             .tooltip_show_delay(std::time::Duration::from_millis(350))
-            .child(if show_shortcut {
+            .child(if show_shortcut && self.enter_send_armed.is_some() {
+                // Armed by one empty Enter: say what a second one does.
+                div()
+                    .text_color(accent)
+                    .child(if compact { "↵" } else { "↵ again" })
+                    .into_any_element()
+            } else if show_shortcut {
                 div()
                     .child(if compact {
                         if cfg!(target_os = "macos") {
@@ -1245,6 +1275,52 @@ impl Composer {
             return;
         };
         self.activate_queued_primary(id, action, cx);
+    }
+
+    /// Enter on an empty composer. With a message queued, the first press
+    /// arms and shows the hint; a second press within `ENTER_SEND_WINDOW`
+    /// sends that message now, like Cmd/Ctrl+Enter. With nothing queued it
+    /// does nothing, so a habitual double Enter never stops a run (#406).
+    pub(crate) fn on_empty_enter(&mut self, cx: &mut Context<Self>) {
+        let latest = if self.editing_queued.is_some() {
+            None
+        } else {
+            latest_queued_message(&self.state.read(cx).queue).map(|item| item.id.clone())
+        };
+        let Some(latest) = latest else {
+            self.disarm_enter_send(cx);
+            return;
+        };
+        let now = std::time::Instant::now();
+        let armed = self
+            .enter_send_armed
+            .as_ref()
+            .map(|(id, at)| (id.as_str(), *at));
+        match empty_enter(armed, &latest, now) {
+            EmptyEnter::SendNow => {
+                self.disarm_enter_send(cx);
+                self.activate_latest_queued(cx);
+            }
+            EmptyEnter::Arm => {
+                self.enter_send_armed = Some((latest, now));
+                self.enter_send_disarm = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(ENTER_SEND_WINDOW).await;
+                    this.update(cx, |this, cx| {
+                        this.enter_send_armed = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn disarm_enter_send(&mut self, cx: &mut Context<Self>) {
+        self.enter_send_disarm = None;
+        if self.enter_send_armed.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Borrow the composer while the leased row reserves its queue position.
@@ -2080,5 +2156,35 @@ mod appshot_edit_tests {
             assert_eq!(composer.staged_appshots()[1].id, "during-save");
             assert!(composer.editing_queued.is_none());
         });
+    }
+}
+
+#[cfg(test)]
+mod enter_send_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_empty_enter_arms_and_a_second_inside_the_window_sends_now() {
+        let t0 = Instant::now();
+        assert_eq!(empty_enter(None, "q1", t0), EmptyEnter::Arm);
+        let second = t0 + Duration::from_millis(2_900);
+        assert_eq!(
+            empty_enter(Some(("q1", t0)), "q1", second),
+            EmptyEnter::SendNow
+        );
+    }
+
+    #[test]
+    fn a_lapsed_window_or_a_newer_queued_message_re_arms_instead_of_sending() {
+        let t0 = Instant::now();
+        assert_eq!(
+            empty_enter(Some(("q1", t0)), "q1", t0 + ENTER_SEND_WINDOW),
+            EmptyEnter::Arm
+        );
+        assert_eq!(
+            empty_enter(Some(("q1", t0)), "q2", t0 + Duration::from_millis(500)),
+            EmptyEnter::Arm
+        );
     }
 }

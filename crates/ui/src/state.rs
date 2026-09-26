@@ -2352,7 +2352,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -4118,7 +4121,10 @@ mod tests {
         if crate::screen_access::supported() && !crate::screen_access::granted() {
             assert_eq!(
                 state.screen_access_notice,
-                Some(crate::screen_access::Notice { chat_id: "chat".into(), requested: false })
+                Some(crate::screen_access::Notice {
+                    chat_id: "chat".into(),
+                    requested: false
+                })
             );
         }
     }

@@ -469,7 +469,13 @@ type AgentSpawn = (String, String, Option<SharedString>, Option<SubagentStatus>)
 fn agent_spawns(parts: &[MessagePart]) -> Vec<AgentSpawn> {
     let mut spawns: Vec<AgentSpawn> = Vec::new();
     for part in parts {
-        if let MessagePart::Tool { call, output: Some(output), subagent_ref, subagent_status, .. } = part
+        if let MessagePart::Tool {
+            call,
+            output: Some(output),
+            subagent_ref,
+            subagent_status,
+            ..
+        } = part
             && let Some((number, title)) = started_agent(output)
         {
             let title = title
@@ -498,7 +504,10 @@ fn bind_agent_wait(spawns: &[AgentSpawn], item: &mut ToolItem) {
     // Chats recorded before the graff driver named these keep the raw tool
     // names; read them the same way.
     if let ToolCall::Unknown { name, input } = &item.call
-        && matches!(name.as_str(), "agent_output" | "agent_message" | "subagent_resume" | "load_tool_schemas")
+        && matches!(
+            name.as_str(),
+            "agent_output" | "agent_message" | "subagent_resume" | "load_tool_schemas"
+        )
     {
         let id = input.as_ref().and_then(|i| i.get("id")).map(|id| match id {
             serde_json::Value::String(s) => s.clone(),
@@ -512,12 +521,18 @@ fn bind_agent_wait(spawns: &[AgentSpawn], item: &mut ToolItem) {
             ("subagent_resume", _) => "Resume agent".into(),
             _ => "Load tools".into(),
         };
-        item.call = ToolCall::Unknown { name: renamed, input: input.clone() };
+        item.call = ToolCall::Unknown {
+            name: renamed,
+            input: input.clone(),
+        };
     }
     let ToolCall::Unknown { name, input } = &item.call else {
         return;
     };
-    let Some(number) = name.strip_prefix("Wait for agent ").filter(|n| !n.contains(':')) else {
+    let Some(number) = name
+        .strip_prefix("Wait for agent ")
+        .filter(|n| !n.contains(':'))
+    else {
         return;
     };
     let Some((_, title, doc, status)) = spawns.iter().rev().find(|(n, ..)| n == number) else {
@@ -986,7 +1001,10 @@ fn memoized_detail_diff(diff: &harness_proto::ToolDiff) -> Option<Arc<crate::cha
         diff.old_text.as_ref().map_or(usize::MAX, String::len),
         diff.new_text.len(),
     );
-    let lock = || MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = || {
+        MEMO.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
     {
         let mut memo = lock();
         if let Some(ix) = memo.iter().position(|(k, _)| *k == key) {
@@ -2520,42 +2538,44 @@ impl HighlightStore {
                     if cancelled.load(std::sync::atomic::Ordering::Relaxed) != 0 {
                         return None;
                     }
-                    harness_syntax::highlight_with_limits(harness_syntax::HighlightRequest {
-                        source: &code,
-                        path: None,
-                        fence_tag: Some(match lang {
-                            Lang::Rust => "rust",
-                            Lang::JavaScript => "javascript",
-                            Lang::Jsx => "jsx",
-                            Lang::TypeScript => "typescript",
-                            Lang::Tsx => "tsx",
-                            Lang::Python => "python",
-                            Lang::Go => "go",
-                            Lang::Json => "json",
-                            Lang::Jsonc => "jsonc",
-                            Lang::Bash => "bash",
-                            Lang::Toml => "toml",
-                            Lang::Markdown => "markdown",
-                            Lang::Html => "html",
-                            Lang::Css => "css",
-                            Lang::Yaml => "yaml",
-                            Lang::C => "c",
-                            Lang::Cpp => "cpp",
-                            Lang::CSharp => "csharp",
-                            Lang::Java => "java",
-                            Lang::Kotlin => "kotlin",
-                            Lang::Swift => "swift",
-                            Lang::Ruby => "ruby",
-                            Lang::Php => "php",
-                            Lang::Sql => "sql",
-                            Lang::Lua => "lua",
-                            Lang::Dockerfile => "dockerfile",
-                            Lang::Nix => "nix",
-                            Lang::Make => "make",
-                        }),
-                    },
-                    harness_syntax::HighlightLimits::default(),
-                    Some(&cancelled))
+                    harness_syntax::highlight_with_limits(
+                        harness_syntax::HighlightRequest {
+                            source: &code,
+                            path: None,
+                            fence_tag: Some(match lang {
+                                Lang::Rust => "rust",
+                                Lang::JavaScript => "javascript",
+                                Lang::Jsx => "jsx",
+                                Lang::TypeScript => "typescript",
+                                Lang::Tsx => "tsx",
+                                Lang::Python => "python",
+                                Lang::Go => "go",
+                                Lang::Json => "json",
+                                Lang::Jsonc => "jsonc",
+                                Lang::Bash => "bash",
+                                Lang::Toml => "toml",
+                                Lang::Markdown => "markdown",
+                                Lang::Html => "html",
+                                Lang::Css => "css",
+                                Lang::Yaml => "yaml",
+                                Lang::C => "c",
+                                Lang::Cpp => "cpp",
+                                Lang::CSharp => "csharp",
+                                Lang::Java => "java",
+                                Lang::Kotlin => "kotlin",
+                                Lang::Swift => "swift",
+                                Lang::Ruby => "ruby",
+                                Lang::Php => "php",
+                                Lang::Sql => "sql",
+                                Lang::Lua => "lua",
+                                Lang::Dockerfile => "dockerfile",
+                                Lang::Nix => "nix",
+                                Lang::Make => "make",
+                            }),
+                        },
+                        harness_syntax::HighlightLimits::default(),
+                        Some(&cancelled),
+                    )
                     .ok()
                 })
                 .await;
@@ -4823,7 +4843,9 @@ impl Transcript {
                     .flatten();
                 if reusing
                     && let Some(rows) = prepared_rows
-                    && previous_sources.get(ix).is_some_and(|prev| Arc::ptr_eq(prev, rows))
+                    && previous_sources
+                        .get(ix)
+                        .is_some_and(|prev| Arc::ptr_eq(prev, rows))
                     && reused + rows.len() <= old_len
                     && rows.first().map(|r| &r.id) == old_rows.get(reused).map(|r| &r.id)
                 {
@@ -9290,7 +9312,10 @@ mod tests {
         draw(cx);
         let top_floor = transcript.read_with(cx, |this, _| this.rows.len() / 2);
         let top = transcript.read_with(cx, |this, _| this.list.logical_scroll_top().item_ix);
-        assert!(top >= top_floor, "promotion frame snapped the chat to row {top}");
+        assert!(
+            top >= top_floor,
+            "promotion frame snapped the chat to row {top}"
+        );
         for frame in 0..40 {
             tick(cx);
             let (top, rows) = transcript.read_with(cx, |this, _| {
@@ -9303,7 +9328,10 @@ mod tests {
         }
         transcript.read_with(cx, |this, _| {
             assert!(
-                this.own_turn.as_ref().is_some_and(|t| &*t.message_id == "steer") || this.pinned,
+                this.own_turn
+                    .as_ref()
+                    .is_some_and(|t| &*t.message_id == "steer")
+                    || this.pinned,
                 "the steered prompt still takes the viewport"
             );
         });
@@ -9394,11 +9422,18 @@ mod tests {
             entries.push(assistant(
                 "r-live",
                 live,
-                vec![reasoning_part("think", "Considering the request."), text_part("text", &live_body)],
+                vec![
+                    reasoning_part("think", "Considering the request."),
+                    text_part("text", &live_body),
+                ],
             ));
             entries
         };
-        let live = if streaming { MessageStatus::Streaming } else { MessageStatus::Complete };
+        let live = if streaming {
+            MessageStatus::Streaming
+        } else {
+            MessageStatus::Complete
+        };
         let check = |label: &str, floor: usize, cx: &mut gpui::TestAppContext| {
             let (top, rows) = transcript.read_with(cx, |this, _| {
                 (this.list.logical_scroll_top().item_ix, this.rows.len())
@@ -9425,7 +9460,9 @@ mod tests {
         } else {
             transcript.update(cx, |this, cx| this.sync(cx));
         }
-        transcript.update(cx, |this, cx| this.on_own_send("chat".into(), "sent".into(), cx));
+        transcript.update(cx, |this, cx| {
+            this.on_own_send("chat".into(), "sent".into(), cx)
+        });
         draw(cx);
         check("send frame", floor, cx);
         for frame in 0..40 {
@@ -9436,7 +9473,11 @@ mod tests {
         // The host confirms the prompt (the echo dedups away) and replies.
         let mut next = history(MessageStatus::Complete, 11);
         next.push(prompt("sent"));
-        next.push(assistant("r-sent", MessageStatus::Streaming, vec![text_part("text", "On it.")]));
+        next.push(assistant(
+            "r-sent",
+            MessageStatus::Streaming,
+            vec![text_part("text", "On it.")],
+        ));
         state.update(cx, |state, _| state.remove_echo("chat", "sent"));
         feed(next, cx);
         draw(cx);
@@ -9447,7 +9488,10 @@ mod tests {
         }
         transcript.read_with(cx, |this, _| {
             assert!(
-                this.own_turn.as_ref().is_some_and(|t| &*t.message_id == "sent") || this.pinned,
+                this.own_turn
+                    .as_ref()
+                    .is_some_and(|t| &*t.message_id == "sent")
+                    || this.pinned,
                 "the sent prompt still takes the viewport"
             );
         });
@@ -9464,7 +9508,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn send_as_the_reply_finishes_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
+    fn send_as_the_reply_finishes_never_snaps_a_long_chat_to_the_top(
+        cx: &mut gpui::TestAppContext,
+    ) {
         direct_send_keeps_a_long_chat_near_its_tail(cx, true, true);
     }
 
@@ -9525,11 +9571,21 @@ mod tests {
             incremental.update(cx, |t, cx| t.sync(cx));
             let fresh = cx.new(|cx| Transcript::new(state.clone(), cx));
             fresh.update(cx, |t, cx| t.sync(cx));
-            let (a, b) = (incremental.read_with(cx, |t, _| keys(t)), fresh.read_with(cx, |t, _| keys(t)));
-            assert_eq!(a, b, "{label}: incremental rows diverged from a fresh build");
+            let (a, b) = (
+                incremental.read_with(cx, |t, _| keys(t)),
+                fresh.read_with(cx, |t, _| keys(t)),
+            );
+            assert_eq!(
+                a, b,
+                "{label}: incremental rows diverged from a fresh build"
+            );
         };
         let prompt = |id: &str| {
-            let mut e = assistant(id, MessageStatus::Complete, vec![text_part("t", "Explain it.")]);
+            let mut e = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("t", "Explain it.")],
+            );
             e.role = MessageRole::User;
             e.status = None;
             e
@@ -9538,7 +9594,11 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0..30 {
             entries.push(prompt(&format!("p{i}")));
-            entries.push(assistant(&format!("r{i}"), MessageStatus::Complete, vec![text_part("t", body)]));
+            entries.push(assistant(
+                &format!("r{i}"),
+                MessageStatus::Complete,
+                vec![text_part("t", body)],
+            ));
         }
         let with_live = |entries: &Vec<SessionMessageEntry>, text: &str, status| {
             let mut next = entries.clone();
@@ -9546,7 +9606,10 @@ mod tests {
             next.push(assistant("r-live", status, vec![text_part("t", text)]));
             next
         };
-        install(with_live(&entries, "Streaming", MessageStatus::Streaming), cx);
+        install(
+            with_live(&entries, "Streaming", MessageStatus::Streaming),
+            cx,
+        );
         check("open", cx);
         let mut live = String::from("Streaming");
         for i in 0..8 {
@@ -9554,9 +9617,16 @@ mod tests {
             install(with_live(&entries, &live, MessageStatus::Streaming), cx);
             check(&format!("chunk {i}"), cx);
             let reused = incremental.read_with(cx, |t, _| t.row_sources.len());
-            assert!(reused >= 60, "chunk {i}: settled history reused ({reused} sources)");
+            assert!(
+                reused >= 60,
+                "chunk {i}: settled history reused ({reused} sources)"
+            );
         }
-        entries[21] = assistant("r10", MessageStatus::Complete, vec![text_part("t", "Edited in the middle.")]);
+        entries[21] = assistant(
+            "r10",
+            MessageStatus::Complete,
+            vec![text_part("t", "Edited in the middle.")],
+        );
         install(with_live(&entries, &live, MessageStatus::Streaming), cx);
         check("middle edit", cx);
         entries.remove(5);
@@ -9591,18 +9661,30 @@ mod tests {
             .collect::<String>();
         let mut entries = Vec::new();
         for i in 0..150 {
-            let mut user = assistant(&format!("p{i}"), MessageStatus::Complete, vec![text_part("t", "Please explain this.")]);
+            let mut user = assistant(
+                &format!("p{i}"),
+                MessageStatus::Complete,
+                vec![text_part("t", "Please explain this.")],
+            );
             user.role = MessageRole::User;
             entries.push(user);
-            entries.push(assistant(&format!("r{i}"), MessageStatus::Complete, vec![
-                tool_part(&format!("tool{i}"), "cargo test"),
-                text_part("t", &body),
-            ]));
+            entries.push(assistant(
+                &format!("r{i}"),
+                MessageStatus::Complete,
+                vec![
+                    tool_part(&format!("tool{i}"), "cargo test"),
+                    text_part("t", &body),
+                ],
+            ));
         }
         let mut live = String::new();
         let mut push = |live: &str, cx: &mut gpui::TestAppContext| {
             let mut next = entries.clone();
-            next.push(assistant("live", MessageStatus::Streaming, vec![text_part("t", live)]));
+            next.push(assistant(
+                "live",
+                MessageStatus::Streaming,
+                vec![text_part("t", live)],
+            ));
             state.update(cx, |state, _| {
                 state.selected_chat = Some("chat".into());
                 state.transcript_replayed = true;
@@ -9613,7 +9695,10 @@ mod tests {
         push("", cx);
         let t = Instant::now();
         transcript.update(cx, |this, cx| this.sync(cx));
-        eprintln!("PROBE attach sync (main-thread parse, no prepared rows)={:?}", t.elapsed());
+        eprintln!(
+            "PROBE attach sync (main-thread parse, no prepared rows)={:?}",
+            t.elapsed()
+        );
         let draw = |cx: &mut gpui::TestAppContext| {
             cx.update_window(window.into(), |_, window, cx| {
                 window.refresh();
@@ -11023,8 +11108,16 @@ mod tests {
     fn code_fence_pruning_matches_full_rekeying() {
         let markdown = "Intro\n\n```rust\nfn a() {}\n```\n\n- item\n\n  ```sh\nls\n  ```\n\n> ```py\n> x = 1\n> ```\n\nTail";
         let entries = [
-            assistant("m1", MessageStatus::Complete, vec![text_part("t", markdown)]),
-            assistant("m2", MessageStatus::Streaming, vec![text_part("t", markdown)]),
+            assistant(
+                "m1",
+                MessageStatus::Complete,
+                vec![text_part("t", markdown)],
+            ),
+            assistant(
+                "m2",
+                MessageStatus::Streaming,
+                vec![text_part("t", markdown)],
+            ),
         ];
         let rows: Vec<Row> = entries
             .iter()
@@ -11033,22 +11126,32 @@ mod tests {
         let full: HashSet<String> = rows
             .iter()
             .flat_map(|row| match &row.kind {
-                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
-                    .blocks
-                    .get(*block_ix)
-                    .map(|top| {
-                        render::code_block_indices(&top.block, *block_ix)
-                            .into_iter()
-                            .map(|ix| format!("{}#code{ix}", row.id))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
+                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+                    tree.blocks
+                        .get(*block_ix)
+                        .map(|top| {
+                            render::code_block_indices(&top.block, *block_ix)
+                                .into_iter()
+                                .map(|ix| format!("{}#code{ix}", row.id))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
                 _ => Vec::new(),
             })
             .collect();
-        assert!(full.len() >= 6, "fixture has nested code blocks in both rows: {full:?}");
-        let mut fences: HashMap<SharedString, ()> = full.iter().map(|k| (k.clone().into(), ())).collect();
-        for stale in ["gone-row#code0", "m1#t#code0#code99", "no-marker", "m1#codeX"] {
+        assert!(
+            full.len() >= 6,
+            "fixture has nested code blocks in both rows: {full:?}"
+        );
+        let mut fences: HashMap<SharedString, ()> =
+            full.iter().map(|k| (k.clone().into(), ())).collect();
+        for stale in [
+            "gone-row#code0",
+            "m1#t#code0#code99",
+            "no-marker",
+            "m1#codeX",
+        ] {
             fences.insert(stale.into(), ());
         }
         let first_row = &rows[0].id;
@@ -11069,11 +11172,18 @@ mod tests {
         let opened = assistant(
             "m1",
             MessageStatus::Streaming,
-            vec![text_part("t", "# Title\n\nSome **history** already written.")],
+            vec![text_part(
+                "t",
+                "# Title\n\nSome **history** already written.",
+            )],
         );
         let baseline = harness_doc::TranscriptBaseline::capture(std::slice::from_ref(&opened));
         let mut prep = TranscriptPreparation::default();
-        let keys = |rows: &[Row]| rows.iter().map(|r| (r.id.clone(), r.version)).collect::<Vec<_>>();
+        let keys = |rows: &[Row]| {
+            rows.iter()
+                .map(|r| (r.id.clone(), r.version))
+                .collect::<Vec<_>>()
+        };
         let first = prep
             .prepare(&harness_doc::TranscriptUpdate {
                 frame: harness_doc::TranscriptFrame::reset(std::slice::from_ref(&opened)),
@@ -11104,7 +11214,11 @@ mod tests {
                 })
                 .unwrap();
             let expected = rows_for_entry(&opened, false, false, &mut parse);
-            assert_eq!(keys(&prepared.historical["m1"]), keys(&expected), "after {token:?}");
+            assert_eq!(
+                keys(&prepared.historical["m1"]),
+                keys(&expected),
+                "after {token:?}"
+            );
             let (cached_prefix, _) = &prep.historical_cache["m1"];
             assert_eq!(cached_prefix, &opened, "cache keyed by the fixed prefix");
         }
@@ -14143,7 +14257,10 @@ mod tests {
             _ => panic!("expected diff detail"),
         };
         let first = file(&diff("a\nB\nc\n"));
-        assert!(Arc::ptr_eq(&first, &file(&diff("a\nB\nc\n"))), "repeat is served from the memo");
+        assert!(
+            Arc::ptr_eq(&first, &file(&diff("a\nB\nc\n"))),
+            "repeat is served from the memo"
+        );
         let changed = file(&diff("a\nB\nC\n"));
         assert!(!Arc::ptr_eq(&first, &changed));
         assert_eq!((changed.additions, changed.deletions), (2, 2));
@@ -14399,7 +14516,10 @@ mod tests {
         assert_eq!(started_agent("[agent 2: completed in 5ms]"), None);
         let parts = vec![MessagePart::Tool {
             id: "spawn".into(),
-            call: ToolCall::Unknown { name: "Agent: Audit frontend login".into(), input: None },
+            call: ToolCall::Unknown {
+                name: "Agent: Audit frontend login".into(),
+                input: None,
+            },
             is_error: false,
             resolved: true,
             output: Some("[agent 1 started: Audit frontend login]".into()),
@@ -14438,7 +14558,10 @@ mod tests {
             tool_chip_content(&wait.call),
             ("Waiting on", "Audit frontend login".to_string())
         );
-        assert_eq!(subagent_tab_title(&wait.call).as_ref(), "Audit frontend login");
+        assert_eq!(
+            subagent_tab_title(&wait.call).as_ref(),
+            "Audit frontend login"
+        );
         // A chat recorded before the driver fix binds the same way.
         let mut legacy = wait.clone();
         legacy.call = ToolCall::Unknown {
@@ -14449,8 +14572,14 @@ mod tests {
         bind_agent_wait(&spawns, &mut legacy);
         assert_eq!(legacy.subagent_ref.as_deref(), Some("c--sub--spawn"));
         // An unbound wait still reads as a subagent wait, just unlinked.
-        let lone = ToolCall::Unknown { name: "Wait for agent 7".into(), input: None };
-        assert_eq!(tool_chip_content(&lone), ("Waiting on", "agent 7".to_string()));
+        let lone = ToolCall::Unknown {
+            name: "Wait for agent 7".into(),
+            input: None,
+        };
+        assert_eq!(
+            tool_chip_content(&lone),
+            ("Waiting on", "agent 7".to_string())
+        );
         assert!(is_agent_wait(&lone));
     }
 

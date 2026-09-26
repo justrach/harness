@@ -253,11 +253,7 @@ impl RailTickCache {
 
     /// `(tick index, row index)` for each cached tick whose id matches a row —
     /// the FIRST such row, exactly like a per-tick `rows.position(..)`.
-    pub fn pairs<R>(
-        &mut self,
-        rows: &[R],
-        row_id: impl Fn(&R) -> &str,
-    ) -> Rc<Vec<(usize, usize)>> {
+    pub fn pairs<R>(&mut self, rows: &[R], row_id: impl Fn(&R) -> &str) -> Rc<Vec<(usize, usize)>> {
         let rows_key = (rows.len(), rows.as_ptr() as usize);
         let valid = self.rows_key == Some(rows_key)
             && !self.unmapped

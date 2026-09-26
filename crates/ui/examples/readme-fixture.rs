@@ -4,7 +4,9 @@ use harness_ui::*;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 async fn pause(cx: &mut AsyncApp, ms: u64) {
-    cx.background_executor().timer(Duration::from_millis(ms)).await;
+    cx.background_executor()
+        .timer(Duration::from_millis(ms))
+        .await;
 }
 
 fn capture(
@@ -15,7 +17,9 @@ fn capture(
 ) -> anyhow::Result<()> {
     window.update(cx, |_, window, cx| {
         window.draw(cx).clear();
-        window.render_to_image()?.save(directory.join(format!("{name}.png")))?;
+        window
+            .render_to_image()?
+            .save(directory.join(format!("{name}.png")))?;
         Ok(())
     })?
 }
@@ -42,20 +46,19 @@ fn main() -> anyhow::Result<()> {
             None,
         )
     })?;
-    core.workspace
-        .create_chat(
-            "readme-fixture",
-            None,
-            Some(&core.device_id),
-            Some(serde_json::from_value(serde_json::json!({
-                "harness": "graff",
-                "model": "gpt-6-sol",
-                "reasoning": null,
-                "modelOptions": {},
-                "sandbox": "workspace-write"
-            }))?),
-            None,
-        )?;
+    core.workspace.create_chat(
+        "readme-fixture",
+        None,
+        Some(&core.device_id),
+        Some(serde_json::from_value(serde_json::json!({
+            "harness": "graff",
+            "model": "gpt-6-sol",
+            "reasoning": null,
+            "modelOptions": {},
+            "sandbox": "workspace-write"
+        }))?),
+        None,
+    )?;
     core.workspace
         .rename_chat("readme-fixture", "Build a release checklist")?;
     let ipc_port = port();

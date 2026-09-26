@@ -2747,7 +2747,8 @@ impl Pickers {
                     chat_id,
                     outcome,
                     can_discard: outcome != GraffWorktreeOutcome::Done
-                        && (message.contains("--discard") || message.contains("ONLY on this branch")),
+                        && (message.contains("--discard")
+                            || message.contains("ONLY on this branch")),
                     message: graff_status_line(&message, &tree_path).into(),
                 });
                 cx.notify();
@@ -2772,7 +2773,11 @@ impl Pickers {
             .graff_worktree_status
             .as_ref()
             .filter(|status| status.chat_id == chat.id);
-        let button = |id: &'static str, label: &'static str, action: &'static str, danger: bool, cx: &mut Context<Self>| {
+        let button = |id: &'static str,
+                      label: &'static str,
+                      action: &'static str,
+                      danger: bool,
+                      cx: &mut Context<Self>| {
             let chat = chat.clone();
             div()
                 .id(id)
@@ -2789,13 +2794,18 @@ impl Pickers {
                 } else {
                     motion::hover_blend(id, theme.text_muted.opacity(0.7), theme.text.opacity(0.85))
                 })
-                .bg(motion::hover_blend(id, gpui::transparent_black(), theme.element_hover))
+                .bg(motion::hover_blend(
+                    id,
+                    gpui::transparent_black(),
+                    theme.element_hover,
+                ))
                 .on_hover(motion::hover_listener(id))
                 .when(busy, |el| el.opacity(0.45))
                 .when(!busy, |el| {
-                    el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
-                        this.run_graff_worktree_action(&chat, action, cx)
-                    }))
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_graff_worktree_action(&chat, action, cx)
+                        }))
                 })
                 .child(SharedString::from(label))
         };
@@ -2809,14 +2819,41 @@ impl Pickers {
             .pl(px(6.0))
             .border_l_1()
             .border_color(theme.border.opacity(0.6))
-            .child(button("graff-worktree-merge", "Merge back", "merge", false, cx))
-            .child(button("graff-worktree-archive", "Archive", "archive", false, cx))
-            .child(button("graff-worktree-remove", "Remove", "remove", false, cx));
+            .child(button(
+                "graff-worktree-merge",
+                "Merge back",
+                "merge",
+                false,
+                cx,
+            ))
+            .child(button(
+                "graff-worktree-archive",
+                "Archive",
+                "archive",
+                false,
+                cx,
+            ))
+            .child(button(
+                "graff-worktree-remove",
+                "Remove",
+                "remove",
+                false,
+                cx,
+            ));
         if status.is_some_and(|status| status.can_discard) {
-            card = card.child(button("graff-worktree-discard", "Discard anyway", "discard", true, cx));
+            card = card.child(button(
+                "graff-worktree-discard",
+                "Discard anyway",
+                "discard",
+                true,
+                cx,
+            ));
         }
         let verdict: Option<(SharedString, gpui::Hsla)> = if busy {
-            Some((format!("Asking Graff about {}…", tree.name).into(), theme.text_muted.opacity(0.7)))
+            Some((
+                format!("Asking Graff about {}…", tree.name).into(),
+                theme.text_muted.opacity(0.7),
+            ))
         } else {
             status.map(|status| {
                 let color = match status.outcome {
@@ -4534,7 +4571,11 @@ impl Pickers {
 /// Graff's verdict as one footer line: its first line, with the tree's
 /// absolute path shortened to the tree name.
 fn graff_status_line(message: &str, tree_path: &str) -> String {
-    let first = message.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Graff didn't say");
+    let first = message
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Graff didn't say");
     let name = tree_path.rsplit('/').next().unwrap_or(tree_path);
     let first = if tree_path.is_empty() {
         first.to_owned()

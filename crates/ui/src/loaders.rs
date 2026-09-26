@@ -13,13 +13,13 @@ use gpui::{
     PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div, point, px,
 };
 
-use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, HARNESS_PULSE};
+use crate::motion::{self, GRADIENT_SPIN, HARNESS_PULSE, PULSE_STAGGER, SPLASH_OUT};
 use crate::theme::{GlyphPalette, Theme};
 
 // Shared with the terminal viewport (`harness_proto::motion`) so both animate the
 // same loaders from the same numbers.
 pub use harness_proto::motion::{
-    MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, HARNESS_CELLS, mark_cell_stagger,
+    HARNESS_CELLS, MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, mark_cell_stagger,
 };
 
 /// The animated harness mark (harness-loader.tsx `HarnessLoader`): the full logo
