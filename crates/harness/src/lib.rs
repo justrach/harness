@@ -51,6 +51,15 @@ pub struct SteerMessage {
     pub attachments: Vec<String>,
 }
 
+/// An MCP server the host adds to a run, over HTTP (Harness's browse relay).
+/// Agents that advertise `mcpCapabilities.http` get it at session start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// The run sends questions and awaits answers (blocks the agent, mirrors harness).
@@ -63,6 +72,8 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Extra MCP servers for this run (empty for most).
+    pub mcp_servers: Vec<McpServer>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

@@ -35,8 +35,15 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
+# browse Connected apps (browse_link): P-256 ECDSA request signing.
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The browse pairing key lives in the login Keychain, not a file.
+security-framework = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }

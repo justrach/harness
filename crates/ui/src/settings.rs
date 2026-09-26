@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use harness_proto::{AuthState, WorkspaceScope};
 
 pub mod accounts;
+pub mod browse_link;
 pub mod appearance;
 pub mod archived;
 pub mod composer;

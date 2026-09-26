@@ -220,6 +220,7 @@ pub struct AccountsPage {
     codegraff_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
+    browse: Entity<crate::settings::browse_link::BrowseLinkCard>,
     _observe: Subscription,
     _code_events: Subscription,
 }
@@ -228,6 +229,7 @@ impl AccountsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
+        let browse = cx.new(|cx| crate::settings::browse_link::BrowseLinkCard::new(state.clone(), cx));
         let code_events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.submit_code(cx);
@@ -248,6 +250,7 @@ impl AccountsPage {
             codegraff_task: None,
             action_task: None,
             poll_task: None,
+            browse,
             _observe: observe,
             _code_events: code_events,
         };
@@ -1704,6 +1707,7 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
+                            .child(self.browse.clone())
                             .child(self.render_codegraff_section(&theme, now, cx))
                             .children(sections)
                             // Footer note (harness: `mt-6 text-[12px] leading-relaxed
