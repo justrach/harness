@@ -830,14 +830,14 @@ mod tests {
     }
 
     #[test]
-    fn default_themes_recommend_frost() {
+    fn default_themes_start_opaque() {
         let registry = ThemeRegistry::builtin();
         let defaults = ThemeSelection::default();
         for id in [&defaults.light, &defaults.dark] {
             assert_eq!(
                 registry.variant(id).unwrap().recommended_surface_treatment,
-                SurfaceTreatment::Frosted,
-                "{id} must keep the window frosted by default"
+                SurfaceTreatment::Opaque,
+                "{id} must keep the window opaque by default"
             );
         }
     }
