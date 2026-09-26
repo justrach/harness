@@ -169,10 +169,13 @@ pub fn user_message_rail_text(content: &str) -> String {
     if !parsed.text.trim().is_empty() {
         return parsed.text;
     }
-    match parsed.attachments.len() {
-        0 => content.to_string(),
-        1 => "Attached image".to_string(),
-        n => format!("{n} attached images"),
+    let images = parsed.attachments.iter().all(|att| is_image_path(&att.path));
+    match (parsed.attachments.len(), images) {
+        (0, _) => content.to_string(),
+        (1, true) => "Attached image".to_string(),
+        (1, false) => "Attached file".to_string(),
+        (n, true) => format!("{n} attached images"),
+        (n, false) => format!("{n} attached files"),
     }
 }
 
@@ -180,22 +183,57 @@ pub fn user_message_rail_text(content: &str) -> String {
 // Staging (use-attachments.ts intake)
 // ---------------------------------------------------------------------------
 
-/// An image staged in the composer, before upload. The raw bytes live inside
-/// the [`Image`] (gpui decodes them at paint; the same Arc feeds thumbnails,
-/// the lightbox, the upload, and the post-send cache seed).
+/// A file staged in the composer, before upload. For an image the raw bytes
+/// live inside the [`Image`] (gpui decodes them at paint; the same Arc feeds
+/// thumbnails, the lightbox, the upload, and the post-send cache seed). Any
+/// other file (a PDF, a log, source) carries its bytes in `file`: it uploads
+/// the same way, shows as a file chip, and reaches the agent as a path.
 #[derive(Clone)]
 pub struct StagedAttachment {
     pub id: String,
-    /// File name with a type-matching extension (use-attachments.ts
+    /// File name; images get a type-matching extension (use-attachments.ts
     /// `ensureExtension` — agents sniff images by extension).
     pub name: String,
-    pub image: Arc<Image>,
+    pub image: Option<Arc<Image>>,
+    pub file: Option<Arc<[u8]>>,
 }
 
 impl StagedAttachment {
-    pub fn bytes(&self) -> &[u8] {
-        &self.image.bytes
+    pub fn from_image(name: String, image: Arc<Image>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            image: Some(image),
+            file: None,
+        }
     }
+
+    pub fn bytes(&self) -> &[u8] {
+        match (&self.image, &self.file) {
+            (Some(image), _) => &image.bytes,
+            (None, Some(file)) => file,
+            (None, None) => &[],
+        }
+    }
+}
+
+/// A committed upload is stored as `{id8}-{name}`; show the name the user
+/// attached, not the engine's collision prefix.
+pub fn display_file_name(name: &str) -> &str {
+    match name.split_once('-') {
+        Some((id8, rest))
+            if id8.len() == 8 && !rest.is_empty() && id8.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            rest
+        }
+        _ => name,
+    }
+}
+
+/// Whether an attachment path names an image the pipeline can preview (the
+/// transcript shows a thumbnail); anything else shows as a file chip.
+pub fn is_image_path(path: &str) -> bool {
+    format_by_extension(Path::new(path)).is_some()
 }
 
 /// Image formats the whole pipeline supports: intersection of gpui's decoders
@@ -246,31 +284,51 @@ pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
         return Err(format!("{display_name} is too large (24 MB max)."));
     }
     let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
+    Ok(StagedAttachment::from_image(
+        ensure_extension(&display_name, format),
+        Arc::new(Image::from_bytes(format, bytes)),
+    ))
+}
+
+/// Stage any file from disk for the composer: images as [`stage_file`] does,
+/// everything else as a file attachment under its own name.
+pub fn stage_any_file(path: &Path) -> Result<StagedAttachment, String> {
+    if format_by_extension(path).is_some() {
+        return stage_file(path);
+    }
+    let display_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let meta = std::fs::metadata(path).map_err(|_| format!("{display_name} could not be read."))?;
+    if meta.is_dir() {
+        return Err(format!("{display_name} is a folder; attach files instead."));
+    }
+    if meta.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!("{display_name} is too large (24 MB max)."));
+    }
+    let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
     Ok(StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension(&display_name, format),
-        image: Arc::new(Image::from_bytes(format, bytes)),
+        name: display_name,
+        image: None,
+        file: Some(bytes.into()),
     })
 }
 
 /// Stage an image pasted from the clipboard.
 pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
     let format = image.format;
-    StagedAttachment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension("image", format),
-        image: Arc::new(image),
-    }
+    StagedAttachment::from_image(ensure_extension("image", format), Arc::new(image))
 }
 
 /// Stage native macOS capture bytes without a temporary file. The capture
 /// service already encoded PNG and enforces the shared size limit.
 pub fn stage_png_bytes(name: String, bytes: Vec<u8>) -> StagedAttachment {
-    StagedAttachment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: ensure_extension(&name, ImageFormat::Png),
-        image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
-    }
+    StagedAttachment::from_image(
+        ensure_extension(&name, ImageFormat::Png),
+        Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1091,34 @@ pub(crate) fn lightbox_with_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_file_stages_but_settings_images_stay_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("build.log");
+        std::fs::write(&log, "error: boom").unwrap();
+        let staged = stage_any_file(&log).unwrap();
+        assert_eq!(staged.name, "build.log");
+        assert!(staged.image.is_none());
+        assert_eq!(staged.bytes(), b"error: boom");
+        // `stage_file` (Settings' image pickers) still refuses non-images.
+        assert!(stage_file(&log).is_err());
+        assert!(stage_any_file(dir.path()).is_err(), "folders are refused");
+    }
+
+    #[test]
+    fn file_names_and_rail_text_describe_files() {
+        assert_eq!(display_file_name("0a1b2c3d-report.pdf"), "report.pdf");
+        assert_eq!(display_file_name("my-report.pdf"), "my-report.pdf");
+        assert!(is_image_path("/u/0a1b2c3d-shot.PNG"));
+        assert!(!is_image_path("/u/0a1b2c3d-report.pdf"));
+        let one = with_attachments("", &["/u/0a1b2c3d-report.pdf".into()]);
+        assert_eq!(user_message_rail_text(&one), "Attached file");
+        let mixed = with_attachments("", &["/u/a.png".into(), "/u/b.pdf".into()]);
+        assert_eq!(user_message_rail_text(&mixed), "2 attached files");
+        let images = with_attachments("", &["/u/a.png".into(), "/u/b.jpg".into()]);
+        assert_eq!(user_message_rail_text(&images), "2 attached images");
+    }
 
     #[test]
     fn appshot_cards_follow_their_exact_image_reference() {

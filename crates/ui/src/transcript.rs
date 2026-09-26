@@ -6153,6 +6153,63 @@ impl Transcript {
         }
     }
 
+    /// A sent non-image attachment: the thumbnail's footprint (so row heights
+    /// don't shift) with a document glyph, the file name, and upload status.
+    fn render_file_attachment(
+        row_id: &SharedString,
+        aix: usize,
+        name: &str,
+        sending: bool,
+        uploading: Option<u8>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        let name = crate::attachments::display_file_name(name);
+        let status = sending.then(|| {
+            uploading
+                .map(|pct| format!("Uploading {pct}%"))
+                .unwrap_or_else(|| "Uploading…".into())
+        });
+        div()
+            .id(SharedString::from(format!("{row_id}#file{aix}")))
+            .flex_none()
+            .w(px(ATT_THUMB_W))
+            .h(px(ATT_THUMB_H))
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .border_1()
+            .border_color(crate::theme::hairline(0.11))
+            .bg(crate::theme::ink(0.035))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .aria_label(format!("Attached file {name}"))
+            .child(
+                crate::icons::icon(crate::icons::DOCUMENT)
+                    .size(px(20.0))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(name.to_string())),
+            )
+            .children(status.map(|status| {
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(status))
+            }))
+            .into_any_element()
+    }
+
     /// The right-aligned thumbnail strip above a user bubble.
     fn render_user_attachments(
         &mut self,
@@ -6178,7 +6235,6 @@ impl Transcript {
             .pt(px(4.0))
             .pb(px(6.0));
         for (aix, att) in atts.iter().enumerate() {
-            let state = self.attachment_state(&device_ids, &att.path, None, cx);
             // The in-flight send's progress belongs ON the thumbnail
             // (2026-08-18 user request). Two ref shapes mean "still
             // crossing": the queued flow's `pending://` (bytes ship
@@ -6206,6 +6262,15 @@ impl Transcript {
                         .then(|| self.state.read(cx).upload_progress_percent())
                         .flatten()
                 });
+            // A non-image file (a PDF, a log) has no thumbnail to load, and
+            // the engine's read-back only serves images: show its name.
+            if att.appshot.is_none() && !crate::attachments::is_image_path(&att.path) {
+                strip = strip.child(Self::render_file_attachment(
+                    row_id, aix, &att.name, sending, uploading, cx,
+                ));
+                continue;
+            }
+            let state = self.attachment_state(&device_ids, &att.path, None, cx);
             if let Some(appshot) = &att.appshot {
                 let has_image = matches!(&state, AttachmentSnapshot::Loaded(_));
                 let theme = Theme::of(cx).clone();

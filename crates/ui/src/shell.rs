@@ -2309,12 +2309,9 @@ impl Shell {
                         .collect()
                 };
                 for device_id in &device_ids {
-                    crate::attachments::seed_attachment(
-                        device_id,
-                        &pending_path,
-                        &att.name,
-                        att.image.clone(),
-                    );
+                    if let Some(image) = att.image.clone() {
+                        crate::attachments::seed_attachment(device_id, &pending_path, &att.name, image);
+                    }
                 }
                 let text = crate::attachments::with_attachments(
                     "Here is the screenshot of the bug.",
