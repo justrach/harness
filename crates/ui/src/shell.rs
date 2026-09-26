@@ -13949,6 +13949,35 @@ impl Shell {
             self.close_settings(cx);
         }
     }
+    /// Starter demo (`examples/starter-demo-fixture.rs`): the composer draft.
+    pub fn fixture_composer_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| composer.fixture_set_text(text, cx));
+    }
+    /// Starter demo: open or close the composer's agent/model menu.
+    pub fn fixture_model_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| {
+            if open {
+                pickers.open_model_menu(window, cx);
+            } else {
+                pickers.fixture_close_menu(cx);
+            }
+        });
+    }
+    /// Starter demo: pick an agent (and a model) in the composer's menu.
+    pub fn fixture_pick_agent(
+        &mut self,
+        harness: harness_proto::HarnessId,
+        model: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| pickers.fixture_pick_agent(harness, model, cx));
+    }
+    /// Starter demo: a starter's prompt, so the demo can type after it.
+    pub fn fixture_starter_prompt(id: &str) -> Option<&'static str> {
+        crate::starters::STARTERS.iter().find(|s| s.id == id).map(|s| s.prompt)
+    }
     /// Onboarding QA (`examples/onboarding-fixture.rs`): click a starter.
     pub fn fixture_onboarding_starter(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(starter) = crate::starters::STARTERS.iter().find(|s| s.id == id) {

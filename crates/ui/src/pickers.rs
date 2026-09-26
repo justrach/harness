@@ -7089,3 +7089,20 @@ impl Pickers {
         cx.notify();
     }
 }
+
+/// Starter demo (`examples/starter-demo-fixture.rs`): drive the agent/model
+/// menu the way a click would.
+#[cfg(feature = "appshots-fixture")]
+impl Pickers {
+    pub fn fixture_pick_agent(&mut self, harness: HarnessId, model: Option<&str>, cx: &mut Context<Self>) {
+        self.pick_harness(harness, cx);
+        if let Some(model) = model {
+            self.pick_model(model.to_owned(), cx);
+        }
+    }
+
+    pub fn fixture_close_menu(&mut self, cx: &mut Context<Self>) {
+        self.animate_close(cx);
+        cx.notify();
+    }
+}

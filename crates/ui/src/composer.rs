@@ -13951,6 +13951,14 @@ mod appshot_rebase_tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl Composer {
+    /// Starter demo (`examples/starter-demo-fixture.rs`): replace the draft,
+    /// as if the person typed it.
+    pub fn fixture_set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.on_input_edited(cx);
+        cx.notify();
+    }
+
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();
