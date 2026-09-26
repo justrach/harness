@@ -1,7 +1,6 @@
 //! Chat tabs: each tab keeps its own split layout, selection and project,
 //! like a terminal's tabs holding their splits. ⌘T opens a fresh tab; ⌘D
-//! also opens one when another side-by-side pane would be too narrow to read
-//! (`MIN_PANE_WIDTH`), so a wall of slivers never builds up.
+//! always splits the current one.
 //!
 //! The ACTIVE tab lives in the ordinary shell fields (`chat_split`, the app
 //! selection, the sidebar filter); parked tabs hold copies. Switching parks
@@ -9,9 +8,6 @@
 
 use super::*;
 use crate::pickers::CanvasDraft;
-
-/// Narrowest a side-by-side chat pane may get before ⌘D opens a tab instead.
-pub(super) const MIN_PANE_WIDTH: f32 = 380.0;
 
 /// A tab's layout while it isn't the active one.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -21,11 +17,6 @@ pub(super) struct ChatTab {
     pub project: Option<String>,
     /// The focused pane's composer picks (read when it's a canvas).
     pub draft: Option<CanvasDraft>,
-}
-
-/// Whether one more side-by-side pane still leaves every pane readable.
-pub(super) fn fits_another_pane(column_width: f32, panes: usize) -> bool {
-    column_width <= 0.0 || column_width / (panes + 1) as f32 >= MIN_PANE_WIDTH
 }
 
 /// The tab to show after closing `closed` of `len`: its left neighbor, or the
@@ -306,17 +297,6 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splits_stop_before_panes_get_unreadable() {
-        // 1200px column: two panes of 600 fit, a third at 400 fits, a fourth
-        // at 300 would not.
-        assert!(fits_another_pane(1200.0, 1));
-        assert!(fits_another_pane(1200.0, 2));
-        assert!(!fits_another_pane(1200.0, 3));
-        // Unmeasured (first frame) never blocks a split.
-        assert!(fits_another_pane(0.0, 7));
-    }
 
     #[test]
     fn closing_a_tab_lands_on_its_neighbor() {

@@ -353,16 +353,9 @@ impl Shell {
         if !matches!(self.route, Route::Chat) {
             return;
         }
-        // Another side-by-side pane would be too narrow to read: open it in
-        // a new tab instead, leaving this layout as it is.
-        let panes = self.chat_split.as_ref().map_or(1, |s| s.panes.len());
-        if axis == SplitAxis::Horizontal
-            && self.can_split(axis)
-            && !chat_tabs::fits_another_pane(self.chat_column_width, panes)
-        {
-            self.new_chat_tab(open, window, cx);
-            return;
-        }
+        // A split is always a split, however narrow (Ghostty's rule): ⌘T is
+        // the way to a tab. Turning a narrow ⌘D into a tab read as panes
+        // jumping into tabs of their own (user report, 2026-09-26).
         let selected = self.state.read(cx).selected_chat.clone();
         // Dragging the chat you are in moves it; the pane it leaves empties.
         let parked = selected.clone().filter(|id| open.as_ref() != Some(id));

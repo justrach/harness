@@ -1617,8 +1617,6 @@ pub struct Shell {
     /// at `chat_tab` is stale; the active tab lives in the fields above.
     chat_tabs: Vec<chat_tabs::ChatTab>,
     chat_tab: usize,
-    /// Width of the conversation column the split divides, last frame.
-    chat_column_width: f32,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
     /// Which pane card the sidebar strip last had under the pointer.
@@ -2048,7 +2046,6 @@ impl Shell {
             chat_split_selected: None,
             chat_tabs: Vec::new(),
             chat_tab: 0,
-            chat_column_width: 0.0,
             peer_chat_views: std::collections::HashMap::new(),
             pane_strip_hovered: 0,
             chat_split_drag: None,
@@ -11205,7 +11202,6 @@ impl Render for Shell {
                     self.sidebar_target(),
                     right_target_width,
                 );
-                self.chat_column_width = split_total_width;
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
                 let main_target_width = split_total_width * self.focused_chat_pane_share();
