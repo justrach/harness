@@ -1,0 +1,37 @@
+name: Attribution
+
+# Public repository: commits and PR descriptions carry no AI-assistant or
+# vendor attribution. See scripts/check-attribution.py.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pull request commits and description
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 scripts/check-attribution.py --range "$BASE..$HEAD"
+          printf '%s' "$BODY" > "$RUNNER_TEMP/pr-body.md"
+          python3 scripts/check-attribution.py --text-file "$RUNNER_TEMP/pr-body.md"
+      - name: Pushed commits
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: python3 scripts/check-attribution.py --range "$BEFORE..$AFTER"

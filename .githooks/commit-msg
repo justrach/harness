@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse commits carrying AI-assistant or vendor attribution (public repo).
+# Enable once per clone: git config core.hooksPath .githooks
+exec python3 "$(git rev-parse --show-toplevel)/scripts/check-attribution.py" --message-file "$1"
