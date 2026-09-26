@@ -7,6 +7,8 @@ mod macos;
 use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(target_os = "macos")]
+pub use macos::clear_browsing_data;
 pub mod model;
 mod view;
 
@@ -487,8 +489,14 @@ impl BrowserSurface {
                     cx.emit(BrowserEvent::NewTab(Some(url)));
                 }
             }
-            native::NativeEvent::Key(key) => {
+            native::NativeEvent::Key { key, app } => {
                 if self.presentation == Presentation::Live {
+                    // An app shortcut (switch chat tab, split, …) moves on from
+                    // the page: take the keyboard back, or the next Space or
+                    // arrow still scrolls it.
+                    if app {
+                        native.release_focus();
+                    }
                     window.focus(&self.focus, cx);
                     window.defer(cx, move |window, cx| {
                         window.dispatch_keystroke(key, cx);

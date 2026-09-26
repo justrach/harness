@@ -328,6 +328,12 @@ fn main() -> anyhow::Result<()> {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
                     }
                     first.read_with(cx, |b,_| b.fixture_eval("document.title = 'Fieldnotes'"));
+                    // The page click took the keyboard. A click back in the app
+                    // must return it, or Space in a chat keeps scrolling the page.
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_focused()), "page click did not give the page the keyboard");
+                    first.read_with(cx, |b,_| b.fixture_click((left-20.) as f64,150.));
+                    pause(cx, 300).await;
+                    anyhow::ensure!(!first.read_with(cx, |b,_| b.fixture_focused()), "clicking outside the browser left the keyboard with the page");
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
