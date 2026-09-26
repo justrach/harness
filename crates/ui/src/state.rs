@@ -629,6 +629,11 @@ pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
 struct PendingSend {
     message_id: String,
     started: DateTime<Utc>,
+    /// The chat's session row `updated_at` when the send fired.
+    session_mark: Option<DateTime<Utc>>,
+    /// The host wrote the message into the chat doc. The overlay still holds
+    /// until the session row catches up (see [`AppState::try_ack_pending_send`]).
+    seen: bool,
 }
 
 /// How long an unadopted send reads as Working/Sending (or Queued when the
@@ -1014,6 +1019,10 @@ impl AppState {
         self.session_presentation = Some(presentation);
         self.session_presence_presentation = presence;
         self.sessions = sessions;
+        let pending: Vec<String> = self.pending_sends.keys().cloned().collect();
+        for chat_id in pending {
+            self.try_ack_pending_send(&chat_id, now);
+        }
         changed
     }
 
@@ -1476,11 +1485,14 @@ impl AppState {
     /// report 2026-08-05).
     pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
         crate::perf_stats::turn_started(chat_id, message_id);
+        let session_mark = self.session_for(chat_id).map(|s| s.updated_at);
         self.pending_sends.insert(
             chat_id.to_string(),
             PendingSend {
                 message_id: message_id.to_string(),
                 started: now,
+                session_mark,
+                seen: false,
             },
         );
     }
@@ -1568,7 +1580,9 @@ impl AppState {
     /// faking progress or silently forgetting the send ever happened.
     pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
         self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
+            // A message the host wrote back was delivered, whatever the
+            // session row says.
+            !p.seen && now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
         })
     }
 
@@ -1596,14 +1610,45 @@ impl AppState {
     }
 
     /// The host executed the queued command iff the sent message's id showed
-    /// up in the transcript (it writes the message before — causally with —
-    /// the Working status; sessions.rs dispatch paths).
+    /// up in the transcript. It writes the Working status right after, but on
+    /// the workspace doc, which reaches us on a different stream than the
+    /// chat doc: acking on the message alone left a window with the send
+    /// cleared and the session row still on the previous turn, so the working
+    /// line vanished right after sending (user report, 2026-09-27).
     fn ack_pending_send_from_transcript(&mut self) {
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
+        let Some(chat_id) = self.selected_chat.clone() else {
+            return;
+        };
+        if let Some(pending) = self.pending_sends.get_mut(&chat_id)
+            && !pending.seen
             && self.transcript.iter().any(|e| e.id == pending.message_id)
         {
-            crate::perf_stats::turn_accepted(chat_id, &pending.message_id);
+            pending.seen = true;
+            crate::perf_stats::turn_accepted(&chat_id, &pending.message_id);
+        }
+        self.try_ack_pending_send(&chat_id, Utc::now());
+    }
+
+    /// Clear a seen send once the session row has caught up: it's live, it
+    /// changed since the send fired, or the reply has already started.
+    fn try_ack_pending_send(&mut self, chat_id: &str, now: DateTime<Utc>) {
+        let Some(pending) = self.pending_sends.get(chat_id).filter(|p| p.seen) else {
+            return;
+        };
+        let session = self.session_for(chat_id);
+        let live = matches!(
+            effective_indicator(session, now),
+            Indicator::Working | Indicator::AwaitingInput
+        );
+        let moved = session.map(|s| s.updated_at) != pending.session_mark;
+        let replied = self.selected_chat.as_deref() == Some(chat_id)
+            && self
+                .transcript
+                .iter()
+                .skip_while(|e| e.id != pending.message_id)
+                .skip(1)
+                .any(|e| e.role == harness_doc::MessageRole::Assistant);
+        if live || moved || replied {
             self.pending_sends.remove(chat_id);
         }
     }
@@ -3971,16 +4016,47 @@ mod tests {
     }
 
     #[test]
-    fn send_pending_acked_when_the_host_writes_the_message_back() {
+    fn send_pending_acked_once_the_message_and_the_session_row_are_back() {
         let now = Utc::now();
         let mut s = AppState::new();
         s.selected_chat = Some("c".into());
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 60, now)], now);
         s.begin_pending_send("c", "m1", now);
         // A frame without the message keeps the overlay.
         s.apply_transcript(vec![user_entry("other")]);
         assert!(s.send_pending("c", now));
-        // The host executed the command: our id comes back in the doc.
+        // The message is back, but the session row is still the previous
+        // turn's: the overlay holds, or the working line vanishes (user
+        // report). It was delivered, so it is never "Not delivered".
         s.apply_transcript(vec![user_entry("other"), user_entry("m1")]);
+        assert!(s.send_pending("c", now));
+        assert_eq!(s.indicator_for("c", now), Indicator::Working);
+        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
+        assert!(!s.send_undelivered("c", later));
+        // The Working row lands on its own stream: acked.
+        s.apply_sessions_at(vec![session("c", SessionStatus::Working, 0, now)], now);
+        assert!(!s.send_pending("c", now));
+        assert_eq!(s.indicator_for("c", now), Indicator::Working);
+    }
+
+    #[test]
+    fn send_pending_acks_when_the_row_was_first_or_the_turn_already_ended() {
+        let now = Utc::now();
+        // The Working row arrived before the message: ack on the message.
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        s.begin_pending_send("c", "m1", now);
+        s.apply_sessions_at(vec![session("c", SessionStatus::Working, 0, now)], now);
+        assert!(s.send_pending("c", now), "not acked before the message is back");
+        s.apply_transcript(vec![user_entry("m1")]);
+        assert!(!s.send_pending("c", now));
+        // A turn so fast the row is already Idle again: it still moved.
+        let mut s = AppState::new();
+        s.selected_chat = Some("c".into());
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 60, now)], now);
+        s.begin_pending_send("c", "m1", now);
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 0, now)], now);
+        s.apply_transcript(vec![user_entry("m1")]);
         assert!(!s.send_pending("c", now));
     }
 
