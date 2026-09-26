@@ -417,7 +417,7 @@ actor ChatRoomClient {
 
     private func openSocket(url: URL, gen: Int) async {
         guard gen == generation, !closed else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
+        let task = URLSession.shared.webSocketTask(with: URLRequest.bearerWebSocket(url))
         socket = task
         task.resume()
         lastInbound = .now()

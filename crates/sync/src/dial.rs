@@ -25,6 +25,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, UrlError};
+use tokio_tungstenite::tungstenite::handshake::client::Request as ClientRequest;
+use tokio_tungstenite::tungstenite::http;
 
 /// Delay before starting the next address attempt while one is still pending
 /// (RFC 8305 §5's "Connection Attempt Delay"; 250ms is its recommended value).
@@ -49,8 +51,72 @@ pub async fn connect_ws(url: &str) -> Result<WsStream, WsError> {
         })?
 }
 
+/// Move a `token` query parameter into an `Authorization: Bearer` header.
+/// Callers mint URLs as `…/ws?token=…`, but a URL reaches request logs and a
+/// header does not. The edge reads the header first and still accepts the
+/// query form, so this is safe against every deployed edge. An existing
+/// `Authorization` header wins; the query token is then just dropped.
+fn bearer_from_query(request: &mut ClientRequest) -> Result<(), WsError> {
+    let uri = request.uri().clone();
+    let Some(query) = uri.query() else {
+        return Ok(());
+    };
+    let mut token = None;
+    let mut kept = Vec::new();
+    for pair in query.split('&') {
+        match pair.strip_prefix("token=") {
+            Some(value) if token.is_none() => token = Some(percent_decode(value)),
+            Some(_) => {}
+            None if pair.is_empty() => {}
+            None => kept.push(pair),
+        }
+    }
+    let Some(token) = token else {
+        return Ok(());
+    };
+    let path_and_query = if kept.is_empty() {
+        uri.path().to_owned()
+    } else {
+        format!("{}?{}", uri.path(), kept.join("&"))
+    };
+    let mut parts = uri.into_parts();
+    parts.path_and_query = Some(path_and_query.parse().map_err(http::Error::from)?);
+    *request.uri_mut() = http::Uri::from_parts(parts).map_err(http::Error::from)?;
+    if !token.is_empty() && !request.headers().contains_key(http::header::AUTHORIZATION) {
+        let value = http::HeaderValue::from_str(&format!("Bearer {token}")).map_err(http::Error::from)?;
+        request.headers_mut().insert(http::header::AUTHORIZATION, value);
+    }
+    Ok(())
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                        continue;
+                    }
+                    _ => out.push(b'%'),
+                }
+            }
+            b'+' => out.push(b' '),
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 async fn connect_ws_inner(url: &str) -> Result<WsStream, WsError> {
-    let request = url.into_client_request()?;
+    let mut request = url.into_client_request()?;
+    bearer_from_query(&mut request)?;
     let uri = request.uri();
     let host = uri
         .host()
@@ -149,6 +215,56 @@ mod tests {
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    fn request(url: &str) -> ClientRequest {
+        let mut req = url.into_client_request().unwrap();
+        bearer_from_query(&mut req).unwrap();
+        req
+    }
+
+    fn auth(req: &ClientRequest) -> Option<&str> {
+        req.headers()
+            .get(http::header::AUTHORIZATION)
+            .map(|v| v.to_str().unwrap())
+    }
+
+    #[test]
+    fn token_moves_from_query_to_bearer_header() {
+        let req = request("wss://edge.example/device/d1/ws?role=host&token=abc.def-ghi&connId=c1");
+        assert_eq!(req.uri().to_string(), "wss://edge.example/device/d1/ws?role=host&connId=c1");
+        assert_eq!(auth(&req), Some("Bearer abc.def-ghi"));
+    }
+
+    #[test]
+    fn sole_token_leaves_no_query() {
+        let req = request("wss://edge.example/chat2/x/ws?token=t0k");
+        assert_eq!(req.uri().to_string(), "wss://edge.example/chat2/x/ws");
+        assert_eq!(auth(&req), Some("Bearer t0k"));
+    }
+
+    #[test]
+    fn percent_encoded_token_is_decoded_like_the_edge_reads_it() {
+        let req = request("ws://localhost:1/registry/o/ws?token=user%40org&device=d");
+        assert_eq!(auth(&req), Some("Bearer user@org"));
+        assert_eq!(req.uri().query(), Some("device=d"));
+    }
+
+    #[test]
+    fn urls_without_a_token_are_untouched() {
+        let req = request("wss://edge.example/registry/o/ws?device=d");
+        assert_eq!(req.uri().to_string(), "wss://edge.example/registry/o/ws?device=d");
+        assert_eq!(auth(&req), None);
+    }
+
+    #[test]
+    fn an_existing_authorization_header_wins() {
+        let mut req = "wss://edge.example/x/ws?token=query".into_client_request().unwrap();
+        req.headers_mut()
+            .insert(http::header::AUTHORIZATION, "Bearer header".parse().unwrap());
+        bearer_from_query(&mut req).unwrap();
+        assert_eq!(auth(&req), Some("Bearer header"));
+        assert_eq!(req.uri().query(), None);
     }
 
     #[tokio::test]

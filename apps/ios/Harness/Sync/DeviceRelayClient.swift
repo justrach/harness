@@ -237,7 +237,7 @@ actor DeviceRelayClient {
             URLQueryItem(name: "connId", value: UUID().uuidString.lowercased()),
             URLQueryItem(name: "token", value: token),
         ]
-        let task = URLSession.shared.webSocketTask(with: components.url!)
+        let task = URLSession.shared.webSocketTask(with: URLRequest.bearerWebSocket(components.url!))
         socket = task
         task.resume()
         connected = true
