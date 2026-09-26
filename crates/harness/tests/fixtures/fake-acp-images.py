@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Offline ACP fixture: advertises promptCapabilities.image when
-FAKE_ACP_IMAGES=1 and records every session/prompt's blocks to prompt.json
-in its working directory."""
+FAKE_ACP_IMAGES=1 and records the first session/prompt's blocks to
+prompt.json in its working directory. With FAKE_ACP_TURNS=2 the first turn
+lingers (so a follow-up can queue) and the second prompt's blocks go to
+prompt-2.json. A fixture.json in the working directory overrides both
+(tests running in parallel share one environment)."""
 
 import json
 import os
 import sys
+import time
 
 
 def reply(request, result=None):
@@ -13,6 +17,13 @@ def reply(request, result=None):
 
 
 images = os.environ.get("FAKE_ACP_IMAGES") == "1"
+turns = int(os.environ.get("FAKE_ACP_TURNS", "1"))
+if os.path.exists("fixture.json"):
+    with open("fixture.json") as f:
+        config = json.load(f)
+    images = config.get("images", images)
+    turns = config.get("turns", turns)
+seen = 0
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -21,9 +32,13 @@ for line in sys.stdin:
     elif method == "session/new":
         reply(request, {"sessionId": "s"})
     elif method == "session/prompt":
-        with open("prompt.json", "w") as f:
+        seen += 1
+        with open("prompt.json" if seen == 1 else f"prompt-{seen}.json", "w") as f:
             json.dump(request["params"]["prompt"], f)
+        if seen < turns:
+            time.sleep(1)
         reply(request, {"stopReason": "end_turn"})
-        break
+        if seen >= turns:
+            break
     else:
         reply(request)

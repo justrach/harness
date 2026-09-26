@@ -375,6 +375,7 @@ async fn ultrathink_preserves_selected_commands_on_initial_and_steered_sends() {
                 .send(SteerMessage {
                     prompt,
                     message_id: None,
+                    attachments: Vec::new(),
                 })
                 .await
                 .unwrap();
@@ -398,6 +399,7 @@ async fn steering_lines_are_written_to_stdin_mid_run() {
         .send(SteerMessage {
             prompt: "redirect please".into(),
             message_id: None,
+            attachments: Vec::new(),
         })
         .await
         .expect("steer queued");

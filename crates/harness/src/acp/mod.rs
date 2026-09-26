@@ -36,6 +36,7 @@ pub mod exo_bridge;
 mod graff_models;
 pub mod graff_worktree;
 mod normalize;
+mod prompt_images;
 mod subagent;
 mod subagent_devin;
 mod subagent_graff;
@@ -2863,28 +2864,21 @@ fn stop_outcome(
 /// One turn: `session/prompt` whose response (the `stopReason`) ends it.
 /// `prompt_id` (agents with the prompt-complete extension) rides `_meta` so
 /// the `_x.ai/session/prompt_complete` notification can be matched exactly —
-/// grok echoes it back (verified live, 1.0.4).
+/// grok echoes it back (verified live, 1.0.4). `images` is the agent's
+/// `promptCapabilities.image`: attachments then ride as `image` blocks on
+/// every turn, not just the first — `extra` plus the text's path refs, read
+/// only when `allowed` (engine-resolved uploads) names them.
 fn prompt_turn(
     client: RpcClient,
     session_id: String,
     text: String,
-    prompt_id: Option<String>,
-) -> BoxFuture<'static, Result<Value, HarnessError>> {
-    prompt_turn_with_images(client, session_id, text, Vec::new(), prompt_id)
-}
-
-/// [`prompt_turn`] plus ACP `image` content blocks after the text (the
-/// run's first prompt, for agents advertising `promptCapabilities.image`).
-fn prompt_turn_with_images(
-    client: RpcClient,
-    session_id: String,
-    text: String,
-    images: Vec<Value>,
+    extra: Vec<String>,
+    allowed: Vec<String>,
+    images: bool,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
-        let mut prompt = vec![json!({ "type": "text", "text": text })];
-        prompt.extend(images);
+        let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
             "prompt": prompt,
@@ -2901,32 +2895,6 @@ fn accepts_images(init: &Value) -> bool {
     init.pointer("/agentCapabilities/promptCapabilities/image")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-}
-
-/// The run's staged image attachments as ACP `image` blocks, best-effort:
-/// an unreadable, oversized or non-image file is skipped — its path ref
-/// still rides the prompt text — never fatal to the run.
-async fn acp_image_blocks(paths: &[String]) -> Vec<Value> {
-    use base64::Engine as _;
-    let mut blocks = Vec::new();
-    for path in paths {
-        let Ok(bytes) = tokio::fs::read(path).await else {
-            tracing::warn!(target: "harness_adapters::acp", %path, "attachment unreadable; path ref only");
-            continue;
-        };
-        if bytes.len() as u64 > crate::claude::MAX_INLINE_IMAGE_BYTES {
-            continue;
-        }
-        let Some(mime) = crate::claude::image_media_type(Path::new(path), &bytes) else {
-            continue;
-        };
-        blocks.push(json!({
-            "type": "image",
-            "mimeType": mime,
-            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-        }));
-    }
-    blocks
 }
 
 /// Answer a server→client request. Permission requests are auto-accepted with
@@ -3775,19 +3743,17 @@ async fn run_session(session: Session) {
     };
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
-    // Pasted/dropped images ride the first prompt as ACP image blocks when
-    // the agent takes them; the text keeps its path refs either way.
-    let images = if images_supported && !request.attachments.is_empty() {
-        acp_image_blocks(&request.attachments).await
-    } else {
-        Vec::new()
-    };
+    // Engine-resolved uploads this run may inline: the request's, plus each
+    // steer's as it arrives. Paths only written in prompt text are never read.
+    let mut allowed_images: Vec<String> = request.attachments.clone();
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
-        prompt_turn_with_images(
+        prompt_turn(
             client.clone(),
             session_id.clone(),
             prompt_transform(request.reasoning, &request.prompt),
-            images,
+            request.attachments.clone(),
+            allowed_images.clone(),
+            images_supported,
             current_prompt_id.clone(),
         )
     });
@@ -4030,6 +3996,9 @@ async fn run_session(session: Session) {
                         client.clone(),
                         session_id.clone(),
                         text,
+                        Vec::new(),
+                        allowed_images.clone(),
+                        images_supported,
                         current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
@@ -4317,6 +4286,9 @@ async fn run_session(session: Session) {
                         client.clone(),
                         session_id.clone(),
                         text,
+                        Vec::new(),
+                        allowed_images.clone(),
+                        images_supported,
                         current_prompt_id.clone(),
                     ));
                 }
@@ -4366,6 +4338,9 @@ async fn run_session(session: Session) {
                         client.clone(),
                         session_id.clone(),
                         text,
+                        Vec::new(),
+                        allowed_images.clone(),
+                        images_supported,
                         current_prompt_id.clone(),
                     ));
                 } else if turn.is_none() && !steering_open {
@@ -4439,6 +4414,9 @@ async fn run_session(session: Session) {
                         client.clone(),
                         session_id.clone(),
                         text,
+                        Vec::new(),
+                        allowed_images.clone(),
+                        images_supported,
                         current_prompt_id.clone(),
                     ));
                 } else if !steering_open {
@@ -4450,6 +4428,7 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    allowed_images.extend(msg.attachments.iter().cloned());
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
@@ -4502,6 +4481,9 @@ async fn run_session(session: Session) {
                         client.clone(),
                         session_id.clone(),
                         text,
+                        Vec::new(),
+                        allowed_images.clone(),
+                        images_supported,
                         current_prompt_id.clone(),
                     ));
                     } else if steer_ext {

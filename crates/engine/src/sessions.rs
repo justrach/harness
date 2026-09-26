@@ -409,6 +409,9 @@ impl SessionsEngine {
                         harness_proto::invocation::harness_prompt(&request.prompt, harness_id)
                     },
                     message_id: Some(user_id.clone()),
+                    // The run's resolved uploads ride along so the adapter
+                    // can inline them on this follow-up turn.
+                    attachments: request.attachments.clone(),
                 };
                 if steer_tx.try_send(message).is_ok() {
                     pending.push_back(RoutedSteer {
@@ -567,6 +570,19 @@ impl SessionsEngine {
         prompt: &str,
         message_id: Option<String>,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_with_attachments(chat_id, prompt, message_id, Vec::new())
+            .await
+    }
+
+    /// [`Self::steer`] carrying the prompt's image attachments, already
+    /// resolved to this device's uploads, so the harness can inline them.
+    pub async fn steer_with_attachments(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        attachments: Vec<String>,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -591,6 +607,7 @@ impl SessionsEngine {
                 harness_proto::invocation::harness_prompt(prompt, harness_id)
             },
             message_id: Some(user_id.clone()),
+            attachments,
         };
         {
             // Serialize mailbox acceptance with confirmation and Done-time

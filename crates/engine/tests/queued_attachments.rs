@@ -14,11 +14,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
+use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::{
     MessageRole, MessageStatus, SessionCommandPayload, SessionCommandStatus, SessionMessageEntry,
 };
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode,
@@ -235,5 +235,105 @@ async fn run_defers_until_attachment_bytes_land_then_executes_rewritten() {
         "persisted text names the committed file: {user_text}"
     );
 
+    core.shutdown().await;
+}
+
+/// Records the attachments each run receives.
+struct RecordHarness(Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+#[async_trait]
+impl Harness for RecordHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Record"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[ReasoningLevel::Medium]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.0.lock().unwrap().push(request.attachments.clone());
+        AckHarness.run(request, controls).await
+    }
+}
+
+/// A synced Run can name any absolute path in `attachments`; only files
+/// inside this device's uploads reach the harness (which reads and inlines
+/// them). The outside path stays a text-only ref in the prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_attachments_outside_uploads_never_reach_the_harness() {
+    let tmp = tempfile::tempdir().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(RecordHarness(seen.clone())));
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    let client = harness_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            harness_rpc::methods::MUTATE,
+            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+        )
+        .await
+        .expect("createChat");
+    core.workspace
+        .rename_chat(CHAT, "Pre-titled")
+        .expect("rename chat");
+
+    std::fs::create_dir_all(core.uploads.dir()).unwrap();
+    let inside = core.uploads.dir().join("abcd1234-shot.png");
+    std::fs::write(&inside, b"\x89PNG\r\n\x1a\n").unwrap();
+    let outside = tmp.path().join("Pictures-private.png");
+    std::fs::write(&outside, b"\x89PNG\r\n\x1a\n").unwrap();
+    let (inside, outside) = (inside.to_str().unwrap(), outside.to_str().unwrap());
+
+    let payload = SessionCommandPayload::Run {
+        request: RunRequest {
+            prompt: format!(
+                "look\n\nAttached images (local files — open them to view):\n- {outside}\n- {inside}"
+            ),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "~".into(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: true,
+            attachments: vec![outside.to_string(), inside.to_string()],
+            worktree: None,
+            resume: None,
+        },
+        message_id: "msg-jail-1".into(),
+    };
+    core.doc_host
+        .queue_command(CHAT, payload)
+        .expect("queue run command");
+    wait_for(
+        || !seen.lock().unwrap().is_empty(),
+        "run to reach the harness",
+    )
+    .await;
+
+    let got = seen.lock().unwrap()[0].clone();
+    assert_eq!(got, [inside.to_string()], "only the upload survives");
     core.shutdown().await;
 }

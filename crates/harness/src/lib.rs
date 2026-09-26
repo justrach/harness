@@ -44,6 +44,11 @@ pub enum HarnessError {
 pub struct SteerMessage {
     pub prompt: String,
     pub message_id: Option<String>,
+    /// Image attachments the engine already resolved to this device's
+    /// uploads (the same set `RunRequest::attachments` carries for a fresh
+    /// run). Adapters may inline these; paths merely written in `prompt` are
+    /// never read.
+    pub attachments: Vec<String>,
 }
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
