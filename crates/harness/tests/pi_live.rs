@@ -26,6 +26,7 @@ async fn real_pi_mock_lifecycle() {
                 let _ = tx.send(Vec::new());
                 rx
             }),
+            mcp_servers: Vec::new(),
         };
         let request = RunRequest {
             prompt: match scenario {

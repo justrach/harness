@@ -2897,6 +2897,38 @@ fn prompt_turn(
     })
 }
 
+/// The host's MCP servers in ACP's `session/new` shape, for an agent that
+/// advertised `agentCapabilities.mcpCapabilities.http`; none otherwise.
+fn session_mcp_servers(init: &Value, servers: &[crate::McpServer]) -> Value {
+    let http = init
+        .pointer("/agentCapabilities/mcpCapabilities/http")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !http {
+        if !servers.is_empty() {
+            tracing::debug!(target: "harness_adapters::acp", "agent takes no HTTP MCP servers; skipping {}", servers.len());
+        }
+        return json!([]);
+    }
+    Value::Array(
+        servers
+            .iter()
+            .map(|server| {
+                json!({
+                    "type": "http",
+                    "name": server.name,
+                    "url": server.url,
+                    "headers": server
+                        .headers
+                        .iter()
+                        .map(|(name, value)| json!({ "name": name, "value": value }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Whether the agent takes ACP `image` prompt blocks.
 fn accepts_images(init: &Value) -> bool {
     init.pointer("/agentCapabilities/promptCapabilities/image")
@@ -3411,6 +3443,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        mcp_servers,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
 
@@ -3442,7 +3475,10 @@ async fn run_session(session: Session) {
         let images_supported = accepts_images(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+        let session_params = json!({
+            "cwd": request.cwd,
+            "mcpServers": session_mcp_servers(&init, &mcp_servers),
+        });
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
@@ -5055,6 +5091,29 @@ mod tests {
         assert!(stable["clientCapabilities"].get("subagents").is_none());
         assert!(stable["clientCapabilities"].get("_meta").is_none());
         assert!(grok["clientCapabilities"].get("subagents").is_none());
+    }
+
+    #[test]
+    fn host_mcp_servers_reach_only_agents_that_take_http_ones() {
+        let servers = vec![crate::McpServer {
+            name: "browse".into(),
+            url: "http://127.0.0.1:5/mcp".into(),
+            headers: vec![("Authorization".into(), "Bearer t".into())],
+        }];
+        let http = json!({ "agentCapabilities": { "mcpCapabilities": { "http": true } } });
+        assert_eq!(
+            session_mcp_servers(&http, &servers),
+            json!([{
+                "type": "http",
+                "name": "browse",
+                "url": "http://127.0.0.1:5/mcp",
+                "headers": [{ "name": "Authorization", "value": "Bearer t" }],
+            }])
+        );
+        let stdio_only = json!({ "agentCapabilities": { "mcpCapabilities": { "http": false } } });
+        assert_eq!(session_mcp_servers(&stdio_only, &servers), json!([]));
+        assert_eq!(session_mcp_servers(&json!({}), &servers), json!([]));
+        assert_eq!(session_mcp_servers(&http, &[]), json!([]));
     }
 
     #[test]

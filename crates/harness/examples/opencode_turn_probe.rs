@@ -83,6 +83,7 @@ async fn main() {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                mcp_servers: Vec::new(),
             },
         )
         .await

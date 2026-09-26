@@ -1437,6 +1437,8 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        // Only ACP agents take host MCP servers so far.
+        mcp_servers: _,
     } = controls;
     let request_input = Arc::new(request_input);
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
