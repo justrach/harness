@@ -407,8 +407,10 @@ impl Shell {
         let target_draft = split.drafts[ix].take().filter(|_| target.is_none());
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
-        self.adopt_canvas_draft(target_draft, cx);
+        // Filter first: on a canvas it re-aims the project, and the pane's
+        // own parked project must have the last word.
         self.set_space_filter(project, cx);
+        self.adopt_canvas_draft(target_draft, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
@@ -477,8 +479,8 @@ impl Shell {
         }
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
-        self.adopt_canvas_draft(draft, cx);
         self.set_space_filter(project, cx);
+        self.adopt_canvas_draft(draft, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();

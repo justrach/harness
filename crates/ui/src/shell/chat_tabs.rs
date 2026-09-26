@@ -55,8 +55,9 @@ impl Shell {
         }
         let draft = tab.draft.filter(|_| tab.selected.is_none());
         self.state.update(cx, |s, cx| s.select_chat(tab.selected, cx));
-        self.adopt_canvas_draft(draft, cx);
+        // Filter first: the tab's own parked project must have the last word.
         self.set_space_filter(tab.project, cx);
+        self.adopt_canvas_draft(draft, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
