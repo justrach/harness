@@ -3930,8 +3930,7 @@ impl Transcript {
                     if this.pinned {
                         this.wake_spring();
                     }
-                    this.show_jump_button = jump_visibility(this.show_jump_button, distance)
-                        && !this.own_turn.as_ref().is_some_and(|a| a.held);
+                    this.refresh_jump_button(distance);
                     cx.notify();
                     return;
                 }
@@ -3954,10 +3953,7 @@ impl Transcript {
                         this.wake_spring();
                     }
                 }
-                let show = jump_visibility(this.show_jump_button, distance) && !this.pinned;
-                if show != this.show_jump_button {
-                    this.show_jump_button = show;
-                }
+                this.refresh_jump_button(distance);
                 cx.notify();
             })
             .ok();
@@ -4016,9 +4012,7 @@ impl Transcript {
             cx.write_to_primary(ClipboardItem::new_string(_text));
         }
         if was_selecting {
-            self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
+            self.refresh_jump_button(self.distance_from_bottom());
             cx.notify();
         }
     }
@@ -4068,8 +4062,7 @@ impl Transcript {
         render::update_drag_at(position);
         self.begin_scroll_navigation();
         self.list.scroll_by(px(step));
-        self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
+        self.refresh_jump_button(self.distance_from_bottom());
         cx.notify();
         self.schedule_selection_scroll(cx);
     }
@@ -4238,8 +4231,7 @@ impl Transcript {
         self.own_turn_kick = false;
         self.own_turn_last_tick = None;
         self.remeasure_last_row();
-        self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
+        self.refresh_jump_button(self.distance_from_bottom());
         self.viewport_finalize_pending = true;
     }
 
@@ -4515,6 +4507,17 @@ impl Transcript {
         self.show_jump_button
     }
 
+    /// Record `distance` and decide the pill. Never while pinned or holding a
+    /// sent turn: both are already headed to the bottom, and a pill raised
+    /// mid-glide outlived the glide, since landing doesn't fire the scroll
+    /// handler (user report: it stayed after being clicked).
+    fn refresh_jump_button(&mut self, distance: f32) {
+        self.last_scroll_distance = distance;
+        self.show_jump_button = jump_visibility(self.show_jump_button, distance)
+            && !self.pinned
+            && !self.own_turn.as_ref().is_some_and(|turn| turn.held);
+    }
+
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
@@ -4605,6 +4608,10 @@ impl Transcript {
         if !self.pinned {
             self.spring_last_tick = None;
             return;
+        }
+        if self.show_jump_button {
+            self.show_jump_button = false;
+            cx.notify();
         }
         let now = Instant::now();
         if self.spring_settled_at.is_some_and(|settled| {
@@ -5514,9 +5521,7 @@ impl Transcript {
         }
         if raw >= 1.0 {
             self.user_collapse_scroll = None;
-            self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
+            self.refresh_jump_button(self.distance_from_bottom());
         }
         cx.notify();
     }
@@ -9205,11 +9210,7 @@ impl Render for Transcript {
                             }
                             return;
                         }
-                        let distance = this.distance_from_bottom();
-                        this.last_scroll_distance = distance;
-                        this.show_jump_button = jump_visibility(this.show_jump_button, distance)
-                            && !this.pinned
-                            && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
+                        this.refresh_jump_button(this.distance_from_bottom());
                         if token.layout_settled(this.viewport_layout_revision) {
                             this.viewport_finalize_pending = false;
                         }
@@ -14084,6 +14085,37 @@ mod tests {
                     transcript.read(cx).own_turn.is_none(),
                     "real output must still retire the reservation while the prompt is expanded"
                 );
+            });
+        }
+
+        #[test]
+        fn the_scroll_pill_never_shows_while_headed_to_the_bottom() {
+            with_transcript(|transcript, cx| {
+                // Clicked: pinned and gliding. A recompute mid-glide (the
+                // sent-turn hold retiring, a fold settling) must not re-raise
+                // it, since landing never fires the scroll handler to lower it.
+                transcript.pinned = true;
+                transcript.refresh_jump_button(2_000.0);
+                assert!(!transcript.jump_button_shown());
+                // A pill raised before the pin engaged goes on the next frame.
+                transcript.show_jump_button = true;
+                transcript.step_spring(cx);
+                assert!(!transcript.jump_button_shown());
+                // A held sent turn is its own bottom.
+                transcript.pinned = false;
+                transcript.own_turn = Some(OwnTurnAnchor {
+                    chat_id: "chat".into(),
+                    message_id: "prompt".into(),
+                    held: true,
+                    positioned: true,
+                    seen_prompt: true,
+                });
+                transcript.refresh_jump_button(2_000.0);
+                assert!(!transcript.jump_button_shown());
+                // Scrolled up for real: offered.
+                transcript.own_turn = None;
+                transcript.refresh_jump_button(2_000.0);
+                assert!(transcript.jump_button_shown());
             });
         }
 
