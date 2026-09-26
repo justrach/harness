@@ -1156,6 +1156,8 @@ fn forwardable(method: &str) -> bool {
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
+            // Live tool output exists only on the host running the agent.
+            | methods::WATCH_TOOL_PROGRESS
             | methods::QUEUE_MESSAGE
             | methods::UPDATE_QUEUED_MESSAGE
             | methods::BEGIN_QUEUED_MESSAGE_EDIT
@@ -1233,6 +1235,7 @@ fn is_stream_method(method: &str) -> bool {
         method,
         methods::WATCH_DOC_MESSAGES
             | methods::WATCH_QUEUE
+            | methods::WATCH_TOOL_PROGRESS
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
@@ -1710,6 +1713,21 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
+                Ok(RpcReply::Stream(
+                    futures::stream::unfold((rx, true), |(mut rx, first)| async move {
+                        if !first {
+                            rx.changed().await.ok()?;
+                        }
+                        let items = rx.borrow_and_update().clone();
+                        let value = serde_json::json!({ "items": items });
+                        Some((value, (rx, false)))
+                    })
+                    .boxed(),
+                ))
+            }
+            methods::WATCH_TOOL_PROGRESS => {
+                let p: ChatParams = parse_params(params)?;
+                let rx = self.sessions.watch_tool_progress(&p.chat_id);
                 Ok(RpcReply::Stream(
                     futures::stream::unfold((rx, true), |(mut rx, first)| async move {
                         if !first {

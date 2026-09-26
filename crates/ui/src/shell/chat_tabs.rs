@@ -8,6 +8,7 @@
 //! the live state and loads the target's, the way focusing a pane swaps.
 
 use super::*;
+use crate::pickers::CanvasDraft;
 
 /// Narrowest a side-by-side chat pane may get before ⌘D opens a tab instead.
 pub(super) const MIN_PANE_WIDTH: f32 = 380.0;
@@ -18,6 +19,8 @@ pub(super) struct ChatTab {
     pub split: Option<chat_split::ChatSplit>,
     pub selected: Option<String>,
     pub project: Option<String>,
+    /// The focused pane's composer picks (read when it's a canvas).
+    pub draft: Option<CanvasDraft>,
 }
 
 /// Whether one more side-by-side pane still leaves every pane readable.
@@ -32,11 +35,24 @@ pub(super) fn tab_after_close(closed: usize, len: usize) -> usize {
 }
 
 impl Shell {
+    /// The focused pane's live composer picks, for parking or inheriting.
+    pub(super) fn current_canvas_draft(&self, cx: &App) -> CanvasDraft {
+        self.composer.read(cx).pickers().read(cx).canvas_draft(cx)
+    }
+
+    /// Hand the pickers the picks of the tab/pane just switched to (call
+    /// after `select_chat`; `None` for a chat or a canvas with none parked).
+    pub(super) fn adopt_canvas_draft(&self, draft: Option<CanvasDraft>, cx: &mut Context<Self>) {
+        let pickers = self.composer.read(cx).pickers().clone();
+        pickers.update(cx, |pickers, cx| pickers.adopt_canvas_draft(draft, cx));
+    }
+
     fn park_chat_tab(&mut self, cx: &App) -> ChatTab {
         ChatTab {
             split: self.chat_split.clone(),
             selected: self.state.read(cx).selected_chat.clone(),
             project: self.settings.space_filter.clone(),
+            draft: Some(self.current_canvas_draft(cx)),
         }
     }
 
@@ -46,7 +62,9 @@ impl Shell {
         if self.chat_split.is_none() {
             motion::reveal_reset(chat_split::STRIP_REVEAL_KEY);
         }
+        let draft = tab.draft.filter(|_| tab.selected.is_none());
         self.state.update(cx, |s, cx| s.select_chat(tab.selected, cx));
+        self.adopt_canvas_draft(draft, cx);
         self.set_space_filter(tab.project, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
@@ -62,6 +80,8 @@ impl Shell {
         }
         let parked = self.park_chat_tab(cx);
         let project = parked.project.clone();
+        // A fresh canvas starts from the picks of the tab it was opened from.
+        let draft = parked.draft.clone().filter(|_| open.is_none());
         if self.chat_tabs.is_empty() {
             self.chat_tabs.push(parked);
         } else {
@@ -79,6 +99,7 @@ impl Shell {
             split: None,
             selected: open,
             project,
+            draft,
         };
         self.chat_tabs.push(tab.clone());
         self.chat_tab = self.chat_tabs.len() - 1;
@@ -93,6 +114,16 @@ impl Shell {
         self.chat_tab = ix;
         let tab = self.chat_tabs[ix].clone();
         self.load_chat_tab(tab, window, cx);
+    }
+
+    /// ⌃Tab / ⌃⇧Tab: browser-style tab cycling once two or more tabs are
+    /// open; with one tab they keep stepping through sidebar sessions.
+    pub(super) fn cycle_tab_or_session(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_tabs.len() >= 2 && matches!(self.route, Route::Chat) && !self.overlay_owns_keyboard(cx) {
+            self.cycle_chat_tab(forward, window, cx);
+        } else {
+            self.cycle_session(forward, cx);
+        }
     }
 
     pub(super) fn cycle_chat_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -213,9 +244,18 @@ impl Shell {
                     div()
                         .px(px(4.0))
                         .pb(px(2.0))
+                        .flex()
+                        .flex_row()
+                        .justify_between()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted.opacity(0.8))
-                        .child(SharedString::from(format!("Tabs · {}", labels.len()))),
+                        .child(SharedString::from(format!("Tabs · {}", labels.len())))
+                        // The live binding: the tab-cycling shortcut is rebindable.
+                        .child(
+                            div().text_color(theme.text_muted.opacity(0.6)).child(SharedString::from(
+                                crate::settings::badge_combo(&self.settings.keymap.next_session),
+                            )),
+                        ),
                 )
                 .children(labels.into_iter().enumerate().map(|(ix, (title, panes))| {
                     let lit = ix == active;

@@ -367,7 +367,10 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
                     .child(SharedString::from("·")),
             );
         }
-        line = line.child(fragment);
+        // Capped at the row's width: a fragment longer than the card (an
+        // install hint with a URL) wraps inside it instead of running past
+        // the card's edge.
+        line = line.child(div().min_w_0().max_w_full().child(fragment));
         first = false;
     }
     line
@@ -507,4 +510,58 @@ pub fn warning_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::D
             ),
         )
         .child(div().min_w_0().child(message.into()))
+}
+
+#[cfg(test)]
+mod meta_line_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn a_fragment_longer_than_the_row_wraps_inside_it(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            measured: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>,
+        }
+        impl gpui::Render for Fixture {
+            fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let measure = |measured: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>| {
+                    gpui::canvas(move |bounds, _, _| measured.borrow_mut().push(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0()
+                };
+                let long = "Start Exo with its agent-cli adapter to enable (./exo.sh --setup agent-cli); \
+                            first install: https://github.com/exoharness/exo and more words after it";
+                div()
+                    .w(px(300.0))
+                    .relative()
+                    .child(measure(self.measured.clone()))
+                    .child(meta_line(
+                        &theme,
+                        vec![
+                            div().child("Exo, the self-improving agent.").into_any_element(),
+                            div()
+                                .relative()
+                                .child(SharedString::from(long))
+                                .child(measure(self.measured.clone()))
+                                .into_any_element(),
+                        ],
+                    ))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let measured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let handle = cx.add_window(|_, _| Fixture {
+            measured: measured.clone(),
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let measured = measured.borrow();
+        let (row, fragment) = (measured[0], measured[1]);
+        assert!(
+            fragment.right() <= row.right(),
+            "the long fragment ends at {:?}, past the row's edge at {:?}",
+            fragment.right(),
+            row.right()
+        );
+    }
 }

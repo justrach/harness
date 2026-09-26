@@ -67,6 +67,9 @@ pub mod methods {
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";
+    /// Running tools' live output on the chat's host (graff's subagent
+    /// logs); never synced. `{ chatId }` → `{ items: ToolProgressItem[] }`.
+    pub const WATCH_TOOL_PROGRESS: &str = "WatchToolProgress";
     /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
     pub const QUEUE_MESSAGE: &str = "QueueMessage";
     /// Retype a queued message; empty text deletes it.

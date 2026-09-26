@@ -102,6 +102,17 @@ pub struct DraftConfig {
     pub checkout: CheckoutKind,
 }
 
+/// A new-session canvas's run picks. Chat tabs and split panes each park
+/// their own, so ⌘D / ⌘T and tab or pane switches keep every canvas's
+/// harness, model and reasoning instead of all canvases sharing one draft
+/// (and the global last-used picks).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CanvasDraft {
+    pub harness: Option<HarnessId>,
+    pub model: Option<String>,
+    pub reasoning: Option<ReasoningLevel>,
+}
+
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
 /// worktree" is NOT a third mode — it's `Local` when the picked ref is already
 /// materialized as a worktree (the session reuses that checkout's path).
@@ -467,6 +478,9 @@ struct ModelRowData {
     harness_name: SharedString,
     model: Model,
     selected_only: bool,
+    /// A provider section title rather than a model (`model` is a
+    /// placeholder): never picked, highlighted, or given a ⌘N number.
+    header: Option<SharedString>,
 }
 
 /// Which picker popover is open.
@@ -804,6 +818,39 @@ impl Pickers {
         &self.config
     }
 
+    /// The run picks shown right now (the chat's config, or this canvas's
+    /// picks), for the tab or pane about to be parked or split off.
+    pub fn canvas_draft(&self, cx: &App) -> CanvasDraft {
+        let resolved = self.resolved(cx);
+        CanvasDraft {
+            harness: resolved.harness,
+            model: resolved.model,
+            reasoning: resolved.reasoning,
+        }
+    }
+
+    /// Install the picks of the tab/pane the shell just switched to, AFTER
+    /// its `select_chat`: owning the new selection keeps the state observer
+    /// from wiping them. A chat selection passes `None` (its own config
+    /// wins), and so does a canvas with nothing parked — it falls back to
+    /// the sticky last-used defaults. A harness the catalog no longer offers
+    /// is dropped with its model rather than resurrected.
+    pub fn adopt_canvas_draft(&mut self, draft: Option<CanvasDraft>, cx: &mut Context<Self>) {
+        let offered = |harness: HarnessId| match self.harnesses.ready() {
+            Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
+            None => true,
+        };
+        let draft = draft
+            .filter(|d| d.harness.is_some_and(offered))
+            .unwrap_or_default();
+        self.draft_owner = self.state.read(cx).selected_chat.clone();
+        self.config.harness = draft.harness;
+        self.config.model = draft.model;
+        self.config.reasoning = draft.reasoning;
+        self.switch_error = None;
+        cx.notify();
+    }
+
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
         self.state.read(cx).selected_chat.is_some()
@@ -1033,9 +1080,16 @@ impl Pickers {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             return false;
         }
-        self.activate_model_index(slot, cx);
+        self.activate_model_slot(slot, cx);
         cx.notify();
         true
+    }
+
+    /// Pick the `slot`th model row (⌘N numbering skips section headers).
+    fn activate_model_slot(&mut self, slot: usize, cx: &mut Context<Self>) {
+        if let Some(ix) = model_slot_row(&self.model_rows(cx), slot) {
+            self.activate_model_index(ix, cx);
+        }
     }
 
     pub fn open_project_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1596,6 +1650,14 @@ impl Pickers {
         cx.notify();
     }
 
+    /// Point the selected chat back at `model_id` (the model its harness
+    /// session actually restored), as if picked in the menu.
+    pub fn keep_chat_model(&mut self, model_id: String, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_some() {
+            self.pick_model(model_id, cx);
+        }
+    }
+
     fn pick_reasoning(&mut self, level: ReasoningLevel, cx: &mut Context<Self>) {
         // Always a concrete selection (no toggle-back-to-default).
         if self.state.read(cx).selected_chat.is_some() {
@@ -1841,6 +1903,7 @@ impl Pickers {
                         harness,
                         harness_name: descriptor.name.clone().into(),
                         selected_only: true,
+                        header: None,
                         model: Model {
                             id: id.into(),
                             label,
@@ -1865,11 +1928,14 @@ impl Pickers {
             .effective_model_id(cx)
             .or_else(|| self.selected_model(cx).map(|m| m.id.as_str()));
         let effective = self.effective_harness(cx);
-        self.model_rows(cx)
-            .iter()
+        let rows = self.model_rows(cx);
+        rows.iter()
             .position(|row| {
-                Some(row.harness) == effective && selected == Some(row.model.id.as_str())
+                row.header.is_none()
+                    && Some(row.harness) == effective
+                    && selected == Some(row.model.id.as_str())
             })
+            .or_else(|| model_slot_row(&rows, 0))
             .unwrap_or(0)
     }
 
@@ -1898,7 +1964,7 @@ impl Pickers {
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
             return;
         };
-        if row.selected_only {
+        if row.selected_only || row.header.is_some() {
             return;
         }
         if self.effective_harness(cx) != Some(row.harness) {
@@ -2441,7 +2507,7 @@ impl Pickers {
             && let Ok(n) = event.keystroke.key.parse::<usize>()
             && (1..=9).contains(&n)
         {
-            self.activate_model_index(n - 1, cx);
+            self.activate_model_slot(n - 1, cx);
             cx.notify();
             return;
         }
@@ -2472,6 +2538,21 @@ impl Pickers {
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
                 self.active = popover::menu_step(current, count, delta).unwrap_or(0);
+                // Step over provider section headers (bounded: a list of
+                // nothing but headers must not spin).
+                if self.open_kind() == Some(PickerKind::HarnessModel) {
+                    let rows = self.model_rows(cx);
+                    for _ in 0..count {
+                        if !rows
+                            .get(self.active)
+                            .is_some_and(|row| row.header.is_some())
+                        {
+                            break;
+                        }
+                        self.active =
+                            popover::menu_step(Some(self.active), count, delta).unwrap_or(0);
+                    }
+                }
                 // Keep the highlighted MODEL row in view (the rows are the
                 // scroll container's direct children, so indices map 1:1);
                 // the traits chips below live in the pinned tray and never
@@ -3825,11 +3906,20 @@ impl Pickers {
                     rows.len(),
                     move |range, _window, app| {
                         entity.update(app, |this, cx| {
+                            // ⌘N numbers only model rows; headers above the
+                            // range still shift the numbering.
+                            let mut slot = row_data[..range.start.min(row_data.len())]
+                                .iter()
+                                .filter(|row| row.header.is_none())
+                                .count();
                             range
                                 .filter_map(|ix| {
-                                    row_data
-                                        .get(ix)
-                                        .map(|row| this.render_model_row(ix, row, cx))
+                                    let row = row_data.get(ix)?;
+                                    if row.header.is_some() {
+                                        return Some(this.render_model_header(row, cx));
+                                    }
+                                    slot += 1;
+                                    Some(this.render_model_row(ix, slot - 1, row, cx))
                                 })
                                 .collect::<Vec<AnyElement>>()
                         })
@@ -3956,9 +4046,49 @@ impl Pickers {
     /// (⌘N chips, hover-cursor, and activation all key on it). The 2px
     /// inter-row gap is baked into each item's bottom padding so every item
     /// is the same height (uniform_list measures the first).
+    /// A provider section title in the virtualized list. It must stand
+    /// exactly as tall as a compact model row (uniform_list sizes every item
+    /// from the first), so it carries the row's padding, a 22px strut (the
+    /// star button) and a zero-width line of row-sized text.
+    fn render_model_header(&self, row: &ModelRowData, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let title = row.header.clone().unwrap_or_default();
+        div()
+            .pb(px(2.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .child(div().flex_none().w(px(0.0)).h(px(22.0)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(0.0))
+                            .overflow_hidden()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .child(SharedString::from(" ")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text_muted)
+                            .child(title),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_model_row(
         &mut self,
         ix: usize,
+        slot: usize,
         row: &ModelRowData,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4114,8 +4244,8 @@ impl Pickers {
                 this.activate_model_index(ix, cx);
             }))
             .child(body);
-        if ix < 9 {
-            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", ix + 1)));
+        if slot < 9 {
+            el = el.child(popover::kbd_hint(&theme, &format!("⌘{}", slot + 1)));
         }
         el = el.child(
             div()
@@ -4603,6 +4733,7 @@ fn scoped_model_rows<'a>(
         harness_name: SharedString::from(descriptor.name.clone()),
         model: model.clone(),
         selected_only: false,
+        header: None,
     };
     let in_scope = |descriptor: &HarnessDescriptor, model: &Model| match rail {
         ModelRail::Favorites => is_favorite(descriptor.id, &model.id),
@@ -4676,13 +4807,120 @@ fn scoped_model_rows<'a>(
             let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
                 .iter()
                 .partition(|m| is_favorite(descriptor.id, &m.id));
-            starred
-                .into_iter()
-                .chain(rest)
-                .map(|model| row(descriptor, model))
-                .collect()
+            let sections = provider_sections(&rest);
+            if sections.len() < 2 {
+                return starred
+                    .into_iter()
+                    .chain(rest)
+                    .map(|model| row(descriptor, model))
+                    .collect();
+            }
+            let header = |title: String| ModelRowData {
+                header: Some(title.clone().into()),
+                ..row(
+                    descriptor,
+                    &Model {
+                        id: String::new(),
+                        label: title,
+                        description: None,
+                        reasoning_levels: Vec::new(),
+                        options: Vec::new(),
+                    },
+                )
+            };
+            let mut rows = Vec::with_capacity(models.len() + sections.len() + 1);
+            if !starred.is_empty() {
+                rows.push(header("Starred".into()));
+                rows.extend(starred.into_iter().map(|model| row(descriptor, model)));
+            }
+            for (provider, models) in sections {
+                rows.push(header(
+                    provider.map_or_else(|| "Other".into(), provider_display_name),
+                ));
+                rows.extend(models.into_iter().map(|model| {
+                    let mut data = row(descriptor, model);
+                    // The header names the provider; the row keeps the rest
+                    // ("kimi · 262k context" → "262k context").
+                    if let Some(provider) = provider {
+                        data.model.description = data
+                            .model
+                            .description
+                            .take()
+                            .and_then(|d| strip_provider(d, provider));
+                    }
+                    data
+                }));
+            }
+            rows
         }
     }
+}
+
+/// Graff (and opencode) serve one list spanning every provider the account
+/// is signed in to, as `provider/model` ids. Split it into per-provider
+/// sections in first-appearance order: the catalog leads with the current
+/// model, so its provider comes first. Rows without a provider prefix land in
+/// a trailing `None` section.
+fn provider_sections<'a>(models: &[&'a Model]) -> Vec<(Option<&'a str>, Vec<&'a Model>)> {
+    let mut sections: Vec<(Option<&'a str>, Vec<&'a Model>)> = Vec::new();
+    let mut unprefixed = Vec::new();
+    for &model in models {
+        let provider = model
+            .id
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .filter(|provider| !provider.is_empty());
+        match provider {
+            Some(provider) => match sections.iter_mut().find(|(p, _)| *p == Some(provider)) {
+                Some((_, rows)) => rows.push(model),
+                None => sections.push((Some(provider), vec![model])),
+            },
+            None => unprefixed.push(model),
+        }
+    }
+    if !unprefixed.is_empty() {
+        sections.push((None, unprefixed));
+    }
+    sections
+}
+
+/// Drop a leading provider attribution the section header already shows.
+fn strip_provider(description: String, provider: &str) -> Option<String> {
+    match description.strip_prefix(provider) {
+        Some("") => None,
+        Some(rest) => Some(rest.strip_prefix(" · ").unwrap_or(&description).to_owned()),
+        None => Some(description),
+    }
+}
+
+/// Section title for a provider id from a `provider/model` row.
+fn provider_display_name(provider: &str) -> String {
+    match provider {
+        "anthropic" => "Anthropic",
+        "cerebras" => "Cerebras",
+        "codegraff" => "Codegraff",
+        "codex" => "Codex",
+        "deepseek" => "DeepSeek",
+        "fugu" => "Fugu",
+        "kimi" => "Kimi",
+        "lmstudio" => "LM Studio",
+        "mlx" => "MLX",
+        "openai" => "OpenAI",
+        "openrouter" => "OpenRouter",
+        "xai" => "xAI",
+        "xiaomi" => "Xiaomi",
+        other => other,
+    }
+    .to_owned()
+}
+
+/// The row a ⌘N `slot` picks: section headers don't take a number.
+fn model_slot_row(rows: &[ModelRowData], slot: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| row.header.is_none())
+        .nth(slot)
+        .map(|(ix, _)| ix)
 }
 
 /// Centered muted note filling an empty model list ("No models found").
@@ -6537,6 +6775,89 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.id, "glm-5.2-b");
+    }
+
+    #[test]
+    fn multi_provider_catalog_groups_under_provider_headers() {
+        let descriptors = vec![descriptor(HarnessId::Graff, "Graff")];
+        let model = |id: &str, description: &str| {
+            let mut m = bare_model(id, id.split_once('/').unwrap().1);
+            m.description = Some(description.into());
+            m
+        };
+        let models = vec![
+            model("codex/gpt-6-luna", "codex · 270k context"),
+            model("kimi/k3", "kimi · 1048k context"),
+            model("codex/gpt-6-sol", "codex · 270k context"),
+            model("kimi/kimi-for-coding", "kimi"),
+        ];
+        let models_for = |harness: HarnessId| -> Option<&[Model]> {
+            (harness == HarnessId::Graff).then_some(models.as_slice())
+        };
+        let starred = |_: HarnessId, model: &str| model == "kimi/k3";
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Harness,
+            Some(HarnessId::Graff),
+            &descriptors,
+            models_for,
+            starred,
+        );
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.header {
+                Some(title) => format!("# {title}"),
+                None => r.model.id.clone(),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "# Starred",
+                "kimi/k3",
+                "# Codex",
+                "codex/gpt-6-luna",
+                "codex/gpt-6-sol",
+                "# Kimi",
+                "kimi/kimi-for-coding",
+            ]
+        );
+        // Starred rows keep their attribution; grouped rows drop the
+        // provider the header already names.
+        assert_eq!(
+            rows[1].model.description.as_deref(),
+            Some("kimi · 1048k context")
+        );
+        assert_eq!(rows[3].model.description.as_deref(), Some("270k context"));
+        assert_eq!(rows[6].model.description, None);
+        // ⌘N numbers skip headers.
+        assert_eq!(model_slot_row(&rows, 0), Some(1));
+        assert_eq!(model_slot_row(&rows, 1), Some(3));
+        assert_eq!(model_slot_row(&rows, 3), Some(6));
+        assert_eq!(model_slot_row(&rows, 4), None);
+
+        // One provider: the flat list, no headers.
+        let codex_only = &models[..1];
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Harness,
+            Some(HarnessId::Graff),
+            &descriptors,
+            |_| Some(codex_only),
+            |_, _| false,
+        );
+        assert!(rows.iter().all(|r| r.header.is_none()));
+        // A search ranks across providers, ungrouped.
+        let rows = scoped_model_rows(
+            "gpt",
+            ModelRail::Harness,
+            Some(HarnessId::Graff),
+            &descriptors,
+            models_for,
+            |_, _| false,
+        );
+        assert!(rows.iter().all(|r| r.header.is_none()));
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

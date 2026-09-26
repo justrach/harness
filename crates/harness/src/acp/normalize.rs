@@ -438,8 +438,21 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
                     call: typed_call(update),
                 });
             }
-            if let Some(resolved) = resolved_result(update, id) {
+            if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
+            } else if let Some(output) = tool_output(update) {
+                // Content with no terminal status: the tool is still running
+                // and this is its live output (graff streams a subagent's
+                // rolling log this way). It replaces the last one and never
+                // resolves the call.
+                events.push(AgentEvent::ToolProgress {
+                    id,
+                    output,
+                    state: update
+                        .pointer("/_meta/graff~1subagent/state")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
             }
             events
         }
@@ -629,6 +642,49 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn graff_subagent_progress_rows_stream_without_resolving_the_call() {
+        let row = |text: &str, state: &str| {
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "spawn-1",
+                "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+                "_meta": {"graff/subagent": {"sessionId": "child-1", "name": "explore", "state": state}},
+            })
+        };
+        // Each row is the whole rolling log so far: it replaces, never appends.
+        assert_eq!(
+            map_update(&row("▸ read_file: src/lib.rs", "running")),
+            vec![AgentEvent::ToolProgress {
+                id: "spawn-1".into(),
+                output: "▸ read_file: src/lib.rs".into(),
+                state: Some("running".into()),
+            }]
+        );
+        let log = "▸ read_file: src/lib.rs\n✗ bash failed\n\nLooking at the parser";
+        assert_eq!(
+            map_update(&row(log, "completed")),
+            vec![AgentEvent::ToolProgress {
+                id: "spawn-1".into(),
+                output: log.into(),
+                state: Some("completed".into()),
+            }]
+        );
+        // The parent's own completed update still resolves the call.
+        let done = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "spawn-1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "final report"}}],
+        });
+        assert!(matches!(
+            map_update(&done).as_slice(),
+            [AgentEvent::ToolResult { id, is_error: false, .. }] if id == "spawn-1"
+        ));
+        // A bare status-less update with no content stays silent.
+        assert!(map_update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "spawn-1"})).is_empty());
     }
 
     #[test]

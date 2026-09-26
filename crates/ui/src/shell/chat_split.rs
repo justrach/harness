@@ -9,6 +9,7 @@
 //! chat becomes the selection and the old selection takes the pane it left.
 
 use super::*;
+use crate::pickers::CanvasDraft;
 
 /// Every pane holds another engine doc watch; Ghostty-scale grids aren't
 /// the point of a chat column.
@@ -49,6 +50,9 @@ pub(super) struct ChatSplit {
     pub shares: Vec<f32>,
     /// Each pane's sidebar project filter (space id; `None` = all).
     pub projects: Vec<Option<String>>,
+    /// Each unfocused pane's parked composer picks (the focused pane's are
+    /// live in the pickers); only a new-session canvas pane reads its own.
+    pub drafts: Vec<Option<CanvasDraft>>,
     pub zoomed: bool,
 }
 
@@ -68,6 +72,7 @@ impl ChatSplit {
             focus: 0,
             shares: vec![1.0],
             projects: vec![project],
+            drafts: vec![None],
             zoomed: false,
         });
         if split.axis != axis || split.panes.len() >= MAX_CHAT_PANES {
@@ -87,6 +92,7 @@ impl ChatSplit {
         // The new pane starts in the project of the pane it split from.
         let project = split.projects[split.focus].clone();
         split.projects.insert(at, project);
+        split.drafts.insert(at, None);
         split.focus = at;
         split.zoomed = false;
         Some(split)
@@ -202,6 +208,7 @@ impl ChatSplit {
         let share = self.shares.remove(closed);
         self.panes.remove(closed);
         self.projects.remove(closed);
+        self.drafts.remove(closed);
         let next = closed.saturating_sub(1).min(self.panes.len() - 1);
         self.shares[next] += share;
         self.focus = next;
@@ -260,6 +267,7 @@ impl ChatSplit {
             focus: saved.focus,
             shares: saved.shares.iter().map(|s| s / total).collect(),
             projects,
+            drafts: vec![None; len],
             zoomed: false,
         })
     }
@@ -359,14 +367,20 @@ impl Shell {
         // Dragging the chat you are in moves it; the pane it leaves empties.
         let parked = selected.clone().filter(|id| open.as_ref() != Some(id));
         let project = self.settings.space_filter.clone();
+        let draft = self.current_canvas_draft(cx);
         // Split a copy: a refused split (at the cap, or across axes) must
         // leave the existing layout alone, not drop every pane.
-        let Some(split) = ChatSplit::split(self.chat_split.clone(), axis, parked, project) else {
+        let Some(mut split) = ChatSplit::split(self.chat_split.clone(), axis, parked, project) else {
             return;
         };
+        // The pane left behind keeps its picks, and a fresh canvas starts
+        // from them — never from whichever canvas was picked in last.
+        split.drafts[split.focus - 1] = Some(draft.clone());
         self.chat_split = Some(split);
         self.chat_split_selected = None;
+        let fresh = open.is_none();
         self.state.update(cx, |s, cx| s.select_chat(open, cx));
+        self.adopt_canvas_draft(fresh.then_some(draft), cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
@@ -374,6 +388,7 @@ impl Shell {
 
     pub(super) fn focus_chat_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.state.read(cx).selected_chat.clone();
+        let draft = self.current_canvas_draft(cx);
         let Some(split) = self.chat_split.as_mut() else {
             return;
         };
@@ -381,12 +396,15 @@ impl Shell {
         let Some(target) = split.focus_pane(ix, selected) else {
             return;
         };
-        // Each pane keeps its own workspace: park the live sidebar filter in
-        // the pane being left and bring the target pane's back.
+        // Each pane keeps its own workspace and composer picks: park the
+        // live ones in the pane being left and bring the target pane's back.
         split.projects[from] = self.settings.space_filter.clone();
+        split.drafts[from] = Some(draft);
         let project = split.projects[ix].clone();
+        let target_draft = split.drafts[ix].take().filter(|_| target.is_none());
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
+        self.adopt_canvas_draft(target_draft, cx);
         self.set_space_filter(project, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
@@ -449,12 +467,14 @@ impl Shell {
             return false;
         };
         let project = split.projects[split.focus].clone();
+        let draft = split.drafts[split.focus].take().filter(|_| target.is_none());
         if split.panes.len() == 1 {
             self.chat_split = None;
             motion::reveal_reset(STRIP_REVEAL_KEY);
         }
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
+        self.adopt_canvas_draft(draft, cx);
         self.set_space_filter(project, cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
@@ -1163,6 +1183,22 @@ mod chat_split_tests {
         assert_eq!(split.shares, vec![0.5, 0.5]);
         assert_eq!(split.peer_chats().collect::<Vec<_>>(), ["a"]);
         assert_eq!(split.projects, vec![Some("p".into()), Some("p".into())], "new pane inherits the project");
+    }
+
+    #[test]
+    fn pane_drafts_follow_their_panes() {
+        let draft = |model: &str| CanvasDraft {
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        let mut split = two("a");
+        assert_eq!(split.drafts, vec![None, None]);
+        split.drafts[0] = Some(draft("x"));
+        let mut split = ChatSplit::split(Some(split), SplitAxis::Horizontal, None, None).unwrap();
+        assert_eq!(split.drafts, vec![Some(draft("x")), None, None], "a new pane slots in empty");
+        split.drafts[1] = Some(draft("y"));
+        assert!(split.close_focused().is_some());
+        assert_eq!(split.drafts, vec![Some(draft("x")), Some(draft("y"))], "the closed pane's slot goes");
     }
 
     #[test]

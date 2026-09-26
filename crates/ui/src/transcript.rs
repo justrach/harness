@@ -1224,6 +1224,12 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// A resumed graff chat restored a model other than the picked one. The
+    /// run can't go on, but the chat can: a card offers both ways forward.
+    ModelMismatch {
+        requested: SharedString,
+        restored: Option<SharedString>,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1780,9 +1786,15 @@ pub fn rows_for_entry(
                             id: format!("{}#{}", entry.id, part_id).into(),
                             version: message.len() as u64,
                             turn_start: false,
-                            kind: RowKind::ErrorChip {
-                                // Harness-generated; the chip is one line.
-                                message: single_line(message).into(),
+                            kind: match harness_adapters::acp::parse_model_mismatch(message) {
+                                Some(mismatch) => RowKind::ModelMismatch {
+                                    requested: mismatch.requested.into(),
+                                    restored: mismatch.restored.map(Into::into),
+                                },
+                                None => RowKind::ErrorChip {
+                                    // Harness-generated; the chip is one line.
+                                    message: single_line(message).into(),
+                                },
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -3349,6 +3361,9 @@ pub struct Transcript {
     /// Last live elapsed (seconds) per assistant entry, used if `duration_ms`
     /// has not landed on the doc yet when the turn settles.
     compact_last_elapsed: HashMap<String, i64>,
+    /// Running subagents' latest step lines ([`live_step_lines`]), shown
+    /// under the working trailer. Live-only; never in the doc.
+    live_steps: Vec<SharedString>,
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
@@ -3474,6 +3489,12 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// The model-mismatch card: start a new chat on `model`, carrying the
+    /// failed prompt over.
+    NewChatWithModel { model: String },
+    /// The model-mismatch card: keep this chat on the `model` its session
+    /// restored, with the failed prompt back in the composer.
+    KeepChatModel { model: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3611,6 +3632,7 @@ impl Transcript {
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
+            live_steps: Vec::new(),
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
@@ -4654,6 +4676,14 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // The trailer grows with the live steps: re-measure the row it rides.
+        if self.doc_override.is_none() {
+            let steps = live_step_lines(&self.state.read(cx).tool_progress);
+            if steps != self.live_steps {
+                self.live_steps = steps;
+                self.remeasure_last_row();
+            }
+        }
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -5977,6 +6007,78 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The recoverable form of a resumed graff chat's model mismatch: say
+    /// plainly what happened and offer both ways forward. Neither action
+    /// re-sends anything — the same run would fail the same way.
+    fn render_model_mismatch(
+        &mut self,
+        row_id: &SharedString,
+        requested: &SharedString,
+        restored: Option<&SharedString>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copy = match restored {
+            Some(restored) => format!(
+                "This chat can't switch to {requested}. Start a new chat with it, or keep {restored}?"
+            ),
+            None => format!("This chat can't switch to {requested}. Start a new chat with it?"),
+        };
+        let action = |id: &str, label: String| {
+            div()
+                .id(SharedString::from(format!("{row_id}-{id}")))
+                .flex_none()
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.element_hover))
+                .child(SharedString::from(label))
+        };
+        let new_chat_model = requested.to_string();
+        let new_chat = action("new-chat", format!("New chat with {requested}")).on_click(
+            cx.listener(move |_, _, _, cx| {
+                cx.emit(TranscriptEvent::NewChatWithModel {
+                    model: new_chat_model.clone(),
+                });
+            }),
+        );
+        let keep = restored.map(|restored| {
+            let model = restored.to_string();
+            action("keep", format!("Keep {restored}")).on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(TranscriptEvent::KeepChatModel {
+                    model: model.clone(),
+                });
+            }))
+        });
+        div()
+            .py(px(4.0))
+            .w_full()
+            .child(
+                div()
+                    .w_full()
+                    .p(px(10.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(crate::typography::ui_rems(12.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(copy)),
+                    )
+                    .child(div().flex().flex_row().gap(px(6.0)).child(new_chat).children(keep)),
+            )
+            .into_any_element()
+    }
+
     fn render_generated_image(
         &mut self,
         row_id: &SharedString,
@@ -6431,6 +6533,12 @@ impl Transcript {
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
                 }
+                // A turn parked on a question waits on the user, not the agent.
+                // A steer can flip the status back to Working with the question
+                // still open; the QuestionPanel owns the surface then.
+                if crate::composer::pending_input_request(&state.transcript).is_some() {
+                    return None;
+                }
                 // During the send→turn window the session row's `started_at`
                 // still belongs to the PREVIOUS turn — a timer based on the
                 // send counted the round-trip and then restarted when the
@@ -6480,7 +6588,25 @@ impl Transcript {
             flavour_word(seed, elapsed_secs)
         };
         let theme = Theme::of(cx).clone();
-        Some(
+        // Running subagents' latest steps, under the line (live-only).
+        let steps: Option<AnyElement> = (!self.live_steps.is_empty() && self.doc_override.is_none())
+            .then(|| {
+                div()
+                    .pt(px(6.0))
+                    .pl(px(Theme::SPACE_LG + 2.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .children(
+                        self.live_steps
+                            .iter()
+                            .map(|line| div().truncate().child(line.clone())),
+                    )
+                    .into_any_element()
+            });
+        let line = {
             div()
                 .flex()
                 .flex_row()
@@ -6518,6 +6644,13 @@ impl Transcript {
                             .child(SharedString::from(format_elapsed(elapsed_secs))),
                     )
                 })
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(line)
+                .children(steps)
                 .into_any_element(),
         )
     }
@@ -6782,6 +6915,10 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ModelMismatch {
+                requested,
+                restored,
+            } => self.render_model_mismatch(&row.id, requested, restored.as_ref(), &theme, cx),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7930,6 +8067,29 @@ fn user_bubble_text(
 /// WRAPS instead of truncating: startup-crash errors carry the agent's exit
 /// status and stderr, and a one-line ellipsis was exactly what made
 /// the upstream adapter failure undiagnosable from the screenshot.
+/// Latest step lines per subagent still running, oldest first. graff's log
+/// is its step lines, a blank line, then the tail of the text the child is
+/// writing mid-stream — that tail is left out (mid-stream fragments read as
+/// noise, the reason the doc-side live tail was retired). Settled children
+/// are dropped: their chip settles from the doc.
+const LIVE_STEPS_PER_TOOL: usize = 4;
+pub(crate) fn live_step_lines(items: &[harness_proto::ToolProgressItem]) -> Vec<SharedString> {
+    items
+        .iter()
+        .filter(|item| item.state.as_deref().is_none_or(|state| state == "running"))
+        .flat_map(|item| {
+            let steps = item.output.split("\n\n").next().unwrap_or_default();
+            let lines: Vec<&str> = steps.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let skip = lines.len().saturating_sub(LIVE_STEPS_PER_TOOL);
+            lines
+                .into_iter()
+                .skip(skip)
+                .map(|line| SharedString::from(line.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
     div()
         .py(px(4.0))
@@ -11668,6 +11828,74 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
         assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
+    }
+
+    #[test]
+    fn live_steps_show_recent_steps_of_running_subagents_only() {
+        let item = |id: &str, output: &str, state: Option<&str>| harness_proto::ToolProgressItem {
+            tool_id: id.into(),
+            output: output.into(),
+            state: state.map(Into::into),
+        };
+        let log = "▸ read_file: a.rs\n▸ read_file: b.rs\n✗ bash failed\n▸ grep: parse\n▸ edit: lib.rs\n\nNow I am halfway through writ";
+        let lines = live_step_lines(&[
+            item("t1", log, Some("running")),
+            item("t2", "▸ web_search: rust", None),
+            item("t3", "▸ done thing\n✓ finished", Some("completed")),
+        ]);
+        let lines: Vec<&str> = lines.iter().map(|l| l.as_ref()).collect();
+        assert_eq!(
+            lines,
+            [
+                // The last four steps, oldest first; the message tail is left out.
+                "▸ read_file: b.rs",
+                "✗ bash failed",
+                "▸ grep: parse",
+                "▸ edit: lib.rs",
+                "▸ web_search: rust",
+            ]
+        );
+        assert!(live_step_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn resumed_model_mismatch_renders_as_a_recoverable_card() {
+        let entry = assistant(
+            "a1",
+            MessageStatus::Aborted,
+            vec![
+                tool_part("t0", "ls"),
+                MessagePart::Error {
+                    id: "e1".into(),
+                    message: "harness protocol error: graff restored a different model \
+                              (codex/gpt-6-sol); kimi/k3 requires a new session"
+                        .into(),
+                },
+                MessagePart::Error {
+                    id: "e2".into(),
+                    message: "boom".into(),
+                },
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let visible = compact_visible(&rows);
+        let card = visible
+            .iter()
+            .find_map(|row| match &row.kind {
+                RowKind::ModelMismatch {
+                    requested,
+                    restored,
+                } => Some((requested.to_string(), restored.as_ref().map(|r| r.to_string()))),
+                _ => None,
+            })
+            .expect("the mismatch stays visible in compact mode, as a card");
+        assert_eq!(card, ("kimi/k3".into(), Some("codex/gpt-6-sol".into())));
+        assert!(
+            visible
+                .iter()
+                .any(|row| matches!(&row.kind, RowKind::ErrorChip { message } if message.as_ref() == "boom")),
+            "other errors stay plain chips"
+        );
     }
 
     #[test]

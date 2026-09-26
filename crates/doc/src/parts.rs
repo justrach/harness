@@ -556,11 +556,14 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // AvailableCommands feeds the engine's per-harness command cache, not
         // the transcript. UserMessage becomes its own doc ENTRY (the engine's
         // subagent sink writes it), never a part of the assistant message.
+        // ToolProgress is live-only (the engine serves it outside the doc):
+        // folding a rolling log into the chip is the rejected live tail above.
         AgentEvent::AssistantMessageCompleted { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::ReasoningChanged { .. }
+        | AgentEvent::ToolProgress { .. }
         | AgentEvent::UserMessage { .. } => {}
     }
 }
