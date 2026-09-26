@@ -53,6 +53,12 @@ What is allowed is the subscriber's own agent, on a machine the subscriber runs,
 
 8. **Enrolled engines get the whole login; sandboxes get access tokens.** Desktops and headless VPS engines enroll as devices. A disposable sandbox never receives the vault key or a refresh token. For graff's providers, `graff keys grant` on an enrolled engine hands the sandbox one provider's current access token at launch and re-grants it before expiry. Other agents get sandbox grants only when their store can inject a short-lived token.
 
+9. **Every vault write is signed by an enrolled device.** The Harness bearer proves the account, not the device; it is a 55-minute token that also opens every other room on the edge. Each device therefore also holds an Ed25519 signing key, registered with its X25519 key at enrollment. Every mutating request (PUT, status, lease, hold, approve, delete) carries `X-Vault-Signature` over `method|path|sha256(body)|timestamp|deviceId`, and the Durable Object rejects a bad signature, a timestamp more than 60 s old, or a replayed one. A stolen bearer alone can then only read ciphertext and register a pending device; it cannot remove devices, flip status, take leases, or overwrite items.
+
+10. **Removing a device rotates the vault key.** A removed device still knows the old vault key. On removal, the approving device generates a new vault key, re-wraps it for the remaining devices, and re-encrypts every item at its next version. Until then the Durable Object refuses item reads to the removed device, but rotation is what makes the removal hold if the removed device's bearer is later stolen.
+
+11. **Enrollment is visible.** Registering a pending device notifies every enrolled device, and approving it shows the device's name, platform and first-seen time next to a short fingerprint of its public key that both screens display. Approval never happens without a person on an enrolled device.
+
 ## Login states and failures
 
 Each vault item carries a plaintext `status` next to its ciphertext, so every device can show it without decrypting: `ok`, `refreshing` (a lease is held), or `needs_signin`. A device adds a local `offline` state when it cannot reach the vault.
@@ -81,6 +87,17 @@ stateDiagram-v2
 
 Signing in again happens on the device the person is using, not the one that failed; the result syncs to the rest. xAI and Kimi use device codes, so Harness shows the verification URL and code in the app and the person approves in any browser, including on a phone. Codex needs its loopback callback, so it runs on the device with the browser, or through the existing `requester` forwarding.
 
+## Threat model
+
+| Attacker has | Can | Cannot |
+| --- | --- | --- |
+| The edge's storage (breach, operator) | Read ciphertext, public keys, item headers and status: which agents and providers a person syncs, and when | Decrypt any login; forge a device signature |
+| A person's Harness bearer | Read ciphertext and headers; register a pending device | Approve it; remove devices; write, flip status, lease or hold (all need a device signature) |
+| One enrolled device (stolen laptop) | Everything that device could do, until removed | Keep access after removal and rotation |
+| A sandbox | Use the one access token it was granted until it expires | Read the vault, refresh, or learn the vault key |
+
+Item status and headers are plaintext by design so every device can render state without decrypting; they reveal which providers a person uses. The AEAD's associated data binds ciphertext to `userId|agent|slot|version`, so the edge cannot swap items between slots, users or versions without detection.
+
 ## What graff priority means
 
 - graff's four provider logins ship first and sync by default once sync is on, with Z.AI off until graff is confirmed as a supported Coding Plan tool (the terms limit the plan to listed tools on any machine).
@@ -92,7 +109,7 @@ Signing in again happens on the device the person is using, not the one that fai
 - A compromised edge exposes ciphertext, public keys and item status, not logins.
 - Model traffic still leaves from the person's own engines. That matches the supported pattern for xAI and OpenAI, and for Kimi while a person drives the session. Unattended Kimi runs in sandboxes are opt-in, because Kimi fingerprints devices and restricts non-interactive use.
 - One implementation of the crypto and wire format, in graff. Harness sync depends on graff being installed.
-- Order: (1) vault Durable Object and `graff keys` with leases; (2) the Accounts UI and device approval in Harness; (3) the hold model and other agents' stores; (4) sandbox grants.
+- Order: (1) vault Durable Object and `graff keys` with leases, device signatures and key rotation on removal; (2) the Accounts UI and device approval in Harness; (3) the hold model and other agents' stores; (4) sandbox grants.
 
 ## Evidence
 
