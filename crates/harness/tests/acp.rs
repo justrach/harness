@@ -263,6 +263,39 @@ async fn permission_requests_auto_accept_the_preferred_allow_option() {
 }
 
 #[tokio::test]
+async fn form_elicitations_round_trip_through_the_input_bridge() {
+    let (mut controls, _steer, _token) = controls();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&asked);
+    controls.request_input = Box::new(move |questions| {
+        let (tx, rx) = oneshot::channel();
+        let answers = questions
+            .iter()
+            .map(|q| UserInputAnswer {
+                question_id: q.id.clone(),
+                labels: vec!["SQLite".into()],
+            })
+            .collect();
+        seen.lock().unwrap().extend(questions);
+        let _ = tx.send(answers);
+        rx
+    });
+    let events = run_to_end(&harness(), request("scenario:elicit"), controls).await;
+    // The fixture answers refusal unless the form came back accepted.
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "answered".into()
+        }),
+        "{events:?}"
+    );
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].question, "Which database should I use?");
+    assert_eq!(asked[0].options, ["Postgres", "SQLite"]);
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
 async fn steering_extension_injects_mid_turn() {
     let (controls, steer, _token) = controls();
     let harness = harness();
