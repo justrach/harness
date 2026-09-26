@@ -224,18 +224,22 @@ impl ChatSplit {
 
     /// The selection moved from `previous` to `selected` outside the split
     /// (sidebar click, ⌘1–9, a deep link). When the new chat already sits in
-    /// an unfocused pane, the two trade places instead of showing twice.
-    pub fn selection_changed(&mut self, previous: Option<String>, selected: Option<&str>) {
-        let Some(selected) = selected else {
-            return;
-        };
-        if let Some(ix) = self
+    /// an unfocused pane, focus moves to that pane and every pane keeps its
+    /// place; the old focused pane keeps showing `previous`. Swapping the two
+    /// panes instead made a chat jump from the far right into the middle
+    /// (user report, 2026-09-26). Returns the pane focus left, if it moved.
+    pub fn selection_changed(&mut self, previous: Option<String>, selected: Option<&str>) -> Option<usize> {
+        let selected = selected?;
+        let ix = self
             .panes
             .iter()
-            .position(|pane| pane.as_deref() == Some(selected))
-        {
-            self.panes[ix] = previous;
-        }
+            .position(|pane| pane.as_deref() == Some(selected))?;
+        let from = self.focus;
+        self.panes[from] = previous;
+        self.panes[ix] = None;
+        self.focus = ix;
+        self.zoomed = false;
+        Some(from)
     }
 
     pub fn to_saved(&self) -> crate::settings::SavedChatLayout {
@@ -484,6 +488,7 @@ impl Shell {
     /// Follow selection changes made outside the split (called from
     /// `on_state_changed`), and drop panes whose chat was deleted.
     pub(super) fn chat_split_on_state_changed(&mut self, cx: &mut Context<Self>) {
+        let filter = self.settings.space_filter.clone();
         let Some(split) = self.chat_split.as_mut() else {
             return;
         };
@@ -491,7 +496,11 @@ impl Shell {
         let selected = state.selected_chat.clone();
         if selected != self.chat_split_selected {
             let previous = std::mem::replace(&mut self.chat_split_selected, selected.clone());
-            split.selection_changed(previous, selected.as_deref());
+            // Focus moved to the pane already showing the chat: the pane it
+            // left keeps the live project, as when clicking a pane.
+            if let Some(from) = split.selection_changed(previous, selected.as_deref()) {
+                split.projects[from] = filter;
+            }
         }
         if state.chats_synced {
             for pane in split.panes.iter_mut() {
@@ -1384,11 +1393,19 @@ mod chat_split_tests {
     }
 
     #[test]
-    fn selecting_a_peer_chat_trades_places() {
+    fn selecting_a_chat_in_another_pane_focuses_it_in_place() {
+        // Three panes: a | b | (focused, showing c). Picking `a` from the
+        // sidebar focuses the first pane; nothing moves.
         let mut split = two("a");
-        split.selection_changed(Some("c".into()), Some("a"));
-        assert_eq!(split.panes[0].as_deref(), Some("c"));
-        split.selection_changed(Some("a".into()), Some("z"));
-        assert_eq!(split.panes[0].as_deref(), Some("c"), "unrelated picks load in place");
+        split = ChatSplit::split(Some(split), SplitAxis::Horizontal, Some("b".into()), None).unwrap();
+        assert_eq!(split.focus, 2);
+        assert_eq!(split.selection_changed(Some("c".into()), Some("a")), Some(2));
+        assert_eq!(split.focus, 0);
+        assert_eq!(split.panes, vec![None, Some("b".into()), Some("c".into())]);
+        // An unrelated chat loads in the focused pane, in place.
+        assert_eq!(split.selection_changed(Some("a".into()), Some("z")), None);
+        assert_eq!(split.focus, 0);
+        assert_eq!(split.panes[1].as_deref(), Some("b"));
+        assert_eq!(split.panes[2].as_deref(), Some("c"));
     }
 }
