@@ -49,7 +49,7 @@ Some agents serve models from several providers at once. Graff lists every provi
 
 ## Tabs, split panes, and composer picks
 
-⌘D and ⌘⇧D split the conversation column like Ghostty; ⌘T opens a tab. When another side-by-side pane would fall below **380 px**, ⌘D opens a tab instead. The focused pane is the selected chat with the composer; other panes are dimmed, read-only transcripts, and clicking one moves focus there.
+⌘D and ⌘⇧D split the conversation column like Ghostty; ⌘T opens a tab. ⌘D always splits, however narrow the column; it never turns into a tab. The focused pane is the selected chat with the composer; other panes are dimmed, read-only transcripts, and clicking one moves focus there.
 
 Each tab and pane owns its selection, project filter, and composer picks (agent, model, reasoning). A new pane or tab starts from the picks of the pane it was opened from. Leaving a pane or tab parks its picks, and coming back restores them. The sticky last-used defaults only seed a new-session canvas with nothing parked, such as after a restart. An existing chat's picks live on the chat itself. See [`crates/ui/src/shell/chat_split.rs`](crates/ui/src/shell/chat_split.rs) and [`crates/ui/src/shell/chat_tabs.rs`](crates/ui/src/shell/chat_tabs.rs).
 
