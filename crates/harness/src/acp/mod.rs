@@ -32,6 +32,7 @@
 
 mod antigravity_paths;
 mod devin_models;
+mod elicitation;
 pub mod exo_bridge;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
@@ -2271,9 +2272,14 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
         // update, all of which DevinTracker can route. Do not advertise the
         // separate subagentControl extension: Harness has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
-    } else if harness == HarnessId::Graff && graff_subagents {
-        capabilities["subagents"] = json!({});
-        capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
+    } else if harness == HarnessId::Graff {
+        // graff 0.0.302.6+ sends ask_user as a form elicitation, and answers
+        // it at once for clients that don't advertise one.
+        capabilities["elicitation"] = elicitation::capability();
+        if graff_subagents {
+            capabilities["subagents"] = json!({});
+            capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
+        }
     }
     json!({
         "protocolVersion": 1,
@@ -2901,9 +2907,9 @@ fn accepts_images(init: &Value) -> bool {
 /// Answer a server→client request. Permission requests are auto-accepted with
 /// the agent's preferred allow option — parity with the claude harness's
 /// bypassPermissions and the codex harness's approvalPolicy "never" (harness
-/// sessions run unattended). Everything else (fs, terminal, elicitation) was
-/// declined at initialize, so a stray request gets method-not-found rather
-/// than wedging the agent.
+/// sessions run unattended). Form elicitations outside a live turn cancel.
+/// Everything else (fs, terminal) was declined at initialize, so a stray
+/// request gets method-not-found rather than wedging the agent.
 fn handle_server_request(
     client: &RpcClient,
     id: Value,
@@ -2924,6 +2930,10 @@ fn handle_server_request(
                 ),
                 None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
             }
+            Vec::new()
+        }
+        "elicitation/create" => {
+            client.respond(&id, elicitation::cancel());
             Vec::new()
         }
         _ => {
@@ -2974,8 +2984,16 @@ fn handle_server_request_live(
         .and_then(Value::as_str)
         .is_some_and(|id| id != session_id)
     {
-        client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
+        let cancelled = if method == "elicitation/create" {
+            elicitation::cancel()
+        } else {
+            json!({"outcome": {"outcome": "cancelled"}})
+        };
+        client.respond(&id, cancelled);
         return Vec::new();
+    }
+    if method == "elicitation/create" {
+        return ask_elicitation(client, id, params, request_input);
     }
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
@@ -3032,6 +3050,28 @@ fn handle_server_request_live(
             ),
             None => client.respond(&id, json!({ "outcome": { "outcome": "cancelled" } })),
         }
+    });
+    Vec::new()
+}
+
+/// Show a form elicitation on the engine's input bridge (in a subtask so the
+/// message loop keeps flowing) and answer with the user's values. A form we
+/// can't show cancels at once, so the agent never waits on it.
+fn ask_elicitation(
+    client: &RpcClient,
+    id: Value,
+    params: &Value,
+    request_input: &std::sync::Arc<RequestInputFn>,
+) -> Vec<AgentEvent> {
+    let Some(form) = elicitation::form(params, new_message_id) else {
+        client.respond(&id, elicitation::cancel());
+        return Vec::new();
+    };
+    let client = client.clone();
+    let request_input = std::sync::Arc::clone(request_input);
+    tokio::spawn(async move {
+        let answers = (request_input)(form.questions()).await.unwrap_or_default();
+        client.respond(&id, form.response(&answers));
     });
     Vec::new()
 }
@@ -5015,6 +5055,21 @@ mod tests {
         assert!(stable["clientCapabilities"].get("subagents").is_none());
         assert!(stable["clientCapabilities"].get("_meta").is_none());
         assert!(grok["clientCapabilities"].get("subagents").is_none());
+    }
+
+    #[test]
+    fn only_graff_is_offered_form_elicitation() {
+        for subagents in [false, true] {
+            let graff = initialize_params_with_subagents(HarnessId::Graff, subagents);
+            assert_eq!(
+                graff["clientCapabilities"]["elicitation"],
+                json!({ "form": {} })
+            );
+        }
+        for other in [HarnessId::Devin, HarnessId::Grok] {
+            let params = initialize_params(other);
+            assert!(params["clientCapabilities"].get("elicitation").is_none());
+        }
     }
 
     #[test]

@@ -237,6 +237,17 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:elicit*)
+  # graff 0.0.302.6's ask_user: a form elicitation with one required answer.
+  # The test's bridge picks "SQLite".
+  emit "{\"id\":\"graff-elicit-1\",\"method\":\"elicitation/create\",\"params\":{\"sessionId\":\"$SID\",\"mode\":\"form\",\"message\":\"Which database should I use?\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\",\"title\":\"Answer\",\"enum\":[\"Postgres\",\"SQLite\"]}},\"required\":[\"answer\"]}}}"
+  read -r ans || exit 1
+  { has "$ans" '"id":"graff-elicit-1"' && has "$ans" '"action":"accept"' && has "$ans" '"answer":"SQLite"'; } ||
+    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"answered"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
 *scenario:permission*)
   emit "{\"id\":77,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"t1\"},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
   read -r ans || exit 1
