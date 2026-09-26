@@ -130,8 +130,9 @@ if $NOTARIZE; then
   xcrun stapler staple "$APP"
 fi
 
-# The auto-updater artifact.
-tar -czf "$APP_TARBALL" -C "$OUT_DIR" Harness.app
+# The auto-updater artifact. COPYFILE_DISABLE keeps macOS tar from adding
+# AppleDouble `._Harness.app` entries (extended attributes) beside the bundle.
+COPYFILE_DISABLE=1 tar -czf "$APP_TARBALL" -C "$OUT_DIR" Harness.app
 echo "packaged: $APP_TARBALL"
 
 # The dmg presents the classic drag-into-Applications layout over the
