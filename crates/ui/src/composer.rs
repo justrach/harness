@@ -5610,7 +5610,7 @@ impl Composer {
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
                 .filter_map(|path| {
-                    match attachments::stage_file(std::path::Path::new(path.trim())) {
+                    match attachments::stage_any_file(std::path::Path::new(path.trim())) {
                         Ok(att) => Some(att),
                         Err(err) => {
                             tracing::warn!(%path, error = %err, "HARNESS_ATTACH stage failed");
@@ -5621,11 +5621,9 @@ impl Composer {
                 .collect();
             if std::env::var("HARNESS_ATTACH_PREVIEW").is_ok_and(|v| v == "1")
                 && let Some(first) = staged.first()
+                && let Some(image) = first.image.clone()
             {
-                composer.preview = Some(attachments::PreviewImage::new(
-                    first.name.clone(),
-                    first.image.clone(),
-                ));
+                composer.preview = Some(attachments::PreviewImage::new(first.name.clone(), image));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -5773,16 +5771,15 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stage image files (picker / drop / pasted paths). Non-images are
-    /// skipped silently (matching the original's `image/*` filter); read
-    /// failures and oversize files surface in the failure notice.
+    /// Stage files (picker / drop / pasted paths). Images get thumbnails;
+    /// any other file (a PDF, a log, source) is attached as a file the agent
+    /// opens by path. Non-images used to be skipped silently, so attaching a
+    /// PDF did nothing at all (user report). Read failures, folders and
+    /// oversize files surface in the failure notice.
     pub(crate) fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let mut staged = Vec::new();
         for path in &paths {
-            if attachments::format_by_extension(path).is_none() {
-                continue;
-            }
-            match attachments::stage_file(path) {
+            match attachments::stage_any_file(path) {
                 Ok(att) => staged.push(att),
                 Err(message) => {
                     self.failure = Some(message.into());
@@ -5924,30 +5921,27 @@ impl Composer {
             .pt(px(STRIP_PAD_TOP));
         for (ix, att) in staged.iter().enumerate() {
             let group: SharedString = format!("composer-att-{}", att.id).into();
-            let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
             let remove_id = att.id.clone();
-            strip = strip.child(
-                div()
-                    .group(group.clone())
-                    .flex_none()
-                    .relative()
-                    .child(
-                        div()
-                            .id(("composer-att-thumb", ix))
-                            .size(px(STRIP_THUMB))
-                            .rounded(px(8.0))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(crate::theme::hairline(0.10))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                preview.viewer.reset();
-                                this.preview = Some(preview.clone());
-                                this.preview_focus_pending = true;
-                                cx.notify();
-                            }))
-                            .child(
-                                img(att.image.clone())
+            let frame = div()
+                .id(("composer-att-thumb", ix))
+                .size(px(STRIP_THUMB))
+                .rounded(px(8.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(crate::theme::hairline(0.10));
+            let tile = match att.image.clone() {
+                Some(image) => {
+                    let preview = attachments::PreviewImage::new(att.name.clone(), image.clone());
+                    frame
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            preview.viewer.reset();
+                            this.preview = Some(preview.clone());
+                            this.preview_focus_pending = true;
+                            cx.notify();
+                        }))
+                        .child(
+                            img(image)
                                     // EXPLICIT dims, not size_full: img layout
                                     // honors the image's intrinsic aspect
                                     // ratio over a percent height (gpui
@@ -5962,8 +5956,40 @@ impl Composer {
                                     // clips rectangularly (7 = 8 - border).
                                     .rounded(px(7.0))
                                     .object_fit(ObjectFit::Cover),
-                            ),
+                        )
+                }
+                // Same footprint as a thumbnail, so the strip's height math
+                // holds: a document glyph over the file's name.
+                None => frame
+                    .bg(crate::theme::ink(0.035))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.0))
+                    .px(px(4.0))
+                    .aria_label(format!("Attached file {}", att.name))
+                    .child(
+                        crate::icons::icon(crate::icons::DOCUMENT)
+                            .size(px(18.0))
+                            .text_color(theme.text_muted),
                     )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .truncate()
+                            .text_size(px(9.5))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(att.name.clone())),
+                    ),
+            };
+            strip = strip.child(
+                div()
+                    .group(group.clone())
+                    .flex_none()
+                    .relative()
+                    .child(tile)
                     // Own layer: inside the frosted pill everything shares one
                     // draw order and images render last, so without it the
                     // thumbnail paints OVER this button (user report).
@@ -6028,7 +6054,7 @@ impl Composer {
             let group: SharedString = format!("composer-appshot-{}", appshot.id).into();
             let preview = crate::attachments::PreviewImage::new(
                 appshot.screenshot.name.clone(),
-                appshot.screenshot.image.clone(),
+                appshot.screenshot_image(),
             );
             let preview_on_key = preview.clone();
             let preview_on_a11y = preview.clone();
@@ -6127,7 +6153,7 @@ impl Composer {
                                     44.0,
                                     false,
                                     true,
-                                    img(appshot.screenshot.image.clone())
+                                    img(appshot.screenshot_image())
                                         .w(px(image_width))
                                         .h(px(image_height))
                                         .object_fit(ObjectFit::Contain),
@@ -6230,8 +6256,7 @@ impl Composer {
         Some(strip.into_any_element())
     }
 
-    /// Paperclip: the native image picker (the original's hidden
-    /// `<input type=file accept=image/* multiple>`).
+    /// Paperclip: the native file picker. Images and other files both attach.
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -7936,30 +7961,27 @@ impl Composer {
         // rewrite instead of blanking into a reload skeleton.
         if queued_flow {
             for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_attachment_alias(
-                    &device_id,
-                    upload_id,
-                    &att.name,
-                    att.image.clone(),
-                );
+                let Some(image) = att.image.clone() else {
+                    continue;
+                };
+                attachments::seed_attachment_alias(&device_id, upload_id, &att.name, image.clone());
                 if let Some(local) = local_device_id.as_deref()
                     && local != device_id
                 {
-                    attachments::seed_attachment_alias(
-                        local,
-                        upload_id,
-                        &att.name,
-                        att.image.clone(),
-                    );
+                    attachments::seed_attachment_alias(local, upload_id, &att.name, image);
                 }
             }
         }
+        // Files have no thumbnail to seed; the transcript shows them as chips.
         for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+            let Some(image) = att.image.clone() else {
+                continue;
+            };
+            attachments::seed_attachment(&device_id, path, &att.name, image.clone());
             if let Some(local) = local_device_id.as_deref()
                 && local != device_id
             {
-                attachments::seed_attachment(local, path, &att.name, att.image.clone());
+                attachments::seed_attachment(local, path, &att.name, image);
             }
         }
 
@@ -8112,9 +8134,12 @@ impl Composer {
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
                     for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_attachment(&seed_device, path, &att.name, att.image.clone());
+                        let Some(image) = att.image.clone() else {
+                            continue;
+                        };
+                        attachments::seed_attachment(&seed_device, path, &att.name, image.clone());
                         if seed_device != device_id {
-                            attachments::seed_attachment(&device_id, path, &att.name, att.image.clone());
+                            attachments::seed_attachment(&device_id, path, &att.name, image);
                         }
                     }
                     let appshot_paths: HashMap<String, String> = staged
@@ -10286,6 +10311,42 @@ mod tests {
                 assert_eq!(composer.input, input);
                 assert_eq!(input.read(cx).text(), draft);
                 assert_eq!(input.read(cx).selected_range, 2..8);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_file_picker_attaches_files_that_arent_images(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let pdf = dir.path().join("report.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7 not really").unwrap();
+        handle
+            .update(cx, |composer, _, cx| composer.open_file_picker(cx))
+            .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        let path = pdf.clone();
+        cx.simulate_path_prompt_response(move |_| Some(vec![path]));
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |composer, _| {
+                let staged = composer.staged();
+                assert_eq!(staged.len(), 1, "a PDF used to be skipped silently");
+                assert_eq!(staged[0].name, "report.pdf");
+                assert!(staged[0].image.is_none());
+                assert_eq!(staged[0].bytes(), b"%PDF-1.7 not really");
+            })
+            .unwrap();
+        // The strip draws a file chip in place of a thumbnail.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.draw(cx).clear();
+        })
+        .unwrap();
+        // Folders are refused with a notice, never staged.
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.add_paths(vec![dir.path().to_path_buf()], cx);
+                assert_eq!(composer.staged().len(), 1);
+                assert!(composer.failure.is_some());
             })
             .unwrap();
     }

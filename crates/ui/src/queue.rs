@@ -696,6 +696,8 @@ impl Composer {
         let keys: std::collections::HashSet<_> = items[visible]
             .iter()
             .flat_map(|item| item.attachments.iter().take(self.queue_preview_limit()))
+            // Files have no thumbnail; the engine only reads back images.
+            .filter(|path| crate::attachments::is_image_path(path))
             .map(|path| (device.clone(), path.clone()))
             .take(64)
             .collect();
@@ -825,7 +827,25 @@ impl Composer {
         path: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::attachments;
+        if !crate::attachments::is_image_path(path) {
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            let name = crate::attachments::display_file_name(name).to_string();
+            return div()
+                .id(SharedString::from(format!("{key}-file-{index}")))
+                .w(px(40.0))
+                .h(px(28.0))
+                .flex_none()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(crate::theme::hairline(0.1))
+                .bg(crate::theme::ink(0.035))
+                .flex()
+                .items_center()
+                .justify_center()
+                .aria_label(format!("Attached file {name}"))
+                .child(icon(icons::DOCUMENT).size(px(14.0)))
+                .into_any_element();
+        }
         let device = self
             .state
             .read(cx)
@@ -1305,16 +1325,32 @@ impl Composer {
             {
                 let paths = reply.get("attachments")
                     .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
-                let mut load_failed = paths.is_none();
-                for path in paths.unwrap_or_default() {
+                let missing = paths.is_none();
+                let paths = paths.unwrap_or_default();
+                // Staging needs each file's bytes back, and the engine only
+                // reads back images: say so instead of blaming the connection.
+                if paths.iter().any(|path| !crate::attachments::is_image_path(path)) {
+                    let _ = engine.client().call(methods::FINISH_QUEUED_MESSAGE_EDIT, serde_json::json!({
+                        "chatId": chat_id, "id": id, "leaseId": reply.get("leaseId"),
+                        "action": "cancel", "targetDeviceId": host_device_id,
+                    })).await;
+                    this.update(cx, |composer, cx| {
+                        composer.queue_edit_pending_id = None;
+                        composer.failure = Some("Queued messages with attached files can't be edited yet. Remove it from the queue and send it again.".into());
+                        cx.notify();
+                    }).ok();
+                    return;
+                }
+                let mut load_failed = missing;
+                for path in paths {
                     let loaded = crate::attachments::read_attachment_image(
                         &engine, cx.background_executor(), Some(&host_device_id), &path,
                         None,
                     ).await;
                     match loaded {
-                        Some(loaded) => loaded_attachments.push(crate::attachments::StagedAttachment {
-                            id: uuid::Uuid::new_v4().to_string(), name: loaded.name, image: loaded.image,
-                        }),
+                        Some(loaded) => loaded_attachments.push(
+                            crate::attachments::StagedAttachment::from_image(loaded.name, loaded.image),
+                        ),
                         None => { load_failed = true; break; }
                     }
                 }
