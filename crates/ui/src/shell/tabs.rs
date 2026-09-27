@@ -117,10 +117,20 @@ impl Shell {
                             .chat_layout
                             .as_ref()
                             .and_then(|saved| chat_split::ChatSplit::from_saved(saved, live)),
+                        chat_tabs::restore_chat_tabs(
+                            &self.settings.chat_tabs,
+                            self.settings.chat_tab,
+                            live,
+                        ),
                     )
                 })
             };
-            if let Some((last, layout)) = restore {
+            if let Some((last, layout, tabs)) = restore {
+                // The active tab's own layout is the one restored below.
+                if let Some((tabs, active)) = tabs {
+                    self.chat_tabs = tabs;
+                    self.chat_tab = active;
+                }
                 let restored_layout = layout.is_some();
                 self.chat_split = layout;
                 self.chat_split_selected = last.clone();

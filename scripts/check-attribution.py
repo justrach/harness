@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reject AI-assistant and model-vendor attribution in commits and PR text.
+"""Reject Claude / Anthropic attribution in commits and PR text.
 
-This repository is public. Commits carry only their human author: no
-assistant co-author trailers, "generated with" footers, or vendor noreply
-identities. Human co-authors (including Codegraff) are fine.
+This repository is public. Commits carry no Claude or Anthropic co-author
+trailers, "Generated with Claude Code" footers, claude.ai links, or
+noreply@anthropic.com identities. Every other co-author is fine, including
+other AI agents such as blackfloofie and Codegraff.
 
     scripts/check-attribution.py --message-file .git/COMMIT_EDITMSG  # commit-msg hook
     scripts/check-attribution.py --range origin/main..HEAD           # commits in a range
@@ -18,16 +19,15 @@ import re
 import subprocess
 import sys
 
-VENDORS = r"anthropic|claude|openai|chatgpt|gpt-\d|codex|copilot|gemini|cursor ?agent|devin"
+BANNED = r"anthropic|claude"
 PATTERNS = [
-    # Co-author trailers naming an assistant or a vendor noreply address.
-    re.compile(rf"^\s*co-authored-by:.*({VENDORS})", re.I),
-    # "Generated with …" footers and assistant links.
-    re.compile(r"generated (with|by) \[?(claude|chatgpt|codex|copilot|gemini|cursor)", re.I),
-    re.compile(r"🤖\s*generated", re.I),
+    # Co-author trailers naming Claude or an Anthropic noreply address.
+    re.compile(rf"^\s*co-authored-by:.*({BANNED})", re.I),
+    # "Generated with Claude Code" footers and Claude links.
+    re.compile(rf"generated (with|by) \[?({BANNED})", re.I),
     re.compile(r"claude\.(ai|com)/(code|claude-code)", re.I),
 ]
-VENDOR_EMAIL = re.compile(r"noreply@(anthropic|openai)\.com", re.I)
+VENDOR_EMAIL = re.compile(r"noreply@anthropic\.com", re.I)
 
 
 def offending_lines(text):
@@ -65,7 +65,7 @@ def main():
             text = "\n".join(l for l in text.splitlines() if not l.startswith("#"))
         problems = offending_lines(text)
     if problems:
-        print("Remove AI-assistant/vendor attribution (public repository):", file=sys.stderr)
+        print("Remove Claude/Anthropic attribution (public repository):", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1

@@ -1810,7 +1810,6 @@ struct ActiveChatRow {
     chat: harness_proto::Chat,
     folder: String,
     branch: Option<String>,
-    change_request: Option<harness_proto::ChangeRequestSummary>,
     group: Option<(String, String)>,
 }
 
@@ -1888,7 +1887,6 @@ enum SidebarViewRow {
     LastUpdated,
     Created,
     ShowBranch,
-    ShowPullRequest,
     ShowHarness,
 }
 
@@ -1904,16 +1902,15 @@ impl SidebarViewRow {
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..10)];
+    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..9)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 9] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
     SidebarViewRow::ShowBranch,
-    SidebarViewRow::ShowPullRequest,
     SidebarViewRow::ShowHarness,
     SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
@@ -3106,13 +3103,6 @@ impl Shell {
             SidebarViewRow::ShowBranch => {
                 self.settings.sidebar_show_branch = !self.settings.sidebar_show_branch
             }
-            SidebarViewRow::ShowPullRequest => {
-                self.settings.sidebar_show_pull_request = !self.settings.sidebar_show_pull_request;
-                let visible = self.settings.sidebar_show_pull_request;
-                self.state.update(cx, |state, cx| {
-                    state.set_change_requests_visible(visible, cx)
-                });
-            }
             SidebarViewRow::ShowHarness => {
                 self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness
             }
@@ -3272,7 +3262,6 @@ impl Shell {
         let sort = self.settings.sidebar_sort;
         let show_harness = self.settings.sidebar_show_harness;
         let show_branch = self.settings.sidebar_show_branch;
-        let show_pr = self.settings.sidebar_show_pull_request;
 
         let labels = [
             "By device",
@@ -3281,7 +3270,6 @@ impl Shell {
             "Last updated",
             "Created",
             "Branch",
-            "Pull request",
             "Harness",
             "Project icon",
             "Location",
@@ -3293,7 +3281,6 @@ impl Shell {
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
             icons::GIT_BRANCH,
-            icons::PULL_REQUEST,
             icons::BOT,
             icons::PROJECT_DEFAULT,
             icons::FOLDER,
@@ -3305,7 +3292,6 @@ impl Shell {
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
             show_branch,
-            show_pr,
             show_harness,
             self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
@@ -4140,10 +4126,6 @@ impl Shell {
             .filter(|b| !b.is_empty())
             .map(str::to_string)
             .filter(|_| self.settings.sidebar_show_branch);
-        let change_request = state
-            .change_request_for_chat(&chat)
-            .cloned()
-            .filter(|_| self.settings.sidebar_show_pull_request);
         let group = match self.settings.sidebar_organization {
             SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
             SidebarOrganization::ByProject => Some((
@@ -4159,7 +4141,6 @@ impl Shell {
             chat: chat.clone(),
             folder,
             branch,
-            change_request,
             group,
         }
     }
@@ -4225,7 +4206,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     row.branch.is_some(),
-                    row.change_request.is_some(),
+                    false,
                 )
             })
             .collect();
@@ -4306,7 +4287,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     rows[index].branch.is_some(),
-                    rows[index].change_request.is_some(),
+                    false,
                 );
                 // Move the vacant slot to the destination instead of keeping two
                 // holes. Sample layout and paint with the same reversible easing.
@@ -4406,7 +4387,6 @@ impl Shell {
                     chat,
                     folder,
                     branch,
-                    change_request,
                     group: _,
                 } = row;
                 let time_ago: SharedString =
@@ -4421,7 +4401,7 @@ impl Shell {
                     self.settings.sidebar_compact,
                     self.settings.sidebar_show_project_label,
                     branch.is_some(),
-                    change_request.is_some(),
+                    false,
                 );
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
@@ -4431,9 +4411,7 @@ impl Shell {
                     (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
                 } else {
                     None
-                }
-                // Open in another split pane: badge the row with that pane.
-                .or_else(|| self.peer_pane_badge(&chat.id));
+                };
                 let drag = (self.pinned_open || slot >= pinned_count)
                     .then(|| {
                         profile_key.as_ref().map(|profile_key| SidebarSessionDrag {
@@ -4477,7 +4455,7 @@ impl Shell {
                     time_ago,
                     folder.into(),
                     branch.map(SharedString::from),
-                    change_request,
+                    None,
                     harness,
                     status,
                     is_selected,
@@ -4881,7 +4859,7 @@ impl Shell {
                         self.settings.sidebar_compact,
                         self.settings.sidebar_show_project_label,
                         row.branch.is_some(),
-                        row.change_request.is_some(),
+                        false,
                     )
                 })
                 .sum::<f32>()
@@ -4939,7 +4917,7 @@ impl Shell {
                             .into(),
                         row.folder.into(),
                         row.branch.map(SharedString::from),
-                        row.change_request,
+                        None,
                         harness,
                         row.status,
                         is_selected,

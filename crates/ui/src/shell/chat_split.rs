@@ -11,6 +11,8 @@
 use super::*;
 use crate::pickers::CanvasDraft;
 
+mod opening;
+
 /// Every pane holds another engine doc watch; Ghostty-scale grids aren't
 /// the point of a chat column.
 pub(super) const MAX_CHAT_PANES: usize = 8;
@@ -351,44 +353,6 @@ impl Shell {
             .is_none_or(|s| s.axis == axis && s.panes.len() < MAX_CHAT_PANES)
     }
 
-    /// Split and show `open` in the new, focused pane (`None` = a fresh
-    /// new-session canvas, Ghostty's new surface).
-    pub(super) fn split_chat_opening(
-        &mut self,
-        axis: SplitAxis,
-        open: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !matches!(self.route, Route::Chat) {
-            return;
-        }
-        // A split is always a split, however narrow (Ghostty's rule): ⌘T is
-        // the way to a tab. Turning a narrow ⌘D into a tab read as panes
-        // jumping into tabs of their own (user report, 2026-09-26).
-        let selected = self.state.read(cx).selected_chat.clone();
-        // Dragging the chat you are in moves it; the pane it leaves empties.
-        let parked = selected.clone().filter(|id| open.as_ref() != Some(id));
-        let project = self.settings.space_filter.clone();
-        let draft = self.current_canvas_draft(cx);
-        // Split a copy: a refused split (at the cap, or across axes) must
-        // leave the existing layout alone, not drop every pane.
-        let Some(mut split) = ChatSplit::split(self.chat_split.clone(), axis, parked, project) else {
-            return;
-        };
-        // The pane left behind keeps its picks, and a fresh canvas starts
-        // from them — never from whichever canvas was picked in last.
-        split.drafts[split.focus - 1] = Some(draft.clone());
-        self.chat_split = Some(split);
-        self.chat_split_selected = None;
-        let fresh = open.is_none();
-        self.state.update(cx, |s, cx| s.select_chat(open, cx));
-        self.adopt_canvas_draft(fresh.then_some(draft), cx);
-        self.sync_chat_panes(cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
-        cx.notify();
-    }
-
     pub(super) fn focus_chat_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.state.read(cx).selected_chat.clone();
         let draft = self.current_canvas_draft(cx);
@@ -457,8 +421,28 @@ impl Shell {
         }
     }
 
-    /// ⌘W with a split open closes the focused pane (not the window).
+    /// ⌘W with a split open closes the focused pane (not the window); with
+    /// one pane left it closes the tab. Either can archive the closed session
+    /// ([`Shell::archive_closed_session`]).
     pub(crate) fn close_focused_chat_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.close_focused_chat_pane_archiving(window, cx).0
+    }
+
+    /// [`Self::close_focused_chat_pane`], plus what it did to the session.
+    pub(super) fn close_focused_chat_pane_archiving(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, Option<super::chat_tabs::CloseArchive>) {
+        let closing = self.state.read(cx).selected_chat.clone();
+        let closed = self.close_focused_chat_view(window, cx);
+        let archive = closing
+            .filter(|_| closed)
+            .map(|chat_id| self.archive_closed_session(chat_id, cx));
+        (closed, archive)
+    }
+
+    fn close_focused_chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.chat_split_active() {
             // One pane left: close its tab while others remain.
             return self.close_chat_tab(window, cx);
@@ -831,20 +815,6 @@ fn space_label(space: &harness_proto::Space) -> String {
 }
 
 impl Shell {
-    /// The pane glyph for a chat open in an UNFOCUSED pane (sidebar badge).
-    pub(super) fn peer_pane_badge(&self, chat_id: &str) -> Option<SharedString> {
-        let split = self.chat_split.as_ref().filter(|s| !s.zoomed)?;
-        if !matches!(self.route, Route::Chat) {
-            return None;
-        }
-        let ix = split
-            .panes
-            .iter()
-            .enumerate()
-            .position(|(ix, pane)| ix != split.focus && pane.as_deref() == Some(chat_id))?;
-        Some(pane_glyph(split.axis, ix, split.panes.len()).into())
-    }
-
     /// A strip of mini cards mirroring the split above the session list:
     /// each shows its pane's session and workspace (project), the focused
     /// one lit. Click a card to move into that pane. Hovering the strip eases

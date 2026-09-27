@@ -888,6 +888,18 @@ struct RightTabDrag {
     workspace_path: Option<WorkspacePathDrag>,
 }
 
+/// Fixed surface-tab chip slot — the terminal drawer's drag mechanics
+/// (drop-index quantisation + slide offsets) assume uniform widths.
+const RIGHT_TAB_CHIP_W: f32 = 112.0;
+const RIGHT_TAB_CHIP_SLOT: f32 = RIGHT_TAB_CHIP_W + 4.0; // + the strip's own gap
+/// A dragged tab near either end of an overflowing strip scrolls it: the
+/// band's width, and the per-frame step at (or past) the strip's edge.
+const RIGHT_TAB_DRAG_SCROLL_BAND: f32 = 40.0;
+const RIGHT_TAB_DRAG_SCROLL_MAX: f32 = 12.0;
+/// How far above or below the strip the pointer may stray and still scroll
+/// it; further down it is aiming at the pane (a file drop onto the chat).
+const RIGHT_TAB_DRAG_SCROLL_SLACK_Y: f32 = 16.0;
+
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
 /// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
 /// slide-animation restarts as the hovered slot changes.
@@ -896,6 +908,29 @@ struct RightTabDragState {
     over: usize,
     epoch: usize,
     prev_over: usize,
+    /// Edge autoscroll: the pointer's x while level with the strip, the
+    /// strip's visible x-range, and its tab count at the last move.
+    pointer_x: Option<f32>,
+    viewport: (f32, f32),
+    count: usize,
+    generation: u64,
+    autoscroll: bool,
+}
+
+/// Per-frame horizontal scroll for a tab dragged at `pointer_x` over a strip
+/// spanning `left..right`: negative toward the start, zero outside the bands.
+fn right_tab_drag_scroll_delta(pointer_x: f32, left: f32, right: f32) -> f32 {
+    if right <= left {
+        return 0.0;
+    }
+    let band = RIGHT_TAB_DRAG_SCROLL_BAND.min((right - left) / 3.0);
+    if pointer_x < left + band {
+        -RIGHT_TAB_DRAG_SCROLL_MAX * ((left + band - pointer_x) / band).clamp(0.0, 1.0)
+    } else if pointer_x > right - band {
+        RIGHT_TAB_DRAG_SCROLL_MAX * ((pointer_x - (right - band)) / band).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Sidebar-only drag payload. Regular sessions never acquire a manual order.
@@ -1641,6 +1676,8 @@ pub struct Shell {
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
     /// In-flight surface-tab drag (slide animation state).
     right_tab_drag: Option<RightTabDragState>,
+    /// Bumped per surface-tab drag, so a stale autoscroll loop stops.
+    right_tab_drag_generation: u64,
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
@@ -1946,9 +1983,8 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
-        state.update(cx, |state, cx| {
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
-        });
+        // PR metadata remains available in the composer and command palette.
+        state.update(cx, |state, cx| state.set_change_requests_visible(true, cx));
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
@@ -2061,6 +2097,7 @@ impl Shell {
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
+            right_tab_drag_generation: 0,
             right_tab_scroll: gpui::ScrollHandle::new(),
             route,
             nav,
@@ -2821,15 +2858,119 @@ impl Shell {
             }
             Some(_) => {}
             None => {
+                self.right_tab_drag_generation = self.right_tab_drag_generation.wrapping_add(1);
                 self.right_tab_drag = Some(RightTabDragState {
                     from,
                     over,
                     epoch: 0,
                     prev_over: from,
+                    pointer_x: None,
+                    viewport: (0.0, 0.0),
+                    count: 0,
+                    generation: self.right_tab_drag_generation,
+                    autoscroll: false,
                 });
                 cx.notify();
             }
         }
+    }
+
+    /// A surface-tab drag released over the strip: move it to its drop slot.
+    fn drop_right_tab(&mut self, payload: &RightTabDrag, cx: &mut Context<Self>) {
+        let over = self.right_tab_drag.take().map(|drag| drag.over);
+        if payload.panel_key != self.panel_key(cx) {
+            cx.notify();
+            return;
+        }
+        self.reorder_right_tabs(payload.from, over.unwrap_or(payload.from), cx);
+        cx.notify();
+    }
+
+    /// A surface-tab drag moved over the strip at `bounds`: retarget its drop
+    /// slot, and start scrolling when it nears an end of an overflowing strip
+    /// so every slot is reachable, not just the visible ones.
+    fn track_right_tab_drag(
+        &mut self,
+        from: usize,
+        pointer: Point<Pixels>,
+        bounds: gpui::Bounds<Pixels>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let (x, left, right) = (
+            f32::from(pointer.x),
+            f32::from(bounds.left()),
+            f32::from(bounds.right()),
+        );
+        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
+        let over =
+            crate::terminal::panel::drop_index(x - left + scrolled, RIGHT_TAB_CHIP_SLOT, count);
+        self.update_right_tab_drag_over(from, over, cx);
+        let y = f32::from(pointer.y);
+        let level = y >= f32::from(bounds.top()) - RIGHT_TAB_DRAG_SCROLL_SLACK_Y
+            && y <= f32::from(bounds.bottom()) + RIGHT_TAB_DRAG_SCROLL_SLACK_Y;
+        let Some(drag) = self.right_tab_drag.as_mut() else {
+            return;
+        };
+        drag.pointer_x = level.then_some(x);
+        drag.viewport = (left, right);
+        drag.count = count;
+        if level && right_tab_drag_scroll_delta(x, left, right) != 0.0 && !drag.autoscroll {
+            drag.autoscroll = true;
+            let generation = drag.generation;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(SIDEBAR_DRAG_SCROLL_FRAME_MS))
+                        .await;
+                    let keep_running = this
+                        .update(cx, |shell, cx| {
+                            shell.right_tab_autoscroll_tick(generation, cx)
+                        })
+                        .unwrap_or(false);
+                    if !keep_running {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// One frame of edge autoscroll; false ends the loop.
+    fn right_tab_autoscroll_tick(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.right_tab_drag.as_mut() else {
+            return false;
+        };
+        if drag.generation != generation {
+            return false;
+        }
+        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
+        let max_scroll = f32::from(self.right_tab_scroll.max_offset().x).max(0.0);
+        let (left, right) = drag.viewport;
+        let next = drag.pointer_x.filter(|_| cx.has_active_drag()).map(|x| {
+            (scrolled + right_tab_drag_scroll_delta(x, left, right)).clamp(0.0, max_scroll)
+        });
+        let (Some(x), Some(next)) = (drag.pointer_x, next) else {
+            drag.autoscroll = false;
+            return false;
+        };
+        if next == scrolled {
+            drag.autoscroll = false;
+            return false;
+        }
+        let offset = self.right_tab_scroll.offset();
+        self.right_tab_scroll
+            .set_offset(gpui::point(px(-next), offset.y));
+        let over =
+            crate::terminal::panel::drop_index(x - left + next, RIGHT_TAB_CHIP_SLOT, drag.count);
+        if drag.over != over {
+            drag.prev_over = drag.over;
+            drag.over = over;
+            drag.epoch += 1;
+        }
+        cx.notify();
+        true
     }
 
     /// The surface that actually renders: the stored pick when it still
@@ -3361,6 +3502,7 @@ impl Shell {
                 reasoning,
                 // The project was just picked above.
                 target: None,
+                input: None,
             }),
             cx,
         );
@@ -3942,6 +4084,7 @@ impl Shell {
                 target.skill_completion_by_harness = current.skill_completion_by_harness.clone();
             }
             target.skills_in_slash_menu = current.skills_in_slash_menu;
+            target.archive_sessions_on_close = current.archive_sessions_on_close;
         });
     }
 
@@ -6117,6 +6260,9 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
+        // This renderer is shared with palette results; PR badges belong there,
+        // not in session rows in the sidebar (including drag previews).
+        let change_request = change_request.filter(|_| search_query.is_some());
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let remote = self
@@ -6573,32 +6719,15 @@ impl Shell {
                         },
                     )
                     .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            }
-                        }))
-                    })
-                    .when(compact, |el| {
                         el.child(
                             div()
                                 .debug_selector({
                                     let id = id.clone();
                                     move || format!("chat-time-{id}")
                                 })
-                                .w(px(30.0))
+                                // Fit the timestamp; add 6px to the compact row's
+                                // 4px gap for 10px of separation from the title.
+                                .ml(px(6.0))
                                 .flex_none()
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
@@ -6607,8 +6736,8 @@ impl Shell {
                         )
                     }),
             )
-            // Line 3 is structural, not reserved whitespace: compact states
-            // omit it completely when both Branch and Pull request are hidden.
+            // Line 3 is structural, not reserved whitespace: sidebar rows
+            // omit it completely when the branch is hidden.
             .when(!compact && shows_metadata, |row| {
                 row.child(
                     div()
@@ -7183,8 +7312,9 @@ impl Shell {
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
         // A chat split adds a strip of pane cards above the list.
-        let chat_tabs = self.render_chat_tabs(theme, cx);
-        let pane_strip = self.render_pane_strip(theme, cx);
+        // With tabs, the strip moves under its own tab (taken below).
+        let mut pane_strip = self.render_pane_strip(theme, cx);
+        let chat_tabs = self.render_chat_tabs(theme, &mut pane_strip, cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
@@ -9528,10 +9658,8 @@ impl Shell {
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
     pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        /// Fixed chip slot — the terminal drawer's drag mechanics (drop-index
-        /// quantisation + slide offsets) assume uniform widths.
-        const CHIP_W: f32 = 112.0;
-        const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
+        const CHIP_W: f32 = RIGHT_TAB_CHIP_W;
+        const CHIP_SLOT: f32 = RIGHT_TAB_CHIP_SLOT;
 
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
@@ -9558,9 +9686,9 @@ impl Shell {
         // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
         // relative min_w_0 region below; drop math runs in CONTENT
         // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
         let mut strip = div()
             .id("right-surface-strip")
+            .debug_selector(|| "right-surface-strip".into())
             .flex()
             .flex_row()
             .items_center()
@@ -9579,27 +9707,12 @@ impl Shell {
                         return;
                     }
                     let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
-                    this.update_right_tab_drag_over(from, over, cx);
+                    this.track_right_tab_drag(from, event.event.position, event.bounds, count, cx);
                 },
             ))
-            .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
-                if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
-                    return;
-                }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
-                this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
-            }));
+            .on_drop::<RightTabDrag>(
+                cx.listener(|this, payload: &RightTabDrag, _, cx| this.drop_right_tab(payload, cx)),
+            );
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
@@ -9711,6 +9824,12 @@ impl Shell {
                         this.close_right_surface(surface, window, cx);
                     }),
                 )
+                // The chip blocks the strip's hitbox behind it, so the strip's
+                // own drop only sees the gaps: land drops on a chip here.
+                .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, _, cx| {
+                    cx.stop_propagation();
+                    this.drop_right_tab(payload, cx)
+                }))
                 .when(crate::click_activation_drag_enabled(), |el| {
                     el.on_drag(
                         RightTabDrag {
@@ -9872,6 +9991,11 @@ impl Shell {
             ))
             .on_hover(motion::hover_listener(plus_fade))
             .block_mouse_except_scroll()
+            // Past the last tab: a drop here lands in the last slot.
+            .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, _, cx| {
+                cx.stop_propagation();
+                this.drop_right_tab(payload, cx)
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {
@@ -13150,6 +13274,86 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn closing_a_pane_archives_its_session_only_when_it_should(cx: &mut TestAppContext) {
+        use chat_tabs::CloseArchive;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let chat = |id: &str| harness_proto::Chat {
+                    id: id.into(),
+                    device_id: "local".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: None,
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    parent_chat_id: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.chats = vec![chat("a"), chat("idle"), chat("busy")];
+                    state.select_chat(Some("a".into()), cx);
+                    state.begin_pending_send("busy", "m1", Utc::now());
+                });
+                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Off);
+                settings::set_archive_sessions_on_close(true, cx);
+                // A render syncs the Settings page's pick into the shell's copy.
+                shell.sync_independent_settings(cx);
+                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
+                // ⌘D parks "a" in the pane to the left: still open there.
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
+                assert_eq!(shell.archive_closed_session("busy".into(), cx), CloseArchive::Running);
+                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Archived);
+                // ⌘W on "a"'s pane: nothing else shows it, so it is archived.
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(
+                    shell.close_focused_chat_pane_archiving(window, cx),
+                    (true, Some(CloseArchive::Archived))
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn split_canvases_keep_their_own_project(cx: &mut TestAppContext) {
         use harness_proto::HarnessId;
         let dir = tempfile::tempdir().unwrap();
@@ -13225,6 +13429,11 @@ mod exit_regressions {
                 // ⌘D from the harness chat, then pick folio in the new pane.
                 shell.split_chat(SplitAxis::Horizontal, window, cx);
                 assert!(shell.state.read(cx).selected_chat.is_none());
+                assert_eq!(
+                    project(shell, cx).as_deref(),
+                    Some("harness"),
+                    "⌘D starts the new session in the chat's folder (#25)"
+                );
                 shell
                     .state
                     .update(cx, |state, cx| state.select_space(Some("folio".into()), cx));
@@ -13244,6 +13453,231 @@ mod exit_regressions {
                 assert_eq!(project(shell, cx).as_deref(), Some("harness"));
                 shell.switch_chat_tab(0, window, cx);
                 assert_eq!(project(shell, cx).as_deref(), Some("folio"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn dragging_a_chat_tab_onto_another_moves_it_and_is_saved(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        // Render just the production tab list, like the right-strip tests.
+        struct ChatTabHost {
+            shell: Entity<Shell>,
+            _data_dir: tempfile::TempDir,
+        }
+        impl Render for ChatTabHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                self.shell.update(cx, |shell, cx| {
+                    let mut strip = Some(
+                        div()
+                            .debug_selector(|| "pane-strip-under-tab".into())
+                            .h(px(20.))
+                            .into_any_element(),
+                    );
+                    div()
+                        .w(px(260.))
+                        .children(shell.render_chat_tabs(&theme, &mut strip, cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        codegraff_client_id: None,
+                        default_harness: harness_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.boot_restored = true;
+                shell.new_chat_tab(None, window, cx);
+                shell.new_chat_tab(None, window, cx);
+                assert_eq!((shell.chat_tabs.len(), shell.chat_tab), (3, 2));
+                shell
+            });
+            ChatTabHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("chat-tab-0").unwrap().center();
+        let target = cx.debug_bounds("chat-tab-2").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(0.), px(8.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            // The lit tab (was last) shifts up one as the first moves below it.
+            assert_eq!(shell.chat_tab, 1);
+            assert_eq!(shell.settings.chat_tabs.len(), 3);
+            assert_eq!(shell.settings.chat_tab, 1);
+        });
+        // The lit tab's pane cards sit under it, not under the last tab (#26).
+        cx.update(|window, cx| window.draw(cx).clear());
+        let strip = cx.debug_bounds("pane-strip-under-tab").unwrap();
+        let lit = cx.debug_bounds("chat-tab-1").unwrap();
+        let next = cx.debug_bounds("chat-tab-2").unwrap();
+        assert!(strip.top() >= lit.bottom() && strip.bottom() <= next.top());
+    }
+
+    #[gpui::test]
+    fn cmd_d_under_all_projects_keeps_the_chats_folder(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let space = |id: &str| harness_proto::Space {
+                    id: id.into(),
+                    device_id: "local".into(),
+                    path: format!("/p/{id}"),
+                    name: None,
+                    git_detected: false,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    created_at: Utc::now(),
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![space("harness"), space("folio")]);
+                    state.chats = vec![harness_proto::Chat {
+                        id: "folio-chat".into(),
+                        device_id: "local".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        parent_chat_id: None,
+                        space_id: Some("folio".into()),
+                        last_seen_at: None,
+                        room_gen: None,
+                    }];
+                    state.select_chat(Some("folio-chat".into()), cx);
+                });
+                shell.set_space_filter(None, cx);
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("folio"),
+                    "⌘D starts the new session in the chat's folder (#25)"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_new_pane_or_tab_starts_without_the_unsent_prompt(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let text = |shell: &Shell, cx: &App| shell.composer.read(cx).canvas_input(cx).text;
+                shell
+                    .composer
+                    .update(cx, |composer, cx| composer.prefill("unsent idea".into(), cx));
+                assert_eq!(text(shell, cx), "unsent idea");
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(text(shell, cx), "", "a ⌘D pane opened with the draft (#28)");
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(text(shell, cx), "unsent idea", "the draft stays in its pane");
+                shell.new_chat_tab(None, window, cx);
+                assert_eq!(text(shell, cx), "", "a ⌘T tab opened with the draft (#28)");
+                shell.switch_chat_tab(0, window, cx);
+                assert_eq!(text(shell, cx), "unsent idea", "the draft stays in its tab");
             })
             .unwrap();
     }
@@ -13348,6 +13782,7 @@ mod exit_regressions {
                         model: Some("gpt-6-sol".into()),
                         reasoning: Some(ReasoningLevel::Low),
                         target: None,
+                        input: None,
                     }),
                     cx,
                 );
@@ -14141,6 +14576,93 @@ mod right_tab_mouse_regressions {
                 "tab strip did not scroll"
             );
         });
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_to_the_strip_edge_reaches_slots_past_the_fold(cx: &mut TestAppContext) {
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            for id in ["third", "fourth", "fifth", "sixth", "seventh", "eighth"] {
+                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                shell.right_tab_scroll.max_offset().x > px(0.),
+                "strip must overflow"
+            );
+        });
+        let strip = cx.debug_bounds("right-surface-strip").unwrap();
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let edge = gpui::point(strip.right() - px(2.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
+        // Hold at the edge until the strip has scrolled all the way.
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.right_tab_scroll.offset().x,
+                -shell.right_tab_scroll.max_offset().x,
+                "holding at the edge did not scroll to the end"
+            );
+        });
+        cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            let tabs = &shell.right_tabs[&shell.panel_key(cx)];
+            assert_eq!(tabs.last(), Some(&RightSurface::Subagent(1)));
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_a_tab_on_a_neighbor_reorders(cx: &mut TestAppContext) {
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let target = cx.debug_bounds("right-surface-tab-1").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            let tabs = &shell.right_tabs[&shell.panel_key(cx)];
+            assert_eq!(tabs.last(), Some(&RightSurface::Subagent(1)));
+        });
+    }
+
+    #[test]
+    fn tab_drag_scroll_speeds_up_toward_and_past_the_edges() {
+        let (left, right) = (100.0, 700.0);
+        assert_eq!(right_tab_drag_scroll_delta(400.0, left, right), 0.0);
+        let near_end = right_tab_drag_scroll_delta(right - 10.0, left, right);
+        let at_end = right_tab_drag_scroll_delta(right, left, right);
+        assert!(near_end > 0.0 && near_end < at_end);
+        assert_eq!(at_end, RIGHT_TAB_DRAG_SCROLL_MAX);
+        assert_eq!(
+            right_tab_drag_scroll_delta(right + 50.0, left, right),
+            RIGHT_TAB_DRAG_SCROLL_MAX
+        );
+        assert_eq!(
+            right_tab_drag_scroll_delta(left - 50.0, left, right),
+            -RIGHT_TAB_DRAG_SCROLL_MAX
+        );
+        assert_eq!(right_tab_drag_scroll_delta(400.0, 700.0, 700.0), 0.0);
     }
 
     #[gpui::test]

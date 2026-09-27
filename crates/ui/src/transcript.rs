@@ -85,6 +85,16 @@ const MAX_PENDING_QUEUED_TURNS: usize = 256;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
+
+/// Each row's side gutter: the full 48px in a roomy column, narrowing in
+/// slim split panes so three side by side don't spend most of their width on
+/// margins, down to a compact 12px beside a divider.
+fn row_gutter(viewport_width: f32) -> f32 {
+    if viewport_width <= 0.0 {
+        return 48.0;
+    }
+    (viewport_width * 0.06).clamp(12.0, 48.0)
+}
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
 /// Rows stack without a gap so the rail continues alongside expanded output.
@@ -3348,6 +3358,8 @@ pub struct Transcript {
     /// identity, so the virtual list must explicitly discard cached heights.
     typography_generation: u32,
     content_width: f32,
+    /// Rows' side gutter for the list's current width ([`row_gutter`]).
+    row_gutter: f32,
     /// Last global code-fence layout generation applied to this transcript.
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
@@ -3628,6 +3640,7 @@ impl Transcript {
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
+            row_gutter: row_gutter(0.0),
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
@@ -6556,6 +6569,17 @@ impl Transcript {
     }
 
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // A pending question owns the surface, even if the run still streams
+        // or a steer follows it. Check this pane's doc, not the focused chat:
+        // live split panes and subagent tabs bypass the session-row path.
+        let state = self.state.read(cx);
+        let entries = match &self.doc_override {
+            Some(doc_id) => state.sub_transcript(doc_id),
+            None => &state.transcript,
+        };
+        if crate::composer::pending_input_request(entries).is_some() {
+            return None;
+        }
         let now = chrono::Utc::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
@@ -6601,12 +6625,6 @@ impl Transcript {
             let (sending, queued, elapsed) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                    return None;
-                }
-                // A turn parked on a question waits on the user, not the agent.
-                // A steer can flip the status back to Working with the question
-                // still open; the QuestionPanel owns the surface then.
-                if crate::composer::pending_input_request(&state.transcript).is_some() {
                     return None;
                 }
                 // During the send→turn window the session row's `started_at`
@@ -7103,7 +7121,7 @@ impl Transcript {
             .pt(px(top_gap))
             .pb(px(bottom_pad))
             // Keep side gutters as the configurable column shrinks to fit.
-            .px(px(48.0))
+            .px(px(self.row_gutter))
             .child(
                 div()
                     .w_full()
@@ -9201,6 +9219,16 @@ impl Render for Transcript {
                 self.own_turn_kick = true;
             }
         }
+        // Gutters follow the pane's width. Read here: the list holds its
+        // state while it lays rows out, so a row can't ask for it.
+        let gutter = row_gutter(f32::from(self.list.viewport_bounds().size.width));
+        if (self.row_gutter - gutter).abs() > 0.5 {
+            self.row_gutter = gutter;
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+        }
         let typography_generation = crate::typography::generation(cx);
         if self.typography_generation != typography_generation {
             self.typography_generation = typography_generation;
@@ -9347,7 +9375,24 @@ impl Render for Transcript {
             // (document paint order = selection order; see markdown/render.rs).
             .child(crate::markdown::render::selection_frame_reset())
             .child(content)
-            .child(rail);
+            .child(rail)
+            // After the list lays out: a resize that changed the gutter asks
+            // for one more frame, where render picks the new width up.
+            .child({
+                let list = self.list.clone();
+                let used = self.row_gutter;
+                gpui::canvas(
+                    move |_, window, _| {
+                        let width = f32::from(list.viewport_bounds().size.width);
+                        if (row_gutter(width) - used).abs() > 0.5 {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0()
+            });
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -9378,6 +9423,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn side_gutters_narrow_with_the_pane() {
+        assert_eq!(row_gutter(0.0), 48.0, "unmeasured keeps the full gutter");
+        assert_eq!(row_gutter(1000.0), 48.0);
+        assert_eq!(row_gutter(800.0), 48.0);
+        assert!((row_gutter(400.0) - 24.0).abs() < 1e-4);
+        assert_eq!(row_gutter(200.0), 12.0);
+        assert_eq!(row_gutter(120.0), 12.0, "never tighter than 12px");
+    }
+
+    #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
         let mut shown = false;
         for distance in [500.0, 330.0, 319.0, 200.0, 100.0] {
@@ -9387,6 +9442,69 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn working_trailer_waits_for_this_panes_question(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let primary = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let peer = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), true, cx));
+            let frozen = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), false, cx));
+            let entries = |resolved, steer| {
+                let mut entries = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![MessagePart::Input {
+                        id: "input".into(),
+                        request_id: "question".into(),
+                        questions: vec![],
+                        resolved,
+                    }],
+                )];
+                if steer {
+                    let mut user = assistant("steer", MessageStatus::Complete, vec![]);
+                    user.role = MessageRole::User;
+                    entries.push(user);
+                }
+                entries
+            };
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.sessions.push(harness_proto::Session {
+                    chat_id: "chat".into(),
+                    device_id: "test".into(),
+                    status: harness_proto::SessionStatus::Working,
+                    started_at: Some(chrono::Utc::now()),
+                    updated_at: chrono::Utc::now(),
+                    last_completed_turn: None,
+                });
+            });
+            primary.update(cx, |this, _| this.chat_id = Some("chat".into()));
+            for steer in [false, true] {
+                for primary_resolved in [false, true] {
+                    for peer_resolved in [false, true] {
+                        state.update(cx, |state, _| {
+                            state.transcript = entries(primary_resolved, steer);
+                            state.set_subagent_snapshot("peer".into(), entries(peer_resolved, steer));
+                        });
+                        primary.update(cx, |this, cx| {
+                            assert_eq!(this.render_working_trailer(cx).is_some(), primary_resolved);
+                        });
+                        peer.update(cx, |this, cx| {
+                            assert_eq!(this.render_working_trailer(cx).is_some(), peer_resolved);
+                        });
+                        frozen.update(cx, |this, cx| {
+                            assert!(this.render_working_trailer(cx).is_none());
+                        });
+                    }
+                }
+            }
+        });
     }
 
     #[gpui::test]
@@ -12738,8 +12856,9 @@ mod tests {
                 assert!(this.list.logical_scroll_top().offset_in_item.abs() <= px(1.0));
                 let bounds = render::selection_test_bounds("reply#body.0:0");
                 assert!(
-                    bounds.size.width <= px(904.0),
-                    "content must fit a 1000px viewport with 48px gutters"
+                    bounds.origin.x == px(row_gutter(1000.0))
+                        && bounds.size.width <= px(1000.0 - 2.0 * row_gutter(1000.0)),
+                    "content must sit inside the viewport's gutters"
                 );
                 entries[0].parts.push(tool_part("live-tool", "pwd"));
                 transcript.update(cx, |this, cx| {

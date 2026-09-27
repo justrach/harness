@@ -446,6 +446,19 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+/// Whether closing a session's tab or pane archives it.
+pub fn archive_sessions_on_close(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.archive_sessions_on_close)
+        .unwrap_or_default()
+}
+
+pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.archive_sessions_on_close = enabled;
+    });
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -678,6 +691,18 @@ pub struct SavedChatLayout {
     pub projects: Vec<Option<String>>,
 }
 
+/// A chat tab as saved between launches (`shell/chat_tabs.rs`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedChatTab {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<SavedChatLayout>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -705,7 +730,6 @@ pub struct UiSettings {
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
-    pub sidebar_show_pull_request: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,6 +753,14 @@ pub struct UiSettings {
     /// The split chat layout at quit; launch restores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_layout: Option<SavedChatLayout>,
+    /// Closing a session's tab or pane also archives the session (off by
+    /// default). Quitting or closing the window never does.
+    pub archive_sessions_on_close: bool,
+    /// The chat tabs at quit (two or more), in order; launch restores them.
+    /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chat_tabs: Vec<SavedChatTab>,
+    pub chat_tab: usize,
     /// Custom sidebar organization, isolated between account profiles on this device.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
@@ -860,13 +892,15 @@ impl Default for UiSettings {
             sidebar_show_project_icon: true,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
-            sidebar_show_pull_request: true,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
             last_chat_id: None,
             chat_layout: None,
+            archive_sessions_on_close: false,
+            chat_tabs: Vec::new(),
+            chat_tab: 0,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sidebar_sections_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
@@ -2209,7 +2243,6 @@ mod tests {
             sidebar_show_project_label: false,
             sidebar_show_harness: false,
             sidebar_show_branch: false,
-            sidebar_show_pull_request: false,
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
@@ -2225,6 +2258,16 @@ mod tests {
                 shares: vec![0.4, 0.6],
                 projects: vec![Some("space-1".into()), None],
             }),
+            archive_sessions_on_close: true,
+            chat_tabs: vec![
+                SavedChatTab {
+                    selected: Some("a".into()),
+                    project: Some("space-1".into()),
+                    layout: None,
+                },
+                SavedChatTab::default(),
+            ],
+            chat_tab: 1,
             sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
