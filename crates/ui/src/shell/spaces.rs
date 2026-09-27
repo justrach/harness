@@ -4411,9 +4411,7 @@ impl Shell {
                     (slot < JUMP_SLOTS && !combo.is_empty()).then(|| badge_combo(combo).into())
                 } else {
                     None
-                }
-                // Open in another split pane: badge the row with that pane.
-                .or_else(|| self.peer_pane_badge(&chat.id));
+                };
                 let drag = (self.pinned_open || slot >= pinned_count)
                     .then(|| {
                         profile_key.as_ref().map(|profile_key| SidebarSessionDrag {
