@@ -85,6 +85,16 @@ const MAX_PENDING_QUEUED_TURNS: usize = 256;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
+
+/// Each row's side gutter: the full 48px in a roomy column, narrowing in
+/// slim split panes so three side by side don't spend most of their width on
+/// margins, down to a compact 12px beside a divider.
+fn row_gutter(viewport_width: f32) -> f32 {
+    if viewport_width <= 0.0 {
+        return 48.0;
+    }
+    (viewport_width * 0.06).clamp(12.0, 48.0)
+}
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
 /// Rows stack without a gap so the rail continues alongside expanded output.
@@ -3348,6 +3358,8 @@ pub struct Transcript {
     /// identity, so the virtual list must explicitly discard cached heights.
     typography_generation: u32,
     content_width: f32,
+    /// Rows' side gutter for the list's current width ([`row_gutter`]).
+    row_gutter: f32,
     /// Last global code-fence layout generation applied to this transcript.
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
@@ -3628,6 +3640,7 @@ impl Transcript {
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
+            row_gutter: row_gutter(0.0),
             code_fences_generation: crate::settings::code_fences_generation(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
@@ -7102,8 +7115,8 @@ impl Transcript {
             .justify_center()
             .pt(px(top_gap))
             .pb(px(bottom_pad))
-            // Keep compact side gutters as the configurable column shrinks to fit.
-            .px(px(12.0))
+            // Keep side gutters as the configurable column shrinks to fit.
+            .px(px(self.row_gutter))
             .child(
                 div()
                     .w_full()
@@ -9201,6 +9214,16 @@ impl Render for Transcript {
                 self.own_turn_kick = true;
             }
         }
+        // Gutters follow the pane's width. Read here: the list holds its
+        // state while it lays rows out, so a row can't ask for it.
+        let gutter = row_gutter(f32::from(self.list.viewport_bounds().size.width));
+        if (self.row_gutter - gutter).abs() > 0.5 {
+            self.row_gutter = gutter;
+            self.list.remeasure();
+            if self.pinned {
+                self.wake_spring();
+            }
+        }
         let typography_generation = crate::typography::generation(cx);
         if self.typography_generation != typography_generation {
             self.typography_generation = typography_generation;
@@ -9347,7 +9370,24 @@ impl Render for Transcript {
             // (document paint order = selection order; see markdown/render.rs).
             .child(crate::markdown::render::selection_frame_reset())
             .child(content)
-            .child(rail);
+            .child(rail)
+            // After the list lays out: a resize that changed the gutter asks
+            // for one more frame, where render picks the new width up.
+            .child({
+                let list = self.list.clone();
+                let used = self.row_gutter;
+                gpui::canvas(
+                    move |_, window, _| {
+                        let width = f32::from(list.viewport_bounds().size.width);
+                        if (row_gutter(width) - used).abs() > 0.5 {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0()
+            });
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -9376,6 +9416,16 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn side_gutters_narrow_with_the_pane() {
+        assert_eq!(row_gutter(0.0), 48.0, "unmeasured keeps the full gutter");
+        assert_eq!(row_gutter(1000.0), 48.0);
+        assert_eq!(row_gutter(800.0), 48.0);
+        assert!((row_gutter(400.0) - 24.0).abs() < 1e-4);
+        assert_eq!(row_gutter(200.0), 12.0);
+        assert_eq!(row_gutter(120.0), 12.0, "never tighter than 12px");
+    }
 
     #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
@@ -12738,8 +12788,9 @@ mod tests {
                 assert!(this.list.logical_scroll_top().offset_in_item.abs() <= px(1.0));
                 let bounds = render::selection_test_bounds("reply#body.0:0");
                 assert!(
-                    bounds.origin.x == px(12.0) && bounds.size.width <= px(976.0),
-                    "content must fit a 1000px viewport with compact 12px gutters"
+                    bounds.origin.x == px(row_gutter(1000.0))
+                        && bounds.size.width <= px(1000.0 - 2.0 * row_gutter(1000.0)),
+                    "content must sit inside the viewport's gutters"
                 );
                 entries[0].parts.push(tool_part("live-tool", "pwd"));
                 transcript.update(cx, |this, cx| {
