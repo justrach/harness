@@ -45,6 +45,12 @@ impl ArchivedPage {
         }
     }
 
+    fn toggle_archive_on_close(&mut self, cx: &mut Context<Self>) {
+        let enabled = crate::settings::archive_sessions_on_close(cx);
+        crate::settings::set_archive_sessions_on_close(!enabled, cx);
+        cx.notify();
+    }
+
     fn unarchive(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -90,6 +96,8 @@ impl popover::ScrollRailHost for ArchivedPage {
 impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        let accent = theme.accent;
+        let archive_sessions_on_close = crate::settings::archive_sessions_on_close(cx);
         let now = chrono::Utc::now();
         let (rows, device_names): (Vec<Chat>, std::collections::HashMap<String, String>) = {
             let state = self.state.read(cx);
@@ -322,36 +330,59 @@ impl Render for ArchivedPage {
                                 &theme,
                                 "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
                             ))
-                            .child({
-                                let on = crate::settings::archive_sessions_on_close(cx);
-                                widgets::card_row(&theme, true)
-                                    .child(widgets::row_tile(&theme, crate::icons::ARCHIVE_MINIMALISTIC))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(widgets::row_title(&theme, "Archive sessions when closing tabs"))
-                                            .child(widgets::meta_line(
-                                                &theme,
-                                                vec![
+                            .child(
+                                widgets::section_card(&theme).child(
+                                    widgets::card_row(&theme, true)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(widgets::row_title(
+                                                    &theme,
+                                                    "Archive sessions when closing tabs or panes",
+                                                ))
+                                                .child(
                                                     div()
-                                                        .child(SharedString::from(
-                                                            "Closing a session's tab or pane also archives it. A session that is still running, or open in another tab or pane, stays. Quitting never archives.",
-                                                        ))
-                                                        .into_any_element(),
-                                                ],
-                                            )),
-                                    )
-                                    .child(
-                                        widgets::toggle_switch(&theme, on)
-                                            .id("archive-on-close-toggle")
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                crate::settings::set_archive_sessions_on_close(!on, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                            })
+                                                        .mt(px(4.0))
+                                                        .text_size(crate::typography::ui_rems(12.0))
+                                                        .text_color(theme.text_muted)
+                                                        .child("Explicitly closing a session tab or pane archives it if idle, unless it is still open in another tab or pane in this app. Running sessions and sessions waiting for input remain in the sidebar. Closing the app or a window does not archive sessions."),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("archive-on-close-toggle")
+                                                .flex_none()
+                                                .size(px(40.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .role(gpui::Role::Switch)
+                                                .aria_label("Archive sessions when closing tabs or panes")
+                                                .aria_toggled(if archive_sessions_on_close {
+                                                    gpui::Toggled::True
+                                                } else {
+                                                    gpui::Toggled::False
+                                                })
+                                                .tab_index(0)
+                                                .focus_visible(move |style| style.border_2().border_color(accent))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.toggle_archive_on_close(cx);
+                                                }))
+                                                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                                    if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                        cx.stop_propagation();
+                                                        this.toggle_archive_on_close(cx);
+                                                    }
+                                                }))
+                                                .child(widgets::toggle_switch(
+                                                    &theme,
+                                                    archive_sessions_on_close,
+                                                )),
+                                        ),
+                                ),
+                            )
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
                                     widgets::error_strip(&theme, message)

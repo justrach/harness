@@ -738,8 +738,8 @@ pub struct UiSettings {
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
     /// Open session tabs in visual order (drag-reorder edits in place).
-    /// Device-local: a tab is a local viewport onto the synced session list —
-    /// closing one never archives the session. Ids of archived/deleted chats
+    /// Device-local: a tab is a local viewport onto the synced session list.
+    /// Ids of archived/deleted chats
     /// are pruned against the doc ([`Shell::sync_open_tabs`]). `None` = file
     /// written by a pre-tabs build; seeded once from the last space's sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -755,6 +755,7 @@ pub struct UiSettings {
     pub chat_layout: Option<SavedChatLayout>,
     /// Closing a session's tab or pane also archives the session (off by
     /// default). Quitting or closing the window never does.
+    #[serde(alias = "archiveSessionsOnTabClose")]
     pub archive_sessions_on_close: bool,
     /// The chat tabs at quit (two or more), in order; launch restores them.
     /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
@@ -1743,6 +1744,43 @@ mod tests {
                 .separate_from_slash
         );
         assert!(legacy.skill_completion(HarnessId::Codex).dollar);
+    }
+
+    #[test]
+    fn archive_sessions_on_close_defaults_off_and_persists() {
+        assert!(!UiSettings::default().archive_sessions_on_close);
+        let mut settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.archive_sessions_on_close);
+        let dir = tempfile::tempdir().unwrap();
+        for enabled in [true, false] {
+            settings.archive_sessions_on_close = enabled;
+            settings.save(dir.path()).unwrap();
+            assert_eq!(
+                UiSettings::load(dir.path()).archive_sessions_on_close,
+                enabled
+            );
+
+            // Earlier builds persisted the tab-only name. Load it, then write
+            // only the canonical key so the preference survives migration.
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                serde_json::json!({ "archiveSessionsOnTabClose": enabled }).to_string(),
+            )
+            .unwrap();
+            let migrated = UiSettings::load(dir.path());
+            assert_eq!(migrated.archive_sessions_on_close, enabled);
+            migrated.save(dir.path()).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(UiSettings::path(dir.path())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["archiveSessionsOnClose"], enabled);
+            assert!(saved.get("archiveSessionsOnTabClose").is_none());
+            assert_eq!(
+                UiSettings::load(dir.path()).archive_sessions_on_close,
+                enabled
+            );
+        }
     }
 
     #[test]

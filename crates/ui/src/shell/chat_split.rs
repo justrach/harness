@@ -438,7 +438,7 @@ impl Shell {
         let closed = self.close_focused_chat_view(window, cx);
         let archive = closing
             .filter(|_| closed)
-            .map(|chat_id| self.archive_closed_session(chat_id, cx));
+            .map(|chat_id| self.archive_closed_session(chat_id, window, cx));
         (closed, archive)
     }
 

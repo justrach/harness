@@ -13333,16 +13333,16 @@ mod exit_regressions {
                     state.select_chat(Some("a".into()), cx);
                     state.begin_pending_send("busy", "m1", Utc::now());
                 });
-                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Off);
+                assert_eq!(shell.archive_closed_session("idle".into(), window, cx), CloseArchive::Off);
                 settings::set_archive_sessions_on_close(true, cx);
                 // A render syncs the Settings page's pick into the shell's copy.
                 shell.sync_independent_settings(cx);
-                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
+                assert_eq!(shell.archive_closed_session("a".into(), window, cx), CloseArchive::StillOpen);
                 // ⌘D parks "a" in the pane to the left: still open there.
                 shell.split_chat(SplitAxis::Horizontal, window, cx);
-                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
-                assert_eq!(shell.archive_closed_session("busy".into(), cx), CloseArchive::Running);
-                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Archived);
+                assert_eq!(shell.archive_closed_session("a".into(), window, cx), CloseArchive::StillOpen);
+                assert_eq!(shell.archive_closed_session("busy".into(), window, cx), CloseArchive::Running);
+                assert_eq!(shell.archive_closed_session("idle".into(), window, cx), CloseArchive::Archived);
                 // ⌘W on "a"'s pane: nothing else shows it, so it is archived.
                 shell.focus_chat_pane(0, window, cx);
                 assert_eq!(
