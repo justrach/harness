@@ -435,6 +435,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             Some(description) => ("Agent", description.to_owned()),
             None if name.starts_with("Jev: ") => ("Jev", name[5..].to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
+            None if name == crate::COMPACTION_TOOL_NAME => ("Compact", "context".into()),
             None => agent_control(name).unwrap_or_else(|| ("Tool", name.clone())),
         },
     }

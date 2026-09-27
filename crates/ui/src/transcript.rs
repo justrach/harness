@@ -88,12 +88,12 @@ const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 
 /// Each row's side gutter: the full 48px in a roomy column, narrowing in
 /// slim split panes so three side by side don't spend most of their width on
-/// margins, and never tighter than 16px from a divider.
+/// margins, down to a compact 12px beside a divider.
 fn row_gutter(viewport_width: f32) -> f32 {
     if viewport_width <= 0.0 {
         return 48.0;
     }
-    (viewport_width * 0.06).clamp(16.0, 48.0)
+    (viewport_width * 0.06).clamp(12.0, 48.0)
 }
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
@@ -9423,7 +9423,8 @@ mod tests {
         assert_eq!(row_gutter(1000.0), 48.0);
         assert_eq!(row_gutter(800.0), 48.0);
         assert!((row_gutter(400.0) - 24.0).abs() < 1e-4);
-        assert_eq!(row_gutter(200.0), 16.0, "never tighter than 16px");
+        assert_eq!(row_gutter(200.0), 12.0);
+        assert_eq!(row_gutter(120.0), 12.0, "never tighter than 12px");
     }
 
     #[test]
@@ -12787,8 +12788,9 @@ mod tests {
                 assert!(this.list.logical_scroll_top().offset_in_item.abs() <= px(1.0));
                 let bounds = render::selection_test_bounds("reply#body.0:0");
                 assert!(
-                    bounds.size.width <= px(904.0),
-                    "content must fit a 1000px viewport with 48px gutters"
+                    bounds.origin.x == px(row_gutter(1000.0))
+                        && bounds.size.width <= px(1000.0 - 2.0 * row_gutter(1000.0)),
+                    "content must sit inside the viewport's gutters"
                 );
                 entries[0].parts.push(tool_part("live-tool", "pwd"));
                 transcript.update(cx, |this, cx| {
