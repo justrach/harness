@@ -8804,6 +8804,22 @@ impl Composer {
         let Some(question) = wizard.current().cloned() else {
             return gpui::Empty.into_any_element();
         };
+        // The shared editor may still carry the normal composer's fixed or
+        // animated viewport. The question panel has no height morph: let the
+        // editor auto-grow to its normal cap, then scroll longer answers.
+        self.input.update(cx, |input, cx| {
+            if input.viewport_height.is_some()
+                || input.settled_viewport_height.is_some()
+                || input.resizing
+                || input.overflow_top_padding != 0.0
+            {
+                input.viewport_height = None;
+                input.settled_viewport_height = None;
+                input.resizing = false;
+                input.overflow_top_padding = 0.0;
+                cx.notify();
+            }
+        });
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
@@ -10013,6 +10029,119 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         (dir, window)
+    }
+
+    #[gpui::test]
+    fn agent_question_answer_grows_and_scrolls(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        for width in [768.0, 320.0] {
+            handle
+                .update(cx, |composer, window, cx| {
+                    window.resize(size(px(width), px(1200.0)));
+                    composer.set_available_width(width, cx);
+                    composer.wizard = None;
+                    composer.state.update(cx, |state, _| {
+                        state.selected_chat = Some("question-chat".into());
+                    });
+                    composer.input.update(cx, |input, cx| input.set_text("", cx));
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer.wizard = Some(Wizard::new(
+                        "answer".into(),
+                        vec![question("answer", &[], false)],
+                    ));
+                    cx.notify();
+                })
+                .unwrap();
+            for answer in [
+                "A short answer".to_string(),
+                "A response that keeps wrapping while I type more words. ".repeat(4),
+                "First line\nSecond line\nThird line".to_string(),
+                "A longer answer with many lines to review.\n".repeat(40),
+            ] {
+                handle
+                    .update(cx, |composer, window, cx| {
+                        composer.input.update(cx, |input, cx| {
+                            input.set_text("", cx);
+                            input.replace_text_in_range(None, &answer, window, cx);
+                        });
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear();
+                })
+                .unwrap();
+                handle
+                    .read_with(cx, |composer, cx| {
+                        let input = composer.input.read(cx);
+                        let bounds = input.last_bounds.unwrap();
+                        let expected = input.content_height.min(TEXTAREA_MAX - TEXTAREA_PAD_V);
+                        assert!(
+                            (f32::from(bounds.size.height) - expected).abs() < 1.0,
+                            "answer must grow before scrolling at width {width}: {bounds:?}, content={}, expected={expected}",
+                            input.content_height
+                        );
+                        assert_eq!(input.text(), answer);
+                        let cursor_y =
+                            f32::from(input.cursor_point().unwrap().y) - input.scroll_top;
+                        assert!(
+                            cursor_y >= -1.0
+                                && cursor_y + f32::from(input.line_height) <= expected + 1.0,
+                            "the active answer line must remain visible"
+                        );
+                        assert!(
+                            f32::from(input.paint_bounds(bounds).size.height - bounds.size.height)
+                                .abs()
+                                < 1.0,
+                            "no stale composer animation may clip the answer"
+                        );
+                    })
+                    .unwrap();
+                for at_start in [true, false] {
+                    handle
+                        .update(cx, |composer, window, cx| {
+                            composer.input.update(cx, |input, cx| {
+                                if at_start {
+                                    input.doc_start(&DocStart, window, cx);
+                                } else {
+                                    input.doc_end(&DocEnd, window, cx);
+                                }
+                            });
+                        })
+                        .unwrap();
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    })
+                    .unwrap();
+                    handle
+                        .read_with(cx, |composer, cx| {
+                            let input = composer.input.read(cx);
+                            let height = f32::from(input.last_bounds.unwrap().size.height);
+                            let expected_scroll = if at_start {
+                                0.0
+                            } else {
+                                (input.content_height - height).max(0.0)
+                            };
+                            assert!(
+                                (input.scroll_top - expected_scroll).abs() < 1.0,
+                                "both ends of the answer must be reachable"
+                            );
+                        })
+                        .unwrap();
+                }
+            }
+        }
     }
 
     fn with_composer_input(
