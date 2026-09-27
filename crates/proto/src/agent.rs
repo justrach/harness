@@ -166,6 +166,10 @@ pub struct WorktreeSpec {
 /// life of a run.
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 
+/// The [`ToolCall::Unknown`] name of a context-compaction chip (ACP
+/// `compaction_update`). Its result output is the agent's summary.
+pub const COMPACTION_TOOL_NAME: &str = "Compact context";
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]

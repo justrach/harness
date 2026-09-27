@@ -1946,9 +1946,8 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
-        state.update(cx, |state, cx| {
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
-        });
+        // PR metadata remains available in the composer and command palette.
+        state.update(cx, |state, cx| state.set_change_requests_visible(true, cx));
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
@@ -6118,6 +6117,9 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
+        // This renderer is shared with palette results; PR badges belong there,
+        // not in session rows in the sidebar (including drag previews).
+        let change_request = change_request.filter(|_| search_query.is_some());
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let remote = self
@@ -6574,25 +6576,6 @@ impl Shell {
                         },
                     )
                     .when(compact, |el| {
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                                    theme,
-                                )
-                            }
-                        }))
-                    })
-                    .when(compact, |el| {
                         el.child(
                             div()
                                 .debug_selector({
@@ -6608,8 +6591,8 @@ impl Shell {
                         )
                     }),
             )
-            // Line 3 is structural, not reserved whitespace: compact states
-            // omit it completely when both Branch and Pull request are hidden.
+            // Line 3 is structural, not reserved whitespace: sidebar rows
+            // omit it completely when the branch is hidden.
             .when(!compact && shows_metadata, |row| {
                 row.child(
                     div()

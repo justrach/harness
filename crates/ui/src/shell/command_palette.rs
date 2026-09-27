@@ -404,11 +404,7 @@ impl Shell {
                     .map(str::trim)
                     .filter(|branch| !branch.is_empty())
                     .map(SharedString::from);
-                let pr = self
-                    .settings
-                    .sidebar_show_pull_request
-                    .then(|| state.change_request_for_chat(chat).cloned())
-                    .flatten();
+                let pr = state.change_request_for_chat(chat).cloned();
                 let harness = self
                     .settings
                     .sidebar_show_harness

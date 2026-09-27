@@ -95,6 +95,9 @@ pub fn hand_off_to_bundle(link: Option<&str>) -> bool {
 /// symlinks into the bundle / the app-managed graff, and refresh that managed
 /// graff from the bundle. Only links we own are ever replaced: an existing
 /// regular file or a foreign symlink (a user's own graff install) is left alone.
+/// A build outside an Applications folder (a dev bundle under `target/`) only
+/// fills missing or dead links, so it never takes the terminal commands away
+/// from the installed app.
 pub fn install_path_shims() {
     let Some(bundle) = app_bundle() else {
         return;
@@ -102,6 +105,7 @@ pub fn install_path_shims() {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
+    let installed = is_installed_app(&bundle, &home);
     let bin = home.join(".local").join("bin");
     let app_exe = bundle.join("Contents").join("MacOS").join("harness");
     let managed_graff = match harness_adapters::graff_bundle::seed_managed() {
@@ -118,7 +122,7 @@ pub fn install_path_shims() {
         return;
     }
     for (name, target) in links {
-        if let Err(err) = link_if_ours(&bin.join(name), &target) {
+        if let Err(err) = link_if_ours(&bin.join(name), &target, installed) {
             tracing::warn!("couldn't link {name} into {}: {err}", bin.display());
         }
     }
@@ -168,24 +172,35 @@ pub fn install_path_shims_and_auto_update_graff() {
     });
 }
 
+/// An app installed in `/Applications` or `~/Applications`, as opposed to a
+/// build run from wherever it was built.
+fn is_installed_app(bundle: &Path, home: &Path) -> bool {
+    bundle
+        .parent()
+        .is_some_and(|dir| dir == Path::new("/Applications") || dir == home.join("Applications"))
+}
+
 /// A link is ours when it points into a Harness `.app` or `~/.harness/bin`.
-fn link_if_ours(link: &Path, target: &Path) -> std::io::Result<()> {
+/// `replace_live` false keeps one of ours whose target still exists.
+fn link_if_ours(link: &Path, target: &Path, replace_live: bool) -> std::io::Result<()> {
     match std::fs::read_link(link) {
         Ok(current) if current == target => return Ok(()),
         Ok(current) => {
+            let live = link.exists();
             let current = current.to_string_lossy();
             let ours = (current.contains(".app/Contents/")
                 && (current.contains("Harness") || current.contains("harness")))
                 || current.contains("/.harness/bin/");
-            if !ours {
+            if !ours || (live && !replace_live) {
                 return Ok(());
             }
             std::fs::remove_file(link)?;
         }
-        // The old Codegraff GUI's launcher script is replaced only once the
-        // app it starts is gone; any other regular file stays untouched.
+        // The old Codegraff GUI's launcher script: Harness is the Codegraff
+        // desktop app now, so `codegraff` opens it. Any other regular file
+        // stays untouched.
         Err(_) if link.symlink_metadata().is_ok() => {
-            if !is_orphaned_codegraff_launcher(link) {
+            if !replace_live || !is_codegraff_launcher(link) {
                 return Ok(());
             }
             std::fs::remove_file(link)?;
@@ -202,19 +217,19 @@ fn link_if_ours(link: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
-/// `# Codegraff GUI terminal launcher` scripts name their app in `APP_BIN='…'`.
-fn is_orphaned_codegraff_launcher(path: &Path) -> bool {
-    let Ok(script) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    if !script.contains("# Codegraff GUI terminal launcher") {
+/// The launcher scripts the old Codegraff GUI wrote, under either header it
+/// has used.
+fn is_codegraff_launcher(path: &Path) -> bool {
+    const HEADERS: [&str; 2] = [
+        "# Codegraff GUI terminal launcher",
+        "# codegraff — open a path in the Codegraff desktop app",
+    ];
+    // The scripts are a few hundred bytes; don't read a large binary.
+    if std::fs::metadata(path).map_or(true, |meta| meta.len() > 4096) {
         return false;
     }
-    script
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("APP_BIN="))
-        .map(|value| value.trim_matches(|c| c == '\'' || c == '"'))
-        .is_some_and(|app| !Path::new(app).exists())
+    std::fs::read_to_string(path)
+        .is_ok_and(|script| HEADERS.iter().any(|header| script.contains(header)))
 }
 
 #[cfg(test)]
@@ -255,32 +270,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn codegraff_launcher_is_replaced_only_when_its_app_is_gone() {
+    fn installed_app_takes_over_both_codegraff_launcher_scripts() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("Harness.app/Contents/MacOS/harness");
-        let script = |app: &Path| {
-            format!(
-                "#!/bin/sh\n# Codegraff GUI terminal launcher\nAPP_BIN='{}'\n",
-                app.display()
-            )
-        };
-        let live_app = dir.path().join("Codegraff");
-        std::fs::write(&live_app, "").unwrap();
-        let live = dir.path().join("codegraff");
-        std::fs::write(&live, script(&live_app)).unwrap();
-        link_if_ours(&live, &target).unwrap();
-        assert!(
-            std::fs::read_link(&live).is_err(),
-            "live launcher must stay"
-        );
-        let orphan = dir.path().join("codegraff-orphan");
-        std::fs::write(
-            &orphan,
-            script(&dir.path().join("Gone.app/Contents/MacOS/Codegraff")),
-        )
-        .unwrap();
-        link_if_ours(&orphan, &target).unwrap();
-        assert_eq!(std::fs::read_link(&orphan).unwrap(), target);
+        let old_app = dir.path().join("Codegraff");
+        std::fs::write(&old_app, "").unwrap();
+        for (name, header) in [
+            ("launcher", "# Codegraff GUI terminal launcher"),
+            (
+                "code-style",
+                "# codegraff — open a path in the Codegraff desktop app (code-style).",
+            ),
+        ] {
+            let script = format!("#!/bin/sh\n{header}\nAPP_BIN=\"{}\"\n", old_app.display());
+            let link = dir.path().join(name);
+            std::fs::write(&link, &script).unwrap();
+            // A dev build leaves it for the installed app.
+            link_if_ours(&link, &target, false).unwrap();
+            assert_eq!(std::fs::read_to_string(&link).unwrap(), script);
+            // The installed app replaces it even while the old app exists.
+            link_if_ours(&link, &target, true).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dev_builds_only_fill_missing_or_dead_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir
+            .path()
+            .join("Applications/Harness.app/Contents/MacOS/harness");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        let dev = dir
+            .path()
+            .join("target/macos-dev/Harness.app/Contents/MacOS/harness");
+        let link = dir.path().join("harness");
+        std::os::unix::fs::symlink(&installed, &link).unwrap();
+        link_if_ours(&link, &dev, false).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), installed);
+        // Once the installed app is gone, the dev build may take the link.
+        std::fs::remove_file(&installed).unwrap();
+        link_if_ours(&link, &dev, false).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), dev);
+        // And the installed app takes the dev build's link back.
+        link_if_ours(&link, &installed, true).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), installed);
+    }
+
+    #[test]
+    fn only_applications_folders_count_as_installed() {
+        let home = Path::new("/Users/me");
+        assert!(is_installed_app(
+            Path::new("/Applications/Harness.app"),
+            home
+        ));
+        assert!(is_installed_app(
+            Path::new("/Users/me/Applications/Harness.app"),
+            home
+        ));
+        assert!(!is_installed_app(
+            Path::new("/tmp/harness-run/target/macos-dev/Harness.app"),
+            home
+        ));
     }
 
     #[cfg(unix)]
@@ -290,17 +343,17 @@ mod tests {
         let target = dir.path().join("Harness.app/Contents/MacOS/harness");
         // Fresh: created.
         let fresh = dir.path().join("harness");
-        link_if_ours(&fresh, &target).unwrap();
+        link_if_ours(&fresh, &target, true).unwrap();
         assert_eq!(std::fs::read_link(&fresh).unwrap(), target);
         // A user's own binary: untouched.
         let own = dir.path().join("graff");
         std::fs::write(&own, "mine").unwrap();
-        link_if_ours(&own, &target).unwrap();
+        link_if_ours(&own, &target, true).unwrap();
         assert_eq!(std::fs::read_to_string(&own).unwrap(), "mine");
         // A foreign symlink: untouched.
         let foreign = dir.path().join("codegraff");
         std::os::unix::fs::symlink("/opt/elsewhere/codegraff", &foreign).unwrap();
-        link_if_ours(&foreign, &target).unwrap();
+        link_if_ours(&foreign, &target, true).unwrap();
         assert_eq!(
             std::fs::read_link(&foreign).unwrap(),
             Path::new("/opt/elsewhere/codegraff")
@@ -312,7 +365,7 @@ mod tests {
             &stale,
         )
         .unwrap();
-        link_if_ours(&stale, &target).unwrap();
+        link_if_ours(&stale, &target, true).unwrap();
         assert_eq!(std::fs::read_link(&stale).unwrap(), target);
     }
 
