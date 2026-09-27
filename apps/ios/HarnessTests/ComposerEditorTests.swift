@@ -38,4 +38,26 @@ final class ComposerEditorTests: XCTestCase {
             editor.apply(text: "")
         }
     }
+
+    func testPastedImagesKeepTheirBytesAndStageAsAttachments() throws {
+        let pasteboard = try XCTUnwrap(UIPasteboard(name: UIPasteboard.Name("composer-paste-test"),
+                                                    create: true))
+        defer { UIPasteboard.remove(withName: pasteboard.name) }
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { context in
+            UIColor.systemPink.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        }
+        let png = try XCTUnwrap(image.pngData())
+        let jpeg = try XCTUnwrap(image.jpegData(compressionQuality: 0.9))
+        // A screenshot (PNG) and a Photos copy (JPEG) arrive as-is, one item each.
+        pasteboard.items = [["public.png": png], ["public.jpeg": jpeg]]
+        XCTAssertEqual(ComposerTextView.imageData(from: pasteboard), [png, jpeg])
+
+        let (staged, failed) = StagedAttachment.stage(images: [png, jpeg, Data("not an image".utf8)])
+        XCTAssertEqual(staged.map { ($0.name as NSString).pathExtension }, ["png", "jpg"])
+        XCTAssertEqual(failed, 1)
+        XCTAssertEqual(StagedAttachment.failureMessage(failed),
+                       "One image couldn't be attached (unsupported or over 24 MB).")
+        XCTAssertNil(StagedAttachment.failureMessage(0))
+    }
 }

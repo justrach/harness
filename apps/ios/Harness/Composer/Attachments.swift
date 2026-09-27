@@ -136,6 +136,25 @@ struct StagedAttachment: Identifiable, Hashable {
                                 data: bytes, image: image)
     }
 
+    /// Stage several images (a paste); how many couldn't be attached.
+    static func stage(images: [Data]) -> (staged: [StagedAttachment], failed: Int) {
+        var staged: [StagedAttachment] = []
+        var failed = 0
+        for data in images {
+            if let attachment = stage(data: data) { staged.append(attachment) } else { failed += 1 }
+        }
+        return (staged, failed)
+    }
+
+    /// The error line for images that couldn't be attached; nil when all were.
+    static func failureMessage(_ failed: Int) -> String? {
+        switch failed {
+        case 0: return nil
+        case 1: return "One image couldn't be attached (unsupported or over 24 MB)."
+        default: return "\(failed) images couldn't be attached (unsupported or over 24 MB)."
+        }
+    }
+
     /// Magic-byte sniff for the formats both ends support.
     private static func sniffExtension(_ data: Data) -> String? {
         guard data.count >= 12 else { return nil }
