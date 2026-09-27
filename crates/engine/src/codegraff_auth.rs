@@ -309,8 +309,9 @@ impl CodegraffAuth {
         Ok(Some(parse_jobs(response)))
     }
 
-    /// Ask the gateway to stop a job. A job already posting its result can't
-    /// be stopped (409); the message says so.
+    /// Ask the gateway to stop a job. A job already posting its result, or
+    /// already finished, can't be stopped (409); the gateway's message says
+    /// which.
     pub async fn cancel_job(&self, id: &str) -> Result<(), String> {
         let key = self
             .current_key()
@@ -322,13 +323,12 @@ impl CodegraffAuth {
             .send()
             .await
             .map_err(|e| format!("couldn't reach CodeGraff: {e}"))?;
-        match response.status() {
-            status if status.is_success() => Ok(()),
-            reqwest::StatusCode::CONFLICT => {
-                Err("This job is already posting its result and can't be cancelled.".into())
-            }
-            status => Err(format!("CodeGraff couldn't cancel the job ({status}).")),
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
+        let body = response.json::<serde_json::Value>().await.ok();
+        Err(cancel_error(status.as_u16(), body.as_ref()))
     }
 
     /// Revoke the key server-side (best effort — an unreachable gateway must
@@ -459,6 +459,30 @@ impl CodegraffAuth {
 }
 
 /// A jobs page, whether the gateway wraps it (`{jobs: [...]}`) or not.
+/// A failed cancel as a sentence: the gateway's own `error.message` ("too
+/// late to cancel: it's already posting its result", "couldn't reach the
+/// job's runner; try again", ...) when it sent one.
+fn cancel_error(status: u16, body: Option<&serde_json::Value>) -> String {
+    let message = body
+        .and_then(|body| body.pointer("/error/message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    match message {
+        Some(message) => {
+            let mut chars = message.chars();
+            let first = chars.next().map(|c| c.to_uppercase().to_string());
+            format!(
+                "{}{}.",
+                first.unwrap_or_default(),
+                chars.as_str().trim_end_matches('.')
+            )
+        }
+        None if status == 409 => "This job is already posting its result or has finished.".into(),
+        None => format!("CodeGraff couldn't cancel the job ({status})."),
+    }
+}
+
 fn parse_jobs(value: serde_json::Value) -> CodegraffJobs {
     match value {
         serde_json::Value::Array(_) => CodegraffJobs {
@@ -566,6 +590,33 @@ mod tests {
             parse_jobs(serde_json::json!({ "error": "nope" }))
                 .jobs
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn cancel_failures_say_why_in_the_gateways_words() {
+        let posting = serde_json::json!({"error": {
+            "message": "too late to cancel: it's already posting its result",
+            "type": "too_late",
+        }});
+        assert_eq!(
+            cancel_error(409, Some(&posting)),
+            "Too late to cancel: it's already posting its result."
+        );
+        let runner = serde_json::json!({"error": {
+            "message": "couldn't reach the job's runner; try again",
+        }});
+        assert_eq!(
+            cancel_error(502, Some(&runner)),
+            "Couldn't reach the job's runner; try again."
+        );
+        assert_eq!(
+            cancel_error(409, None),
+            "This job is already posting its result or has finished."
+        );
+        assert_eq!(
+            cancel_error(500, Some(&serde_json::json!({}))),
+            "CodeGraff couldn't cancel the job (500)."
         );
     }
 

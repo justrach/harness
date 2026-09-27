@@ -195,6 +195,7 @@ pub fn job_summary(job: &CodegraffJob) -> (String, String) {
             Some("reviewing") => "Reviewing…".into(),
             Some("describing") => "Describing…".into(),
             Some("posting") => "Posting…".into(),
+            Some("working") => "Working…".into(),
             _ => "Starting…".into(),
         },
         "completed" => "Done".into(),
