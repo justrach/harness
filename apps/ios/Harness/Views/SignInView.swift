@@ -168,7 +168,10 @@ final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationCon
             }
         }
         session.presentationContextProvider = self
-        session.prefersEphemeralWebBrowserSession = false
+        // Private browser session: sharing Safari's cookies meant a signed-in
+        // codegraff.com (or Google) account was reused silently, so signing
+        // out and back in could never switch accounts.
+        session.prefersEphemeralWebBrowserSession = true
         self.session = session
         session.start()
     }
