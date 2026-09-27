@@ -20,6 +20,7 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+pub mod codegraff_jobs;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
@@ -215,8 +216,9 @@ pub fn run_app(config: UiConfig) {
             }
         })
         .detach();
-        // Banner clicks land on the notified chat. The AppKit delegate fires
-        // mid-event, so hop through a channel rather than updating inline.
+        // Banner clicks land on the notified chat (or, for a CodeGraff job's
+        // banner, open its https page). The AppKit delegate fires mid-event,
+        // so hop through a channel rather than updating inline.
         let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
         notify::on_click(move |chat_id| {
             let _ = click_tx.unbounded_send(chat_id);
@@ -224,11 +226,18 @@ pub fn run_app(config: UiConfig) {
         let click_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(chat_id) = click_rx.next().await {
-                let _ = cx.update(|cx| open_notified_chat(chat_id, &click_state, cx));
+                let _ = cx.update(|cx| {
+                    if chat_id.starts_with("https://") {
+                        cx.open_url(&chat_id);
+                    } else {
+                        open_notified_chat(chat_id, &click_state, cx);
+                    }
+                });
             }
         })
         .detach();
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
+        codegraff_jobs::watch(state.clone(), cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
         // doc snapshots before the process exits (remote engines outlive us).

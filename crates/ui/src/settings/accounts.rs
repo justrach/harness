@@ -22,6 +22,7 @@ use harness_proto::{
 };
 use harness_rpc::methods;
 
+use crate::codegraff_jobs::{CodegraffJob, job_active, job_summary};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -135,23 +136,6 @@ struct CodegraffUsage {
     key_budget_resets_at: String,
 }
 
-/// A CodeGraff PR-agent run (engine `CodegraffJobs`, from the gateway's
-/// `/v1/jobs`). Tolerant: unknown fields are ignored, missing ones default.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default)]
-pub struct CodegraffJob {
-    pub id: String,
-    pub kind: String,
-    pub status: String,
-    pub cancellable: bool,
-    pub step: Option<String>,
-    pub repo: Option<String>,
-    pub pr: Option<serde_json::Value>,
-    pub title: Option<String>,
-    pub result_url: Option<String>,
-    pub error: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 struct CodegraffJobs {
@@ -162,64 +146,6 @@ struct CodegraffJobs {
 const JOBS_POLL: Duration = Duration::from_secs(20);
 /// How many recent jobs the card shows.
 const JOBS_SHOWN: u64 = 8;
-
-/// Still queued or running (the list keeps refreshing). Pure.
-pub fn job_active(job: &CodegraffJob) -> bool {
-    matches!(job.status.as_str(), "queued" | "pending" | "running")
-}
-
-/// A job row's title and its "repo #pr · status" line. Pure.
-pub fn job_summary(job: &CodegraffJob) -> (String, String) {
-    let kind = match job.kind.as_str() {
-        "pr_review" => "PR review",
-        "pr_describe" => "PR description",
-        _ => "PR agent job",
-    };
-    let title = job
-        .title
-        .clone()
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| kind.to_string());
-    let pr = match &job.pr {
-        Some(serde_json::Value::Number(n)) => Some(format!("#{n}")),
-        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(if s.starts_with('#') {
-            s.clone()
-        } else {
-            format!("#{s}")
-        }),
-        _ => None,
-    };
-    let status = match job.status.as_str() {
-        "queued" | "pending" => "Queued".to_string(),
-        "running" => match job.step.as_deref() {
-            Some("reviewing") => "Reviewing…".into(),
-            Some("describing") => "Describing…".into(),
-            Some("posting") => "Posting…".into(),
-            Some("working") => "Working…".into(),
-            _ => "Starting…".into(),
-        },
-        "completed" => "Done".into(),
-        "cancelled" => "Cancelled".into(),
-        "error" => job
-            .error
-            .clone()
-            .filter(|error| !error.trim().is_empty())
-            .map(|error| format!("Failed: {error}"))
-            .unwrap_or_else(|| "Failed".into()),
-        other => other.to_string(),
-    };
-    let place = [job.repo.clone(), pr]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let detail = if place.is_empty() {
-        format!("{kind} · {status}")
-    } else {
-        format!("{place} · {status}")
-    };
-    (title, detail)
-}
 
 fn format_micro_usd(amount: i64) -> String {
     let dollars = amount as f64 / 1_000_000.0;

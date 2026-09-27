@@ -1527,8 +1527,9 @@ impl RpcService for EngineRpc {
             }
             methods::CODEGRAFF_JOBS => {
                 let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+                let updated_since = params.get("updatedSince").and_then(|v| v.as_i64());
                 let jobs = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
-                    .jobs(limit)
+                    .jobs(limit, updated_since)
                     .await
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&jobs)

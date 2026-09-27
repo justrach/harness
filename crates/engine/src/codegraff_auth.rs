@@ -288,15 +288,29 @@ impl CodegraffAuth {
     }
 
     /// The account's recent PR-agent runs, newest first (`None` when signed
-    /// out). `state=all` keeps a just-finished job in the list.
-    pub async fn jobs(&self, limit: u32) -> Result<Option<CodegraffJobs>, String> {
+    /// out). `state=all` keeps a just-finished job in the list. With
+    /// `updated_since` (unix seconds, inclusive) only jobs changed since
+    /// then come back, oldest change first, and `next_updated_since` is the
+    /// cursor for the next poll.
+    pub async fn jobs(
+        &self,
+        limit: u32,
+        updated_since: Option<i64>,
+    ) -> Result<Option<CodegraffJobs>, String> {
         let Some(key) = self.current_key() else {
             return Ok(None);
         };
         crate::auth::validate_secure_url("CodeGraff gateway", &self.gateway)?;
+        let mut query = vec![
+            ("state", "all".to_string()),
+            ("limit", limit.clamp(1, 100).to_string()),
+        ];
+        if let Some(since) = updated_since {
+            query.push(("updated_since", since.to_string()));
+        }
         let response = http()
             .get(format!("{}/v1/jobs", self.gateway))
-            .query(&[("state", "all"), ("limit", &limit.clamp(1, 50).to_string())])
+            .query(&query)
             .bearer_auth(key)
             .send()
             .await
