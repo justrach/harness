@@ -1947,7 +1947,8 @@ impl Shell {
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
         state.update(cx, |state, cx| {
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
+            // Pull requests still show in the palette and elsewhere.
+            state.set_change_requests_visible(true, cx)
         });
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);

@@ -705,6 +705,8 @@ pub struct UiSettings {
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
+    /// Legacy: session rows no longer show pull requests. Kept for file
+    /// compatibility; no longer read.
     pub sidebar_show_pull_request: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
