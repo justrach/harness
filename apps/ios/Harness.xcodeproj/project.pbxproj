@@ -6,38 +6,21 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = A1000000000000000000T001 /* Harness */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		A1000000000000000000G001 /* Harness */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */,
-			);
-			path = Harness;
-			sourceTree = "<group>";
-		};
-		A2000000000000000000G001 /* HarnessTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = HarnessTests;
-			sourceTree = "<group>";
-		};
-		A3000000000000000000G001 /* HarnessUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = HarnessUITests;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
+/* Begin PBXBuildFile section */
+		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
+		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
+		AB9C174743381D5C067EE245 /* HarnessWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D2E2115BBF69BED0B4439FC4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DB88999CE90755C33D472091 /* Foundation.framework */; };
+/* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		2B0D13BB1188075819C7FCEC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AEBE4543C72514F058D31F39;
+			remoteInfo = HarnessWidgets;
+		};
 		A2000000000000000000X001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A1000000000000000000PJ01 /* Project object */;
@@ -54,24 +37,94 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXTargetDependency section */
-		A2000000000000000000D001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A1000000000000000000T001 /* Harness */;
-			targetProxy = A2000000000000000000X001 /* PBXContainerItemProxy */;
+/* Begin PBXCopyFilesBuildPhase section */
+		7AD294EB90B0F10E8EE7C274 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AB9C174743381D5C067EE245 /* HarnessWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
 		};
-		A3000000000000000000D001 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A1000000000000000000T001 /* Harness */;
-			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A1000000000000000000PR01 /* Harness.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Harness.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* HarnessTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HarnessTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000000000000000000PR01 /* HarnessUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HarnessUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HarnessWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		DB88999CE90755C33D472091 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		037506436D522EE9B4146B27 /* Exceptions for "HarnessWidgets" folder in "HarnessWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = AEBE4543C72514F058D31F39 /* HarnessWidgets */;
+		};
+		050E2CD472AA6B5CC79F87B8 /* Exceptions for "HarnessWidgets" folder in "Harness" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				SessionActivityAttributes.swift,
+			);
+			target = A1000000000000000000T001 /* Harness */;
+		};
+		13F0799F6C34AAD8E1B2B457 /* Exceptions for "Harness" folder in "HarnessWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Theme/BrandMarks.swift,
+				Theme/HermesMark.swift,
+			);
+			target = AEBE4543C72514F058D31F39 /* HarnessWidgets */;
+		};
+		A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A1000000000000000000T001 /* Harness */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		17E920BF97A87A03629DE7D2 /* HarnessWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				037506436D522EE9B4146B27 /* Exceptions for "HarnessWidgets" folder in "HarnessWidgets" target */,
+				050E2CD472AA6B5CC79F87B8 /* Exceptions for "HarnessWidgets" folder in "Harness" target */,
+			);
+			path = HarnessWidgets;
+			sourceTree = "<group>";
+		};
+		A1000000000000000000G001 /* Harness */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */,
+				13F0799F6C34AAD8E1B2B457 /* Exceptions for "Harness" folder in "HarnessWidgets" target */,
+			);
+			path = Harness;
+			sourceTree = "<group>";
+		};
+		A2000000000000000000G001 /* HarnessTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = HarnessTests;
+			sourceTree = "<group>";
+		};
+		A3000000000000000000G001 /* HarnessUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = HarnessUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A1000000000000000000F001 /* Frameworks */ = {
@@ -83,21 +136,42 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C4264AC560679CBC3D1A9760 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D2E2115BBF69BED0B4439FC4 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
-/* Begin PBXBuildFile section */
-		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
-		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXGroup section */
+		3C1486E334C30019AE524A92 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				DB88999CE90755C33D472091 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
+		3D5187BD2DC30DC4F9C84591 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				3C1486E334C30019AE524A92 /* iOS */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		A1000000000000000000G000 = {
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000G001 /* Harness */,
+				17E920BF97A87A03629DE7D2 /* HarnessWidgets */,
 				A2000000000000000000G001 /* HarnessTests */,
 				A3000000000000000000G001 /* HarnessUITests */,
 				A1000000000000000000G002 /* Products */,
+				3D5187BD2DC30DC4F9C84591 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -107,6 +181,7 @@
 				A1000000000000000000PR01 /* Harness.app */,
 				A2000000000000000000PR01 /* HarnessTests.xctest */,
 				A3000000000000000000PR01 /* HarnessUITests.xctest */,
+				C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -121,10 +196,12 @@
 				A1000000000000000000S001 /* Sources */,
 				A1000000000000000000F001 /* Frameworks */,
 				A1000000000000000000R001 /* Resources */,
+				7AD294EB90B0F10E8EE7C274 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				66484FC759CF30648D991A9A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A1000000000000000000G001 /* Harness */,
@@ -153,8 +230,6 @@
 				A2000000000000000000G001 /* HarnessTests */,
 			);
 			name = HarnessTests;
-			packageProductDependencies = (
-			);
 			productName = HarnessTests;
 			productReference = A2000000000000000000PR01 /* HarnessTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -174,11 +249,29 @@
 				A3000000000000000000G001 /* HarnessUITests */,
 			);
 			name = HarnessUITests;
-			packageProductDependencies = (
-			);
 			productName = HarnessUITests;
 			productReference = A3000000000000000000PR01 /* HarnessUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		AEBE4543C72514F058D31F39 /* HarnessWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3FA1F3187613EA0ACBBDB7B9 /* Build configuration list for PBXNativeTarget "HarnessWidgets" */;
+			buildPhases = (
+				62961743BA648AD3EE1F65D2 /* Sources */,
+				C4264AC560679CBC3D1A9760 /* Frameworks */,
+				A76E61AC0E6A7644E3989A64 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				17E920BF97A87A03629DE7D2 /* HarnessWidgets */,
+			);
+			name = HarnessWidgets;
+			productName = HarnessWidgets;
+			productReference = C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -216,6 +309,7 @@
 				A1000000000000000000T001 /* Harness */,
 				A2000000000000000000T001 /* HarnessTests */,
 				A3000000000000000000T001 /* HarnessUITests */,
+				AEBE4543C72514F058D31F39 /* HarnessWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -228,9 +322,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A76E61AC0E6A7644E3989A64 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		62961743BA648AD3EE1F65D2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A1000000000000000000S001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -254,7 +362,53 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		66484FC759CF30648D991A9A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = HarnessWidgets;
+			target = AEBE4543C72514F058D31F39 /* HarnessWidgets */;
+			targetProxy = 2B0D13BB1188075819C7FCEC /* PBXContainerItemProxy */;
+		};
+		A2000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000T001 /* Harness */;
+			targetProxy = A2000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+		A3000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000T001 /* Harness */;
+			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		2A74D4BD629126670A5C9C22 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		A1000000000000000000BC01 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -273,6 +427,8 @@
 					"DEBUG=1",
 					"$(inherited)",
 				);
+				HARNESS_APP_BUNDLE_ID = harness.codegraff.ios;
+				HARNESS_DISPLAY_NAME = Harness;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -295,6 +451,8 @@
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
+				HARNESS_APP_BUNDLE_ID = harness.codegraff.ios;
+				HARNESS_DISPLAY_NAME = Harness;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -321,7 +479,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = harness.codegraff.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID)";
 				PRODUCT_NAME = Harness;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -347,7 +505,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = harness.codegraff.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID)";
 				PRODUCT_NAME = Harness;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -375,24 +533,6 @@
 			};
 			name = Debug;
 		};
-		A3000000000000000000BC03 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = harness.codegraff.ios.uitests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Harness;
-			};
-			name = Debug;
-		};
 		A2000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -411,10 +551,26 @@
 			};
 			name = Release;
 		};
+		A3000000000000000000BC03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = harness.codegraff.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Harness;
+			};
+			name = Debug;
+		};
 		A3000000000000000000BC04 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -429,9 +585,44 @@
 			};
 			name = Release;
 		};
+		C354BDB5646CB2AF415B7DAD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5XY3M483YQ;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3FA1F3187613EA0ACBBDB7B9 /* Build configuration list for PBXNativeTarget "HarnessWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2A74D4BD629126670A5C9C22 /* Release */,
+				C354BDB5646CB2AF415B7DAD /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		A1000000000000000000C000 /* Build configuration list for PBXProject "Harness" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

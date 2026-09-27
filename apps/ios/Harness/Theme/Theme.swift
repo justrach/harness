@@ -120,7 +120,12 @@ extension Theme {
     /// A project's own color, keyed by its space id: the same project reads
     /// the same on every device, with a deeper cut of each hue for light mode.
     static func projectTint(_ key: String) -> Color {
-        projectTints[Int(fnv1a(key) % UInt64(projectTints.count))]
+        projectTints[projectTintIndex(key)]
+    }
+
+    /// Which of the tints a project gets (the Live Activity draws its own copy).
+    static func projectTintIndex(_ key: String) -> Int {
+        Int(fnv1a(key) % UInt64(projectTints.count))
     }
 
     /// Coral, amber, green, teal, sky, indigo, violet, pink.

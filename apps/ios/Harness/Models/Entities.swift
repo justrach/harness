@@ -258,6 +258,15 @@ struct RenderToolCall: Hashable {
     var fields: [String: AnyHashable]
 
     var string: (String) -> String? { { key in self.fields[key] as? String } }
+
+    /// A todo call's list (proto `TodoItem`); nil for other calls.
+    var tasks: [TaskItem]? { tag == "todo" ? fields["items"] as? [TaskItem] : nil }
+}
+
+/// One entry of an agent's task list (proto `TodoItem`).
+struct TaskItem: Hashable {
+    var text: String
+    var done: Bool
 }
 
 /// Durable metadata only; bytes remain on the message owner's device.

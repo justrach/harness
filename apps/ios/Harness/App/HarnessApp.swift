@@ -47,8 +47,19 @@ struct RootView: View {
                 OrgPickerView(tokens: tokens, orgs: orgs)
             case .ready:
                 HomeView()
+                    .task {
+                        // Sampled, not observed: the snapshots read live
+                        // transcripts, so observing them re-rendered the root
+                        // on every streamed token. A lock-screen status only
+                        // needs a couple of seconds' resolution.
+                        while !Task.isCancelled {
+                            model.liveActivities.sync(model.liveActivitySnapshots)
+                            try? await Task.sleep(for: .seconds(2))
+                        }
+                    }
             }
         }
         .task { model.restore() }
+        .onOpenURL { model.openDeepLink($0) }
     }
 }

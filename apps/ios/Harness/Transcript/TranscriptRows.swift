@@ -298,6 +298,9 @@ extension RenderToolCall {
         case "webFetch": return string("url") ?? ""
         case "webSearch": return string("query") ?? ""
         case "todo":
+            if let tasks, !tasks.isEmpty {
+                return "\(tasks.filter(\.done).count)/\(tasks.count) done"
+            }
             return string("summary") ?? "task list"
         case "mcp":
             let server = string("server").map { "\($0) · " } ?? ""

@@ -108,6 +108,7 @@ final class AppModel {
     /// Deep-link target applied by HomeView on first appearance (set by launch
     /// args in demo mode; simulator-driven screenshots use it).
     var launchRoute: Route?
+    @ObservationIgnored let liveActivities = LiveActivities()
     /// Screenshot rig: "newsession" / "newspace" presents that sheet on arrival.
     var launchSheet: String?
     /// Screenshot rig: auto-send a canned prompt from the new-session canvas.
@@ -399,6 +400,41 @@ final class AppModel {
     func space(for chat: Chat) -> Space? {
         guard let spaceId = chat.spaceId else { return nil }
         return spaces.first { $0.id == spaceId }
+    }
+
+    /// Every active session as its Live Activity would show it.
+    var liveActivitySnapshots: [LiveActivitySnapshot] {
+        overviewChats.map { chat in
+            let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]
+            let started = row?.startedAt ?? row?.updatedAt ?? chat.createdAt
+            let phase = LiveActivityPlan.phase(for: indicator(for: chat))
+            // Only live runs read the transcript (it changes every token).
+            let tasks = (phase == .working || phase == .waiting)
+                ? sessionStores[chat.id].flatMap { LiveActivityPlan.tasks(in: $0.entries) } : nil
+            let project = chat.spaceId.map { _ in
+                space(for: chat)?.displayName
+                    ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
+                    ?? "?"
+            }
+            return LiveActivitySnapshot(
+                attributes: SessionActivityAttributes(
+                    chatId: chat.id, title: chat.displayTitle, project: project,
+                    device: deviceName(chat.deviceId),
+                    projectTint: chat.spaceId.map(Theme.projectTintIndex),
+                    harness: chat.config?.harness ?? "claude-code"),
+                phase: phase,
+                startedAt: Date(timeIntervalSince1970: Double(started) / 1000),
+                detail: LiveActivityPlan.detail(chat.lastMessagePreview),
+                tasks: tasks)
+        }
+    }
+
+    /// `harness://chat/<id>` (a Live Activity tap) opens that session.
+    func openDeepLink(_ url: URL) {
+        guard url.scheme == "harness", url.host == "chat" else { return }
+        let chatId = url.lastPathComponent
+        guard !chatId.isEmpty, chatId != "/" else { return }
+        launchRoute = .chat(chatId)
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {
