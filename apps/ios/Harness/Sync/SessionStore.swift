@@ -80,6 +80,8 @@ final class SessionStore {
     var onPersisted: (() -> Void)?
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
+    /// Which messages changed since the last projection (see `EntryCache`).
+    @ObservationIgnored private let entryCache = EntryCache()
     private let config: AppConfig
     /// Registry roomGen for this chat (M2): connect only at >= 2. One-way —
     /// the registry never walks a chat back to s2.
@@ -162,6 +164,10 @@ final class SessionStore {
     func start(holdDial: Bool = false) {
         guard !stopped, !started, !offline else { return }
         started = true
+        // Before anything touches the doc (the disk load included): the
+        // projection memo is only correct if it hears every change.
+        let cache = entryCache
+        subscriptions.append(doc.subscribeRoot { cache.observe($0) })
         leaseToken = SnapshotLease.claim(chatId)
         self.holdDial = holdDial
         // Local-first: the last-synced chat2 snapshot renders instantly (even
@@ -606,10 +612,11 @@ final class SessionStore {
         }
         projecting = true
         let doc = self.doc
+        let cache = started ? entryCache : nil
         let generation = lifecycleGeneration
         Task { @MainActor [weak self] in
             let decoded = await Task.detached(priority: .userInitiated) {
-                Self.decodeEntries(from: doc)
+                Self.decodeEntries(from: doc, cache: cache)
             }.value
             guard let self, !self.stopped,
                   self.lifecycleGeneration == generation else { return }
@@ -645,9 +652,17 @@ final class SessionStore {
 
     /// Whole-doc decode. `nil` means the doc has no map root yet — leave the
     /// previous projection standing rather than blanking a live transcript.
+    /// With a `cache` (a started store, which reports every change to it),
+    /// only the messages that changed since the last call are re-decoded.
     nonisolated static func decodeEntries(
-        from doc: LoroDoc
+        from doc: LoroDoc, cache: EntryCache? = nil
     ) -> (entries: [MessageEntry], queue: [QueuedMessage])? {
+        if let cache {
+            let raw = cache.read(doc, parse: entryFrom)
+            let queue = (doc.getMovableList(id: "queue").getDeepValue().listValue ?? [])
+                .compactMap(queuedFrom)
+            return (joinContinuations(raw), queue)
+        }
         guard let root = doc.getDeepValue().mapValue else { return nil }
         let raw = (root["messages"]?.listValue ?? []).compactMap(entryFrom)
         let queue = (root["queue"]?.listValue ?? []).compactMap(queuedFrom)

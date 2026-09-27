@@ -58,6 +58,35 @@ enum BenchRunner {
         var entries: [MessageEntry] = []
         let decode = time { entries = SessionStore.decodeEntries(from: doc)?.entries ?? [] }
 
+        // Stage 1b — a streaming update (the last message's text grows):
+        // the whole-doc re-decode it used to cost, then the per-message memo.
+        let entryCache = EntryCache()
+        let subscription = doc.subscribeRoot { entryCache.observe($0) }
+        _ = SessionStore.decodeEntries(from: doc, cache: entryCache)
+        var tick = 0
+        func growTail() {
+            tick += 1
+            let messages = doc.getList(id: "messages")
+            guard let last = messages.get(index: messages.len() - 1)?.asLoroMap(),
+                  let parts = last.get(key: "parts")?.asLoroList(),
+                  let part = parts.get(index: parts.len() - 1)?.asLoroMap() else { return }
+            try? part.insert(key: "text", v: closing(0) + String(repeating: " more", count: tick))
+            doc.commit()
+        }
+        let streamFull = best(3) {
+            growTail()
+            _ = SessionStore.decodeEntries(from: doc)
+        }
+        _ = SessionStore.decodeEntries(from: doc, cache: entryCache)
+        var cachedEntries: [MessageEntry] = []
+        let streamCached = best(5) {
+            growTail()
+            cachedEntries = SessionStore.decodeEntries(from: doc, cache: entryCache)?.entries ?? []
+        }
+        precondition(cachedEntries == SessionStore.decodeEntries(from: doc)?.entries,
+                     "cached projection must equal the whole-doc decode")
+        subscription.detach()
+
         // Stage 2 — cold row build (empty caches). The OLD per-rebuild cost.
         var rowCount = 0
         let cold = best(3) {
@@ -88,6 +117,9 @@ enum BenchRunner {
         log("--- \(turns) turns · \(entries.count) entries · \(rowCount) rows · \(bytes / 1024) KB snapshot")
         log(String(format: "disk import (ON MAIN)   %8.2f ms", importMs))
         log(String(format: "decode (now off-main)   %8.2f ms", decode))
+        log(String(format: "stream update, whole doc %7.2f ms", streamFull))
+        log(String(format: "stream update, cached   %8.2f ms   %.0fx", streamCached,
+                   streamFull / max(streamCached, 0.0001)))
         log(String(format: "row build cold  [was]   %8.2f ms", cold))
         log(String(format: "row build warm  [now]   %8.2f ms   %.0fx", warm, cold / max(warm, 0.0001)))
         log(String(format: "scroll frame    [now]   %8.4f ms   %.0fx", cached, cold / max(cached, 0.0001)))
