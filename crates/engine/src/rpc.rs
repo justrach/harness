@@ -1523,6 +1523,18 @@ impl RpcService for EngineRpc {
                     .await;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::BROWSE_LINK_STATUS => RpcReply::value(
+                &crate::browse_link::BrowseLink::shared(self.repos.data_dir()).status(),
+            ),
+            methods::BROWSE_LINK_PAIR => {
+                let link = crate::browse_link::BrowseLink::shared(self.repos.data_dir());
+                let code = link.start_pair().await.map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "code": code }))
+            }
+            methods::BROWSE_LINK_DISCONNECT => {
+                crate::browse_link::BrowseLink::shared(self.repos.data_dir()).disconnect();
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),

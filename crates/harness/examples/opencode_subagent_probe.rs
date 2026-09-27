@@ -39,6 +39,7 @@ async fn main() {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     // Optional second arg overrides the prompt (e.g. the mock rig's
     // "TWO subagents" variant exercising concurrent binding).

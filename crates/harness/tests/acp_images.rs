@@ -35,6 +35,7 @@ async fn sent_prompt(images: bool) -> serde_json::Value {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         prompt: "What colour is this?".into(),
@@ -140,6 +141,7 @@ async fn follow_up_prompt(authorized: bool) -> serde_json::Value {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         prompt: "hi".into(),

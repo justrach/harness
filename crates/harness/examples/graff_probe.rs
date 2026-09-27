@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         prompt: "Reply with exactly: graff over harness ACP verified. Do not use tools.".into(),

@@ -139,6 +139,10 @@ pub mod methods {
     pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
     pub const CODEGRAFF_USAGE: &str = "CodegraffUsage";
     pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
+    // browse Connected apps (engine browse_link; local only).
+    pub const BROWSE_LINK_STATUS: &str = "BrowseLinkStatus";
+    pub const BROWSE_LINK_PAIR: &str = "BrowseLinkPair";
+    pub const BROWSE_LINK_DISCONNECT: &str = "BrowseLinkDisconnect";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";

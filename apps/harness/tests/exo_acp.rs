@@ -39,6 +39,7 @@ async fn exo_turn_runs_through_the_harness_bridge() {
         request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         prompt: "summarize the repo".into(),
