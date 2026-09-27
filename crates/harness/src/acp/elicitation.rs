@@ -54,16 +54,26 @@ impl Form {
         }
         let mut content = Map::new();
         for field in &self.fields {
-            let Some(label) = answers
+            let labels = answers
                 .iter()
                 .find(|answer| answer.question_id == field.question.id)
-                .and_then(|answer| answer.labels.first())
+                .map(|answer| answer.labels.as_slice())
+                .unwrap_or_default();
+            let mut labels = labels
+                .iter()
                 .map(|label| label.trim())
-                .filter(|label| !label.is_empty())
-            else {
-                return json!({ "action": "decline" });
+                .filter(|label| !label.is_empty());
+            // Free text keeps every label: files attached to an answer ride
+            // as a second one. A choice or typed value is just the first.
+            let label = if field.kind == Kind::Text && field.question.options.is_empty() {
+                labels.collect::<Vec<_>>().join("\n\n")
+            } else {
+                labels.next().unwrap_or_default().to_owned()
             };
-            let Some(value) = field.kind.parse(label) else {
+            if label.is_empty() {
+                return json!({ "action": "decline" });
+            }
+            let Some(value) = field.kind.parse(&label) else {
                 return json!({ "action": "decline" });
             };
             content.insert(field.key.clone(), value);
@@ -229,6 +239,24 @@ mod tests {
         assert_eq!(
             form.response(&[answer("q1", "  the one in docker  ")]),
             json!({ "action": "accept", "content": { "answer": "the one in docker" } })
+        );
+    }
+
+    #[test]
+    fn attached_files_ride_a_free_text_answer_but_not_a_choice() {
+        let attached = UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec!["see this".into(), "Attached images:\n- /tmp/a.png".into()],
+        };
+        let free = form(&graff_ask(None), ids()).unwrap();
+        assert_eq!(
+            free.response(std::slice::from_ref(&attached)),
+            json!({ "action": "accept", "content": { "answer": "see this\n\nAttached images:\n- /tmp/a.png" } })
+        );
+        let choice = form(&graff_ask(Some(&["see this", "other"])), ids()).unwrap();
+        assert_eq!(
+            choice.response(&[attached]),
+            json!({ "action": "accept", "content": { "answer": "see this" } })
         );
     }
 

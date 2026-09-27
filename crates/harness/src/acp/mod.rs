@@ -31,6 +31,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 mod antigravity_paths;
+mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
@@ -71,6 +72,7 @@ use crate::scratch::ScratchDir;
 use child::Child;
 pub(crate) mod child;
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use compaction::CompactionTracker;
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
@@ -2276,6 +2278,8 @@ fn initialize_params_with_subagents(harness: HarnessId, graff_subagents: bool) -
         // graff 0.0.302.6+ sends ask_user as a form elicitation, and answers
         // it at once for clients that don't advertise one.
         capabilities["elicitation"] = elicitation::capability();
+        // v1 gates compaction updates behind this (unstable) capability.
+        capabilities["session"] = compaction::session_capability();
         if graff_subagents {
             capabilities["subagents"] = json!({});
             capabilities["_meta"] = json!({ "graff/backgroundSubagents": true });
@@ -2660,8 +2664,9 @@ fn session_update_events(
     params: &Value,
     session_id: &str,
     subagents: &mut SubagentObserver,
-    effort: &mut EffortTracker,
+    trackers: &mut SessionTrackers,
 ) -> Vec<AgentEvent> {
+    let SessionTrackers { effort, compaction } = trackers;
     let update_session = params.get("sessionId").and_then(Value::as_str);
     let update = params.get("update").unwrap_or(&Value::Null);
     if let SubagentObserver::Graff(tracker) = subagents {
@@ -2677,6 +2682,7 @@ fn session_update_events(
                 return events;
             }
             let mut events = events;
+            events.extend(compaction.observe(update));
             if let Some(change) = effort.observe(update) {
                 events.push(change);
             }
@@ -2701,11 +2707,19 @@ fn session_update_events(
         _ => Vec::new(),
     };
     if method == "session/update" {
+        events.extend(compaction.observe(update));
         if let Some(change) = effort.observe(update) {
             events.push(change);
         }
     }
     events
+}
+
+/// Per-session state the `session/update` mapping keeps across frames.
+#[derive(Default)]
+struct SessionTrackers {
+    effort: EffortTracker,
+    compaction: CompactionTracker,
 }
 
 /// Codegraff's Jev result announces a pending choice; the config update is
@@ -3760,8 +3774,11 @@ async fn run_session(session: Session) {
             sessions_root,
         ))
     };
-    let mut effort = EffortTracker {
-        current: initial_effort,
+    let mut trackers = SessionTrackers {
+        effort: EffortTracker {
+            current: initial_effort,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -3936,7 +3953,7 @@ async fn run_session(session: Session) {
                     match inc {
                         Incoming::Notification { method, params } => {
                             let events =
-                                session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
+                                session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -3988,7 +4005,7 @@ async fn run_session(session: Session) {
                 if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
                     error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
                 }
-                effort.finish_turn();
+                trackers.effort.finish_turn();
                 done_current = true;
                 if interrupted {
                     done_after_interrupt = true;
@@ -4118,7 +4135,7 @@ async fn run_session(session: Session) {
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events =
-                        session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
+                        session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
                         if !send(&event_tx, ev).await {
@@ -4164,7 +4181,7 @@ async fn run_session(session: Session) {
                             let _ = send(&event_tx, usage).await;
                         }
                         let (status, error) = stop_outcome(&res, interrupted);
-                        effort.finish_turn();
+                        trackers.effort.finish_turn();
                         done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
@@ -4230,7 +4247,7 @@ async fn run_session(session: Session) {
                             match inc {
                                 Incoming::Notification { method, params } => {
                                     let events =
-                                        session_update_events(&method, &params, &session_id, &mut subagents, &mut effort);
+                                        session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4415,7 +4432,7 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                effort.finish_turn();
+                trackers.effort.finish_turn();
                 done_current = true;
                 if !send(
                     &event_tx,
@@ -4590,7 +4607,7 @@ async fn run_session(session: Session) {
                     },
                 )
                 .await;
-                effort.finish_turn();
+                trackers.effort.finish_turn();
                 done_current = true;
                 let _ = send(
                     &event_tx,
@@ -5073,9 +5090,56 @@ mod tests {
     }
 
     #[test]
+    fn only_graff_advertises_session_compaction() {
+        for subagents in [false, true] {
+            let graff = initialize_params_with_subagents(HarnessId::Graff, subagents);
+            assert_eq!(
+                graff["clientCapabilities"]["session"],
+                json!({ "compaction": {} })
+            );
+        }
+        for other in [HarnessId::Devin, HarnessId::Grok] {
+            let params = initialize_params(other);
+            assert!(params["clientCapabilities"].get("session").is_none());
+        }
+    }
+
+    #[test]
+    fn graff_parent_compaction_opens_and_resolves_one_chip() {
+        let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
+        let mut trackers = SessionTrackers::default();
+        let mut frame = |update: Value| {
+            session_update_events(
+                "session/update",
+                &json!({ "sessionId": "parent", "update": update }),
+                "parent",
+                &mut observer,
+                &mut trackers,
+            )
+        };
+        let opened = frame(json!({
+            "sessionUpdate": "compaction_update", "compactionId": "k1", "status": "in_progress"
+        }));
+        assert!(matches!(
+            &opened[..],
+            [AgentEvent::ToolCall { id, call: harness_proto::ToolCall::Unknown { name, .. } }]
+                if id == "acp-compaction-k1" && name == harness_proto::COMPACTION_TOOL_NAME
+        ));
+        let done = frame(json!({
+            "sessionUpdate": "compaction_update", "compactionId": "k1", "status": "completed",
+            "summary": [{ "type": "text", "text": "Kept the plan." }]
+        }));
+        assert!(matches!(
+            &done[..],
+            [AgentEvent::ToolResult { id, is_error: false, output: Some(text), .. }]
+                if id == "acp-compaction-k1" && text == "Kept the plan."
+        ));
+    }
+
+    #[test]
     fn graff_child_updates_route_by_announced_session_id() {
         let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
-        let mut effort = EffortTracker::default();
+        let mut trackers = SessionTrackers::default();
         let announced = session_update_events(
             "session/update",
             &json!({
@@ -5084,7 +5148,7 @@ mod tests {
             }),
             "parent",
             &mut observer,
-            &mut effort,
+            &mut trackers,
         );
         assert!(matches!(&announced[0], AgentEvent::ToolCall { .. }));
         let child = session_update_events(
@@ -5095,7 +5159,7 @@ mod tests {
             }),
             "parent",
             &mut observer,
-            &mut effort,
+            &mut trackers,
         );
         assert!(matches!(&child[..], [AgentEvent::Subagent { .. }]));
         let unrelated = session_update_events(
@@ -5106,7 +5170,7 @@ mod tests {
             }),
             "parent",
             &mut observer,
-            &mut effort,
+            &mut trackers,
         );
         assert!(unrelated.is_empty());
     }
@@ -5114,7 +5178,7 @@ mod tests {
     #[test]
     fn graff_background_notifications_route_after_parent_done() {
         let mut observer = SubagentObserver::Graff(GraffTracker::new("parent".into()));
-        let mut effort = EffortTracker::default();
+        let mut trackers = SessionTrackers::default();
         let frame = |seq, event| {
             json!({
                 "parentSessionId": "parent", "subagentSessionId": "child",
@@ -5131,7 +5195,7 @@ mod tests {
             ),
             "parent",
             &mut observer,
-            &mut effort,
+            &mut trackers,
         );
         assert!(matches!(&spawn[0], AgentEvent::ToolCall { id, .. } if id == "tool-1"));
         // This is sent after the parent prompt's Done. The parked ACP
@@ -5155,7 +5219,7 @@ mod tests {
             ),
             "parent",
             &mut observer,
-            &mut effort,
+            &mut trackers,
         );
         assert!(
             matches!(&update[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
