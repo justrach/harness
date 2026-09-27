@@ -39,7 +39,7 @@ pub(crate) fn cap_text(text: &str, cap: usize) -> String {
 
 /// The text of a `ContentBlock` (`{type: "text", text}`); non-text blocks
 /// (image, audio, resource, resource_link) render as nothing.
-fn content_block_text(block: &Value) -> Option<&str> {
+pub(crate) fn content_block_text(block: &Value) -> Option<&str> {
     (block.get("type").and_then(Value::as_str) == Some("text"))
         .then(|| block.get("text").and_then(Value::as_str))
         .flatten()
@@ -520,6 +520,8 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             None => Vec::new(),
         },
         "current_mode_update" | "session_info_update" => Vec::new(),
+        // Stateful across frames: the session loop's CompactionTracker.
+        "compaction_update" | "compaction_summary_chunk" => Vec::new(),
         _ => Vec::new(),
     }
 }
