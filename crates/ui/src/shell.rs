@@ -13252,6 +13252,10 @@ mod exit_regressions {
     #[gpui::test]
     fn dragging_a_chat_tab_onto_another_moves_it_and_is_saved(cx: &mut TestAppContext) {
         use gpui::AppContext as _;
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
         // Render just the production tab list, like the right-strip tests.
         struct ChatTabHost {
             shell: Entity<Shell>,
