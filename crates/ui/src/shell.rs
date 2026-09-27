@@ -3733,9 +3733,8 @@ impl Shell {
     /// when the close was consumed by the pane.
     ///
     /// The pane's empty picker state and a closed pane both yield false, so the
-    /// caller falls through to [`Self::prepare_window_close`] and the window
-    /// closes — the same cascade browsers use. The native traffic-light close
-    /// deliberately skips this rung: it always closes the window.
+    /// caller moves on to the split pane, the chat tab, then the chat itself.
+    /// `⌘W` never closes the window; ⌘⇧W and the traffic light do.
     pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(surface) = self.closable_right_surface(cx) else {
             return false;
@@ -13359,6 +13358,81 @@ mod exit_regressions {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn cmd_w_never_closes_the_window(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        let windows = |cx: &mut TestAppContext| cx.update(|cx| cx.windows().len());
+        // A fresh, unprompted chat (the new-session canvas): nothing closes.
+        cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
+        assert_eq!(windows(cx), 1, "⌘W on a new chat closed the app (#55)");
+        // An open chat goes back to a new session; the window stays.
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.chats = vec![harness_proto::Chat {
+                        id: "chat".into(),
+                        device_id: "local".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        parent_chat_id: None,
+                        space_id: None,
+                        last_seen_at: None,
+                        room_gen: None,
+                    }];
+                    state.select_chat(Some("chat".into()), cx);
+                });
+            })
+            .unwrap();
+        cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
+        assert_eq!(windows(cx), 1);
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.state.read(cx).selected_chat, None, "the chat closed");
+            })
+            .unwrap();
+        cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
+        assert_eq!(windows(cx), 1);
     }
 
     #[gpui::test]

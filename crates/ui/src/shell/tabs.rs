@@ -174,6 +174,17 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌘W's last rung: with nothing else to close, leave the open chat for a
+    /// new session. False on the new-session canvas (nothing to close) or off
+    /// the chat route.
+    pub(crate) fn close_chat_to_new_session(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.route, Route::Chat) || self.state.read(cx).selected_chat.is_none() {
+            return false;
+        }
+        self.open_new_session(cx);
+        true
+    }
+
     /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
