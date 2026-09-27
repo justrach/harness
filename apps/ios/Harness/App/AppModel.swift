@@ -108,6 +108,7 @@ final class AppModel {
     /// Deep-link target applied by HomeView on first appearance (set by launch
     /// args in demo mode; simulator-driven screenshots use it).
     var launchRoute: Route?
+    @ObservationIgnored let liveActivities = LiveActivities()
     /// Screenshot rig: "newsession" / "newspace" presents that sheet on arrival.
     var launchSheet: String?
     /// Screenshot rig: auto-send a canned prompt from the new-session canvas.
@@ -399,6 +400,38 @@ final class AppModel {
     func space(for chat: Chat) -> Space? {
         guard let spaceId = chat.spaceId else { return nil }
         return spaces.first { $0.id == spaceId }
+    }
+
+    /// "project @ device", as plain text (the Live Activity's subtitle).
+    func locationLabel(for chat: Chat) -> String {
+        let project = chat.spaceId == nil ? "No project" : (
+            space(for: chat)?.displayName
+                ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
+                ?? "?"
+        )
+        return "\(project) @ \(deviceName(chat.deviceId))"
+    }
+
+    /// Every active session as its Live Activity would show it.
+    var liveActivitySnapshots: [LiveActivitySnapshot] {
+        overviewChats.map { chat in
+            let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]
+            let started = row?.startedAt ?? row?.updatedAt ?? chat.createdAt
+            return LiveActivitySnapshot(
+                attributes: SessionActivityAttributes(
+                    chatId: chat.id, title: chat.displayTitle, location: locationLabel(for: chat),
+                    projectTint: chat.spaceId.map(Theme.projectTintIndex)),
+                phase: LiveActivityPlan.phase(for: indicator(for: chat)),
+                startedAt: Date(timeIntervalSince1970: Double(started) / 1000))
+        }
+    }
+
+    /// `harness://chat/<id>` (a Live Activity tap) opens that session.
+    func openDeepLink(_ url: URL) {
+        guard url.scheme == "harness", url.host == "chat" else { return }
+        let chatId = url.lastPathComponent
+        guard !chatId.isEmpty, chatId != "/" else { return }
+        launchRoute = .chat(chatId)
     }
 
     func indicator(for chat: Chat) -> ChatIndicator {

@@ -47,8 +47,12 @@ struct RootView: View {
                 OrgPickerView(tokens: tokens, orgs: orgs)
             case .ready:
                 HomeView()
+                    .onChange(of: model.liveActivitySnapshots, initial: true) { _, sessions in
+                        model.liveActivities.sync(sessions)
+                    }
             }
         }
         .task { model.restore() }
+        .onOpenURL { model.openDeepLink($0) }
     }
 }

@@ -133,6 +133,12 @@ struct HomeView: View {
             .task(id: model.overviewChats.map(\.id).joined()) {
                 model.preloadSessions()
             }
+            .onChange(of: model.launchRoute) { _, route in
+                // A deep link while Home is already up (Live Activity tap).
+                guard let route else { return }
+                model.launchRoute = nil
+                path = [route]
+            }
             .onAppear {
                 if let route = model.launchRoute {
                     model.launchRoute = nil
