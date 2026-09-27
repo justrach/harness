@@ -112,7 +112,10 @@ actions!(
         // Chat tabs, each holding its own split (`shell/chat_tabs.rs`).
         NewChatTab,
         NextChatTab,
-        PrevChatTab
+        PrevChatTab,
+        // Settings → Devices' update button: the sidebar strip's flow
+        // (download, then restart into the new version).
+        StartAppUpdate
     ]
 );
 
@@ -11160,6 +11163,11 @@ impl Render for Shell {
                 this.toggle_chat_pane_zoom(cx)
             }))
             .on_action(cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)))
+            .on_action(cx.listener(|this, _: &StartAppUpdate, _, cx| {
+                if matches!(this.update_flow, UpdateFlow::Idle | UpdateFlow::Failed(_)) {
+                    this.on_update_strip_click(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NextChatTab, window, cx| this.cycle_chat_tab(true, window, cx)))
             .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| this.cycle_chat_tab(false, window, cx)))
             .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
