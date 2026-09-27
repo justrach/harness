@@ -7102,8 +7102,8 @@ impl Transcript {
             .justify_center()
             .pt(px(top_gap))
             .pb(px(bottom_pad))
-            // Keep side gutters as the configurable column shrinks to fit.
-            .px(px(48.0))
+            // Keep compact side gutters as the configurable column shrinks to fit.
+            .px(px(12.0))
             .child(
                 div()
                     .w_full()
@@ -12738,8 +12738,8 @@ mod tests {
                 assert!(this.list.logical_scroll_top().offset_in_item.abs() <= px(1.0));
                 let bounds = render::selection_test_bounds("reply#body.0:0");
                 assert!(
-                    bounds.size.width <= px(904.0),
-                    "content must fit a 1000px viewport with 48px gutters"
+                    bounds.origin.x == px(12.0) && bounds.size.width <= px(976.0),
+                    "content must fit a 1000px viewport with compact 12px gutters"
                 );
                 entries[0].parts.push(tool_part("live-tool", "pwd"));
                 transcript.update(cx, |this, cx| {
