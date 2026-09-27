@@ -28,6 +28,7 @@ actions!(
         ShowAll,
         Minimize,
         Zoom,
+        CloseTab,
         CloseWindow,
         AppearanceSystem,
         AppearanceLight,
@@ -58,6 +59,7 @@ pub fn init(cx: &mut App) {
     // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
+    cx.on_action(close_tab);
     cx.on_action(close_window);
     // Appearance. Each verb persists and repaints every window; see
     // `appearance::set_mode`.
@@ -103,6 +105,35 @@ pub(crate) fn quit_after_save(cx: &mut App) {
     cx.quit();
 }
 
+fn close_tab(_: &CloseTab, cx: &mut App) {
+    cx.defer(close_active_tab);
+}
+
+/// ⌘W: close the innermost thing open and never the window. Closing the
+/// window ends the app's session for every chat, so a stray ⌘W in an empty
+/// chat must not take running agents down with it (⌘⇧W closes the window).
+fn close_active_tab(cx: &mut App) {
+    if let Some(window) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<shell::Shell>())
+    {
+        close_tab_in(window, cx);
+    }
+}
+
+pub(crate) fn close_tab_in(window: gpui::WindowHandle<shell::Shell>, cx: &mut App) {
+    window
+        .update(cx, |shell, window, cx| {
+            // The right pane's active surface (the tab the user just opened),
+            // then the focused split pane or chat tab, Ghostty-style, then
+            // the chat itself, back to a new session.
+            let _ = shell.close_active_surface(window, cx)
+                || shell.close_focused_chat_pane(window, cx)
+                || shell.close_chat_to_new_session(cx);
+        })
+        .ok();
+}
+
 fn close_window(_: &CloseWindow, cx: &mut App) {
     cx.defer(close_active_window);
 }
@@ -112,16 +143,7 @@ fn close_active_window(cx: &mut App) {
         if let Some(window) = window.downcast::<shell::Shell>() {
             window
                 .update(cx, |shell, window, cx| {
-                    // ⌘W closes the right pane's active surface first (the tab
-                    // the user just opened); an empty or closed pane falls
-                    // through to the window close, unsaved-file gate and all.
-                    if shell.close_active_surface(window, cx) {
-                        return;
-                    }
-                    // Then the focused split chat pane, Ghostty-style.
-                    if shell.close_focused_chat_pane(window, cx) {
-                        return;
-                    }
+                    // Unsaved files hold the close until they are dealt with.
                     if shell.prepare_window_close(cx) {
                         window.remove_window();
                     }
@@ -158,7 +180,8 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
             KeyBinding::new("cmd-m", Minimize, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("cmd-shift-w", CloseWindow, None),
         ]);
     }
     bindings
@@ -225,6 +248,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
+            MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Window", CloseWindow),
         ]));
     }
@@ -354,7 +378,9 @@ mod tests {
             Some(combo("cmd-,"))
         );
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
-        assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-w")));
+        // ⌘W closes a tab and never the window; ⌘⇧W closes the window.
+        assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
+        assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
 
         let other = app_key_bindings(false);
