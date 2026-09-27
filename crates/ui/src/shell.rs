@@ -3361,6 +3361,7 @@ impl Shell {
                 reasoning,
                 // The project was just picked above.
                 target: None,
+                input: None,
             }),
             cx,
         );
@@ -13225,6 +13226,11 @@ mod exit_regressions {
                 // ⌘D from the harness chat, then pick folio in the new pane.
                 shell.split_chat(SplitAxis::Horizontal, window, cx);
                 assert!(shell.state.read(cx).selected_chat.is_none());
+                assert_eq!(
+                    project(shell, cx).as_deref(),
+                    Some("harness"),
+                    "⌘D starts the new session in the chat's folder (#25)"
+                );
                 shell
                     .state
                     .update(cx, |state, cx| state.select_space(Some("folio".into()), cx));
@@ -13244,6 +13250,136 @@ mod exit_regressions {
                 assert_eq!(project(shell, cx).as_deref(), Some("harness"));
                 shell.switch_chat_tab(0, window, cx);
                 assert_eq!(project(shell, cx).as_deref(), Some("folio"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn cmd_d_under_all_projects_keeps_the_chats_folder(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let space = |id: &str| harness_proto::Space {
+                    id: id.into(),
+                    device_id: "local".into(),
+                    path: format!("/p/{id}"),
+                    name: None,
+                    git_detected: false,
+                    git_checked_at: None,
+                    checkout_id: None,
+                    created_at: Utc::now(),
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.apply_spaces(vec![space("harness"), space("folio")]);
+                    state.chats = vec![harness_proto::Chat {
+                        id: "folio-chat".into(),
+                        device_id: "local".into(),
+                        title: None,
+                        archived: false,
+                        cwd: None,
+                        branch: None,
+                        checkout_id: None,
+                        source_context: None,
+                        config: None,
+                        last_message_preview: None,
+                        last_message_at: None,
+                        created_at: Utc::now(),
+                        harness_session_id: None,
+                        harness_session_cwd: None,
+                        parent_chat_id: None,
+                        space_id: Some("folio".into()),
+                        last_seen_at: None,
+                        room_gen: None,
+                    }];
+                    state.select_chat(Some("folio-chat".into()), cx);
+                });
+                shell.set_space_filter(None, cx);
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(
+                    shell.state.read(cx).selected_space.as_deref(),
+                    Some("folio"),
+                    "⌘D starts the new session in the chat's folder (#25)"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_new_pane_or_tab_starts_without_the_unsent_prompt(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let text = |shell: &Shell, cx: &App| shell.composer.read(cx).canvas_input(cx).text;
+                shell
+                    .composer
+                    .update(cx, |composer, cx| composer.prefill("unsent idea".into(), cx));
+                assert_eq!(text(shell, cx), "unsent idea");
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(text(shell, cx), "", "a ⌘D pane opened with the draft (#28)");
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(text(shell, cx), "unsent idea", "the draft stays in its pane");
+                shell.new_chat_tab(None, window, cx);
+                assert_eq!(text(shell, cx), "", "a ⌘T tab opened with the draft (#28)");
+                shell.switch_chat_tab(0, window, cx);
+                assert_eq!(text(shell, cx), "unsent idea", "the draft stays in its tab");
             })
             .unwrap();
     }
@@ -13348,6 +13484,7 @@ mod exit_regressions {
                         model: Some("gpt-6-sol".into()),
                         reasoning: Some(ReasoningLevel::Low),
                         target: None,
+                        input: None,
                     }),
                     cx,
                 );

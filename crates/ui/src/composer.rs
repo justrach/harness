@@ -5654,6 +5654,45 @@ impl Composer {
 
     // ---- attachment staging (use-attachments.ts) ----
 
+    /// The new-session canvas's unsent prompt and staged files. Every canvas
+    /// uses the empty draft key; the shell parks each one's own copy with its
+    /// pane or tab so a fresh canvas never inherits another's.
+    pub(crate) fn canvas_input(&self, cx: &App) -> crate::pickers::CanvasInput {
+        let text = if self.current_key.is_empty() {
+            self.input.read(cx).text().to_string()
+        } else {
+            self.drafts.get("").cloned().unwrap_or_default()
+        };
+        crate::pickers::CanvasInput {
+            text,
+            stage: self.attachments.get("").cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Show `input` on the canvas. A pending switch onto the canvas (the
+    /// draft swap runs after the selection change) picks it up from the
+    /// stash instead.
+    pub(crate) fn set_canvas_input(
+        &mut self,
+        input: crate::pickers::CanvasInput,
+        cx: &mut Context<Self>,
+    ) {
+        if input.stage.is_empty() {
+            self.attachments.remove("");
+        } else {
+            self.attachments.insert(String::new(), input.stage);
+        }
+        if self.current_key.is_empty() {
+            self.input
+                .update(cx, |field, cx| field.set_text(input.text, cx));
+        } else if input.text.is_empty() {
+            self.drafts.remove("");
+        } else {
+            self.drafts.insert(String::new(), input.text);
+        }
+        cx.notify();
+    }
+
     /// Staged attachments for the chat the composer is showing.
     pub(crate) fn staged(&self) -> &[StagedAttachment] {
         self.attachments
