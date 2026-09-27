@@ -83,7 +83,7 @@ struct QueuePanel: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(whiteAlpha(dragging == item.id ? 0.10 : 0.04),
+        .background(ink(dragging == item.id ? 0.10 : 0.04),
                     in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border, lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 10))

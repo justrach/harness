@@ -15,6 +15,7 @@ struct TranscriptView: View {
     @State private var userExpansionHeights: [String: CGFloat] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
@@ -26,13 +27,14 @@ struct TranscriptView: View {
             expansionHeight: runway.flatMap { userExpansionHeights[$0] } ?? 0,
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
-            configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue) { row in
+            configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
+                ^ colorScheme.hashValue) { row in
                 AnyView(rowView(row)
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
-                    .environment(\.colorScheme, .dark))
+                    .environment(\.colorScheme, colorScheme))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)
@@ -599,7 +601,7 @@ struct InputChipView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 20, height: 20)
-                .background(whiteAlpha(0.09), in: RoundedRectangle(cornerRadius: 6))
+                .background(ink(0.09), in: RoundedRectangle(cornerRadius: 6))
             Text("Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
@@ -611,7 +613,7 @@ struct InputChipView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 34)
-        .background(whiteAlpha(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+        .background(ink(0.045), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(ink(0.08), lineWidth: 1))
     }
 }

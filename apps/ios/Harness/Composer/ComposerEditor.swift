@@ -111,7 +111,7 @@ struct ComposerEditor: UIViewRepresentable {
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
         view.showsVerticalScrollIndicator = false
-        view.keyboardAppearance = .dark
+        view.keyboardAppearance = .default
         view.accessibilityIdentifier = "composer-input"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.delegate = controller

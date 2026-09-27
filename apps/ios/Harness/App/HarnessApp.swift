@@ -13,7 +13,7 @@ struct HarnessApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
+                .harnessAppearance()
                 // Monochrome controls: glass buttons, toolbar icons, and
                 // toggles render white like the desktop — accent stays paint
                 // for status/markdown, never chrome.
