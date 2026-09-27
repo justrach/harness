@@ -6569,6 +6569,17 @@ impl Transcript {
     }
 
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // A pending question owns the surface, even if the run still streams
+        // or a steer follows it. Check this pane's doc, not the focused chat:
+        // live split panes and subagent tabs bypass the session-row path.
+        let state = self.state.read(cx);
+        let entries = match &self.doc_override {
+            Some(doc_id) => state.sub_transcript(doc_id),
+            None => &state.transcript,
+        };
+        if crate::composer::pending_input_request(entries).is_some() {
+            return None;
+        }
         let now = chrono::Utc::now();
         let (sending, queued, elapsed_secs, seed) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
@@ -6614,12 +6625,6 @@ impl Transcript {
             let (sending, queued, elapsed) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                    return None;
-                }
-                // A turn parked on a question waits on the user, not the agent.
-                // A steer can flip the status back to Working with the question
-                // still open; the QuestionPanel owns the surface then.
-                if crate::composer::pending_input_request(&state.transcript).is_some() {
                     return None;
                 }
                 // During the send→turn window the session row's `started_at`
@@ -9437,6 +9442,69 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn working_trailer_waits_for_this_panes_question(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let primary = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let peer = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), true, cx));
+            let frozen = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), false, cx));
+            let entries = |resolved, steer| {
+                let mut entries = vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![MessagePart::Input {
+                        id: "input".into(),
+                        request_id: "question".into(),
+                        questions: vec![],
+                        resolved,
+                    }],
+                )];
+                if steer {
+                    let mut user = assistant("steer", MessageStatus::Complete, vec![]);
+                    user.role = MessageRole::User;
+                    entries.push(user);
+                }
+                entries
+            };
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.sessions.push(harness_proto::Session {
+                    chat_id: "chat".into(),
+                    device_id: "test".into(),
+                    status: harness_proto::SessionStatus::Working,
+                    started_at: Some(chrono::Utc::now()),
+                    updated_at: chrono::Utc::now(),
+                    last_completed_turn: None,
+                });
+            });
+            primary.update(cx, |this, _| this.chat_id = Some("chat".into()));
+            for steer in [false, true] {
+                for primary_resolved in [false, true] {
+                    for peer_resolved in [false, true] {
+                        state.update(cx, |state, _| {
+                            state.transcript = entries(primary_resolved, steer);
+                            state.set_subagent_snapshot("peer".into(), entries(peer_resolved, steer));
+                        });
+                        primary.update(cx, |this, cx| {
+                            assert_eq!(this.render_working_trailer(cx).is_some(), primary_resolved);
+                        });
+                        peer.update(cx, |this, cx| {
+                            assert_eq!(this.render_working_trailer(cx).is_some(), peer_resolved);
+                        });
+                        frozen.update(cx, |this, cx| {
+                            assert!(this.render_working_trailer(cx).is_none());
+                        });
+                    }
+                }
+            }
+        });
     }
 
     #[gpui::test]
