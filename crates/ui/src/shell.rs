@@ -6723,7 +6723,9 @@ impl Shell {
                                     let id = id.clone();
                                     move || format!("chat-time-{id}")
                                 })
-                                .w(px(30.0))
+                                // Fit the timestamp; add 6px to the compact row's
+                                // 4px gap for 10px of separation from the title.
+                                .ml(px(6.0))
                                 .flex_none()
                                 .text_right()
                                 .text_size(crate::typography::ui_rems(11.0))
