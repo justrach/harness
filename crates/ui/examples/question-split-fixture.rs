@@ -144,6 +144,14 @@ fn main() -> anyhow::Result<()> {
                     if [1, 2, 4, 8].contains(&count) {
                         capture(window.into(), cx, &output, &format!("shell-{count}-panes-1440"))?;
                     }
+                    if count == 1 {
+                        let handle: gpui::AnyWindowHandle = window.into();
+                        handle.update(cx, |_, window, _| window.resize(size(px(1440.), px(360.))))?;
+                        pause(cx, 700).await;
+                        capture(window.into(), cx, &output, "shell-1-panes-1440x360")?;
+                        handle.update(cx, |_, window, _| window.resize(size(px(1440.), px(900.))))?;
+                        pause(cx, 700).await;
+                    }
                 }
                 // Eight equal panes under tighter desktop viewports.
                 for width in [1200, 1000, 800] {
@@ -152,6 +160,32 @@ fn main() -> anyhow::Result<()> {
                     pause(cx, 700).await;
                     capture(window.into(), cx, &output, &format!("shell-8-panes-{width}"))?;
                 }
+                let handle: gpui::AnyWindowHandle = window.into();
+                handle.update(cx, |_, window, _| window.resize(size(px(1000.), px(360.))))?;
+                pause(cx, 700).await;
+                capture(window.into(), cx, &output, "shell-8-panes-1000x360")?;
+                // Open the active pane's compact question launcher through its real hit target.
+                handle.update(cx, |_, window, cx| {
+                    let viewport = window.viewport_size();
+                    let position = gpui::point(viewport.width - px(24.), viewport.height - px(32.));
+                    window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left, position, click_count: 1,
+                        ..Default::default()
+                    }), cx);
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left, position, click_count: 1,
+                        ..Default::default()
+                    }), cx);
+                })?;
+                pause(cx, 500).await;
+                capture(window.into(), cx, &output, "shell-8-panes-question-expanded")?;
+                handle.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                    window.dispatch_event(gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("escape")?,
+                        is_held: false, prefer_character_input: false,
+                    }), cx);
+                    Ok(())
+                })??;
                 // Tabs are not splits: eight tabs still give the active session the full column.
                 window.update(cx, |shell, window, cx| {
                     window.resize(size(px(1440.), px(900.)));

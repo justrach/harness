@@ -8725,6 +8725,12 @@ impl Shell {
             composer.set_available_width(composer_width, cx)
         });
         let term_h = self.eval_tween(self.terminal_tween, self.terminal_target(cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_available_height(
+                self.viewport_height - term_h - Theme::TITLEBAR_HEIGHT - Theme::STATUS_STRIP_HEIGHT,
+                cx,
+            );
+        });
         let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
             if artwork.is_some() && artwork_opacity < 1.0 {
                 window.request_animation_frame();
