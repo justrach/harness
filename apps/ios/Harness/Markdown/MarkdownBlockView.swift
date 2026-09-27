@@ -199,7 +199,7 @@ struct CodeBlockView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 5)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(whiteAlpha(0.02))
+                    .background(ink(0.02))
                     .overlay(alignment: .bottom) {
                         Rectangle().fill(Theme.border).frame(height: 1)
                     }
@@ -217,11 +217,11 @@ struct CodeBlockView: View {
                 .padding(.vertical, MD.codePaddingY)
             }
         }
-        .background(whiteAlpha(0.035))
+        .background(ink(0.035))
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.panelRadius)
-                .strokeBorder(whiteAlpha(0.06), lineWidth: 1)
+                .strokeBorder(ink(0.06), lineWidth: 1)
         )
         .contextMenu {
             Button {
@@ -378,7 +378,7 @@ struct TableBlockView: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(whiteAlpha(0.10)).frame(height: 1)
+        Rectangle().fill(ink(0.10)).frame(height: 1)
             .gridCellUnsizedAxes(.horizontal)
     }
 

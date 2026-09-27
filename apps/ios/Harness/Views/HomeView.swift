@@ -23,6 +23,7 @@ struct HomeView: View {
     @State private var showProjectlessDevices = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
+    @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
@@ -106,6 +107,12 @@ struct HomeView: View {
                         if model.demo != nil {
                             Text("Demo mode")
                         }
+                        Picker(selection: $appearance) {
+                            ForEach(AppearancePreference.allCases) { Text($0.label).tag($0.rawValue) }
+                        } label: {
+                            Label("Appearance", systemImage: "circle.lefthalf.filled")
+                        }
+                        .pickerStyle(.menu)
                         Button("Sign out", role: .destructive) { model.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
