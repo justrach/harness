@@ -23,132 +23,180 @@ struct HomeView: View {
     @State private var showProjectlessDevices = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
     }
 
+    /// iPad (and other wide windows): the session list becomes a sidebar
+    /// next to the open session, like the desktop. Compact width keeps the
+    /// phone's single stack.
+    private var splitLayout: Bool { horizontalSizeClass == .regular }
+
     var body: some View {
-        NavigationStack(path: $path) {
-            List {
-                sessionsSection
-                // The desktop's archived shelf sits under the active list,
-                // scoped by the same space filter.
-                ArchivedSection(spaceId: selectedSpace?.id, path: $path)
-            }
-            .listStyle(.plain)
-            .environment(\.defaultMinListRowHeight, 10)
-            .contentMargins(.top, 2, for: .scrollContent)
-            .scrollContentBackground(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .background(Theme.surface.ignoresSafeArea())
-            .navigationTitle("Harness")  // feeds the back menu; not displayed
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar(removing: .title)
-            .navigationDestination(for: Route.self) { route in
-                switch route {
-                case .space(let id): SpaceView(spaceId: id, path: $path)
-                case .chat(let id): SessionView(chatId: id)
-                case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+        if splitLayout {
+            NavigationSplitView {
+                sidebar
+            } detail: {
+                NavigationStack(path: $path) {
+                    SplitDetailPlaceholder()
+                        .navigationDestination(for: Route.self, destination: destination)
                 }
             }
-            .toolbar {
-                // Let the native toolbar own this glass surface and its menu
-                // morph. A second custom glass layer retains stale masks.
-                ToolbarItem(placement: .topBarLeading) {
-                    HStack(spacing: 10) {
-                        spaceDropdown
-                        // In the bar, not the list: as a list row it appeared
-                        // and vanished with the connection and shoved the
-                        // content down. Degraded states are GRACED (4s of
-                        // continuous raw degradation before anything shows;
-                        // recovery hides instantly) and quiet — a bare
-                        // grayscale spinner or dot with a faint caption, no
-                        // surface, no border (shell.rs render_connection_pill).
-                        switch model.connectivity.state {
-                        case .offline:
-                            HStack(spacing: 5) {
-                                Circle()
-                                    .fill(Theme.warning)
-                                    .frame(width: 5, height: 5)
-                                Text("Offline — sends are saved")
-                                    .font(Theme.sans(13))
-                                    .foregroundStyle(Theme.textFaint)
-                            }
-                            .transition(.opacity)
-                        case .reconnecting:
-                            HStack(spacing: 5) {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .tint(Theme.textMuted)
-                                Text("Reconnecting…")
-                                    .font(Theme.sans(13))
-                                    .foregroundStyle(Theme.textFaint)
-                            }
-                            .transition(.opacity)
-                        case .connected:
-                            // Initial catch-up (within the grace): the old
-                            // quiet "connecting" spinner, gone on first sync.
-                            if !model.connected {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .tint(Theme.textMuted)
-                                    .accessibilityLabel("Connecting")
-                            }
+            .navigationSplitViewStyle(.balanced)
+        } else {
+            NavigationStack(path: $path) {
+                sidebar
+                    .navigationDestination(for: Route.self, destination: destination)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destination(_ route: Route) -> some View {
+        switch route {
+        case .space(let id): SpaceView(spaceId: id, path: $path)
+        case .chat(let id): SessionView(chatId: id)
+        case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+        }
+    }
+
+    /// Open a route from the list. In the split layout the sidebar replaces
+    /// what the detail shows instead of stacking behind it.
+    private func open(_ route: Route) {
+        if splitLayout { path = [route] } else { path.append(route) }
+    }
+
+    /// `path` for sidebar children that push by appending (the archived shelf).
+    private var sidebarPath: Binding<[Route]> {
+        Binding(get: { path }, set: { newPath in
+            if splitLayout, newPath.count > path.count, let route = newPath.last {
+                path = [route]
+            } else {
+                path = newPath
+            }
+        })
+    }
+
+    /// The session the detail column shows, for the sidebar's selection wash.
+    private var selectedChatId: String? {
+        guard splitLayout, case .chat(let id) = path.first else { return nil }
+        return id
+    }
+
+    private var sidebar: some View {
+        List {
+            sessionsSection
+            // The desktop's archived shelf sits under the active list,
+            // scoped by the same space filter.
+            ArchivedSection(spaceId: selectedSpace?.id, path: sidebarPath)
+        }
+        .listStyle(.plain)
+        .environment(\.defaultMinListRowHeight, 10)
+        .contentMargins(.top, 2, for: .scrollContent)
+        .scrollContentBackground(.hidden)
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .background(Theme.surface.ignoresSafeArea())
+        .navigationTitle("Harness")  // feeds the back menu; not displayed
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(removing: .title)
+        .toolbar {
+            // Let the native toolbar own this glass surface and its menu
+            // morph. A second custom glass layer retains stale masks.
+            ToolbarItem(placement: .topBarLeading) {
+                HStack(spacing: 10) {
+                    spaceDropdown
+                    // In the bar, not the list: as a list row it appeared
+                    // and vanished with the connection and shoved the
+                    // content down. Degraded states are GRACED (4s of
+                    // continuous raw degradation before anything shows;
+                    // recovery hides instantly) and quiet — a bare
+                    // grayscale spinner or dot with a faint caption, no
+                    // surface, no border (shell.rs render_connection_pill).
+                    switch model.connectivity.state {
+                    case .offline:
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(Theme.warning)
+                                .frame(width: 5, height: 5)
+                            Text("Offline — sends are saved")
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textFaint)
+                        }
+                        .transition(.opacity)
+                    case .reconnecting:
+                        HStack(spacing: 5) {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(Theme.textMuted)
+                            Text("Reconnecting…")
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textFaint)
+                        }
+                        .transition(.opacity)
+                    case .connected:
+                        // Initial catch-up (within the grace): the old
+                        // quiet "connecting" spinner, gone on first sync.
+                        if !model.connected {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(Theme.textMuted)
+                                .accessibilityLabel("Connecting")
                         }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    newButton
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if model.demo != nil {
-                            Text("Demo mode")
-                        }
-                        Picker(selection: $appearance) {
-                            ForEach(AppearancePreference.allCases) { Text($0.label).tag($0.rawValue) }
-                        } label: {
-                            Label("Appearance", systemImage: "circle.lefthalf.filled")
-                        }
-                        .pickerStyle(.menu)
-                        Button("Sign out", role: .destructive) { model.signOut() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                newButton
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if model.demo != nil {
+                        Text("Demo mode")
+                    }
+                    Picker(selection: $appearance) {
+                        ForEach(AppearancePreference.allCases) { Text($0.label).tag($0.rawValue) }
                     } label: {
-                        Image(systemName: "person.circle")
+                        Label("Appearance", systemImage: "circle.lefthalf.filled")
                     }
+                    .pickerStyle(.menu)
+                    Button("Sign out", role: .destructive) { model.signOut() }
+                } label: {
+                    Image(systemName: "person.circle")
                 }
             }
-            .sheet(isPresented: $showNewSpace) {
-                NewSpaceSheet { spaceId in
-                    path.append(.space(spaceId))
-                }
+        }
+        .sheet(isPresented: $showNewSpace) {
+            NewSpaceSheet { spaceId in
+                open(.space(spaceId))
             }
-            .sheet(isPresented: $showProjectlessDevices) {
-                SessionHostPickerSheet { deviceId in
-                    spaceFilter = ""
-                    path.append(.newSession(.projectless(deviceId: deviceId)))
-                }
+        }
+        .sheet(isPresented: $showProjectlessDevices) {
+            SessionHostPickerSheet { deviceId in
+                spaceFilter = ""
+                open(.newSession(.projectless(deviceId: deviceId)))
             }
-            .task(id: model.overviewChats.map(\.id).joined()) {
-                model.preloadSessions()
-            }
-            .onAppear {
-                if let route = model.launchRoute {
-                    model.launchRoute = nil
-                    // Push the whole stack atomically — appending from a child's
-                    // onAppear mid-transition gets dropped by NavigationStack.
-                    if case .space(let id) = route, model.launchSheet == "newsession" {
-                        model.launchSheet = nil
-                        path = [route, .newSession(spaceId: id)]
-                    } else {
-                        path = [route]
-                    }
-                }
-                if model.launchSheet == "newspace" {
+        }
+        .task(id: model.overviewChats.map(\.id).joined()) {
+            model.preloadSessions()
+        }
+        .onAppear {
+            if let route = model.launchRoute {
+                model.launchRoute = nil
+                // Push the whole stack atomically — appending from a child's
+                // onAppear mid-transition gets dropped by NavigationStack.
+                if case .space(let id) = route, model.launchSheet == "newsession" {
                     model.launchSheet = nil
-                    showNewSpace = true
+                    path = [route, .newSession(spaceId: id)]
+                } else {
+                    path = [route]
                 }
+            }
+            if model.launchSheet == "newspace" {
+                model.launchSheet = nil
+                showNewSpace = true
             }
         }
     }
@@ -230,13 +278,13 @@ struct HomeView: View {
         Menu {
             if let space = selectedSpace {
                 Button("New session in \(space.displayName)") {
-                    path.append(.newSession(spaceId: space.id))
+                    open(.newSession(spaceId: space.id))
                 }
             } else if !model.spaces.isEmpty {
                 Section("New session in…") {
                     ForEach(model.spaces) { space in
                         Button {
-                            path.append(.newSession(spaceId: space.id))
+                            open(.newSession(spaceId: space.id))
                         } label: {
                             Text(space.displayName)
                             Text(deviceTag(space))
@@ -278,9 +326,12 @@ struct HomeView: View {
                 // Location shows even when scoped — without it the row's
                 // first line is just a floating dot and a timestamp.
                 ChatRow(chat: chat, showLocation: true) {
-                    path.append(.chat(chat.id))
+                    open(.chat(chat.id))
                 }
-                .listRowBackground(Color.clear)
+                .listRowBackground(selectedChatId == chat.id
+                    ? AnyView(RoundedRectangle(cornerRadius: 10).fill(Theme.elementActive)
+                        .padding(.horizontal, 8))
+                    : AnyView(Color.clear))
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
                 .sessionPinAction(chat: chat, model: model)
@@ -475,4 +526,20 @@ func projectLocation(chat: Chat, model: AppModel) -> Text {
         ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
         ?? "?"
     return Text("\(Text(project).foregroundStyle(Theme.projectTint(spaceId))) @ \(device)")
+}
+
+/// The split layout's detail column before a session is picked.
+private struct SplitDetailPlaceholder: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "bubble.left.and.text.bubble.right")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(Theme.textFaint)
+            Text("Pick a session, or start one with +")
+                .font(Theme.sans(15))
+                .foregroundStyle(Theme.textMuted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bg.ignoresSafeArea())
+    }
 }
