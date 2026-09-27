@@ -690,8 +690,14 @@ final class SessionStore {
                 if let s = v.stringValue { fields[k] = s }
                 else if let b = v.boolValue { fields[k] = b }
                 else if let i = v.i64Value { fields[k] = i }
+                else if tag == "todo", k == "items", let list = v.listValue {
+                    fields[k] = list.compactMap { item -> TaskItem? in
+                        guard let m = item.mapValue, let text = m["text"]?.stringValue else { return nil }
+                        return TaskItem(text: text, done: m["done"]?.boolValue ?? false)
+                    }
+                }
                 else if let list = v.listValue {
-                    // ApplyPatch changes / Todo items — keep a JSON echo.
+                    // ApplyPatch changes — keep a JSON echo.
                     fields[k] = list.map { "\($0.jsonObject)" }
                 }
             }

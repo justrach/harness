@@ -17,6 +17,13 @@ struct SessionActivityAttributes: ActivityAttributes, Hashable {
         var startedAt: Date
         /// The session's latest line (what the agent is doing or said).
         var detail: String?
+        /// From the agent's task list, when it keeps one: the task it's on
+        /// (nil once all are done) and the progress through the list.
+        var task: String?
+        var tasksDone: Int?
+        var tasksTotal: Int?
+
+        var hasTasks: Bool { (tasksTotal ?? 0) > 0 }
     }
 
     var chatId: String

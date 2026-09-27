@@ -47,12 +47,7 @@ struct SessionLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
-                        if let detail = state.detail {
-                            Text(detail)
-                                .font(.subheadline)
-                                .foregroundStyle(.white.opacity(0.72))
-                                .lineLimit(2)
-                        }
+                        WorkLine(state: state)
                         PlaceLine(attributes: attributes)
                             .font(.caption)
                     }
@@ -95,12 +90,7 @@ private struct LockScreenCard: View {
                     Spacer(minLength: 4)
                     StatusPill(phase: state.phase)
                 }
-                if let detail = state.detail {
-                    Text(detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(2)
-                }
+                WorkLine(state: state)
                 HStack(spacing: 8) {
                     PlaceLine(attributes: attributes)
                     Spacer(minLength: 4)
@@ -176,15 +166,59 @@ private struct CompactStatus: View {
         case .working:
             HStack(spacing: 5) {
                 Circle().fill(phaseColor(.working)).frame(width: 6, height: 6)
-                ElapsedTimer(startedAt: state.startedAt)
-                    .font(.system(.footnote, design: .rounded).weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: 40)
+                // With a task list, progress says more than the clock.
+                if state.hasTasks, let total = state.tasksTotal {
+                    Text("\(state.tasksDone ?? 0)/\(total)")
+                        .font(.system(.footnote, design: .rounded).weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                } else {
+                    ElapsedTimer(startedAt: state.startedAt)
+                        .font(.system(.footnote, design: .rounded).weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: 40)
+                }
             }
         case .waiting, .done, .failed:
             Image(systemName: phaseSymbol(state.phase))
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(phaseColor(state.phase))
+        }
+    }
+}
+
+/// What the agent is on: the current task and progress through its task
+/// list when it keeps one, otherwise its latest line.
+private struct WorkLine: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        if state.hasTasks, let total = state.tasksTotal {
+            let done = state.tasksDone ?? 0
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: state.task == nil ? "checkmark.circle.fill" : "circle.dashed")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(phaseColor(state.phase))
+                    Text(state.task ?? "All \(total) tasks done")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Text("\(done) of \(total)")
+                        .font(.caption.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.6))
+                        .fixedSize()
+                }
+                ProgressView(value: Double(done), total: Double(total))
+                    .tint(phaseColor(state.phase))
+            }
+        } else if let detail = state.detail {
+            Text(detail)
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(2)
         }
     }
 }

@@ -407,6 +407,10 @@ final class AppModel {
         overviewChats.map { chat in
             let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]
             let started = row?.startedAt ?? row?.updatedAt ?? chat.createdAt
+            let phase = LiveActivityPlan.phase(for: indicator(for: chat))
+            // Only live runs read the transcript (it changes every token).
+            let tasks = (phase == .working || phase == .waiting)
+                ? sessionStores[chat.id].flatMap { LiveActivityPlan.tasks(in: $0.entries) } : nil
             let project = chat.spaceId.map { _ in
                 space(for: chat)?.displayName
                     ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
@@ -418,9 +422,10 @@ final class AppModel {
                     device: deviceName(chat.deviceId),
                     projectTint: chat.spaceId.map(Theme.projectTintIndex),
                     harness: chat.config?.harness ?? "claude-code"),
-                phase: LiveActivityPlan.phase(for: indicator(for: chat)),
+                phase: phase,
                 startedAt: Date(timeIntervalSince1970: Double(started) / 1000),
-                detail: LiveActivityPlan.detail(chat.lastMessagePreview))
+                detail: LiveActivityPlan.detail(chat.lastMessagePreview),
+                tasks: tasks)
         }
     }
 

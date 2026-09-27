@@ -71,4 +71,33 @@ final class LiveActivityPlanTests: XCTestCase {
         let long = String(repeating: "a", count: 200)
         XCTAssertEqual(LiveActivityPlan.detail(long)?.count, 140)
     }
+
+    func testCurrentTaskIsTheFirstUnfinishedOneFromTheLatestTodoCall() {
+        func todo(_ id: String, _ items: [TaskItem]) -> MessagePart {
+            .tool(id: id, call: RenderToolCall(tag: "todo", fields: ["items": items]), isError: false, resolved: true)
+        }
+        let entries = [
+            MessageEntry(id: "1", role: .assistant, parts: [todo("a", [TaskItem(text: "old", done: false)])],
+                         createdAt: 1, deviceId: "mac"),
+            MessageEntry(id: "2", role: .assistant, parts: [
+                todo("b", [TaskItem(text: "Read the code", done: true),
+                           TaskItem(text: "Write the fix", done: false),
+                           TaskItem(text: "Run the tests", done: false)]),
+                .text(id: "t", text: "Working on it"),
+            ], createdAt: 2, deviceId: "mac"),
+        ]
+        let tasks = LiveActivityPlan.tasks(in: entries)
+        XCTAssertEqual(tasks?.map(\.text), ["Read the code", "Write the fix", "Run the tests"])
+
+        var snapshot = session("s", .working)
+        snapshot.tasks = tasks
+        XCTAssertEqual(snapshot.state?.task, "Write the fix")
+        XCTAssertEqual(snapshot.state?.tasksDone, 1)
+        XCTAssertEqual(snapshot.state?.tasksTotal, 3)
+
+        snapshot.tasks = tasks?.map { TaskItem(text: $0.text, done: true) }
+        XCTAssertNil(snapshot.state?.task)
+        XCTAssertEqual(snapshot.state?.tasksDone, 3)
+        XCTAssertNil(LiveActivityPlan.tasks(in: []))
+    }
 }

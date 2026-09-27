@@ -14,9 +14,15 @@ struct LiveActivitySnapshot: Hashable {
     var phase: SessionActivityAttributes.ContentState.Phase?
     var startedAt: Date
     var detail: String?
+    var tasks: [TaskItem]?
 
     var state: SessionActivityAttributes.ContentState? {
-        phase.map { .init(phase: $0, startedAt: startedAt, detail: detail) }
+        guard let phase else { return nil }
+        let list = tasks ?? []
+        return .init(phase: phase, startedAt: startedAt, detail: detail,
+                     task: list.first { !$0.done }?.text,
+                     tasksDone: list.isEmpty ? nil : list.filter(\.done).count,
+                     tasksTotal: list.isEmpty ? nil : list.count)
     }
 }
 
@@ -32,6 +38,18 @@ enum LiveActivityPlan {
         case finish(chatId: String)
         /// The session went idle (seen, or gone): take it down now.
         case remove(chatId: String)
+    }
+
+    /// The agent's current task list: its latest todo call in the session.
+    static func tasks(in entries: [MessageEntry]) -> [TaskItem]? {
+        for entry in entries.reversed() where entry.role == .assistant {
+            for part in entry.parts.reversed() {
+                if case .tool(_, let call, _, _) = part, let tasks = call.tasks, !tasks.isEmpty {
+                    return tasks
+                }
+            }
+        }
+        return nil
     }
 
     /// The latest line, flattened to one short line for the island.
