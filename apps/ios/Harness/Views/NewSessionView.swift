@@ -299,6 +299,11 @@ struct NewSessionView: View {
                 onSend: send,
                 attachments: attachments,
                 onAttach: { showPhotoPicker = true },
+                onPasteImages: { images in
+                    let (staged, failed) = StagedAttachment.stage(images: images)
+                    attachments.append(contentsOf: staged)
+                    attachError = StagedAttachment.failureMessage(failed)
+                },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } }
             ) {
                 // Model + trait chips, split like the desktop's footer pickers

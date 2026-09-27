@@ -39,6 +39,8 @@ struct ComposerShell<Chips: View>: View {
     var attachments: [StagedAttachment] = []
     /// Present the photo picker; nil hides the attach button.
     var onAttach: (() -> Void)? = nil
+    /// Images pasted into the box; nil pastes text only.
+    var onPasteImages: (([Data]) -> Void)? = nil
     var onRemoveAttachment: (String) -> Void = { _ in }
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
@@ -160,7 +162,8 @@ struct ComposerShell<Chips: View>: View {
                                onAdvanceQueue()
                            }
                            editor.apply(text: draft)
-                       })
+                       },
+                       onPasteImages: onPasteImages)
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
                     Text(placeholder)
@@ -367,6 +370,7 @@ struct ComposerView: View {
                 onAdvanceQueue: advanceQueue,
                 attachments: editingQueuedId == nil ? attachments : [],
                 onAttach: editingQueuedId == nil ? { showPicker = true } : nil,
+                onPasteImages: editingQueuedId == nil ? { stagePasted($0) } : nil,
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 autoFocus: model.launchFocusComposer
             ) {
@@ -517,6 +521,12 @@ struct ComposerView: View {
                 uploadError = nil
             }
         }
+    }
+
+    private func stagePasted(_ images: [Data]) {
+        let (staged, failed) = StagedAttachment.stage(images: images)
+        attachments.append(contentsOf: staged)
+        uploadError = StagedAttachment.failureMessage(failed)
     }
 
     /// Retype a queued message in the composer. Whatever was already in the box
