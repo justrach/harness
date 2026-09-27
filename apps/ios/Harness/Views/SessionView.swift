@@ -63,13 +63,11 @@ struct SessionView: View {
                             .foregroundStyle(Theme.text)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                        if let subtitle {
-                            Text(subtitle)
-                                .font(Theme.sans(12))
-                                .foregroundStyle(Theme.textMuted.opacity(0.6))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
+                        projectLocation(chat: chat, model: model)
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textMuted.opacity(0.6))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     // A FIXED width, not a max: iOS 26 proposes leading items
                     // almost nothing next to the back button, so a flexible
@@ -93,18 +91,6 @@ struct SessionView: View {
         }
     }
 
-    /// "space @ device" — short, like the home dropdown's rows. The space
-    /// NAME (not the cwd basename: they differ for renamed spaces and
-    /// worktree sessions), falling back to the cwd when the space row is gone.
-    private var subtitle: String? {
-        guard let chat else { return nil }
-        let space = chat.spaceId == nil ? "No project" : (
-            model.space(for: chat)?.displayName
-                ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
-                ?? "?"
-        )
-        return "\(space) @ \(model.deviceName(chat.deviceId))"
-    }
 
     private func content(chat: Chat, store: SessionStore) -> some View {
         let status = liveStatus(chat: chat)

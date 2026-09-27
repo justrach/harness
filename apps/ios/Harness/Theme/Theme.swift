@@ -114,6 +114,31 @@ extension Theme {
     }
 }
 
+// MARK: - Project tints
+
+extension Theme {
+    /// A project's own color, keyed by its space id: the same project reads
+    /// the same on every device, with a deeper cut of each hue for light mode.
+    static func projectTint(_ key: String) -> Color {
+        projectTints[Int(fnv1a(key) % UInt64(projectTints.count))]
+    }
+
+    /// Coral, amber, green, teal, sky, indigo, violet, pink.
+    private static let projectTints: [Color] = [25.0, 70, 145, 185, 235, 265, 300, 340].map { hue in
+        adaptive(dark: oklch(0.76, 0.13, hue), light: oklch(0.52, 0.16, hue))
+    }
+}
+
+/// FNV-1a: a hash that is stable across launches (Swift's `Hasher` is seeded).
+func fnv1a(_ text: String) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in text.utf8 {
+        hash ^= UInt64(byte)
+        hash = hash &* 0x100000001b3
+    }
+    return hash
+}
+
 // MARK: - Color primitives (ported from theme.rs)
 
 /// A neutral (chroma 0) oklch tone. Chroma 0 means r == g == b exactly.
