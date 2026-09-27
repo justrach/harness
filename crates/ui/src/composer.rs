@@ -667,6 +667,20 @@ pub fn input_request_resolved(transcript: &[SessionMessageEntry], request_id: &s
     })
 }
 
+/// Files attached while answering ride the last answer as one more label: the
+/// same "attached images" text a prompt carries, so the agent can open them.
+pub fn answers_with_attachments(
+    mut answers: Vec<UserInputAnswer>,
+    paths: &[String],
+) -> Vec<UserInputAnswer> {
+    if let Some(last) = answers.last_mut()
+        && !paths.is_empty()
+    {
+        last.labels.push(attachments::with_attachments("", paths));
+    }
+    answers
+}
+
 // ---------------------------------------------------------------------------
 // Question wizard (pure reducer)
 // ---------------------------------------------------------------------------
@@ -8652,17 +8666,63 @@ impl Composer {
             return;
         };
         let request_id = wizard.request_id.clone();
-        let command = SessionCommandPayload::RespondInput {
-            request_id: request_id.clone(),
-            answers,
-        };
+        // Files staged while the question was up belong to the answer, not
+        // to the next message: upload them to the chat's host like a send.
+        let staged = self
+            .attachments
+            .remove(&self.current_key)
+            .unwrap_or_default();
+        let staged_key = self.current_key.clone();
+        let host_device_id = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .map(|chat| chat.device_id.clone());
         let failure_chat = chat_id.clone();
-        let params = match serde_json::to_value(&command) {
-            Ok(value) => serde_json::json!({ "chatId": chat_id, "command": value }),
-            Err(_) => return,
-        };
         // `action_task`, NOT `send_task` — see `interrupt`.
         self.action_task = Some(cx.spawn(async move |this, cx| {
+            let mut paths = Vec::with_capacity(staged.len());
+            for attachment in &staged {
+                let upload_id = uuid::Uuid::new_v4().to_string();
+                match attachments::upload_attachment(
+                    &engine,
+                    cx.background_executor(),
+                    host_device_id.as_deref(),
+                    &upload_id,
+                    attachment,
+                    None,
+                )
+                .await
+                {
+                    Ok(path) => paths.push(path),
+                    Err(err) => {
+                        tracing::warn!(name = %attachment.name, error = %err, "answer attachment upload failed");
+                        this.update(cx, |composer, cx| {
+                            composer
+                                .attachments
+                                .entry(staged_key)
+                                .or_default()
+                                .extend(staged.iter().cloned());
+                            composer.failure = Some(
+                                "Couldn't upload the attachment — the device may be offline.".into(),
+                            );
+                            composer.failure_key = Some(failure_chat);
+                            composer.answered_requests.remove(&request_id);
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+            let command = SessionCommandPayload::RespondInput {
+                request_id: request_id.clone(),
+                answers: answers_with_attachments(answers, &paths),
+            };
+            let Ok(command) = serde_json::to_value(&command) else {
+                return;
+            };
+            let params = serde_json::json!({ "chatId": chat_id, "command": command });
             let result = engine.client().call(methods::QUEUE_COMMAND, params).await;
             if let Err(err) = result {
                 this.update(cx, |composer, cx| {
@@ -13745,6 +13805,26 @@ mod tests {
         assert_eq!(w.press_number(2), WizardStep::AutoAdvance);
         assert!(w.is_picked(1));
         assert_eq!(w.select(5), WizardStep::Stay, "bad option ix ignored");
+    }
+
+    #[test]
+    fn answer_attachments_ride_the_last_answer() {
+        let answers = vec![
+            UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            },
+            UserInputAnswer {
+                question_id: "q2".into(),
+                labels: vec!["b".into()],
+            },
+        ];
+        let unchanged = answers_with_attachments(answers.clone(), &[]);
+        assert_eq!(unchanged, answers);
+        let with = answers_with_attachments(answers, &["/tmp/shot.png".into()]);
+        assert_eq!(with[0].labels, vec!["a"]);
+        assert_eq!(with[1].labels.len(), 2);
+        assert!(with[1].labels[1].contains("- /tmp/shot.png"));
     }
 
     #[test]
