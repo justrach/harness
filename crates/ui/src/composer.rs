@@ -8937,6 +8937,10 @@ impl Composer {
 
         div()
             .id("question-panel")
+            // Keep intrinsic question/header widths from sizing the panel in a split.
+            .w_full()
+            .min_w_0()
+            .whitespace_normal()
             .track_focus(&self.wizard_focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_wizard_key(event, window, cx)
@@ -8950,6 +8954,8 @@ impl Composer {
             .flex_col()
             .child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .px(px(16.0))
                     .pt(px(16.0))
                     .flex()
@@ -8961,8 +8967,10 @@ impl Composer {
                             .flex_row()
                             .items_center()
                             .gap(px(10.0))
+                            .flex_wrap()
                             .child(
                                 div()
+                                    .min_w_0()
                                     .text_size(crate::typography::ui_rems(10.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(theme.text_muted.opacity(0.6))
@@ -8973,6 +8981,7 @@ impl Composer {
                             .when(wizard.questions.len() > 1, |el| {
                                 el.child(
                                     div()
+                                        .flex_none()
                                         .h(px(20.0))
                                         .px(px(6.0))
                                         .flex()
@@ -8988,6 +8997,8 @@ impl Composer {
                     )
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
@@ -10179,6 +10190,49 @@ mod tests {
                         })
                         .unwrap();
                 }
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn agent_question_wraps_to_session_width(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let mut wide_top = None;
+        for width in [768.0, 320.0, 220.0, 160.0, 100.0, 80.0] {
+            handle
+                .update(cx, |composer, window, cx| {
+                    window.resize(size(px(width), px(1200.0)));
+                    composer.set_available_width(width, cx);
+                    let mut q = question("wrap", &["Yes"], false);
+                    q.header = "Agent question".into();
+                    q.question = "Which approach should we use to keep the agent question readable when the session pane becomes narrow?".into();
+                    composer.wizard = Some(Wizard::new("wrap".into(), vec![q.clone(), q]));
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            let bounds = handle
+                .read_with(cx, |composer, cx| composer.input.read(cx).last_bounds.unwrap())
+                .unwrap();
+            assert!(
+                bounds.left() >= px(0.0),
+                "input overflows left at {width}: {bounds:?}"
+            );
+            assert!(
+                bounds.right() <= px(width),
+                "input overflows right at {width}: {bounds:?}"
+            );
+            if let Some(top) = wide_top {
+                assert!(
+                    bounds.top() > top + px(20.0),
+                    "question must wrap at {width}: {bounds:?}"
+                );
+            } else {
+                wide_top = Some(bounds.top());
             }
         }
     }
