@@ -139,6 +139,10 @@ pub mod methods {
     pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
     pub const CODEGRAFF_USAGE: &str = "CodegraffUsage";
     pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
+    /// The account's recent CodeGraff PR-agent runs (`GET /v1/jobs`).
+    pub const CODEGRAFF_JOBS: &str = "CodegraffJobs";
+    /// Cancel one PR-agent run (`POST /v1/jobs/:id/cancel`).
+    pub const CODEGRAFF_CANCEL_JOB: &str = "CodegraffCancelJob";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";

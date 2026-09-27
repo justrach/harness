@@ -135,6 +135,91 @@ struct CodegraffUsage {
     key_budget_resets_at: String,
 }
 
+/// A CodeGraff PR-agent run (engine `CodegraffJobs`, from the gateway's
+/// `/v1/jobs`). Tolerant: unknown fields are ignored, missing ones default.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct CodegraffJob {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub cancellable: bool,
+    pub step: Option<String>,
+    pub repo: Option<String>,
+    pub pr: Option<serde_json::Value>,
+    pub title: Option<String>,
+    pub result_url: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+struct CodegraffJobs {
+    jobs: Vec<CodegraffJob>,
+}
+
+/// While a job is still working, the list refreshes this often.
+const JOBS_POLL: Duration = Duration::from_secs(20);
+/// How many recent jobs the card shows.
+const JOBS_SHOWN: u64 = 8;
+
+/// Still queued or running (the list keeps refreshing). Pure.
+pub fn job_active(job: &CodegraffJob) -> bool {
+    matches!(job.status.as_str(), "queued" | "pending" | "running")
+}
+
+/// A job row's title and its "repo #pr · status" line. Pure.
+pub fn job_summary(job: &CodegraffJob) -> (String, String) {
+    let kind = match job.kind.as_str() {
+        "pr_review" => "PR review",
+        "pr_describe" => "PR description",
+        _ => "PR agent job",
+    };
+    let title = job
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| kind.to_string());
+    let pr = match &job.pr {
+        Some(serde_json::Value::Number(n)) => Some(format!("#{n}")),
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(if s.starts_with('#') {
+            s.clone()
+        } else {
+            format!("#{s}")
+        }),
+        _ => None,
+    };
+    let status = match job.status.as_str() {
+        "queued" | "pending" => "Queued".to_string(),
+        "running" => match job.step.as_deref() {
+            Some("reviewing") => "Reviewing…".into(),
+            Some("describing") => "Describing…".into(),
+            Some("posting") => "Posting…".into(),
+            _ => "Starting…".into(),
+        },
+        "completed" => "Done".into(),
+        "cancelled" => "Cancelled".into(),
+        "error" => job
+            .error
+            .clone()
+            .filter(|error| !error.trim().is_empty())
+            .map(|error| format!("Failed: {error}"))
+            .unwrap_or_else(|| "Failed".into()),
+        other => other.to_string(),
+    };
+    let place = [job.repo.clone(), pr]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let detail = if place.is_empty() {
+        format!("{kind} · {status}")
+    } else {
+        format!("{place} · {status}")
+    };
+    (title, detail)
+}
+
 fn format_micro_usd(amount: i64) -> String {
     let dollars = amount as f64 / 1_000_000.0;
     let decimals = if dollars.abs() < 0.01 {
@@ -211,6 +296,13 @@ pub struct AccountsPage {
     device_menu: popover::Popup<()>,
     snapshot: Loadable<AgentAccountsSnapshot>,
     codegraff_usage: Loadable<Option<CodegraffUsage>>,
+    /// Recent CodeGraff PR-agent runs (`None` when signed out).
+    codegraff_jobs: Loadable<Option<CodegraffJobs>>,
+    jobs_task: Option<Task<()>>,
+    /// The next refresh while a job is still working.
+    jobs_poll_task: Option<Task<()>>,
+    /// Job id with an in-flight Cancel.
+    cancelling_job: Option<String>,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
     login: Option<LoginFlow>,
@@ -240,6 +332,10 @@ impl AccountsPage {
             device_menu: popover::Popup::default(),
             snapshot: Loadable::Idle,
             codegraff_usage: Loadable::Idle,
+            codegraff_jobs: Loadable::Idle,
+            jobs_task: None,
+            jobs_poll_task: None,
+            cancelling_job: None,
             busy_account: None,
             login: None,
             error: None,
@@ -471,6 +567,7 @@ impl AccountsPage {
         };
         self.snapshot = Loadable::Loading;
         self.load_codegraff_usage(cx);
+        self.load_codegraff_jobs(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -513,6 +610,153 @@ impl AccountsPage {
             })
             .ok();
         }));
+    }
+
+    /// The account's recent PR-agent runs. While any is still working, the
+    /// list refreshes itself every [`JOBS_POLL`] for as long as the page is
+    /// open (the tasks drop with it).
+    fn load_codegraff_jobs(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if matches!(self.codegraff_jobs, Loadable::Idle) {
+            self.codegraff_jobs = Loadable::Loading;
+        }
+        let params = self.params(serde_json::json!({ "limit": JOBS_SHOWN }));
+        self.jobs_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::CODEGRAFF_JOBS, params).await;
+            this.update(cx, |page, cx| {
+                page.codegraff_jobs = match result {
+                    Ok(value) => match serde_json::from_value::<Option<CodegraffJobs>>(value) {
+                        Ok(jobs) => Loadable::Ready(jobs),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                let working = matches!(
+                    &page.codegraff_jobs,
+                    Loadable::Ready(Some(jobs)) if jobs.jobs.iter().any(job_active)
+                );
+                page.jobs_poll_task = working.then(|| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(JOBS_POLL).await;
+                        this.update(cx, |page, cx| page.load_codegraff_jobs(cx))
+                            .ok();
+                    })
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn cancel_codegraff_job(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.cancelling_job = Some(id.clone());
+        self.error = None;
+        let params = self.params(serde_json::json!({ "id": id }));
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CODEGRAFF_CANCEL_JOB, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.cancelling_job = None;
+                if let Err(err) = result {
+                    page.error = Some(format!("{err}").into());
+                }
+                page.load_codegraff_jobs(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The PR-agent jobs card; nothing while signed out or with no jobs.
+    fn render_codegraff_jobs(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Loadable::Ready(Some(jobs)) = &self.codegraff_jobs else {
+            return None;
+        };
+        if jobs.jobs.is_empty() {
+            return None;
+        }
+        let rows = jobs.jobs.iter().enumerate().map(|(ix, job)| {
+            let (title, detail) = job_summary(job);
+            let cancelling = self.cancelling_job.as_deref() == Some(job.id.as_str());
+            let cancel = (job.cancellable && job_active(job)).then(|| {
+                let id = job.id.clone();
+                widgets::ghost_action(theme)
+                    .id(("codegraff-job-cancel", ix))
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(cancelling, |el| el.opacity(0.5))
+                    .when(!cancelling, |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            page.cancel_codegraff_job(id.clone(), cx)
+                        }))
+                    })
+                    .child(if cancelling {
+                        "Cancelling…"
+                    } else {
+                        "Cancel"
+                    })
+            });
+            let open = job
+                .result_url
+                .clone()
+                .filter(|url| url.starts_with("https://"))
+                .map(|url| {
+                    widgets::ghost_action(theme)
+                        .id(("codegraff-job-open", ix))
+                        .hover(|s| widgets::ghost_hover(theme, s))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                        .child("Open")
+                });
+            div()
+                .id(("codegraff-job", ix))
+                .px(px(20.0))
+                .py(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(theme, title))
+                        .child(
+                            div()
+                                .mt(px(2.0))
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_muted)
+                                .child(detail),
+                        ),
+                )
+                .children(cancel)
+                .children(open)
+        });
+        Some(
+            div()
+                .mt(px(16.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child("PR agent jobs"),
+                )
+                .child(widgets::section_card(theme).mt(px(8.0)).children(rows))
+                .into_any_element(),
+        )
     }
 
     /// Switch / Forget an account.
@@ -991,41 +1235,40 @@ impl AccountsPage {
         now: DateTime<Utc>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let header =
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::icons::icon(crate::icons::GRAFF_MARK)
-                                .size(px(16.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("CodeGraff"),
-                )
-                .child(div().flex_1())
-                .child(
-                    widgets::ghost_action(theme)
-                        .id("codegraff-view-usage")
-                        .hover(|s| widgets::ghost_hover(theme, s))
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url("https://codegraff.com/dashboard/usage")
-                        }))
-                        .child("View usage"),
-                );
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::GRAFF_MARK)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("CodeGraff"),
+            )
+            .child(div().flex_1())
+            .child(
+                widgets::ghost_action(theme)
+                    .id("codegraff-view-usage")
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.open_url("https://codegraff.com/dashboard/usage")
+                    }))
+                    .child("View usage"),
+            );
 
         let body: AnyElement = match &self.codegraff_usage {
             Loadable::Idle | Loadable::Loading => {
@@ -1142,6 +1385,7 @@ impl AccountsPage {
             .flex_col()
             .child(header)
             .child(widgets::section_card(theme).mt(px(8.0)).child(body))
+            .children(self.render_codegraff_jobs(theme, cx))
             .into_any_element()
     }
 
@@ -1732,6 +1976,41 @@ impl Render for AccountsPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    fn job(value: serde_json::Value) -> CodegraffJob {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn job_rows_name_the_pr_and_where_the_run_is() {
+        let running = job(serde_json::json!({
+            "id": "j1", "kind": "pr_review", "status": "running", "step": "posting",
+            "cancellable": false, "repo": "acme/api", "pr": 42, "title": "Fix login",
+            "unknown_field": true,
+        }));
+        assert!(job_active(&running));
+        assert_eq!(
+            job_summary(&running),
+            ("Fix login".into(), "acme/api #42 · Posting…".into())
+        );
+
+        // No title falls back to the kind; a failure carries its reason.
+        let failed = job(serde_json::json!({
+            "id": "j2", "kind": "pr_describe", "status": "error", "error": "no access",
+        }));
+        assert!(!job_active(&failed));
+        assert_eq!(
+            job_summary(&failed),
+            (
+                "PR description".into(),
+                "PR description · Failed: no access".into()
+            )
+        );
+
+        let queued = job(serde_json::json!({"id": "j3", "status": "pending", "pr": "#7"}));
+        assert!(job_active(&queued));
+        assert_eq!(job_summary(&queued).1, "#7 · Queued");
+    }
 
     #[test]
     fn first_load_of_a_visit_forces_the_usage_probe() {

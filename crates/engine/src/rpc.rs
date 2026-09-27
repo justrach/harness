@@ -1212,6 +1212,8 @@ fn forwardable(method: &str) -> bool {
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
             | methods::CODEGRAFF_USAGE
+            | methods::CODEGRAFF_JOBS
+            | methods::CODEGRAFF_CANCEL_JOB
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
             | methods::START_AGENT_LOGIN
@@ -1521,6 +1523,25 @@ impl RpcService for EngineRpc {
                 crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
                     .sign_out()
                     .await;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::CODEGRAFF_JOBS => {
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+                let jobs = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .jobs(limit)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&jobs)
+            }
+            methods::CODEGRAFF_CANCEL_JOB => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RpcError::Failed("missing job id".into()))?;
+                crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .cancel_job(id)
+                    .await
+                    .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
