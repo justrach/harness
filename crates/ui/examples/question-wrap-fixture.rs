@@ -72,19 +72,47 @@ fn main() -> anyhow::Result<()> {
         });
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
-                for width in [768, 320, 220, 160, 128, 100, 80, 64] {
+                for (width, height) in [(768, 900), (320, 900), (320, 300), (220, 600), (160, 600), (128, 600), (100, 600), (80, 600), (64, 600)] {
+                    // A tiny split pane still lives in a desktop-sized window.
+                    let window_width = if width < 300 { 1000 } else { width };
                     window.update(cx, |composer, window, cx| {
-                        window.resize(size(px(width as f32), px(1200.)));
+                        window.resize(size(px(window_width as f32), px(height as f32)));
                         composer.set_available_width(width as f32, cx);
+                        composer.set_available_height(height as f32, cx);
                         cx.notify();
                     })?;
                     cx.background_executor().timer(Duration::from_millis(500)).await;
                     let capture_window: gpui::AnyWindowHandle = window.into();
                     capture_window.update(cx, |_, window, cx| -> anyhow::Result<()> {
                         window.draw(cx).clear();
-                        window.render_to_image()?.save(output.join(format!("question-{width}.png")))?;
+                        window.render_to_image()?.save(output.join(format!("question-{width}-{height}.png")))?;
                         Ok(())
                     })??;
+                    if width < 300 {
+                        capture_window.update(cx, |_, window, cx| {
+                            let position = gpui::point(px(width as f32 / 2.0), px(14.0));
+                            window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                button: gpui::MouseButton::Left, position, click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                            window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                button: gpui::MouseButton::Left, position, click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                        })?;
+                        cx.background_executor().timer(Duration::from_millis(300)).await;
+                        capture_window.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                            window.draw(cx).clear();
+                            window.render_to_image()?.save(output.join(format!("question-{width}-expanded.png")))?;
+                            // Escape closes without discarding the pending answer.
+                            window.dispatch_event(gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("escape")?,
+                                is_held: false,
+                                prefer_character_input: false,
+                            }), cx);
+                            Ok(())
+                        })??;
+                    }
                 }
                 Ok(())
             }.await;

@@ -5314,6 +5314,9 @@ pub struct Composer {
     failure_key: Option<String>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
+    wizard_expanded: bool,
+    wizard_scroll: gpui::ScrollHandle,
+    available_height: Option<f32>,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
     answered_requests: HashSet<String>,
@@ -5457,6 +5460,15 @@ impl Composer {
         }
     }
 
+    /// Space above the terminal dock and below the shell's title/status chrome.
+    pub fn set_available_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        let height = height.max(0.0);
+        if composer_width_changed(self.available_height, height) {
+            self.available_height = Some(height);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_queue_shortcut_revealed(&mut self, revealed: bool, cx: &mut Context<Self>) {
         if self.queue_shortcut_revealed != revealed {
             self.queue_shortcut_revealed = revealed;
@@ -5564,6 +5576,9 @@ impl Composer {
             failure: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
+            wizard_expanded: false,
+            wizard_scroll: gpui::ScrollHandle::new(),
+            available_height: None,
             answered_requests: HashSet::new(),
             failure_key: None,
             action_task: None,
@@ -7588,6 +7603,7 @@ impl Composer {
             // so switching away and back must not erase the one visible
             // trace of a failed send.
             self.wizard = None;
+            self.wizard_expanded = false;
             // Attachments stay stashed under their chat key (the map swap IS
             // the navigation); only the transient chrome resets.
             self.preview = None;
@@ -7639,6 +7655,8 @@ impl Composer {
                 if !same {
                     self.reset_mention(None, cx);
                     self.wizard = Some(Wizard::new(request_id, questions));
+                    self.wizard_expanded = false;
+                    self.wizard_scroll.set_offset(point(px(0.0), px(0.0)));
                     self.advance_task = None;
                     // The shared input becomes the panel's free-text override.
                     self.input.update(cx, |input, cx| {
@@ -8671,6 +8689,7 @@ impl Composer {
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
             _ => {
+                self.wizard_scroll.set_offset(point(px(0.0), px(0.0)));
                 // Moving on: clear the shared free-text input for the next page.
                 self.input.update(cx, |input, cx| input.set_text("", cx));
                 cx.notify();
@@ -8681,6 +8700,7 @@ impl Composer {
     fn wizard_back(&mut self, cx: &mut Context<Self>) {
         if let Some(wizard) = self.wizard.as_mut() {
             wizard.back();
+            self.wizard_scroll.set_offset(point(px(0.0), px(0.0)));
             cx.notify();
         }
     }
@@ -8794,7 +8814,7 @@ impl Composer {
         cx.notify();
     }
 
-    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
+    fn on_wizard_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Keys bubbling out of the free-text input must not double-handle:
         // digits select options only while the input is empty, and Enter is the
         // input's own Submit action when it has focus.
@@ -8820,7 +8840,11 @@ impl Composer {
                 cx.stop_propagation();
             }
         } else if key == "escape" {
-            if wizard_escape_goes_back(key, input_focused, input_empty) {
+            if self.wizard_expanded {
+                self.wizard_expanded = false;
+                window.focus(&self.wizard_focus, cx);
+                cx.notify();
+            } else if wizard_escape_goes_back(key, input_focused, input_empty) {
                 self.wizard_back(cx);
             }
             cx.stop_propagation();
@@ -8834,7 +8858,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, max_height: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -8843,17 +8867,17 @@ impl Composer {
         let Some(question) = wizard.current().cloned() else {
             return gpui::Empty.into_any_element();
         };
-        // The shared editor may still carry the normal composer's fixed or
-        // animated viewport. The question panel has no height morph: let the
-        // editor auto-grow to its normal cap, then scroll longer answers.
+        // Reserve room for the question and navigation even with a long answer
+        // or a short window. The editor still grows naturally below this cap.
+        let answer_cap = (max_height * 0.35).min(TEXTAREA_MAX - TEXTAREA_PAD_V);
         self.input.update(cx, |input, cx| {
-            if input.viewport_height.is_some()
-                || input.settled_viewport_height.is_some()
+            if input.viewport_height != Some(answer_cap)
+                || input.settled_viewport_height != Some(answer_cap)
                 || input.resizing
                 || input.overflow_top_padding != 0.0
             {
-                input.viewport_height = None;
-                input.settled_viewport_height = None;
+                input.viewport_height = Some(answer_cap);
+                input.settled_viewport_height = Some(answer_cap);
                 input.resizing = false;
                 input.overflow_top_padding = 0.0;
                 cx.notify();
@@ -8937,6 +8961,10 @@ impl Composer {
 
         div()
             .id("question-panel")
+            .debug_selector(|| "question-panel".into())
+            .max_h(px(max_height))
+            .min_h_0()
+            .overflow_hidden()
             // Keep intrinsic question/header widths from sizing the panel in a split.
             .w_full()
             .min_w_0()
@@ -8954,10 +8982,16 @@ impl Composer {
             .flex_col()
             .child(
                 div()
+                    .id(("question-body", page))
+                    .debug_selector(|| "question-body".into())
+                    .track_scroll(&self.wizard_scroll)
+                    .overflow_y_scroll()
+                    .min_h_0()
                     .w_full()
                     .min_w_0()
                     .px(px(16.0))
                     .pt(px(16.0))
+                    .pb(px(12.0))
                     .flex()
                     .flex_col()
                     // Header: tracked uppercase + counter chip when paged.
@@ -9023,18 +9057,18 @@ impl Composer {
                             .gap(px(4.0))
                             .children(options),
                     )
-                    // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+            )
+            // The answer and navigation never scroll away with the question.
+            .child(
+                div()
+                    .flex_none()
+                    .mx(px(16.0))
+                    .border_t_1()
+                    .border_color(crate::theme::hairline(0.06))
+                    .pt(px(12.0))
+                    .pb(px(4.0))
+                    .px(px(4.0))
+                    .child(self.input.clone()),
             )
             .child(
                 div()
@@ -9042,6 +9076,9 @@ impl Composer {
                     .flex_row()
                     .justify_between()
                     .items_center()
+                    .flex_none()
+                    .flex_wrap()
+                    .gap(px(4.0))
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
@@ -9056,6 +9093,7 @@ impl Composer {
                     .child(
                         crate::popover::btn_primary(&theme, if last { "Submit" } else { "Next" })
                             .id("wizard-submit")
+                            .debug_selector(|| "wizard-submit".into())
                             .px(px(16.0))
                             .when(!can_advance, |el| el.opacity(0.4))
                             .on_click(cx.listener(|this, _, _, cx| this.wizard_advance(cx))),
@@ -9384,9 +9422,92 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
-            return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
+            let viewport = window.viewport_size();
+            let available = self.available_height.unwrap_or(f32::from(viewport.height));
+            let container = container.max_h(px(available)).min_h_0();
+            let narrow = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) < 300.0
+                || available < 240.0;
+            if narrow || self.wizard_expanded {
+                if !self.wizard_expanded && self.input.focus_handle(cx).is_focused(window) {
+                    window.focus(&self.wizard_focus, cx);
+                }
+                let launcher = crate::popover::btn_primary(
+                    &theme,
+                    if self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) < 100.0 {
+                        "?"
+                    } else {
+                        "Answer"
+                    },
+                )
+                .id("question-expand")
+                .debug_selector(|| "question-expand".into())
+                .role(Role::Button)
+                .aria_label("Open agent question")
+                .when(!self.wizard_expanded, |el| el.track_focus(&self.wizard_focus))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.wizard_expanded = true;
+                        window.focus(&this.wizard_focus, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+                .px(px(4.0))
+                .text_center()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.wizard_expanded = true;
+                    window.focus(&this.wizard_focus, cx);
+                    cx.notify();
+                }));
+                let container = container.px(px(4.0)).child(launcher);
+                if !self.wizard_expanded {
+                    return container;
+                }
+                let panel = self.render_wizard((f32::from(viewport.height) - 96.0).max(120.0), cx);
+                return container.child(
+                    gpui::deferred(
+                        gpui::anchored().position(point(px(0.0), px(0.0))).child(
+                            div()
+                                .id("question-overlay")
+                                .flex_none()
+                                .occlude()
+                                .w(viewport.width)
+                                .h(viewport.height)
+                                .bg(crate::popover::scrim_alpha(0.7))
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                .child(
+                                    div()
+                                        .w((viewport.width - px(24.0)).min(px(COMPOSER_MAX_WIDTH)))
+                                        .rounded(px(COMPOSER_RADIUS))
+                                        .bg(theme.bg)
+                                        .child(panel),
+                                )
+                                .child(
+                                    crate::popover::btn_primary(&theme, "Close")
+                                        .id("question-close")
+                                        .debug_selector(|| "question-close".into())
+                                        .mt(px(8.0))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.wizard_expanded = false;
+                                            window.focus(&this.wizard_focus, cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                    ).priority(3),
+                );
+            }
+            let wizard = self.render_wizard((available - Theme::SPACE_LG).max(120.0), cx);
+            return container.child(motion::fade_quick(
+                "composer-wizard",
+                div().min_h_0().flex().flex_col().child(wizard),
+            ));
         }
+        self.wizard_expanded = false;
 
         // What is waiting to be sent, stacked directly above the box it was
         // typed in — the queue is a property of this composer, not a panel
@@ -10197,43 +10318,144 @@ mod tests {
     #[gpui::test]
     fn agent_question_wraps_to_session_width(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
-        let mut wide_top = None;
-        for width in [768.0, 320.0, 220.0, 160.0, 100.0, 80.0] {
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        for (width, height) in [(768.0, 900.0), (320.0, 900.0), (300.0, 300.0)] {
+            handle.update(cx, |composer, window, cx| {
+                window.resize(size(px(width), px(height)));
+                composer.set_available_width(width, cx);
+                composer.set_available_height(height, cx);
+                let mut q = question("wrap", &["An option that must wrap without losing its text"; 20], true);
+                q.header = "Agent question".into();
+                q.question = "Which approach should we use to keep the agent question readable when the session pane becomes narrow?".repeat(8);
+                composer.wizard = Some(Wizard::new("wrap".into(), vec![q.clone(), q]));
+                composer.input.update(cx, |input, cx| input.set_text(&"A long answer\n".repeat(40), cx));
+                cx.notify();
+            }).unwrap();
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            let panel = visual.debug_bounds("question-panel").unwrap();
+            let body = visual.debug_bounds("question-body").unwrap();
+            let submit = visual.debug_bounds("wizard-submit").unwrap();
+            let (input, scroll) = handle
+                .read_with(cx, |composer, cx| {
+                    (
+                        composer.input.read(cx).last_bounds.unwrap(),
+                        composer.wizard_scroll.clone(),
+                    )
+                })
+                .unwrap();
+            assert!(panel.left() >= px(0.0) && panel.right() <= px(width));
+            assert!(
+                panel.top() >= px(0.0) && panel.bottom() <= px(height),
+                "panel must fit: {panel:?}"
+            );
+            assert!(
+                body.size.height > px(20.0),
+                "question needs a usable viewport: {body:?}"
+            );
+            assert!(input.top() >= body.bottom() && input.bottom() <= submit.top());
+            assert!(submit.bottom() <= panel.bottom() && submit.right() <= panel.right());
+            assert!(
+                scroll.max_offset().y > px(0.0),
+                "long questions must scroll"
+            );
+            visual.simulate_event(ScrollWheelEvent {
+                position: body.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-10000.0))),
+                touch_phase: gpui::TouchPhase::Moved,
+                modifiers: Default::default(),
+            });
+            visual.update(|window, cx| {
+                window.draw(cx).clear();
+            });
+            assert!(
+                scroll.offset().y < px(0.0),
+                "wheel must reach the question body"
+            );
+            assert_eq!(visual.debug_bounds("wizard-submit").unwrap(), submit);
+            assert_eq!(
+                handle
+                    .read_with(cx, |composer, cx| composer
+                        .input
+                        .read(cx)
+                        .last_bounds
+                        .unwrap())
+                    .unwrap(),
+                input
+            );
+            visual.simulate_click(submit.center(), Default::default());
             handle
-                .update(cx, |composer, window, cx| {
-                    window.resize(size(px(width), px(1200.0)));
+                .read_with(cx, |composer, _| {
+                    assert_eq!(
+                        composer.wizard.as_ref().unwrap().page,
+                        1,
+                        "Next remains clickable"
+                    );
+                    assert_eq!(
+                        composer.wizard_scroll.offset().y,
+                        px(0.0),
+                        "new page starts at the top"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn agent_question_narrow_pane_opens_readable_overlay(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(1000.0), px(600.0)));
+        for width in [220.0, 160.0, 100.0, 80.0, 64.0] {
+            handle
+                .update(cx, |composer, _, cx| {
                     composer.set_available_width(width, cx);
-                    let mut q = question("wrap", &["Yes"], false);
-                    q.header = "Agent question".into();
-                    q.question = "Which approach should we use to keep the agent question readable when the session pane becomes narrow?".into();
-                    composer.wizard = Some(Wizard::new("wrap".into(), vec![q.clone(), q]));
+                    composer.wizard_expanded = false;
+                    let mut q = question("narrow", &["Yes", "No"], true);
+                    q.question = "A long question that must stay readable. ".repeat(60);
+                    composer.wizard = Some(Wizard::new("narrow".into(), vec![q.clone(), q]));
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("My answer", cx));
                     cx.notify();
                 })
                 .unwrap();
-            cx.update_window(handle.into(), |_, window, cx| {
+            visual.update(|window, cx| {
                 window.refresh();
                 window.draw(cx).clear();
-            })
-            .unwrap();
-            let bounds = handle
-                .read_with(cx, |composer, cx| composer.input.read(cx).last_bounds.unwrap())
+            });
+            let launcher = visual.debug_bounds("question-expand").unwrap();
+            assert!(launcher.size.width <= px(width) && launcher.size.height < px(60.0));
+            visual.simulate_click(launcher.center(), Default::default());
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            let panel = visual.debug_bounds("question-panel").unwrap();
+            let submit = visual.debug_bounds("wizard-submit").unwrap();
+            assert!(
+                panel.size.width >= px(600.0),
+                "overlay must escape the narrow pane: {panel:?}"
+            );
+            assert!(
+                panel.left() >= px(0.0) && panel.right() <= px(1000.0),
+                "overlay outside window: {panel:?}"
+            );
+            assert!(panel.top() >= px(0.0) && panel.bottom() <= px(600.0));
+            assert!(submit.bottom() <= panel.bottom());
+            visual.simulate_click(submit.center(), Default::default());
+            handle
+                .read_with(cx, |composer, _| {
+                    assert_eq!(composer.wizard.as_ref().unwrap().page, 1);
+                })
                 .unwrap();
-            assert!(
-                bounds.left() >= px(0.0),
-                "input overflows left at {width}: {bounds:?}"
-            );
-            assert!(
-                bounds.right() <= px(width),
-                "input overflows right at {width}: {bounds:?}"
-            );
-            if let Some(top) = wide_top {
-                assert!(
-                    bounds.top() > top + px(20.0),
-                    "question must wrap at {width}: {bounds:?}"
-                );
-            } else {
-                wide_top = Some(bounds.top());
-            }
+            let close = visual.debug_bounds("question-close").unwrap();
+            visual.simulate_click(close.center(), Default::default());
+            handle
+                .read_with(cx, |composer, _| assert!(!composer.wizard_expanded))
+                .unwrap();
         }
     }
 
