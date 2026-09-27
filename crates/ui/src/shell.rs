@@ -888,6 +888,18 @@ struct RightTabDrag {
     workspace_path: Option<WorkspacePathDrag>,
 }
 
+/// Fixed surface-tab chip slot — the terminal drawer's drag mechanics
+/// (drop-index quantisation + slide offsets) assume uniform widths.
+const RIGHT_TAB_CHIP_W: f32 = 112.0;
+const RIGHT_TAB_CHIP_SLOT: f32 = RIGHT_TAB_CHIP_W + 4.0; // + the strip's own gap
+/// A dragged tab near either end of an overflowing strip scrolls it: the
+/// band's width, and the per-frame step at (or past) the strip's edge.
+const RIGHT_TAB_DRAG_SCROLL_BAND: f32 = 40.0;
+const RIGHT_TAB_DRAG_SCROLL_MAX: f32 = 12.0;
+/// How far above or below the strip the pointer may stray and still scroll
+/// it; further down it is aiming at the pane (a file drop onto the chat).
+const RIGHT_TAB_DRAG_SCROLL_SLACK_Y: f32 = 16.0;
+
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
 /// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
 /// slide-animation restarts as the hovered slot changes.
@@ -896,6 +908,29 @@ struct RightTabDragState {
     over: usize,
     epoch: usize,
     prev_over: usize,
+    /// Edge autoscroll: the pointer's x while level with the strip, the
+    /// strip's visible x-range, and its tab count at the last move.
+    pointer_x: Option<f32>,
+    viewport: (f32, f32),
+    count: usize,
+    generation: u64,
+    autoscroll: bool,
+}
+
+/// Per-frame horizontal scroll for a tab dragged at `pointer_x` over a strip
+/// spanning `left..right`: negative toward the start, zero outside the bands.
+fn right_tab_drag_scroll_delta(pointer_x: f32, left: f32, right: f32) -> f32 {
+    if right <= left {
+        return 0.0;
+    }
+    let band = RIGHT_TAB_DRAG_SCROLL_BAND.min((right - left) / 3.0);
+    if pointer_x < left + band {
+        -RIGHT_TAB_DRAG_SCROLL_MAX * ((left + band - pointer_x) / band).clamp(0.0, 1.0)
+    } else if pointer_x > right - band {
+        RIGHT_TAB_DRAG_SCROLL_MAX * ((pointer_x - (right - band)) / band).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Sidebar-only drag payload. Regular sessions never acquire a manual order.
@@ -1641,6 +1676,8 @@ pub struct Shell {
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
     /// In-flight surface-tab drag (slide animation state).
     right_tab_drag: Option<RightTabDragState>,
+    /// Bumped per surface-tab drag, so a stale autoscroll loop stops.
+    right_tab_drag_generation: u64,
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
@@ -2060,6 +2097,7 @@ impl Shell {
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
+            right_tab_drag_generation: 0,
             right_tab_scroll: gpui::ScrollHandle::new(),
             route,
             nav,
@@ -2820,15 +2858,119 @@ impl Shell {
             }
             Some(_) => {}
             None => {
+                self.right_tab_drag_generation = self.right_tab_drag_generation.wrapping_add(1);
                 self.right_tab_drag = Some(RightTabDragState {
                     from,
                     over,
                     epoch: 0,
                     prev_over: from,
+                    pointer_x: None,
+                    viewport: (0.0, 0.0),
+                    count: 0,
+                    generation: self.right_tab_drag_generation,
+                    autoscroll: false,
                 });
                 cx.notify();
             }
         }
+    }
+
+    /// A surface-tab drag released over the strip: move it to its drop slot.
+    fn drop_right_tab(&mut self, payload: &RightTabDrag, cx: &mut Context<Self>) {
+        let over = self.right_tab_drag.take().map(|drag| drag.over);
+        if payload.panel_key != self.panel_key(cx) {
+            cx.notify();
+            return;
+        }
+        self.reorder_right_tabs(payload.from, over.unwrap_or(payload.from), cx);
+        cx.notify();
+    }
+
+    /// A surface-tab drag moved over the strip at `bounds`: retarget its drop
+    /// slot, and start scrolling when it nears an end of an overflowing strip
+    /// so every slot is reachable, not just the visible ones.
+    fn track_right_tab_drag(
+        &mut self,
+        from: usize,
+        pointer: Point<Pixels>,
+        bounds: gpui::Bounds<Pixels>,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let (x, left, right) = (
+            f32::from(pointer.x),
+            f32::from(bounds.left()),
+            f32::from(bounds.right()),
+        );
+        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
+        let over =
+            crate::terminal::panel::drop_index(x - left + scrolled, RIGHT_TAB_CHIP_SLOT, count);
+        self.update_right_tab_drag_over(from, over, cx);
+        let y = f32::from(pointer.y);
+        let level = y >= f32::from(bounds.top()) - RIGHT_TAB_DRAG_SCROLL_SLACK_Y
+            && y <= f32::from(bounds.bottom()) + RIGHT_TAB_DRAG_SCROLL_SLACK_Y;
+        let Some(drag) = self.right_tab_drag.as_mut() else {
+            return;
+        };
+        drag.pointer_x = level.then_some(x);
+        drag.viewport = (left, right);
+        drag.count = count;
+        if level && right_tab_drag_scroll_delta(x, left, right) != 0.0 && !drag.autoscroll {
+            drag.autoscroll = true;
+            let generation = drag.generation;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(SIDEBAR_DRAG_SCROLL_FRAME_MS))
+                        .await;
+                    let keep_running = this
+                        .update(cx, |shell, cx| {
+                            shell.right_tab_autoscroll_tick(generation, cx)
+                        })
+                        .unwrap_or(false);
+                    if !keep_running {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// One frame of edge autoscroll; false ends the loop.
+    fn right_tab_autoscroll_tick(&mut self, generation: u64, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.right_tab_drag.as_mut() else {
+            return false;
+        };
+        if drag.generation != generation {
+            return false;
+        }
+        let scrolled = -f32::from(self.right_tab_scroll.offset().x);
+        let max_scroll = f32::from(self.right_tab_scroll.max_offset().x).max(0.0);
+        let (left, right) = drag.viewport;
+        let next = drag.pointer_x.filter(|_| cx.has_active_drag()).map(|x| {
+            (scrolled + right_tab_drag_scroll_delta(x, left, right)).clamp(0.0, max_scroll)
+        });
+        let (Some(x), Some(next)) = (drag.pointer_x, next) else {
+            drag.autoscroll = false;
+            return false;
+        };
+        if next == scrolled {
+            drag.autoscroll = false;
+            return false;
+        }
+        let offset = self.right_tab_scroll.offset();
+        self.right_tab_scroll
+            .set_offset(gpui::point(px(-next), offset.y));
+        let over =
+            crate::terminal::panel::drop_index(x - left + next, RIGHT_TAB_CHIP_SLOT, drag.count);
+        if drag.over != over {
+            drag.prev_over = drag.over;
+            drag.over = over;
+            drag.epoch += 1;
+        }
+        cx.notify();
+        true
     }
 
     /// The surface that actually renders: the stored pick when it still
@@ -9512,10 +9654,8 @@ impl Shell {
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
     pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        /// Fixed chip slot — the terminal drawer's drag mechanics (drop-index
-        /// quantisation + slide offsets) assume uniform widths.
-        const CHIP_W: f32 = 112.0;
-        const CHIP_SLOT: f32 = CHIP_W + 4.0; // + the strip's own gap
+        const CHIP_W: f32 = RIGHT_TAB_CHIP_W;
+        const CHIP_SLOT: f32 = RIGHT_TAB_CHIP_SLOT;
 
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
@@ -9542,9 +9682,9 @@ impl Shell {
         // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
         // relative min_w_0 region below; drop math runs in CONTENT
         // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
         let mut strip = div()
             .id("right-surface-strip")
+            .debug_selector(|| "right-surface-strip".into())
             .flex()
             .flex_row()
             .items_center()
@@ -9563,27 +9703,12 @@ impl Shell {
                         return;
                     }
                     let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
-                    this.update_right_tab_drag_over(from, over, cx);
+                    this.track_right_tab_drag(from, event.event.position, event.bounds, count, cx);
                 },
             ))
-            .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
-                if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
-                    return;
-                }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
-                this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
-            }));
+            .on_drop::<RightTabDrag>(
+                cx.listener(|this, payload: &RightTabDrag, _, cx| this.drop_right_tab(payload, cx)),
+            );
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
             let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
@@ -9695,6 +9820,12 @@ impl Shell {
                         this.close_right_surface(surface, window, cx);
                     }),
                 )
+                // The chip blocks the strip's hitbox behind it, so the strip's
+                // own drop only sees the gaps: land drops on a chip here.
+                .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, _, cx| {
+                    cx.stop_propagation();
+                    this.drop_right_tab(payload, cx)
+                }))
                 .when(crate::click_activation_drag_enabled(), |el| {
                     el.on_drag(
                         RightTabDrag {
@@ -9856,6 +9987,11 @@ impl Shell {
             ))
             .on_hover(motion::hover_listener(plus_fade))
             .block_mouse_except_scroll()
+            // Past the last tab: a drop here lands in the last slot.
+            .on_drop::<RightTabDrag>(cx.listener(|this, payload: &RightTabDrag, _, cx| {
+                cx.stop_propagation();
+                this.drop_right_tab(payload, cx)
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {
@@ -14220,6 +14356,93 @@ mod right_tab_mouse_regressions {
                 "tab strip did not scroll"
             );
         });
+    }
+
+    #[gpui::test]
+    fn dragging_a_tab_to_the_strip_edge_reaches_slots_past_the_fold(cx: &mut TestAppContext) {
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        let (shell, cx) = setup(cx);
+        shell.update(cx, |shell, cx| {
+            for id in ["third", "fourth", "fifth", "sixth", "seventh", "eighth"] {
+                shell.add_subagent_surface("parent".into(), id.into(), id.into(), false, cx);
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                shell.right_tab_scroll.max_offset().x > px(0.),
+                "strip must overflow"
+            );
+        });
+        let strip = cx.debug_bounds("right-surface-strip").unwrap();
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let edge = gpui::point(strip.right() - px(2.), start.y);
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), gpui::Modifiers::default());
+        // Hold at the edge until the strip has scrolled all the way.
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.right_tab_scroll.offset().x,
+                -shell.right_tab_scroll.max_offset().x,
+                "holding at the edge did not scroll to the end"
+            );
+        });
+        cx.simulate_mouse_up(edge, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            let tabs = &shell.right_tabs[&shell.panel_key(cx)];
+            assert_eq!(tabs.last(), Some(&RightSurface::Subagent(1)));
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_a_tab_on_a_neighbor_reorders(cx: &mut TestAppContext) {
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        let (shell, cx) = setup(cx);
+        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+        let target = cx.debug_bounds("right-surface-tab-1").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(8.), px(0.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, cx| {
+            let tabs = &shell.right_tabs[&shell.panel_key(cx)];
+            assert_eq!(tabs.last(), Some(&RightSurface::Subagent(1)));
+        });
+    }
+
+    #[test]
+    fn tab_drag_scroll_speeds_up_toward_and_past_the_edges() {
+        let (left, right) = (100.0, 700.0);
+        assert_eq!(right_tab_drag_scroll_delta(400.0, left, right), 0.0);
+        let near_end = right_tab_drag_scroll_delta(right - 10.0, left, right);
+        let at_end = right_tab_drag_scroll_delta(right, left, right);
+        assert!(near_end > 0.0 && near_end < at_end);
+        assert_eq!(at_end, RIGHT_TAB_DRAG_SCROLL_MAX);
+        assert_eq!(
+            right_tab_drag_scroll_delta(right + 50.0, left, right),
+            RIGHT_TAB_DRAG_SCROLL_MAX
+        );
+        assert_eq!(
+            right_tab_drag_scroll_delta(left - 50.0, left, right),
+            -RIGHT_TAB_DRAG_SCROLL_MAX
+        );
+        assert_eq!(right_tab_drag_scroll_delta(400.0, 700.0, 700.0), 0.0);
     }
 
     #[gpui::test]
