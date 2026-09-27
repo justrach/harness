@@ -311,10 +311,16 @@ impl Shell {
             .collect()
     }
 
-    /// The tab row above the sidebar's pane strip, shown once there are two
-    /// or more tabs. Click to switch; the lit tab is the one on screen; drag
-    /// a tab onto another to move it there.
-    pub(super) fn render_chat_tabs(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The tab list, shown once there are two or more tabs. Click to switch;
+    /// the lit tab is the one on screen; drag a tab onto another to move it
+    /// there. The lit tab's pane cards (`pane_strip`, taken) sit right under
+    /// it, so they read as that tab's panes rather than the last tab's.
+    pub(super) fn render_chat_tabs(
+        &mut self,
+        theme: &Theme,
+        pane_strip: &mut Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if self.chat_tabs.len() < 2 || !matches!(self.route, Route::Chat) {
             return None;
         }
@@ -348,10 +354,10 @@ impl Shell {
                             )),
                         ),
                 )
-                .children(labels.into_iter().enumerate().map(|(ix, (title, panes))| {
+                .children(labels.into_iter().enumerate().flat_map(|(ix, (title, panes))| {
                     let lit = ix == active;
                     let key: SharedString = format!("chat-tab-{ix}").into();
-                    div()
+                    let row = div()
                         .id(("chat-tab", ix))
                         .debug_selector(move || format!("chat-tab-{ix}"))
                         .h(px(26.0))
@@ -412,6 +418,9 @@ impl Shell {
                                     .child(SharedString::from(format!("{panes} panes"))),
                             )
                         })
+                        .into_any_element();
+                    let strip = if lit { pane_strip.take() } else { None };
+                    std::iter::once(row).chain(strip)
                 }))
                 .into_any_element(),
         )

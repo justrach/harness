@@ -7183,8 +7183,9 @@ impl Shell {
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
         // A chat split adds a strip of pane cards above the list.
-        let chat_tabs = self.render_chat_tabs(theme, cx);
-        let pane_strip = self.render_pane_strip(theme, cx);
+        // With tabs, the strip moves under its own tab (taken below).
+        let mut pane_strip = self.render_pane_strip(theme, cx);
+        let chat_tabs = self.render_chat_tabs(theme, &mut pane_strip, cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
@@ -13260,7 +13261,15 @@ mod exit_regressions {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let theme = Theme::of(cx).clone();
                 self.shell.update(cx, |shell, cx| {
-                    div().w(px(260.)).children(shell.render_chat_tabs(&theme, cx))
+                    let mut strip = Some(
+                        div()
+                            .debug_selector(|| "pane-strip-under-tab".into())
+                            .h(px(20.))
+                            .into_any_element(),
+                    );
+                    div()
+                        .w(px(260.))
+                        .children(shell.render_chat_tabs(&theme, &mut strip, cx))
                 })
             }
         }
@@ -13323,6 +13332,12 @@ mod exit_regressions {
             assert_eq!(shell.settings.chat_tabs.len(), 3);
             assert_eq!(shell.settings.chat_tab, 1);
         });
+        // The lit tab's pane cards sit under it, not under the last tab (#26).
+        cx.update(|window, cx| window.draw(cx).clear());
+        let strip = cx.debug_bounds("pane-strip-under-tab").unwrap();
+        let lit = cx.debug_bounds("chat-tab-1").unwrap();
+        let next = cx.debug_bounds("chat-tab-2").unwrap();
+        assert!(strip.top() >= lit.bottom() && strip.bottom() <= next.top());
     }
 
     #[gpui::test]
