@@ -85,12 +85,20 @@ pub(super) struct ChatTabDrag {
 impl Shell {
     /// The focused pane's live composer picks, for parking or inheriting.
     pub(super) fn current_canvas_draft(&self, cx: &App) -> CanvasDraft {
-        self.composer.read(cx).pickers().read(cx).canvas_draft(cx)
+        let composer = self.composer.read(cx);
+        CanvasDraft {
+            input: Some(composer.canvas_input(cx)),
+            ..composer.pickers().read(cx).canvas_draft(cx)
+        }
     }
 
     /// Hand the pickers the picks of the tab/pane just switched to (call
     /// after `select_chat`; `None` for a chat or a canvas with none parked).
     pub(super) fn adopt_canvas_draft(&self, draft: Option<CanvasDraft>, cx: &mut Context<Self>) {
+        if let Some(input) = draft.as_ref().and_then(|draft| draft.input.clone()) {
+            self.composer
+                .update(cx, |composer, cx| composer.set_canvas_input(input, cx));
+        }
         let pickers = self.composer.read(cx).pickers().clone();
         pickers.update(cx, |pickers, cx| pickers.adopt_canvas_draft(draft, cx));
     }
@@ -180,8 +188,13 @@ impl Shell {
         }
         let parked = self.park_chat_tab(cx);
         let project = parked.project.clone();
-        // A fresh canvas starts from the picks of the tab it was opened from.
-        let draft = parked.draft.clone().filter(|_| open.is_none());
+        // A fresh canvas starts from the picks of the tab it was opened from,
+        // not its unsent prompt.
+        let draft = parked
+            .draft
+            .as_ref()
+            .map(CanvasDraft::fresh)
+            .filter(|_| open.is_none());
         if self.chat_tabs.is_empty() {
             self.chat_tabs.push(parked);
         } else {

@@ -113,6 +113,48 @@ pub struct CanvasDraft {
     pub reasoning: Option<ReasoningLevel>,
     /// Where the canvas's session would run. `None` leaves the current pick.
     pub target: Option<CanvasTarget>,
+    /// The canvas's unsent prompt and files. `None` leaves the composer's.
+    pub input: Option<CanvasInput>,
+}
+
+impl CanvasDraft {
+    /// The same picks for a fresh canvas: it starts with an empty composer
+    /// instead of copying the one it was opened from.
+    pub fn fresh(&self) -> Self {
+        Self {
+            input: Some(CanvasInput::default()),
+            ..self.clone()
+        }
+    }
+}
+
+/// A new-session canvas's unsent prompt and staged files. All canvases
+/// share the composer's empty draft key, so each pane or tab parks its own.
+#[derive(Clone, Default)]
+pub struct CanvasInput {
+    pub text: String,
+    pub stage: Vec<crate::attachments::StagedAttachment>,
+}
+
+impl PartialEq for CanvasInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.stage.len() == other.stage.len()
+            && self
+                .stage
+                .iter()
+                .zip(&other.stage)
+                .all(|(a, b)| a.id == b.id)
+    }
+}
+
+impl std::fmt::Debug for CanvasInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanvasInput")
+            .field("text", &self.text)
+            .field("stage", &self.stage.len())
+            .finish()
+    }
 }
 
 /// A canvas's "New session in …" pick. The project is one app-wide
@@ -847,6 +889,7 @@ impl Pickers {
                 no_project: state.no_project,
                 device: state.selected_device.clone(),
             }),
+            input: None,
         }
     }
 
