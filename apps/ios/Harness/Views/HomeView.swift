@@ -414,7 +414,7 @@ struct ChatRow: View {
             // Line 1: space @ device, status corner (time-ago when idle).
             HStack(spacing: 8) {
                 if showLocation {
-                    Text(location)
+                    location
                         .font(Theme.sans(13))
                         .foregroundStyle(subline)
                         .lineLimit(1)
@@ -486,13 +486,8 @@ struct ChatRow: View {
     /// the cwd basename) is what the desktop row shows — they differ once a
     /// space has been renamed, or when the session runs in a worktree off to
     /// the side. No offline marker: the dropdown carries device liveness.
-    private var location: String {
-        let space = chat.spaceId == nil ? "No project" : (
-            model.space(for: chat)?.displayName
-                ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
-                ?? "?"
-        )
-        return "\(space) @ \(model.deviceName(chat.deviceId))"
+    private var location: Text {
+        projectLocation(chat: chat, model: model)
     }
 }
 
@@ -519,6 +514,18 @@ func relativeTime(_ ms: Int64) -> String {
     if delta < 3600 { return "\(delta / 60)m" }
     if delta < 86_400 { return "\(delta / 3600)h" }
     return "\(delta / 86_400)d"
+}
+
+/// "project @ device", the project name in its own tint (projectless sessions
+/// stay muted).
+@MainActor
+func projectLocation(chat: Chat, model: AppModel) -> Text {
+    let device = model.deviceName(chat.deviceId)
+    guard let spaceId = chat.spaceId else { return Text("No project @ \(device)") }
+    let project = model.space(for: chat)?.displayName
+        ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
+        ?? "?"
+    return Text("\(Text(project).foregroundStyle(Theme.projectTint(spaceId))) @ \(device)")
 }
 
 /// The split layout's detail column before a session is picked.
