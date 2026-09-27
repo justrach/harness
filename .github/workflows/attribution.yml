@@ -1,7 +1,8 @@
 name: Attribution
 
-# Public repository: commits and PR descriptions carry no AI-assistant or
-# vendor attribution. See scripts/check-attribution.py.
+# Public repository: commits and PR descriptions carry no Claude or Anthropic
+# attribution; other agents (e.g. blackfloofie) are fine. See
+# scripts/check-attribution.py.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
