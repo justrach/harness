@@ -15,15 +15,19 @@ struct SessionActivityAttributes: ActivityAttributes, Hashable {
         /// When the current run started; the working timer counts from here
         /// on its own, so it stays live while the app is suspended.
         var startedAt: Date
+        /// The session's latest line (what the agent is doing or said).
+        var detail: String?
     }
 
     var chatId: String
     var title: String
-    /// "project @ device".
-    var location: String
-    /// Index into the project tint palette (`Theme.projectTint`); nil for
-    /// projectless sessions.
+    /// Project name; nil for projectless sessions.
+    var project: String?
+    var device: String
+    /// Index into the project tint palette (`Theme.projectTint`).
     var projectTint: Int?
+    /// Harness id ("claude-code", "codex", …) for the brand mark.
+    var harness: String
 
     /// Tapping the activity opens the session.
     var url: URL? {

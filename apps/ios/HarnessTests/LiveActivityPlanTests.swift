@@ -6,13 +6,14 @@ final class LiveActivityPlanTests: XCTestCase {
 
     private func session(_ id: String, _ phase: Phase?, startedAt: TimeInterval = 0) -> LiveActivitySnapshot {
         LiveActivitySnapshot(
-            attributes: SessionActivityAttributes(chatId: id, title: id, location: "harness @ mac", projectTint: 0),
+            attributes: SessionActivityAttributes(chatId: id, title: id, project: "harness", device: "mac",
+                                                  projectTint: 0, harness: "claude-code"),
             phase: phase,
             startedAt: Date(timeIntervalSince1970: startedAt))
     }
 
     private func shown(_ phase: Phase, startedAt: TimeInterval = 0) -> SessionActivityAttributes.ContentState {
-        .init(phase: phase, startedAt: Date(timeIntervalSince1970: startedAt))
+        .init(phase: phase, startedAt: Date(timeIntervalSince1970: startedAt), detail: nil)
     }
 
     func testIndicatorsMapToPhases() {
@@ -61,5 +62,13 @@ final class LiveActivityPlanTests: XCTestCase {
         ]
         XCTAssertEqual(LiveActivityPlan.steps(showing: showing, sessions: sessions),
                        [.finish(chatId: "c"), .start(chatId: "d")])
+    }
+
+    func testDetailIsOneShortLine() {
+        XCTAssertNil(LiveActivityPlan.detail(nil))
+        XCTAssertNil(LiveActivityPlan.detail("  \n \n"))
+        XCTAssertEqual(LiveActivityPlan.detail("Running tests\n\n  cargo test -p ui "), "Running tests cargo test -p ui")
+        let long = String(repeating: "a", count: 200)
+        XCTAssertEqual(LiveActivityPlan.detail(long)?.count, 140)
     }
 }

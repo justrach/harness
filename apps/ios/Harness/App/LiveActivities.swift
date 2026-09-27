@@ -13,6 +13,11 @@ struct LiveActivitySnapshot: Hashable {
     /// nil: the session is idle (nothing to show).
     var phase: SessionActivityAttributes.ContentState.Phase?
     var startedAt: Date
+    var detail: String?
+
+    var state: SessionActivityAttributes.ContentState? {
+        phase.map { .init(phase: $0, startedAt: startedAt, detail: detail) }
+    }
 }
 
 enum LiveActivityPlan {
@@ -27,6 +32,17 @@ enum LiveActivityPlan {
         case finish(chatId: String)
         /// The session went idle (seen, or gone): take it down now.
         case remove(chatId: String)
+    }
+
+    /// The latest line, flattened to one short line for the island.
+    static func detail(_ preview: String?) -> String? {
+        guard let preview else { return nil }
+        let line = preview.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !line.isEmpty else { return nil }
+        return line.count > 140 ? String(line.prefix(139)) + "…" : line
     }
 
     static func phase(for indicator: ChatIndicator) -> SessionActivityAttributes.ContentState.Phase? {
@@ -48,12 +64,11 @@ enum LiveActivityPlan {
         let byId = Dictionary(sessions.map { ($0.attributes.chatId, $0) },
                               uniquingKeysWith: { first, _ in first })
         for (chatId, shown) in showing.sorted(by: { $0.key < $1.key }) {
-            guard let session = byId[chatId], let phase = session.phase else {
+            guard let session = byId[chatId], let next = session.state else {
                 steps.append(.remove(chatId: chatId))
                 continue
             }
-            let next = SessionActivityAttributes.ContentState(phase: phase, startedAt: session.startedAt)
-            if phase == .done || phase == .failed {
+            if next.phase == .done || next.phase == .failed {
                 steps.append(.finish(chatId: chatId))
             } else if next != shown {
                 steps.append(.update(chatId: chatId))
@@ -78,6 +93,10 @@ enum LiveActivityPlan {
 @MainActor
 final class LiveActivities {
     private var activities: [String: Activity<SessionActivityAttributes>] = [:]
+    /// Last push to each activity. A streaming reply changes the latest line
+    /// many times a second; those land at most every few seconds.
+    private var lastUpdate: [String: Date] = [:]
+    private static let detailInterval: TimeInterval = 5
 
     init() {
         // Adopt activities from an earlier launch instead of doubling them.
@@ -95,34 +114,43 @@ final class LiveActivities {
         for step in LiveActivityPlan.steps(showing: showing, sessions: sessions) {
             switch step {
             case .start(let chatId):
-                guard let session = byId[chatId], let phase = session.phase else { continue }
-                let content = Self.content(phase: phase, startedAt: session.startedAt)
+                guard let session = byId[chatId], let state = session.state else { continue }
                 if let activity = try? Activity.request(attributes: session.attributes,
-                                                        content: content, pushType: nil) {
+                                                        content: Self.content(state), pushType: nil) {
                     activities[chatId] = activity
+                    lastUpdate[chatId] = .now
                 }
             case .update(let chatId):
-                guard let activity = activities[chatId], let session = byId[chatId],
-                      let phase = session.phase else { continue }
-                let content = Self.content(phase: phase, startedAt: session.startedAt)
-                Task { await activity.update(content) }
+                guard let activity = activities[chatId], let state = byId[chatId]?.state else { continue }
+                let shown = activity.content.state
+                let onlyDetail = shown.phase == state.phase && shown.startedAt == state.startedAt
+                if onlyDetail, let last = lastUpdate[chatId],
+                   Date.now.timeIntervalSince(last) < Self.detailInterval {
+                    continue
+                }
+                lastUpdate[chatId] = .now
+                Task { await activity.update(Self.content(state)) }
             case .finish(let chatId):
-                guard let activity = activities.removeValue(forKey: chatId), let session = byId[chatId],
-                      let phase = session.phase else { continue }
-                let content = Self.content(phase: phase, startedAt: session.startedAt)
-                Task { await activity.end(content, dismissalPolicy: .after(.now.addingTimeInterval(20 * 60))) }
+                guard let activity = activities.removeValue(forKey: chatId),
+                      let state = byId[chatId]?.state else { continue }
+                lastUpdate[chatId] = nil
+                Task {
+                    await activity.end(Self.content(state),
+                                       dismissalPolicy: .after(.now.addingTimeInterval(20 * 60)))
+                }
             case .remove(let chatId):
                 guard let activity = activities.removeValue(forKey: chatId) else { continue }
+                lastUpdate[chatId] = nil
                 Task { await activity.end(nil, dismissalPolicy: .immediate) }
             }
         }
     }
 
-    private static func content(phase: SessionActivityAttributes.ContentState.Phase,
-                                startedAt: Date) -> ActivityContent<SessionActivityAttributes.ContentState> {
+    private static func content(_ state: SessionActivityAttributes.ContentState)
+        -> ActivityContent<SessionActivityAttributes.ContentState> {
         // A running state that stops updating (app suspended, no push yet)
         // greys out after half an hour rather than claiming to be live.
-        let stale: Date? = phase == .working ? .now.addingTimeInterval(30 * 60) : nil
-        return ActivityContent(state: .init(phase: phase, startedAt: startedAt), staleDate: stale)
+        let stale: Date? = state.phase == .working ? .now.addingTimeInterval(30 * 60) : nil
+        return ActivityContent(state: state, staleDate: stale)
     }
 }

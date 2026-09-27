@@ -402,27 +402,25 @@ final class AppModel {
         return spaces.first { $0.id == spaceId }
     }
 
-    /// "project @ device", as plain text (the Live Activity's subtitle).
-    func locationLabel(for chat: Chat) -> String {
-        let project = chat.spaceId == nil ? "No project" : (
-            space(for: chat)?.displayName
-                ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
-                ?? "?"
-        )
-        return "\(project) @ \(deviceName(chat.deviceId))"
-    }
-
     /// Every active session as its Live Activity would show it.
     var liveActivitySnapshots: [LiveActivitySnapshot] {
         overviewChats.map { chat in
             let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]
             let started = row?.startedAt ?? row?.updatedAt ?? chat.createdAt
+            let project = chat.spaceId.map { _ in
+                space(for: chat)?.displayName
+                    ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
+                    ?? "?"
+            }
             return LiveActivitySnapshot(
                 attributes: SessionActivityAttributes(
-                    chatId: chat.id, title: chat.displayTitle, location: locationLabel(for: chat),
-                    projectTint: chat.spaceId.map(Theme.projectTintIndex)),
+                    chatId: chat.id, title: chat.displayTitle, project: project,
+                    device: deviceName(chat.deviceId),
+                    projectTint: chat.spaceId.map(Theme.projectTintIndex),
+                    harness: chat.config?.harness ?? "claude-code"),
                 phase: LiveActivityPlan.phase(for: indicator(for: chat)),
-                startedAt: Date(timeIntervalSince1970: Double(started) / 1000))
+                startedAt: Date(timeIntervalSince1970: Double(started) / 1000),
+                detail: LiveActivityPlan.detail(chat.lastMessagePreview))
         }
     }
 

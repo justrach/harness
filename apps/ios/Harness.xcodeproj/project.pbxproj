@@ -74,6 +74,14 @@
 			);
 			target = A1000000000000000000T001 /* Harness */;
 		};
+		13F0799F6C34AAD8E1B2B457 /* Exceptions for "Harness" folder in "HarnessWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Theme/BrandMarks.swift,
+				Theme/HermesMark.swift,
+			);
+			target = AEBE4543C72514F058D31F39 /* HarnessWidgets */;
+		};
 		A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -97,6 +105,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */,
+				13F0799F6C34AAD8E1B2B457 /* Exceptions for "Harness" folder in "HarnessWidgets" target */,
 			);
 			path = Harness;
 			sourceTree = "<group>";
