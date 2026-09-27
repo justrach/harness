@@ -133,9 +133,9 @@ struct ComposerShell<Chips: View>: View {
         }
         .padding(.horizontal, expanded ? 12 : 5)
         .padding(.vertical, expanded ? 12 : 5)
-        .background(whiteAlpha(0.04), in: surfaceShape)
+        .background(ink(0.04), in: surfaceShape)
         .glassEffect(.regular.interactive(), in: surfaceShape)
-        .overlay(surfaceShape.strokeBorder(whiteAlpha(0.05), lineWidth: 1))
+        .overlay(surfaceShape.strokeBorder(hairline(0.05), lineWidth: 1))
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -180,8 +180,8 @@ struct ComposerShell<Chips: View>: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 44, height: 44)
-                .background(whiteAlpha(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+                .background(ink(0.06), in: Circle())
+                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -223,7 +223,7 @@ struct ComposerShell<Chips: View>: View {
                 }
             }
             .frame(width: 44, height: 44)
-            .background(buttonActive ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.10)),
+            .background(buttonActive ? AnyShapeStyle(Theme.text) : AnyShapeStyle(ink(0.10)),
                         in: Circle())
             .contentShape(Circle())
         }
@@ -762,7 +762,7 @@ struct QuestionPanel: View {
                         .foregroundStyle(Theme.textMuted)
                         .padding(.horizontal, 6)
                         .frame(height: 20)
-                        .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .background(ink(0.06), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
 
@@ -784,7 +784,7 @@ struct QuestionPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Rectangle().fill(whiteAlpha(0.06)).frame(height: 1)
+                Rectangle().fill(hairline(0.06)).frame(height: 1)
                 TextField("Or type your own answer", text: Binding(
                     get: { typed[question.id] ?? "" },
                     set: { typed[question.id] = $0 }
@@ -817,7 +817,7 @@ struct QuestionPanel: View {
         }
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26))
-        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(whiteAlpha(0.05), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(hairline(0.05), lineWidth: 1))
         .padding(.horizontal, 12)
         .transition(.opacity)
     }
@@ -841,15 +841,15 @@ struct QuestionPanel: View {
                         .font(Theme.sans(11))
                         .foregroundStyle(Theme.textMuted)
                         .frame(width: 22, height: 22)
-                        .background(whiteAlpha(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .background(ink(0.06), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(isPicked ? whiteAlpha(0.09) : whiteAlpha(0.025),
+            .background(isPicked ? ink(0.09) : ink(0.025),
                         in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(isPicked ? whiteAlpha(0.16) : .clear, lineWidth: 1))
+                .strokeBorder(isPicked ? ink(0.16) : .clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }

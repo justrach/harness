@@ -7,9 +7,9 @@ import SwiftUI
 
 enum SheetStyle {
     static let cardRadius: CGFloat = 20
-    static let cardFill = whiteAlpha(0.045)
-    static let rowSeparator = whiteAlpha(0.06)
-    static let panel = grey(0x14)
+    static var cardFill: Color { ink(0.045) }
+    static var rowSeparator: Color { hairline(0.06) }
+    static var panel: Color { Theme.surfaceDialog }
 }
 
 /// Grouped card: rows separated by inset hairlines.
@@ -22,7 +22,7 @@ struct SheetCard<Content: View>: View {
         }
         .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
         .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
-            .strokeBorder(whiteAlpha(0.06), lineWidth: 1))
+            .strokeBorder(hairline(0.06), lineWidth: 1))
     }
 }
 
@@ -136,7 +136,7 @@ struct SheetLabel: View {
 struct SheetRowButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(configuration.isPressed ? whiteAlpha(0.06) : .clear)
+            .background(configuration.isPressed ? ink(0.06) : .clear)
     }
 }
 
@@ -153,7 +153,7 @@ struct SheetPrimaryButton: View {
                 .foregroundStyle(enabled ? Theme.bg : Theme.textFaint)
                 .frame(maxWidth: .infinity)
                 .frame(height: 50)
-                .background(enabled ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.08)),
+                .background(enabled ? AnyShapeStyle(Theme.text) : AnyShapeStyle(ink(0.08)),
                             in: Capsule())
         }
         .buttonStyle(.plain)
@@ -178,7 +178,7 @@ struct PressWashButtonStyle: ButtonStyle {
 struct ChipPressButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .overlay(Capsule().fill(configuration.isPressed ? whiteAlpha(0.06) : .clear))
+            .overlay(Capsule().fill(configuration.isPressed ? ink(0.06) : .clear))
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }

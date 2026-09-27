@@ -486,7 +486,7 @@ struct AttachmentStripView: View {
                         .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .overlay(RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(whiteAlpha(0.11), lineWidth: 1))
+                            .strokeBorder(hairline(0.11), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .overlay(alignment: .topTrailing) {
@@ -498,7 +498,7 @@ struct AttachmentStripView: View {
                             .foregroundStyle(Theme.text)
                             .frame(width: 18, height: 18)
                             .background(.black.opacity(0.65), in: Circle())
-                            .overlay(Circle().strokeBorder(whiteAlpha(0.2), lineWidth: 1))
+                            .overlay(Circle().strokeBorder(hairline(0.2), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .offset(x: 5, y: -5)
@@ -590,9 +590,9 @@ struct AttachmentThumbView: View {
                 .buttonStyle(.plain)
             }
         }
-        .background(whiteAlpha(0.035))
+        .background(ink(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(whiteAlpha(0.11), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(hairline(0.11), lineWidth: 1))
         .task(id: "\(deviceId)|\(path)") {
             cache.load(deviceId: deviceId, path: path)
         }
@@ -667,7 +667,7 @@ struct GeneratedImageView: View {
                     .tint(Theme.textFaint)
                     .frame(maxWidth: .infinity)
                     .frame(height: 220)
-                    .background(whiteAlpha(0.035), in: RoundedRectangle(cornerRadius: 12))
+                    .background(ink(0.035), in: RoundedRectangle(cornerRadius: 12))
                     .accessibilityLabel("Loading generated image")
             case .error:
                 Button {
@@ -681,7 +681,7 @@ struct GeneratedImageView: View {
                         .foregroundStyle(Theme.textFaint)
                         .frame(maxWidth: .infinity)
                         .frame(height: 220)
-                        .background(whiteAlpha(0.035), in: RoundedRectangle(cornerRadius: 12))
+                        .background(ink(0.035), in: RoundedRectangle(cornerRadius: 12))
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Tap to retry")

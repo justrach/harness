@@ -63,6 +63,7 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 use crate::workspace_links::resolve_workspace_file_link;
 
 mod actions_ui;
+mod appearance_sync;
 mod chat_split;
 mod chat_tabs;
 mod codegraff_account;
@@ -1773,6 +1774,9 @@ pub struct Shell {
     org: Option<OrgGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
+    /// Last appearance sent to the registry (`appearance_sync`).
+    published_appearance: Option<appearance_sync::PublishedAppearance>,
+    appearance_task: Option<Task<()>>,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
     runtime_change_error: Option<SharedString>,
@@ -1886,6 +1890,7 @@ pub struct Shell {
     /// 1s heartbeat re-rendering the working indicator (elapsed + flavour word).
     _ticker: Task<()>,
     _state_observation: Subscription,
+    _appearance_observation: Subscription,
     _composer_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
@@ -1898,6 +1903,10 @@ impl Shell {
             this.on_state_changed(&state, cx);
             cx.notify();
         });
+        // Phones follow the desktop's theme choice through the registry.
+        let appearance_observation = cx.observe_global::<crate::appearance::AppearanceState>(
+            |this: &mut Shell, cx| this.publish_appearance(cx),
+        );
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
@@ -2159,6 +2168,8 @@ impl Shell {
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
+            published_appearance: None,
+            appearance_task: None,
             auth_task: None,
             runtime_change_task: None,
             runtime_change_error: None,
@@ -2212,6 +2223,7 @@ impl Shell {
             activation_sub: None,
             _ticker: ticker,
             _state_observation: observation,
+            _appearance_observation: appearance_observation,
             _composer_events: composer_events,
             _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
@@ -2280,6 +2292,7 @@ impl Shell {
             self.sidebar_notice = Some(notice.into());
         }
         self.drive_pending_folder_open(cx);
+        self.publish_appearance(cx);
         let next_sync_flow = {
             let state = state.read(cx);
             sync_flow_after_auth(self.sync_flow, state.workspace_scope, state.auth.as_ref())

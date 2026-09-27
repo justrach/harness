@@ -164,7 +164,7 @@ struct TranscriptSkeleton: View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(fractions.enumerated()), id: \.offset) { _, frac in
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(whiteAlpha(0.06))
+                    .fill(ink(0.06))
                     .frame(width: width * frac, height: 12)
             }
         }
@@ -172,7 +172,7 @@ struct TranscriptSkeleton: View {
 
     private func bubble(_ width: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
-            .fill(whiteAlpha(0.07))
+            .fill(ink(0.07))
             .frame(width: width, height: 42)
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
@@ -180,15 +180,15 @@ struct TranscriptSkeleton: View {
     private func chip(_ width: CGFloat) -> some View {
         HStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 5)
-                .fill(whiteAlpha(0.07))
+                .fill(ink(0.07))
                 .frame(width: 18, height: 18)
             RoundedRectangle(cornerRadius: 4)
-                .fill(whiteAlpha(0.05))
+                .fill(ink(0.05))
                 .frame(height: 10)
         }
         .padding(.horizontal, 8)
         .frame(width: width, height: 30)
-        .background(whiteAlpha(0.03), in: RoundedRectangle(cornerRadius: 9))
+        .background(ink(0.03), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -203,7 +203,7 @@ extension ChatIndicator {
         case .awaitingInput: return Theme.accent.opacity(0.6)       // indigo
         case .errored: return Theme.danger.opacity(0.65)
         case .completed: return Theme.statusCompleted.opacity(0.9)  // emerald-400
-        case .idle: return whiteAlpha(0.14)
+        case .idle: return ink(0.14)
         }
     }
 

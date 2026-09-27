@@ -855,6 +855,50 @@ fn pin_sessions(doc: &mut RegistryDoc, ids: &[&str]) {
 }
 
 #[test]
+fn appearance_publishes_only_changed_fields() {
+    let mut doc = RegistryDoc::new("desktop");
+    assert_eq!(doc.appearance(), None);
+    let codegraff = SyncedAppearance {
+        mode: "system".into(),
+        light: "codegraff-light".into(),
+        dark: "codegraff-dark".into(),
+    };
+    doc.set_appearance(&codegraff).unwrap();
+    assert_eq!(doc.appearance(), Some(codegraff.clone()));
+    assert_eq!(doc.pending_len(), 1);
+
+    // Republishing the same choice is free; one changed field is one field.
+    doc.set_appearance(&codegraff).unwrap();
+    assert_eq!(doc.pending_len(), 1);
+    let nord = SyncedAppearance { dark: "nord".into(), ..codegraff };
+    doc.set_appearance(&nord).unwrap();
+    assert_eq!(doc.pending_len(), 2);
+    let last = doc.pending.last().unwrap().ops.last().unwrap();
+    assert_eq!(last.set.as_ref().unwrap().keys().collect::<Vec<_>>(), ["dark"]);
+    assert_eq!(doc.appearance(), Some(nord));
+}
+
+#[test]
+fn appearance_rejects_unknown_modes_and_unsafe_ids() {
+    let mut doc = RegistryDoc::new("desktop");
+    let valid = SyncedAppearance {
+        mode: "dark".into(),
+        light: "github-light".into(),
+        dark: "rose-pine-moon".into(),
+    };
+    for bad in [
+        SyncedAppearance { mode: "sepia".into(), ..valid.clone() },
+        SyncedAppearance { light: String::new(), ..valid.clone() },
+        SyncedAppearance { dark: "../nord".into(), ..valid.clone() },
+    ] {
+        assert!(doc.set_appearance(&bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(doc.appearance(), None);
+    doc.set_appearance(&valid).unwrap();
+    assert_eq!(doc.appearance(), Some(valid));
+}
+
+#[test]
 fn sidebar_preferences_preserve_unknown_empty_and_ordered_states() {
     let mut doc = RegistryDoc::new("dev-a");
     assert_eq!(doc.sidebar_preferences(), None);

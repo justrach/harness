@@ -32,7 +32,7 @@ struct TranscriptView: View {
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
-                    .environment(\.colorScheme, .dark))
+                    .environment(\.colorScheme, ThemeStore.shared.colorScheme))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)
@@ -599,7 +599,7 @@ struct InputChipView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 20, height: 20)
-                .background(whiteAlpha(0.09), in: RoundedRectangle(cornerRadius: 6))
+                .background(ink(0.09), in: RoundedRectangle(cornerRadius: 6))
             Text("Question")
                 .font(Theme.sans(12, weight: .medium))
                 .foregroundStyle(Theme.text)
@@ -611,7 +611,7 @@ struct InputChipView: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 34)
-        .background(whiteAlpha(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+        .background(ink(0.045), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hairline(0.08), lineWidth: 1))
     }
 }

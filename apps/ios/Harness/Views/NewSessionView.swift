@@ -355,8 +355,8 @@ struct NewSessionView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(whiteAlpha(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+            .background(ink(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -572,8 +572,8 @@ struct ComposerChip: View {
             }
             .padding(.horizontal, 13)
             .frame(height: 40)
-            .background(whiteAlpha(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(whiteAlpha(0.08), lineWidth: 1))
+            .background(ink(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -659,7 +659,7 @@ struct ModelPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
 
     private var selectedModel: ModelInfo? {
@@ -758,7 +758,7 @@ struct TraitPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
 
     /// One-line hints for the ladder (the special modes deserve explanation).
@@ -820,7 +820,7 @@ struct ModelOptionPickerSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
 
     private func hint(for choice: ModelOptionChoiceInfo) -> String? {
@@ -881,7 +881,7 @@ struct PickRow: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? AnyShapeStyle(Theme.text) : AnyShapeStyle(whiteAlpha(0.03)),
+            .background(selected ? AnyShapeStyle(Theme.text) : AnyShapeStyle(ink(0.03)),
                         in: RoundedRectangle(cornerRadius: 12))
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
@@ -949,7 +949,7 @@ struct RefPickerSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
 
     private func row(_ ref: RepoRef) -> some View {
@@ -1024,7 +1024,7 @@ struct CheckoutPickerSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
 
     private func row(_ rowKind: CheckoutKind, title: String, subtitle: String) -> some View {

@@ -1103,6 +1103,11 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
     }
 
+    /// Publish the desktop's appearance choice for other devices to follow.
+    pub fn set_appearance(&self, appearance: &harness_doc::SyncedAppearance) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.set_appearance(appearance))?)
+    }
+
     /// LWW full-config replace on the chat row (harness `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.

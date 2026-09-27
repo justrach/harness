@@ -21,6 +21,7 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    @State private var showAppearance = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
 
@@ -106,11 +107,16 @@ struct HomeView: View {
                         if model.demo != nil {
                             Text("Demo mode")
                         }
+                        Button("Appearance", systemImage: "paintpalette") { showAppearance = true }
                         Button("Sign out", role: .destructive) { model.signOut() }
                     } label: {
                         Image(systemName: "person.circle")
                     }
+                    .accessibilityIdentifier("account-menu")
                 }
+            }
+            .sheet(isPresented: $showAppearance) {
+                AppearanceSheet()
             }
             .sheet(isPresented: $showNewSpace) {
                 NewSpaceSheet { spaceId in
@@ -141,6 +147,9 @@ struct HomeView: View {
                 if model.launchSheet == "newspace" {
                     model.launchSheet = nil
                     showNewSpace = true
+                } else if model.launchSheet == "appearance" {
+                    model.launchSheet = nil
+                    showAppearance = true
                 }
             }
         }

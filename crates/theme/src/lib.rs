@@ -518,6 +518,15 @@ pub struct ThemeRegistry {
     pub families: Vec<ThemeFamily>,
 }
 
+/// The built-in registry as pretty JSON with a trailing newline — the catalog
+/// the iOS app bundles. `builtin_catalog_matches_ios_bundle` keeps the checked-in
+/// copy in lockstep; regenerate with the `harness-theme-export` binary.
+pub fn builtin_catalog_json() -> serde_json::Result<String> {
+    let mut json = serde_json::to_string_pretty(ThemeRegistry::builtin())?;
+    json.push('\n');
+    Ok(json)
+}
+
 impl ThemeRegistry {
     pub fn builtin() -> &'static Self {
         builtin_registry()
@@ -767,6 +776,17 @@ mod tests {
             let json = serde_json::to_string(&color).unwrap();
             assert_eq!(serde_json::from_str::<Color>(&json).unwrap(), color);
         }
+    }
+
+    #[test]
+    fn builtin_catalog_matches_ios_bundle() {
+        let bundled = include_str!("../../../apps/ios/Harness/Theme/themes.json");
+        assert!(
+            bundled == builtin_catalog_json().unwrap(),
+            "apps/ios/Harness/Theme/themes.json is stale; regenerate with \
+             `cargo run -p harness-theme --bin harness-theme-export -- \
+             --output apps/ios/Harness/Theme/themes.json`"
+        );
     }
 
     #[test]
