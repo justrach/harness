@@ -724,9 +724,12 @@ pub struct UiSettings {
     /// Last successfully launched Action per project in this viewport.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
+    /// Archive idle sessions when their last tab in this app is explicitly closed.
+    /// Device-local and opt-in; closing a window or the app does not archive.
+    pub archive_sessions_on_tab_close: bool,
     /// Open session tabs in visual order (drag-reorder edits in place).
-    /// Device-local: a tab is a local viewport onto the synced session list —
-    /// closing one never archives the session. Ids of archived/deleted chats
+    /// Device-local: a tab is a local viewport onto the synced session list.
+    /// Ids of archived/deleted chats
     /// are pruned against the doc ([`Shell::sync_open_tabs`]). `None` = file
     /// written by a pre-tabs build; seeded once from the last space's sessions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -878,6 +881,7 @@ impl Default for UiSettings {
             sidebar_show_branch: true,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
+            archive_sessions_on_tab_close: false,
             open_tabs: None,
             space_filter: None,
             last_chat_id: None,
@@ -1729,6 +1733,22 @@ mod tests {
     }
 
     #[test]
+    fn archive_sessions_on_tab_close_defaults_off_and_persists() {
+        assert!(!UiSettings::default().archive_sessions_on_tab_close);
+        let mut settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.archive_sessions_on_tab_close);
+        let dir = tempfile::tempdir().unwrap();
+        for enabled in [true, false] {
+            settings.archive_sessions_on_tab_close = enabled;
+            settings.save(dir.path()).unwrap();
+            assert_eq!(
+                UiSettings::load(dir.path()).archive_sessions_on_tab_close,
+                enabled
+            );
+        }
+    }
+
+    #[test]
     fn slash_skills_are_opt_in_and_persist() {
         let old: UiSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.skills_in_slash_menu);
@@ -2232,6 +2252,7 @@ mod tests {
                 "dev".into(),
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
+            archive_sessions_on_tab_close: true,
             space_filter: Some("space-1".into()),
             last_chat_id: Some("b".into()),
             chat_layout: Some(SavedChatLayout {

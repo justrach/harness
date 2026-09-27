@@ -37,7 +37,7 @@ use crate::popover::{self, Loadable};
 use crate::rail;
 use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
-use crate::settings::archived::ArchivedPage;
+use crate::settings::archived::{ArchivedPage, ArchivedSettingsEvent};
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
@@ -1687,6 +1687,7 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    archived_settings_sub: Option<Subscription>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2103,6 +2104,7 @@ impl Shell {
             nav,
             devices_page: None,
             archived_page: None,
+            archived_settings_sub: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -4072,6 +4074,7 @@ impl Shell {
             target.new_thread_composer_background = current.new_thread_composer_background.clone();
             target.new_thread_background_effect = current.new_thread_background_effect.clone();
             target.open_web_links_in_harness = current.open_web_links_in_harness;
+            target.archive_sessions_on_tab_close = current.archive_sessions_on_tab_close;
             target.ui_font_family = current.ui_font_family.clone();
             target.ui_font_size = current.ui_font_size;
             target.terminal_font_family = current.terminal_font_family.clone();
@@ -4461,7 +4464,20 @@ impl Shell {
             SettingsSection::Archived => {
                 if self.archived_page.is_none() {
                     let state = self.state.clone();
-                    self.archived_page = Some(cx.new(|cx| ArchivedPage::new(state, cx)));
+                    let enabled = settings::with_current(cx, |s| s.archive_sessions_on_tab_close);
+                    let page = cx.new(|cx| ArchivedPage::new(state, enabled, cx));
+                    self.archived_settings_sub = Some(cx.subscribe(
+                        &page,
+                        |this, _, event: &ArchivedSettingsEvent, cx| {
+                            let ArchivedSettingsEvent::ArchiveOnTabCloseChanged(enabled) = *event;
+                            settings::update(SavePolicy::Immediate, cx, |settings| {
+                                settings.archive_sessions_on_tab_close = enabled;
+                            });
+                            this.settings.archive_sessions_on_tab_close = enabled;
+                            cx.notify();
+                        },
+                    ));
+                    self.archived_page = Some(page);
                 }
                 match &self.archived_page {
                     Some(page) => page.clone().into_any_element(),

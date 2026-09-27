@@ -228,11 +228,13 @@ impl Shell {
     }
 
     /// ⌘W on a tab down to one pane closes the tab (not the window) while
-    /// other tabs remain. Its chats stay in the sidebar.
+    /// other tabs remain. Archiving is opt-in and only applies to this explicit close.
     pub(super) fn close_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.chat_tabs.len() < 2 || !matches!(self.route, Route::Chat) {
             return false;
         }
+        // The active tab's parked copy can be stale after sidebar navigation.
+        let closing = self.park_chat_tab(cx);
         let closed = self.chat_tab;
         let next = tab_after_close(closed, self.chat_tabs.len());
         tracing::info!(closed, tabs = self.chat_tabs.len(), "closing chat tab");
@@ -244,7 +246,101 @@ impl Shell {
             self.chat_tab = 0;
         }
         self.load_chat_tab(tab, window, cx);
+        self.archive_closed_tab(closing, window, cx);
         true
+    }
+
+    /// Includes the live pane even while Settings is covering the chat outlet.
+    fn has_open_chat(&self, chat_id: &str, cx: &App) -> bool {
+        self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+            || self
+                .chat_split
+                .as_ref()
+                .is_some_and(|split| split.panes.iter().any(|id| id.as_deref() == Some(chat_id)))
+            || self.chat_in_other_tab(chat_id).is_some()
+    }
+
+    fn archive_closed_tab(&mut self, closing: ChatTab, window: &Window, cx: &mut Context<Self>) {
+        if !settings::with_current(cx, |s| s.archive_sessions_on_tab_close) {
+            return;
+        }
+        let mut ids: Vec<String> = closing.selected.into_iter().collect();
+        if let Some(split) = closing.split {
+            ids.extend(split.panes.into_iter().flatten());
+        }
+        ids.sort();
+        ids.dedup();
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let mut active = false;
+        ids.retain(|id| {
+            if !state
+                .chats
+                .iter()
+                .any(|chat| chat.id == *id && !chat.archived)
+            {
+                return false;
+            }
+            // Use the raw status conservatively: a stale heartbeat must not
+            // turn an offline host's unfinished run into an archive candidate.
+            if state.send_pending(id, now)
+                || state.send_queued(id, now)
+                || state.session_for(id).is_some_and(|session| {
+                    matches!(
+                        session.status,
+                        harness_proto::SessionStatus::Working
+                            | harness_proto::SessionStatus::AwaitingInput
+                    )
+                })
+            {
+                active = true;
+                return false;
+            }
+            !self.has_open_chat(id, cx)
+                && !cx.windows().into_iter().any(|other| {
+                    other.window_id() != window.window_handle().window_id()
+                        && other.downcast::<Shell>().is_some_and(|handle| {
+                            handle
+                                .read(cx)
+                                .is_ok_and(|shell| shell.has_open_chat(id, cx))
+                        })
+                })
+        });
+        if active {
+            self.sidebar_notice = Some("Active sessions were left unarchived.".into());
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let Some(engine) = state.engine().cloned() else {
+            self.sidebar_notice =
+                Some("Could not archive closed sessions: engine not connected".into());
+            return;
+        };
+        // Each close owns its requests. Reusing mutate_task would cancel an
+        // earlier archive when tabs are closed in quick succession.
+        cx.spawn(async move |this, cx| {
+            for id in ids {
+                let result = engine
+                    .client()
+                    .call(
+                        methods::MUTATE,
+                        serde_json::json!({
+                            "op": "setChatArchived", "chatId": id, "archived": true,
+                        }),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    this.update(cx, |shell, cx| {
+                        shell.sidebar_notice =
+                            Some(format!("Could not archive closed session: {error}").into());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
     }
 
     /// Where `chat_id` is open in a PARKED tab: (tab, pane) — the pane is
@@ -430,6 +526,277 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn archive_test_window(
+        cx: &mut gpui::TestAppContext,
+        path: &std::path::Path,
+    ) -> gpui::WindowHandle<Shell> {
+        cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: path.into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        })
+    }
+
+    fn init_archive_test(cx: &mut gpui::TestAppContext, path: &std::path::Path) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), path, cx);
+        });
+    }
+
+    fn archive_test_chat(id: &str) -> harness_proto::Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "local", "archived": false, "createdAt": chrono::Utc::now(),
+        }))
+        .unwrap()
+    }
+
+    #[gpui::test]
+    fn close_tab_archive_dispatches_live_sessions_without_cancelling_prior_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(128);
+        let (replies, inbound) = tokio::sync::mpsc::channel(128);
+        let engine =
+            crate::state::EngineHandle::from_test_client(harness_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        // Build the Settings outlet inside a draw scope so GPUI releases its
+        // element-arena references, just as it does in an actual frame.
+        let shell = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.draw(
+            gpui::Point::default(),
+            gpui::size(px(800.0), px(600.0)),
+            |window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.settings_outlet(SettingsSection::Archived, window, cx)
+                })
+            },
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                // Exercise the actual Settings subscription, including immediate persistence.
+                shell.archived_page.clone().unwrap().update(cx, |_, cx| {
+                    cx.emit(ArchivedSettingsEvent::ArchiveOnTabCloseChanged(true));
+                });
+            })
+            .unwrap();
+        drop(shell);
+        drop(visual);
+        cx.run_until_parked();
+        assert!(settings::UiSettings::load(dir.path()).archive_sessions_on_tab_close);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["keep", "second", "live", "stale"]
+                        .map(archive_test_chat)
+                        .into();
+                    state.selected_chat = Some("live".into());
+                    state.set_test_engine(engine);
+                });
+                shell.route = Route::Chat;
+                shell.chat_tabs = ["keep", "second", "stale"]
+                    .map(|id| ChatTab {
+                        selected: Some(id.into()),
+                        ..Default::default()
+                    })
+                    .into();
+                shell.chat_tab = 2;
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("keep"));
+                assert!(
+                    !shell.close_focused_chat_pane(window, cx),
+                    "last tab falls through to window close"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut archived = Vec::new();
+        while let Ok(request) = requests.try_recv() {
+            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            if request["method"] == methods::MUTATE {
+                assert_eq!(request["params"]["op"], "setChatArchived");
+                assert_eq!(request["params"]["archived"], true);
+                archived.push(request["params"]["chatId"].as_str().unwrap().to_string());
+                runtime.block_on(async {
+                    replies
+                        .send(
+                            serde_json::json!({"id": request["id"], "err": "archive rejected"})
+                                .to_string(),
+                        )
+                        .await
+                        .unwrap();
+                    while replies.capacity() < replies.max_capacity() {
+                        tokio::task::yield_now().await;
+                    }
+                });
+            }
+        }
+        archived.sort();
+        assert_eq!(archived, ["live", "second"]);
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_ref()
+                        .unwrap()
+                        .contains("archive rejected")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn close_tab_archive_skips_disabled_active_shared_and_non_session_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(128);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(128);
+        let engine =
+            crate::state::EngineHandle::from_test_client(harness_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        let other = archive_test_window(cx, dir.path());
+        for case in [
+            "disabled",
+            "working",
+            "waiting",
+            "other-tab",
+            "other-window",
+            "canvas",
+            "settings",
+            "last-tab",
+            "split-pane",
+            "pending",
+        ] {
+            other
+                .update(cx, |shell, _, cx| {
+                    shell.state.update(cx, |state, _| {
+                        state.selected_chat = (case == "other-window").then(|| "closing".into());
+                    });
+                })
+                .unwrap();
+            window
+                .update(cx, |shell, window, cx| {
+                    settings::update(SavePolicy::Immediate, cx, |s| {
+                        s.archive_sessions_on_tab_close = case != "disabled"
+                    });
+                    shell.route = if case == "settings" {
+                        Route::Settings(SettingsSection::Archived)
+                    } else {
+                        Route::Chat
+                    };
+                    shell.chat_split = None;
+                    let closing = (case != "canvas").then(|| "closing".to_string());
+                    shell.state.update(cx, |state, _| {
+                        state.chats = ["keep", "closing"].map(archive_test_chat).into();
+                        state.selected_chat = closing.clone();
+                        state.sessions.clear();
+                        if matches!(case, "working" | "waiting") {
+                            state.sessions.push(harness_proto::Session {
+                                chat_id: "closing".into(),
+                                device_id: "local".into(),
+                                status: if case == "working" {
+                                    harness_proto::SessionStatus::Working
+                                } else {
+                                    harness_proto::SessionStatus::AwaitingInput
+                                },
+                                started_at: None,
+                                updated_at: chrono::Utc::now() - chrono::Duration::hours(1),
+                                last_completed_turn: None,
+                            });
+                        }
+                        state.set_test_engine(engine.clone());
+                        if case == "pending" {
+                            state.begin_pending_send(
+                                "closing",
+                                "pending-message",
+                                chrono::Utc::now(),
+                            );
+                        }
+                    });
+                    shell.chat_tabs = vec![
+                        ChatTab {
+                            selected: Some(
+                                if case == "other-tab" {
+                                    "closing"
+                                } else {
+                                    "keep"
+                                }
+                                .into(),
+                            ),
+                            ..Default::default()
+                        },
+                        ChatTab {
+                            selected: closing.clone(),
+                            ..Default::default()
+                        },
+                    ];
+                    shell.chat_tab = 1;
+                    if case == "last-tab" {
+                        shell.chat_tabs.clear();
+                        shell.chat_tab = 0;
+                    }
+                    if case == "split-pane" {
+                        shell.chat_split = chat_split::ChatSplit::split(
+                            None,
+                            SplitAxis::Horizontal,
+                            Some("keep".into()),
+                            closing,
+                        );
+                    }
+                    let closed = shell.close_focused_chat_pane(window, cx);
+                    assert_eq!(closed, !matches!(case, "settings" | "last-tab"), "{case}");
+                })
+                .unwrap();
+            cx.run_until_parked();
+            while let Ok(request) = requests.try_recv() {
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                assert_ne!(
+                    request["method"],
+                    methods::MUTATE,
+                    "unexpected archive for {case}: {request}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn moving_a_tab_keeps_every_other_tab_in_order() {
