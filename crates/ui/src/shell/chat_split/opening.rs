@@ -46,7 +46,7 @@ impl Shell {
         self.chat_split_selected = None;
         let fresh = open.is_none();
         self.state.update(cx, |s, cx| s.select_chat(open, cx));
-        self.adopt_canvas_draft(fresh.then_some(draft), cx);
+        self.adopt_canvas_draft(fresh.then(|| draft.fresh()), cx);
         self.sync_chat_panes(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();

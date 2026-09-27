@@ -446,6 +446,19 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+/// Whether closing a session's tab or pane archives it.
+pub fn archive_sessions_on_close(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.archive_sessions_on_close)
+        .unwrap_or_default()
+}
+
+pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.archive_sessions_on_close = enabled;
+    });
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -724,9 +737,6 @@ pub struct UiSettings {
     /// Last successfully launched Action per project in this viewport.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
-    /// Archive idle sessions when their last tab in this app is explicitly closed.
-    /// Device-local and opt-in; closing a window or the app does not archive.
-    pub archive_sessions_on_tab_close: bool,
     /// Open session tabs in visual order (drag-reorder edits in place).
     /// Device-local: a tab is a local viewport onto the synced session list.
     /// Ids of archived/deleted chats
@@ -743,6 +753,10 @@ pub struct UiSettings {
     /// The split chat layout at quit; launch restores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_layout: Option<SavedChatLayout>,
+    /// Closing a session's tab or pane also archives the session (off by
+    /// default). Quitting or closing the window never does.
+    #[serde(alias = "archiveSessionsOnTabClose")]
+    pub archive_sessions_on_close: bool,
     /// The chat tabs at quit (two or more), in order; launch restores them.
     /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -881,11 +895,11 @@ impl Default for UiSettings {
             sidebar_show_branch: true,
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
-            archive_sessions_on_tab_close: false,
             open_tabs: None,
             space_filter: None,
             last_chat_id: None,
             chat_layout: None,
+            archive_sessions_on_close: false,
             chat_tabs: Vec::new(),
             chat_tab: 0,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
@@ -1733,16 +1747,37 @@ mod tests {
     }
 
     #[test]
-    fn archive_sessions_on_tab_close_defaults_off_and_persists() {
-        assert!(!UiSettings::default().archive_sessions_on_tab_close);
+    fn archive_sessions_on_close_defaults_off_and_persists() {
+        assert!(!UiSettings::default().archive_sessions_on_close);
         let mut settings: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(!settings.archive_sessions_on_tab_close);
+        assert!(!settings.archive_sessions_on_close);
         let dir = tempfile::tempdir().unwrap();
         for enabled in [true, false] {
-            settings.archive_sessions_on_tab_close = enabled;
+            settings.archive_sessions_on_close = enabled;
             settings.save(dir.path()).unwrap();
             assert_eq!(
-                UiSettings::load(dir.path()).archive_sessions_on_tab_close,
+                UiSettings::load(dir.path()).archive_sessions_on_close,
+                enabled
+            );
+
+            // Earlier builds persisted the tab-only name. Load it, then write
+            // only the canonical key so the preference survives migration.
+            std::fs::write(
+                UiSettings::path(dir.path()),
+                serde_json::json!({ "archiveSessionsOnTabClose": enabled }).to_string(),
+            )
+            .unwrap();
+            let migrated = UiSettings::load(dir.path());
+            assert_eq!(migrated.archive_sessions_on_close, enabled);
+            migrated.save(dir.path()).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(UiSettings::path(dir.path())).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["archiveSessionsOnClose"], enabled);
+            assert!(saved.get("archiveSessionsOnTabClose").is_none());
+            assert_eq!(
+                UiSettings::load(dir.path()).archive_sessions_on_close,
                 enabled
             );
         }
@@ -2252,7 +2287,6 @@ mod tests {
                 "dev".into(),
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
-            archive_sessions_on_tab_close: true,
             space_filter: Some("space-1".into()),
             last_chat_id: Some("b".into()),
             chat_layout: Some(SavedChatLayout {
@@ -2262,6 +2296,7 @@ mod tests {
                 shares: vec![0.4, 0.6],
                 projects: vec![Some("space-1".into()), None],
             }),
+            archive_sessions_on_close: true,
             chat_tabs: vec![
                 SavedChatTab {
                     selected: Some("a".into()),

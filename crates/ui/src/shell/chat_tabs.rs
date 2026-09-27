@@ -25,6 +25,18 @@ pub(super) fn tab_after_close(closed: usize, len: usize) -> usize {
     closed.saturating_sub(1).min(len.saturating_sub(2))
 }
 
+/// What closing a pane or tab did to its session ([`Shell::archive_closed_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloseArchive {
+    /// The setting is off.
+    Off,
+    /// Another pane or tab still shows it.
+    StillOpen,
+    /// It is still working or waiting for input; kept, with a notice.
+    Running,
+    Archived,
+}
+
 /// Where tab `ix` ends up after the tab at `from` moves to `to`.
 pub(super) fn index_after_move(ix: usize, from: usize, to: usize) -> usize {
     if ix == from {
@@ -73,12 +85,20 @@ pub(super) struct ChatTabDrag {
 impl Shell {
     /// The focused pane's live composer picks, for parking or inheriting.
     pub(super) fn current_canvas_draft(&self, cx: &App) -> CanvasDraft {
-        self.composer.read(cx).pickers().read(cx).canvas_draft(cx)
+        let composer = self.composer.read(cx);
+        CanvasDraft {
+            input: Some(composer.canvas_input(cx)),
+            ..composer.pickers().read(cx).canvas_draft(cx)
+        }
     }
 
     /// Hand the pickers the picks of the tab/pane just switched to (call
     /// after `select_chat`; `None` for a chat or a canvas with none parked).
     pub(super) fn adopt_canvas_draft(&self, draft: Option<CanvasDraft>, cx: &mut Context<Self>) {
+        if let Some(input) = draft.as_ref().and_then(|draft| draft.input.clone()) {
+            self.composer
+                .update(cx, |composer, cx| composer.set_canvas_input(input, cx));
+        }
         let pickers = self.composer.read(cx).pickers().clone();
         pickers.update(cx, |pickers, cx| pickers.adopt_canvas_draft(draft, cx));
     }
@@ -168,8 +188,13 @@ impl Shell {
         }
         let parked = self.park_chat_tab(cx);
         let project = parked.project.clone();
-        // A fresh canvas starts from the picks of the tab it was opened from.
-        let draft = parked.draft.clone().filter(|_| open.is_none());
+        // A fresh canvas starts from the picks of the tab it was opened from,
+        // not its unsent prompt.
+        let draft = parked
+            .draft
+            .as_ref()
+            .map(CanvasDraft::fresh)
+            .filter(|_| open.is_none());
         if self.chat_tabs.is_empty() {
             self.chat_tabs.push(parked);
         } else {
@@ -228,13 +253,11 @@ impl Shell {
     }
 
     /// ⌘W on a tab down to one pane closes the tab (not the window) while
-    /// other tabs remain. Archiving is opt-in and only applies to this explicit close.
+    /// other tabs remain. The shared pane/tab close handler owns archiving.
     pub(super) fn close_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.chat_tabs.len() < 2 || !matches!(self.route, Route::Chat) {
             return false;
         }
-        // The active tab's parked copy can be stale after sidebar navigation.
-        let closing = self.park_chat_tab(cx);
         let closed = self.chat_tab;
         let next = tab_after_close(closed, self.chat_tabs.len());
         tracing::info!(closed, tabs = self.chat_tabs.len(), "closing chat tab");
@@ -246,101 +269,72 @@ impl Shell {
             self.chat_tab = 0;
         }
         self.load_chat_tab(tab, window, cx);
-        self.archive_closed_tab(closing, window, cx);
         true
     }
 
     /// Includes the live pane even while Settings is covering the chat outlet.
-    fn has_open_chat(&self, chat_id: &str, cx: &App) -> bool {
+    fn chat_still_open(&self, chat_id: &str, cx: &App) -> bool {
         self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
-            || self
-                .chat_split
-                .as_ref()
-                .is_some_and(|split| split.panes.iter().any(|id| id.as_deref() == Some(chat_id)))
+            || self.chat_split.as_ref().is_some_and(|split| {
+                split.panes.iter().any(|id| id.as_deref() == Some(chat_id))
+            })
             || self.chat_in_other_tab(chat_id).is_some()
     }
 
-    fn archive_closed_tab(&mut self, closing: ChatTab, window: &Window, cx: &mut Context<Self>) {
-        if !settings::with_current(cx, |s| s.archive_sessions_on_tab_close) {
-            return;
+    /// The shared archive path for explicit pane and tab closes. Keep unfinished
+    /// work and sessions still visible elsewhere; no archive runs on window exit.
+    pub(super) fn archive_closed_session(
+        &mut self,
+        chat_id: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> CloseArchive {
+        if !settings::archive_sessions_on_close(cx) {
+            return CloseArchive::Off;
         }
-        let mut ids: Vec<String> = closing.selected.into_iter().collect();
-        if let Some(split) = closing.split {
-            ids.extend(split.panes.into_iter().flatten());
-        }
-        ids.sort();
-        ids.dedup();
-        let state = self.state.read(cx);
-        let now = chrono::Utc::now();
-        let mut active = false;
-        ids.retain(|id| {
-            if !state
-                .chats
-                .iter()
-                .any(|chat| chat.id == *id && !chat.archived)
-            {
-                return false;
-            }
-            // Use the raw status conservatively: a stale heartbeat must not
-            // turn an offline host's unfinished run into an archive candidate.
-            if state.send_pending(id, now)
-                || state.send_queued(id, now)
-                || state.session_for(id).is_some_and(|session| {
-                    matches!(
-                        session.status,
-                        harness_proto::SessionStatus::Working
-                            | harness_proto::SessionStatus::AwaitingInput
-                    )
-                })
-            {
-                active = true;
-                return false;
-            }
-            !self.has_open_chat(id, cx)
-                && !cx.windows().into_iter().any(|other| {
-                    other.window_id() != window.window_handle().window_id()
-                        && other.downcast::<Shell>().is_some_and(|handle| {
-                            handle
-                                .read(cx)
-                                .is_ok_and(|shell| shell.has_open_chat(id, cx))
-                        })
-                })
-        });
-        if active {
-            self.sidebar_notice = Some("Active sessions were left unarchived.".into());
-        }
-        if ids.is_empty() {
-            return;
-        }
-        let Some(engine) = state.engine().cloned() else {
-            self.sidebar_notice =
-                Some("Could not archive closed sessions: engine not connected".into());
-            return;
-        };
-        // Each close owns its requests. Reusing mutate_task would cancel an
-        // earlier archive when tabs are closed in quick succession.
-        cx.spawn(async move |this, cx| {
-            for id in ids {
-                let result = engine
-                    .client()
-                    .call(
-                        methods::MUTATE,
-                        serde_json::json!({
-                            "op": "setChatArchived", "chatId": id, "archived": true,
-                        }),
-                    )
-                    .await;
-                if let Err(error) = result {
-                    this.update(cx, |shell, cx| {
-                        shell.sidebar_notice =
-                            Some(format!("Could not archive closed session: {error}").into());
-                        cx.notify();
+        if self.chat_still_open(&chat_id, cx)
+            || cx.windows().into_iter().any(|other| {
+                other.window_id() != window.window_handle().window_id()
+                    && other.downcast::<Shell>().is_some_and(|handle| {
+                        handle.read(cx).is_ok_and(|shell| shell.chat_still_open(&chat_id, cx))
                     })
-                    .ok();
+            })
+        {
+            return CloseArchive::StillOpen;
+        }
+        let state = self.state.read(cx);
+        let now = Utc::now();
+        // A stale heartbeat must not turn an offline host's unfinished run
+        // into an archive candidate. Pending and queued sends are active too.
+        let running = state.send_pending(&chat_id, now)
+            || state.send_queued(&chat_id, now)
+            || state.session_for(&chat_id).is_some_and(|session| {
+                matches!(session.status,
+                    harness_proto::SessionStatus::Working | harness_proto::SessionStatus::AwaitingInput)
+            });
+        if running {
+            self.sidebar_notice = Some("Still running — closed without archiving".into());
+            cx.notify();
+            return CloseArchive::Running;
+        }
+        if let Some(engine) = state.engine().cloned() {
+            // Each close owns its request. Reusing mutate_task would cancel
+            // an earlier archive when panes or tabs close in quick succession.
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = engine.client().call(methods::MUTATE, serde_json::json!({
+                    "op": "setChatArchived", "chatId": chat_id, "archived": true,
+                })).await {
+                    this.update(cx, |shell, cx| {
+                        shell.sidebar_notice = Some(format!("Could not archive closed session: {error}").into());
+                        cx.notify();
+                    }).ok();
                 }
-            }
-        })
-        .detach();
+            }).detach();
+        } else {
+            self.sidebar_notice = Some("Engine not connected".into());
+            cx.notify();
+        }
+        CloseArchive::Archived
     }
 
     /// Where `chat_id` is open in a PARKED tab: (tab, pane) — the pane is
@@ -576,6 +570,15 @@ mod tests {
     fn close_tab_archive_dispatches_live_sessions_without_cancelling_prior_closes(
         cx: &mut gpui::TestAppContext,
     ) {
+        assert_close_archive_dispatch(cx, false);
+    }
+
+    #[gpui::test]
+    fn close_pane_archive_dispatches_without_cancelling_prior_closes(cx: &mut gpui::TestAppContext) {
+        assert_close_archive_dispatch(cx, true);
+    }
+
+    fn assert_close_archive_dispatch(cx: &mut gpui::TestAppContext, panes: bool) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -588,31 +591,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_archive_test(cx, dir.path());
         let window = archive_test_window(cx, dir.path());
-        // Build the Settings outlet inside a draw scope so GPUI releases its
-        // element-arena references, just as it does in an actual frame.
-        let shell = window.update(cx, |_, _, cx| cx.entity()).unwrap();
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.draw(
-            gpui::Point::default(),
-            gpui::size(px(800.0), px(600.0)),
-            |window, cx| {
-                shell.update(cx, |shell, cx| {
-                    shell.settings_outlet(SettingsSection::Archived, window, cx)
-                })
-            },
-        );
-        window
-            .update(cx, |shell, _, cx| {
-                // Exercise the actual Settings subscription, including immediate persistence.
-                shell.archived_page.clone().unwrap().update(cx, |_, cx| {
-                    cx.emit(ArchivedSettingsEvent::ArchiveOnTabCloseChanged(true));
-                });
-            })
-            .unwrap();
-        drop(shell);
-        drop(visual);
-        cx.run_until_parked();
-        assert!(settings::UiSettings::load(dir.path()).archive_sessions_on_tab_close);
+        cx.update(|cx| settings::set_archive_sessions_on_close(true, cx));
+        assert!(settings::UiSettings::load(dir.path()).archive_sessions_on_close);
         window
             .update(cx, |shell, window, cx| {
                 shell.state.update(cx, |state, _| {
@@ -630,6 +610,16 @@ mod tests {
                     })
                     .into();
                 shell.chat_tab = 2;
+                if panes {
+                    shell.chat_tabs.clear();
+                    shell.chat_tab = 0;
+                    let split = chat_split::ChatSplit::split(
+                        None, SplitAxis::Horizontal, Some("keep".into()), None,
+                    );
+                    shell.chat_split = chat_split::ChatSplit::split(
+                        split, SplitAxis::Horizontal, Some("second".into()), None,
+                    );
+                }
                 assert!(shell.close_focused_chat_pane(window, cx));
                 assert!(shell.close_focused_chat_pane(window, cx));
                 assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("keep"));
@@ -703,7 +693,7 @@ mod tests {
             "canvas",
             "settings",
             "last-tab",
-            "split-pane",
+            "other-pane",
             "pending",
         ] {
             other
@@ -715,9 +705,7 @@ mod tests {
                 .unwrap();
             window
                 .update(cx, |shell, window, cx| {
-                    settings::update(SavePolicy::Immediate, cx, |s| {
-                        s.archive_sessions_on_tab_close = case != "disabled"
-                    });
+                    settings::set_archive_sessions_on_close(case != "disabled", cx);
                     shell.route = if case == "settings" {
                         Route::Settings(SettingsSection::Archived)
                     } else {
@@ -774,12 +762,12 @@ mod tests {
                         shell.chat_tabs.clear();
                         shell.chat_tab = 0;
                     }
-                    if case == "split-pane" {
+                    if case == "other-pane" {
                         shell.chat_split = chat_split::ChatSplit::split(
                             None,
                             SplitAxis::Horizontal,
-                            Some("keep".into()),
                             closing,
+                            None,
                         );
                     }
                     let closed = shell.close_focused_chat_pane(window, cx);

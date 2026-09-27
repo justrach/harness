@@ -2,8 +2,7 @@
 //! devices, with Unarchive (Mutate setChatArchived false).
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 
 use harness_proto::Chat;
@@ -19,14 +18,8 @@ pub fn archived_chats(chats: &[Chat]) -> Vec<&Chat> {
     chats.iter().filter(|c| c.archived).collect()
 }
 
-#[derive(Debug, Clone)]
-pub enum ArchivedSettingsEvent {
-    ArchiveOnTabCloseChanged(bool),
-}
-
 pub struct ArchivedPage {
     state: Entity<AppState>,
-    archive_sessions_on_tab_close: bool,
     scroll: widgets::PageScroll,
     error: Option<SharedString>,
     /// Chat with an in-flight unarchive (button shows working state).
@@ -38,18 +31,11 @@ pub struct ArchivedPage {
     _observe: Subscription,
 }
 
-impl EventEmitter<ArchivedSettingsEvent> for ArchivedPage {}
-
 impl ArchivedPage {
-    pub fn new(
-        state: Entity<AppState>,
-        archive_sessions_on_tab_close: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         Self {
             state,
-            archive_sessions_on_tab_close,
             scroll: widgets::PageScroll::default(),
             error: None,
             busy: None,
@@ -59,11 +45,9 @@ impl ArchivedPage {
         }
     }
 
-    fn toggle_archive_on_tab_close(&mut self, cx: &mut Context<Self>) {
-        self.archive_sessions_on_tab_close = !self.archive_sessions_on_tab_close;
-        cx.emit(ArchivedSettingsEvent::ArchiveOnTabCloseChanged(
-            self.archive_sessions_on_tab_close,
-        ));
+    fn toggle_archive_on_close(&mut self, cx: &mut Context<Self>) {
+        let enabled = crate::settings::archive_sessions_on_close(cx);
+        crate::settings::set_archive_sessions_on_close(!enabled, cx);
         cx.notify();
     }
 
@@ -113,8 +97,7 @@ impl Render for ArchivedPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let accent = theme.accent;
-        self.archive_sessions_on_tab_close =
-            crate::settings::with_current(cx, |settings| settings.archive_sessions_on_tab_close);
+        let archive_sessions_on_close = crate::settings::archive_sessions_on_close(cx);
         let now = chrono::Utc::now();
         let (rows, device_names): (Vec<Chat>, std::collections::HashMap<String, String>) = {
             let state = self.state.read(cx);
@@ -356,27 +339,27 @@ impl Render for ArchivedPage {
                                                 .min_w_0()
                                                 .child(widgets::row_title(
                                                     &theme,
-                                                    "Archive sessions when closing tabs",
+                                                    "Archive sessions when closing tabs or panes",
                                                 ))
                                                 .child(
                                                     div()
                                                         .mt(px(4.0))
                                                         .text_size(crate::typography::ui_rems(12.0))
                                                         .text_color(theme.text_muted)
-                                                        .child("Explicitly closing a session tab archives it if idle, unless it is still open elsewhere in this app. Running sessions and sessions waiting for input remain in the sidebar. Closing the app or a window does not archive sessions."),
+                                                        .child("Explicitly closing a session tab or pane archives it if idle, unless it is still open in another tab or pane in this app. Running sessions and sessions waiting for input remain in the sidebar. Closing the app or a window does not archive sessions."),
                                                 ),
                                         )
                                         .child(
                                             div()
-                                                .id("archive-on-tab-close-toggle")
+                                                .id("archive-on-close-toggle")
                                                 .flex_none()
                                                 .size(px(40.0))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .role(gpui::Role::Switch)
-                                                .aria_label("Archive sessions when closing tabs")
-                                                .aria_toggled(if self.archive_sessions_on_tab_close {
+                                                .aria_label("Archive sessions when closing tabs or panes")
+                                                .aria_toggled(if archive_sessions_on_close {
                                                     gpui::Toggled::True
                                                 } else {
                                                     gpui::Toggled::False
@@ -385,17 +368,17 @@ impl Render for ArchivedPage {
                                                 .focus_visible(move |style| style.border_2().border_color(accent))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.toggle_archive_on_tab_close(cx);
+                                                    this.toggle_archive_on_close(cx);
                                                 }))
                                                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                                                     if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                         cx.stop_propagation();
-                                                        this.toggle_archive_on_tab_close(cx);
+                                                        this.toggle_archive_on_close(cx);
                                                     }
                                                 }))
                                                 .child(widgets::toggle_switch(
                                                     &theme,
-                                                    self.archive_sessions_on_tab_close,
+                                                    archive_sessions_on_close,
                                                 )),
                                         ),
                                 ),
