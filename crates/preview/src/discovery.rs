@@ -349,13 +349,28 @@ pub fn listeners() -> Vec<Listener> {
         }
         values
     };
-    let cwds: HashMap<_, _> = fields(&["-nP", "-a", "-u", &uid, "-d", "cwd", "-F0pn"])
+    // Listening sockets first: the one pass that has to look across every
+    // process. Working directories and process details are then asked of just
+    // those few pids; the old full `lsof -d cwd` and `ps -ax` passes walked
+    // every open file and process on the machine each scan (~4x the CPU).
+    let sockets = fields(&["-nP", "-a", "-u", &uid, "-iTCP", "-sTCP:LISTEN", "-F0pn"]);
+    if sockets.is_empty() {
+        return Vec::new();
+    }
+    let mut pids: Vec<u32> = sockets.iter().map(|(pid, _)| *pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let pid_list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let cwds: HashMap<_, _> = fields(&["-nP", "-a", "-p", &pid_list, "-d", "cwd", "-F0pn"])
         .into_iter()
         .collect();
-    let mut parents = HashMap::new();
     let mut processes = HashMap::new();
     if let Ok(output) = Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid=,lstart=,command="])
+        .args(["-o", "pid=,ppid=,lstart=,command=", "-p", &pid_list])
         .env("LC_ALL", "C")
         .output()
     {
@@ -367,7 +382,6 @@ pub fn listeners() -> Vec<Listener> {
             let (Ok(pid), Ok(parent)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) else {
                 continue;
             };
-            parents.insert(pid, parent);
             let started_at = parse_lstart(&parts[2..7]);
             processes.insert(
                 pid,
@@ -380,7 +394,7 @@ pub fn listeners() -> Vec<Listener> {
         }
     }
     let mut result = Vec::new();
-    for (pid, socket) in fields(&["-nP", "-a", "-u", &uid, "-iTCP", "-sTCP:LISTEN", "-F0pn"]) {
+    for (pid, socket) in sockets {
         let Some(cwd) = cwds.get(&pid).and_then(|s| std::fs::canonicalize(s).ok()) else {
             continue;
         };
@@ -415,8 +429,42 @@ pub fn listeners() -> Vec<Listener> {
             });
         }
     }
+    let parents = ancestry(&pids);
     mark_descendants(&mut result, &parents, std::process::id());
     result
+}
+
+/// Parent links from each pid up toward launchd, read natively
+/// (`proc_pidinfo`), for [`mark_descendants`].
+#[cfg(target_os = "macos")]
+fn ancestry(pids: &[u32]) -> HashMap<u32, u32> {
+    fn parent_of(pid: u32) -> Option<u32> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (read == size).then_some(info.pbi_ppid)
+    }
+    let mut parents = HashMap::new();
+    for &start in pids {
+        let mut pid = start;
+        for _ in 0..128 {
+            if pid <= 1 || parents.contains_key(&pid) {
+                break;
+            }
+            let Some(parent) = parent_of(pid) else { break };
+            parents.insert(pid, parent);
+            pid = parent;
+        }
+    }
+    parents
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -507,6 +555,25 @@ mod tests {
             "a reaped pid no longer matches"
         );
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn finds_this_process_listener_with_its_details() {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let found = listeners()
+            .into_iter()
+            .find(|l| l.pid == std::process::id() && l.address.port() == port)
+            .expect("the test's own listener is discovered");
+        assert_eq!(
+            found.cwd,
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+        assert!(!found.args.is_empty());
+        assert!(found.started_at > 0);
+        assert!(found.harness_owned, "a listener in this process is ours");
+        assert!(same_process(found.pid, found.started_at));
+    }
+
     #[tokio::test]
     async fn requires_an_http_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
