@@ -968,7 +968,8 @@ fn updated_input_with_answers(
         let value = if q.multi_select {
             Value::Array(labels.into_iter().map(Value::String).collect())
         } else {
-            Value::String(labels.into_iter().next().unwrap_or_default())
+            // One answer, but files attached to it ride as a second label.
+            Value::String(labels.join("\n\n"))
         };
         by_question.insert(q.question.clone(), value);
     }
@@ -1017,5 +1018,21 @@ mod tests {
         assert_eq!(updated["answers"]["Pick one"], json!("B"));
         // Original input is preserved alongside the answers.
         assert!(updated["questions"].is_array());
+    }
+
+    #[test]
+    fn a_single_answer_keeps_its_attached_files() {
+        let input =
+            json!({"questions": [{"header": "H", "question": "Pick one", "options": ["A", "B"]}]});
+        let qs = parse_questions(&input);
+        let answers = vec![UserInputAnswer {
+            question_id: qs[0].id.clone(),
+            labels: vec!["B".into(), "Attached images:\n- /tmp/a.png".into()],
+        }];
+        let updated = updated_input_with_answers(&input, &qs, &answers);
+        assert_eq!(
+            updated["answers"]["Pick one"],
+            json!("B\n\nAttached images:\n- /tmp/a.png")
+        );
     }
 }
