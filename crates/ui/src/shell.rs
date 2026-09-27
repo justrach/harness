@@ -4083,6 +4083,7 @@ impl Shell {
                 target.skill_completion_by_harness = current.skill_completion_by_harness.clone();
             }
             target.skills_in_slash_menu = current.skills_in_slash_menu;
+            target.archive_sessions_on_close = current.archive_sessions_on_close;
         });
     }
 
@@ -13265,6 +13266,86 @@ mod exit_regressions {
                 shell.on_state_changed(&shell.state.clone(), cx);
                 assert!(shell.settings.space_filter.is_none());
                 assert!(shell.state.read(cx).no_project);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn closing_a_pane_archives_its_session_only_when_it_should(cx: &mut TestAppContext) {
+        use chat_tabs::CloseArchive;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                let chat = |id: &str| harness_proto::Chat {
+                    id: id.into(),
+                    device_id: "local".into(),
+                    title: None,
+                    archived: false,
+                    cwd: None,
+                    branch: None,
+                    checkout_id: None,
+                    source_context: None,
+                    config: None,
+                    last_message_preview: None,
+                    last_message_at: None,
+                    created_at: Utc::now(),
+                    harness_session_id: None,
+                    harness_session_cwd: None,
+                    parent_chat_id: None,
+                    space_id: None,
+                    last_seen_at: None,
+                    room_gen: None,
+                };
+                shell.state.update(cx, |state, cx| {
+                    state.chats = vec![chat("a"), chat("idle"), chat("busy")];
+                    state.select_chat(Some("a".into()), cx);
+                    state.begin_pending_send("busy", "m1", Utc::now());
+                });
+                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Off);
+                settings::set_archive_sessions_on_close(true, cx);
+                // A render syncs the Settings page's pick into the shell's copy.
+                shell.sync_independent_settings(cx);
+                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
+                // ⌘D parks "a" in the pane to the left: still open there.
+                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                assert_eq!(shell.archive_closed_session("a".into(), cx), CloseArchive::StillOpen);
+                assert_eq!(shell.archive_closed_session("busy".into(), cx), CloseArchive::Running);
+                assert_eq!(shell.archive_closed_session("idle".into(), cx), CloseArchive::Archived);
+                // ⌘W on "a"'s pane: nothing else shows it, so it is archived.
+                shell.focus_chat_pane(0, window, cx);
+                assert_eq!(
+                    shell.close_focused_chat_pane_archiving(window, cx),
+                    (true, Some(CloseArchive::Archived))
+                );
             })
             .unwrap();
     }

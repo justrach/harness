@@ -421,8 +421,28 @@ impl Shell {
         }
     }
 
-    /// ⌘W with a split open closes the focused pane (not the window).
+    /// ⌘W with a split open closes the focused pane (not the window); with
+    /// one pane left it closes the tab. Either can archive the closed session
+    /// ([`Shell::archive_closed_session`]).
     pub(crate) fn close_focused_chat_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.close_focused_chat_pane_archiving(window, cx).0
+    }
+
+    /// [`Self::close_focused_chat_pane`], plus what it did to the session.
+    pub(super) fn close_focused_chat_pane_archiving(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, Option<super::chat_tabs::CloseArchive>) {
+        let closing = self.state.read(cx).selected_chat.clone();
+        let closed = self.close_focused_chat_view(window, cx);
+        let archive = closing
+            .filter(|_| closed)
+            .map(|chat_id| self.archive_closed_session(chat_id, cx));
+        (closed, archive)
+    }
+
+    fn close_focused_chat_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.chat_split_active() {
             // One pane left: close its tab while others remain.
             return self.close_chat_tab(window, cx);

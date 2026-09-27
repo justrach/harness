@@ -25,6 +25,18 @@ pub(super) fn tab_after_close(closed: usize, len: usize) -> usize {
     closed.saturating_sub(1).min(len.saturating_sub(2))
 }
 
+/// What closing a pane or tab did to its session ([`Shell::archive_closed_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CloseArchive {
+    /// The setting is off.
+    Off,
+    /// Another pane or tab still shows it.
+    StillOpen,
+    /// It is still working or waiting for input; kept, with a notice.
+    Running,
+    Archived,
+}
+
 /// Where tab `ix` ends up after the tab at `from` moves to `to`.
 pub(super) fn index_after_move(ix: usize, from: usize, to: usize) -> usize {
     if ix == from {
@@ -245,6 +257,44 @@ impl Shell {
         }
         self.load_chat_tab(tab, window, cx);
         true
+    }
+
+    /// Whether `chat_id` still shows anywhere: the live selection or a pane
+    /// of the active tab, or any pane of a parked tab.
+    fn chat_still_open(&self, chat_id: &str, cx: &App) -> bool {
+        let in_split = |split: &Option<chat_split::ChatSplit>| {
+            split
+                .as_ref()
+                .is_some_and(|split| split.panes.iter().any(|pane| pane.as_deref() == Some(chat_id)))
+        };
+        self.state.read(cx).selected_chat.as_deref() == Some(chat_id)
+            || in_split(&self.chat_split)
+            || self.chat_tabs.iter().enumerate().any(|(ix, tab)| {
+                ix != self.chat_tab && (tab.selected.as_deref() == Some(chat_id) || in_split(&tab.split))
+            })
+    }
+
+    /// Archive-on-close (a setting, off by default): the session of a pane or
+    /// tab just closed is archived, unless it still runs (work is never
+    /// stopped behind the user's back) or still shows elsewhere.
+    pub(super) fn archive_closed_session(&mut self, chat_id: String, cx: &mut Context<Self>) -> CloseArchive {
+        if !crate::settings::archive_sessions_on_close(cx) {
+            return CloseArchive::Off;
+        }
+        if self.chat_still_open(&chat_id, cx) {
+            return CloseArchive::StillOpen;
+        }
+        let running = matches!(
+            self.state.read(cx).indicator_for(&chat_id, Utc::now()),
+            Indicator::Working | Indicator::AwaitingInput
+        );
+        if running {
+            self.sidebar_notice = Some("Still running — closed without archiving".into());
+            cx.notify();
+            return CloseArchive::Running;
+        }
+        self.archive_chat(chat_id, cx);
+        CloseArchive::Archived
     }
 
     /// Where `chat_id` is open in a PARKED tab: (tab, pane) — the pane is

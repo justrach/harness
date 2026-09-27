@@ -322,6 +322,36 @@ impl Render for ArchivedPage {
                                 &theme,
                                 "Hidden from the sidebar, never deleted. Unarchiving puts a session back on its device.",
                             ))
+                            .child({
+                                let on = crate::settings::archive_sessions_on_close(cx);
+                                widgets::card_row(&theme, true)
+                                    .child(widgets::row_tile(&theme, crate::icons::ARCHIVE_MINIMALISTIC))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(widgets::row_title(&theme, "Archive sessions when closing tabs"))
+                                            .child(widgets::meta_line(
+                                                &theme,
+                                                vec![
+                                                    div()
+                                                        .child(SharedString::from(
+                                                            "Closing a session's tab or pane also archives it. A session that is still running, or open in another tab or pane, stays. Quitting never archives.",
+                                                        ))
+                                                        .into_any_element(),
+                                                ],
+                                            )),
+                                    )
+                                    .child(
+                                        widgets::toggle_switch(&theme, on)
+                                            .id("archive-on-close-toggle")
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                crate::settings::set_archive_sessions_on_close(!on, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                            })
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
                                     widgets::error_strip(&theme, message)

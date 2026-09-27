@@ -446,6 +446,19 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+/// Whether closing a session's tab or pane archives it.
+pub fn archive_sessions_on_close(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.archive_sessions_on_close)
+        .unwrap_or_default()
+}
+
+pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.archive_sessions_on_close = enabled;
+    });
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -740,6 +753,9 @@ pub struct UiSettings {
     /// The split chat layout at quit; launch restores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_layout: Option<SavedChatLayout>,
+    /// Closing a session's tab or pane also archives the session (off by
+    /// default). Quitting or closing the window never does.
+    pub archive_sessions_on_close: bool,
     /// The chat tabs at quit (two or more), in order; launch restores them.
     /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -882,6 +898,7 @@ impl Default for UiSettings {
             space_filter: None,
             last_chat_id: None,
             chat_layout: None,
+            archive_sessions_on_close: false,
             chat_tabs: Vec::new(),
             chat_tab: 0,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
@@ -2241,6 +2258,7 @@ mod tests {
                 shares: vec![0.4, 0.6],
                 projects: vec![Some("space-1".into()), None],
             }),
+            archive_sessions_on_close: true,
             chat_tabs: vec![
                 SavedChatTab {
                     selected: Some("a".into()),
