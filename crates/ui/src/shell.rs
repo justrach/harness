@@ -7166,8 +7166,9 @@ impl Shell {
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
         // A chat split adds a strip of pane cards above the list.
-        let chat_tabs = self.render_chat_tabs(theme, cx);
-        let pane_strip = self.render_pane_strip(theme, cx);
+        // With tabs, the strip moves under its own tab (taken below).
+        let mut pane_strip = self.render_pane_strip(theme, cx);
+        let chat_tabs = self.render_chat_tabs(theme, &mut pane_strip, cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
@@ -13229,6 +13230,101 @@ mod exit_regressions {
                 assert_eq!(project(shell, cx).as_deref(), Some("folio"));
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn dragging_a_chat_tab_onto_another_moves_it_and_is_saved(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
+        // Render just the production tab list, like the right-strip tests.
+        struct ChatTabHost {
+            shell: Entity<Shell>,
+            _data_dir: tempfile::TempDir,
+        }
+        impl Render for ChatTabHost {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                self.shell.update(cx, |shell, cx| {
+                    let mut strip = Some(
+                        div()
+                            .debug_selector(|| "pane-strip-under-tab".into())
+                            .h(px(20.))
+                            .into_any_element(),
+                    );
+                    div()
+                        .w(px(260.))
+                        .children(shell.render_chat_tabs(&theme, &mut strip, cx))
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        codegraff_client_id: None,
+                        default_harness: harness_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.boot_restored = true;
+                shell.new_chat_tab(None, window, cx);
+                shell.new_chat_tab(None, window, cx);
+                assert_eq!((shell.chat_tabs.len(), shell.chat_tab), (3, 2));
+                shell
+            });
+            ChatTabHost {
+                shell,
+                _data_dir: dir,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        let start = cx.debug_bounds("chat-tab-0").unwrap().center();
+        let target = cx.debug_bounds("chat-tab-2").unwrap().center();
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(px(0.), px(8.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            // The lit tab (was last) shifts up one as the first moves below it.
+            assert_eq!(shell.chat_tab, 1);
+            assert_eq!(shell.settings.chat_tabs.len(), 3);
+            assert_eq!(shell.settings.chat_tab, 1);
+        });
+        // The lit tab's pane cards sit under it, not under the last tab (#26).
+        cx.update(|window, cx| window.draw(cx).clear());
+        let strip = cx.debug_bounds("pane-strip-under-tab").unwrap();
+        let lit = cx.debug_bounds("chat-tab-1").unwrap();
+        let next = cx.debug_bounds("chat-tab-2").unwrap();
+        assert!(strip.top() >= lit.bottom() && strip.bottom() <= next.top());
     }
 
     #[gpui::test]
