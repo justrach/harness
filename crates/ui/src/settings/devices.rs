@@ -55,6 +55,58 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     }
 }
 
+/// What the version card offers next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateAction {
+    Check,
+    /// Download and restart into this version.
+    Update(String),
+    None,
+}
+
+/// The version card's status line and button. `desktop` = this install can
+/// update itself (the macOS app, the portable Windows package). Pure.
+pub fn update_summary(
+    status: Option<&harness_update::UpdateStatus>,
+    desktop: bool,
+    checking: bool,
+    now: DateTime<Utc>,
+) -> (String, UpdateAction) {
+    let Some(status) = status.filter(|_| desktop) else {
+        return (
+            "This build doesn't update itself. Install the latest release to update.".into(),
+            UpdateAction::None,
+        );
+    };
+    if checking {
+        return ("Checking for updates…".into(), UpdateAction::None);
+    }
+    if status.update_available
+        && let Some(latest) = status.latest_version.clone()
+    {
+        return (
+            format!("Harness v{latest} is available."),
+            UpdateAction::Update(latest),
+        );
+    }
+    if let Some(error) = &status.error {
+        return (
+            format!("Couldn't check for updates: {error}"),
+            UpdateAction::Check,
+        );
+    }
+    let checked = status
+        .checked_at
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .map(|at| format!("Up to date · checked {}", format_last_seen(Some(at), now)))
+        .unwrap_or_else(|| "Not checked yet.".into());
+    (checked, UpdateAction::Check)
+}
+
+/// A manual check stops showing "Checking…" once the status changes, or
+/// after this long.
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
@@ -70,6 +122,10 @@ pub struct DevicesPage {
     error: Option<SharedString>,
     task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    /// A manual update check in flight: the status it started from.
+    checking: Option<Option<harness_update::UpdateStatus>>,
+    check_task: Option<Task<()>>,
+    desktop_update: bool,
     _observe: Subscription,
 }
 
@@ -84,8 +140,94 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
+            checking: None,
+            check_task: None,
+            desktop_update: harness_update::detect_install().supports_desktop_update(),
             _observe: observe,
         }
+    }
+
+    /// Ask the engine to check for a release now; the answer comes back on
+    /// the UpdateStatus stream this page already watches.
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
+            return;
+        };
+        self.checking = Some(self.state.read(cx).update.clone());
+        self.check_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CHECK_FOR_UPDATES, serde_json::json!({}))
+                .await;
+            if let Err(err) = result {
+                this.update(cx, |page, cx| {
+                    page.checking = None;
+                    page.error = Some(format!("Update check failed: {err}").into());
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            cx.background_executor().timer(UPDATE_CHECK_TIMEOUT).await;
+            this.update(cx, |page, cx| {
+                page.checking = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_version_card(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.state.read(cx).update.clone();
+        // The check is over once the status moves.
+        if self.checking.as_ref().is_some_and(|before| *before != status) {
+            self.checking = None;
+        }
+        let current = status
+            .as_ref()
+            .map(|status| status.current_version.clone())
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let (line, action) = update_summary(
+            status.as_ref(),
+            self.desktop_update,
+            self.checking.is_some(),
+            Utc::now(),
+        );
+        let button = match action {
+            UpdateAction::Check => Some(
+                popover::btn_ghost(theme, "Check for updates", "check-for-updates-fade")
+                    .id("check-for-updates")
+                    .on_click(cx.listener(|page, _, _, cx| page.check_for_updates(cx)))
+                    .into_any_element(),
+            ),
+            UpdateAction::Update(latest) => Some(
+                popover::btn_primary(theme, &format!("Update to v{latest}"))
+                    .id("start-app-update")
+                    .cursor_pointer()
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::shell::StartAppUpdate), cx)
+                    })
+                    .into_any_element(),
+            ),
+            UpdateAction::None => None,
+        };
+        widgets::card_row(theme, true)
+            .child(widgets::row_tile(theme, crate::icons::REFRESH))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(widgets::row_title(theme, format!("Harness v{current}")))
+                    .child(widgets::meta_line(
+                        theme,
+                        vec![div().child(SharedString::from(line)).into_any_element()],
+                    )),
+            )
+            .children(button)
+            .into_any_element()
     }
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
@@ -435,6 +577,7 @@ impl Render for DevicesPage {
                                 &theme,
                                 devices_subtitle(workspace_scope),
                             ))
+                            .child(self.render_version_card(&theme, cx))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
                                     widgets::error_strip(&theme, message)
@@ -458,6 +601,45 @@ impl Render for DevicesPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    #[test]
+    fn version_card_offers_the_right_next_step() {
+        let now = Utc::now();
+        let status = |latest: Option<&str>, available: bool, error: Option<&str>| {
+            harness_update::UpdateStatus {
+                current_version: "0.2.92".into(),
+                latest_version: latest.map(Into::into),
+                update_available: available,
+                checked_at: Some(now.timestamp_millis() - 120_000),
+                error: error.map(Into::into),
+            }
+        };
+        let up_to_date = status(Some("0.2.92"), false, None);
+        assert_eq!(
+            update_summary(Some(&up_to_date), true, false, now),
+            ("Up to date · checked 2m ago".into(), UpdateAction::Check)
+        );
+        assert_eq!(
+            update_summary(Some(&up_to_date), true, true, now).1,
+            UpdateAction::None,
+            "no second check while one is running"
+        );
+        let newer = status(Some("0.2.93"), true, None);
+        assert_eq!(
+            update_summary(Some(&newer), true, false, now),
+            (
+                "Harness v0.2.93 is available.".into(),
+                UpdateAction::Update("0.2.93".into())
+            )
+        );
+        let failed = status(None, false, Some("offline"));
+        assert_eq!(
+            update_summary(Some(&failed), true, false, now),
+            ("Couldn't check for updates: offline".into(), UpdateAction::Check)
+        );
+        assert_eq!(update_summary(Some(&newer), false, false, now).1, UpdateAction::None);
+        assert_eq!(update_summary(None, true, false, now).1, UpdateAction::None);
+    }
 
     #[test]
     fn presence_window() {

@@ -2049,6 +2049,10 @@ impl RpcService for EngineRpc {
                 ))))
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
+            methods::CHECK_FOR_UPDATES => {
+                self.updater()?.check_now();
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
             methods::APPLY_UPDATE => {
                 let version = self
                     .updater()?
