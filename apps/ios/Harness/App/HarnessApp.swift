@@ -47,8 +47,15 @@ struct RootView: View {
                 OrgPickerView(tokens: tokens, orgs: orgs)
             case .ready:
                 HomeView()
-                    .onChange(of: model.liveActivitySnapshots, initial: true) { _, sessions in
-                        model.liveActivities.sync(sessions)
+                    .task {
+                        // Sampled, not observed: the snapshots read live
+                        // transcripts, so observing them re-rendered the root
+                        // on every streamed token. A lock-screen status only
+                        // needs a couple of seconds' resolution.
+                        while !Task.isCancelled {
+                            model.liveActivities.sync(model.liveActivitySnapshots)
+                            try? await Task.sleep(for: .seconds(2))
+                        }
                     }
             }
         }
