@@ -777,8 +777,21 @@ impl Wizard {
         }
     }
 
-    /// Explicit submit / auto-advance landing.
+    /// Whether the current page has an answer: a pick or typed text.
+    pub fn page_answered(&self) -> bool {
+        self.page_has_pick()
+            || self
+                .typed
+                .get(self.page)
+                .is_some_and(|typed| !typed.trim().is_empty())
+    }
+
+    /// Explicit submit / auto-advance landing. An unanswered page stays: an
+    /// empty answer reached the agent as a dismissal the user never made.
     pub fn advance(&mut self) -> WizardStep {
+        if !self.page_answered() {
+            return WizardStep::Stay;
+        }
         if self.page + 1 < self.questions.len() {
             self.page += 1;
             WizardStep::Stay
@@ -8665,11 +8678,20 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        // What is in the box answers this page however it is submitted — the
+        // Submit button and a bare Enter used to skip it and send a blank.
+        let typed = self.input.read(cx).text().trim().to_string();
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
+        wizard.set_typed(typed);
+        let page = wizard.page;
         match wizard.advance() {
             WizardStep::Done(answers) => self.wizard_finish(answers, cx),
+            // Unanswered: nothing moves, nothing is sent.
+            WizardStep::Stay if self.wizard.as_ref().is_some_and(|w| w.page == page) => {
+                cx.notify();
+            }
             _ => {
                 // Moving on: clear the shared free-text input for the next page.
                 self.input.update(cx, |input, cx| input.set_text("", cx));
@@ -14047,6 +14069,27 @@ mod tests {
         assert_eq!(with[0].labels, vec!["a"]);
         assert_eq!(with[1].labels.len(), 2);
         assert!(with[1].labels[1].contains("- /tmp/shot.png"));
+    }
+
+    #[test]
+    fn an_unanswered_page_never_submits() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q1", &["a"], false), question("q2", &[], false)],
+        );
+        assert_eq!(w.advance(), WizardStep::Stay);
+        assert_eq!(w.page, 0, "an empty page must not advance");
+        w.set_typed("   ".into());
+        assert_eq!(w.advance(), WizardStep::Stay, "whitespace is no answer");
+        w.select(0);
+        assert_eq!(w.advance(), WizardStep::Stay);
+        assert_eq!(w.page, 1);
+        assert_eq!(w.advance(), WizardStep::Stay, "the free-text page needs text");
+        w.set_typed("use sqlite".into());
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!("expected Done")
+        };
+        assert_eq!(answers[1].labels, vec!["use sqlite"]);
     }
 
     #[test]
