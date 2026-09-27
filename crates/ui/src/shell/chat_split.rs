@@ -815,20 +815,6 @@ fn space_label(space: &harness_proto::Space) -> String {
 }
 
 impl Shell {
-    /// The pane glyph for a chat open in an UNFOCUSED pane (sidebar badge).
-    pub(super) fn peer_pane_badge(&self, chat_id: &str) -> Option<SharedString> {
-        let split = self.chat_split.as_ref().filter(|s| !s.zoomed)?;
-        if !matches!(self.route, Route::Chat) {
-            return None;
-        }
-        let ix = split
-            .panes
-            .iter()
-            .enumerate()
-            .position(|(ix, pane)| ix != split.focus && pane.as_deref() == Some(chat_id))?;
-        Some(pane_glyph(split.axis, ix, split.panes.len()).into())
-    }
-
     /// A strip of mini cards mirroring the split above the session list:
     /// each shows its pane's session and workspace (project), the focused
     /// one lit. Click a card to move into that pane. Hovering the strip eases
