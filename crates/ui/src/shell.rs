@@ -14281,6 +14281,10 @@ mod right_tab_mouse_regressions {
 
     #[gpui::test]
     fn dragging_a_tab_to_the_strip_edge_reaches_slots_past_the_fold(cx: &mut TestAppContext) {
+        // Windows keeps click jitter from starting drags: no tab drag there.
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
         let (shell, cx) = setup(cx);
         shell.update(cx, |shell, cx| {
             for id in ["third", "fourth", "fifth", "sixth", "seventh", "eighth"] {
@@ -14323,6 +14327,9 @@ mod right_tab_mouse_regressions {
 
     #[gpui::test]
     fn dropping_a_tab_on_a_neighbor_reorders(cx: &mut TestAppContext) {
+        if !crate::click_activation_drag_enabled() {
+            return;
+        }
         let (shell, cx) = setup(cx);
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
         let target = cx.debug_bounds("right-surface-tab-1").unwrap().center();
