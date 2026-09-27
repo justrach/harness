@@ -3036,6 +3036,8 @@ fn handle_server_request_live(
             .get("toolCall")
             .and_then(|t| t.get("title"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
             .unwrap_or("The agent needs your input.")
             .to_owned(),
         options: names.clone(),

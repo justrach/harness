@@ -1223,11 +1223,11 @@ pub enum RowKind {
         compact_shell: bool,
     },
     InputChip {
-        /// First question's header (chat-view.tsx `InputChip`: the resolved
-        /// chip shows it; unresolved shows "Awaiting your answer…" — which
-        /// stays TRUE even across a run death: the composer keeps the panel
-        /// up until the user answers, and the engine delivers a dead run's
-        /// answer as a resumed turn).
+        /// The first question's text (its header when it has none). While
+        /// unresolved the chip adds "Waiting for you" — which stays TRUE even
+        /// across a run death: the composer keeps the panel up until the user
+        /// answers, and the engine delivers a dead run's answer as a resumed
+        /// turn.
         header: SharedString,
         resolved: bool,
     },
@@ -1766,11 +1766,20 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        // Model-generated header onto the one-line chip.
+                        // The question itself onto the one-line chip. Agent-
+                        // relayed questions all share the header "Agent
+                        // question", so a header-only chip said nothing (#30).
                         let header: SharedString = single_line(
                             &questions
                                 .first()
-                                .map(|q| q.header.clone())
+                                .map(|q| {
+                                    let asked = q.question.trim();
+                                    if asked.is_empty() {
+                                        q.header.clone()
+                                    } else {
+                                        asked.to_string()
+                                    }
+                                })
                                 .unwrap_or_else(|| "Question".to_string()),
                         )
                         .into();
@@ -8194,15 +8203,11 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
 /// text-[12px]`, a 20px `bg-white/[0.09]` icon tile with a 12px
-/// ChatRoundLine, the medium "Question" label, then the truncating value —
-/// the first question's header once resolved, "Awaiting your answer…" while
-/// pending. Neutral tones throughout; resolution never recolors the chip.
+/// ChatRoundLine, the medium "Question" label, then the truncating question,
+/// with "Waiting for you" after it while unanswered. Neutral tones
+/// throughout; resolution never recolors the chip.
 fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement {
-    let value: SharedString = if resolved {
-        header
-    } else {
-        "Awaiting your answer…".into()
-    };
+    let value = header;
     div()
         .py(px(4.0))
         .w_full()
@@ -8249,7 +8254,15 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
                         .truncate()
                         .text_color(theme.text.opacity(0.9))
                         .child(value),
-                ),
+                )
+                .when(!resolved, |chip| {
+                    chip.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("Waiting for you")),
+                    )
+                }),
         )
         .into_any_element()
 }
