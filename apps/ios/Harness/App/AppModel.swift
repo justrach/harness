@@ -639,6 +639,18 @@ final class AppModel {
         return workspace?.archivedChats(in: spaceId) ?? []
     }
 
+    /// The archived shelf narrowed by Home's search text.
+    func archivedMatches(in spaceId: String?, query: String) -> [Chat] {
+        let archived = archivedChats(in: spaceId)
+        guard !query.isEmpty else { return archived }
+        return HomeFilter.apply(archived, query: query, status: .all,
+                                indicator: { _ in .idle }, names: homeFilterNames)
+    }
+
+    func homeFilterNames(_ chat: Chat) -> HomeFilter.Names {
+        HomeFilter.Names(project: space(for: chat)?.displayName, device: deviceName(chat.deviceId))
+    }
+
     func archive(chatId: String) { setArchived(chatId: chatId, archived: true) }
     func unarchive(chatId: String) { setArchived(chatId: chatId, archived: false) }
 

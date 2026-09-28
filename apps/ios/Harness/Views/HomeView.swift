@@ -25,6 +25,9 @@ struct HomeView: View {
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
+    // Not persisted: a filter left on across launches reads as lost sessions.
+    @State private var searchText = ""
+    @State private var statusFilter: HomeStatusFilter = .all
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
 
@@ -92,9 +95,13 @@ struct HomeView: View {
         List {
             sessionsSection
             // The desktop's archived shelf sits under the active list,
-            // scoped by the same space filter.
-            ArchivedSection(spaceId: selectedSpace?.id, path: sidebarPath)
+            // scoped by the same space filter and search. Archived sessions
+            // are never running or waiting, so a status filter hides it.
+            if statusFilter == .all {
+                ArchivedSection(spaceId: selectedSpace?.id, query: searchText, path: sidebarPath)
+            }
         }
+        .searchable(text: $searchText, prompt: "Search sessions")
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
         .contentMargins(.top, 2, for: .scrollContent)
@@ -330,15 +337,32 @@ struct HomeView: View {
     // MARK: Sessions
 
     @ViewBuilder private var sessionsSection: some View {
-        let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
+        let scoped = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
+        let chats = HomeFilter.apply(scoped, query: searchText, status: statusFilter,
+                                     indicator: model.indicator(for:), names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
-        if chats.isEmpty {
+        if !scoped.isEmpty {
             Section {
-                Text("No sessions yet — start one with +")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.textFaint)
+                HomeStatusChips(selection: $statusFilter, counts: statusCounts(scoped))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
+            }
+            .listSectionSeparator(.hidden)
+        }
+        if chats.isEmpty {
+            // A search can still hit the archived shelf below.
+            let archivedHit = statusFilter == .all && !searchText.isEmpty
+                && !model.archivedMatches(in: selectedSpace?.id, query: searchText).isEmpty
+            if !archivedHit {
+                Section {
+                    Text(scoped.isEmpty ? "No sessions yet — start one with +" : "No matching sessions")
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textFaint)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .accessibilityIdentifier("home-empty")
+                }
             }
         } else {
             ForEach(HomeGrouping.groups(chats, by: grouping)) { group in
@@ -361,6 +385,17 @@ struct HomeView: View {
             }
             .motionAnimation(Motion.resort, value: chats.map(\.id))
         }
+    }
+
+    private func statusCounts(_ chats: [Chat]) -> [HomeStatusFilter: Int] {
+        var counts: [HomeStatusFilter: Int] = [:]
+        for chat in chats {
+            let indicator = model.indicator(for: chat)
+            for filter in HomeStatusFilter.allCases where filter.matches(indicator) {
+                counts[filter, default: 0] += 1
+            }
+        }
+        return counts
     }
 
     /// Collapsed section ids, persisted (comma-separated).
