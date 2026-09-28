@@ -3020,6 +3020,124 @@ impl DocHost {
         });
     }
 
+    /// Agent rooms (edge `room-actor.ts`): one authed HTTP call to the edge's
+    /// `/rooms…` or `/room/{id}/…` routes, answered as `{status, body}` so the
+    /// caller sees the room's own errors (`not_a_member`, `room_destroyed`).
+    /// Only room paths pass: this is not a general edge proxy.
+    pub async fn room_request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let room_path = path == "rooms"
+            || path == "rooms/inbox"
+            || path == "rooms/invites"
+            || path == "rooms/wakes"
+            || path == "rooms/wakes/ack"
+            || path
+                .strip_prefix("room/")
+                .is_some_and(|rest| rest.split('/').count() == 2 && !rest.contains(".."));
+        if !room_path {
+            return Err(format!("not a room path: {path}"));
+        }
+        let edge = self
+            .inner
+            .config
+            .edge
+            .clone()
+            .ok_or("rooms need a signed-in engine (no edge configured)")?;
+        let bearer = edge.bearer().await.map_err(|e| e.to_string())?;
+        let url = format!("{}/{path}", edge.url.trim_end_matches('/'));
+        let request = match method {
+            "GET" => self.inner.http.get(&url),
+            "POST" => self.inner.http.post(&url).json(&body.unwrap_or_else(|| serde_json::json!({}))),
+            other => return Err(format!("unsupported method {other}")),
+        };
+        let res = request
+            .query(query)
+            .bearer_auth(&bearer)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| describe_http_error(e).to_string())?;
+        let status = res.status().as_u16();
+        let body = res
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        Ok(serde_json::json!({ "status": status, "body": body }))
+    }
+
+    /// Collect the room wakes other people's agents left for this user's
+    /// chats on this device (edge `GET /rooms/wakes`), queue each into its
+    /// chat as advisory peer mail from another person, and ack them. Run on
+    /// the `rooms-wakes` device nudge; the nudge is durable, so a device that
+    /// was offline drains when it reconnects. Returns how many were queued.
+    pub async fn drain_room_wakes(&self) -> Result<usize, String> {
+        let reply = self
+            .room_request("GET", "rooms/wakes", &[("limit".into(), "100".into())], None)
+            .await?;
+        if reply["status"].as_u64() != Some(200) {
+            return Err(format!("rooms/wakes answered {}", reply["status"]));
+        }
+        let wakes = reply["body"]["wakes"].as_array().cloned().unwrap_or_default();
+        let workspace = self.workspace();
+        let mut acked = Vec::new();
+        let mut dropped = Vec::new();
+        let mut queued = 0;
+        for wake in wakes {
+            // Each device drains only its own chats' wakes, so two devices
+            // of the same person never queue one twice.
+            if wake["toDevice"].as_str() != Some(self.device_id()) {
+                continue;
+            }
+            let Some(id) = wake["id"].as_u64() else { continue };
+            let chat_id = wake["toRef"].as_str().unwrap_or_default();
+            let known = !chat_id.is_empty()
+                && workspace.is_some_and(|w| matches!(w.chat(chat_id), Ok(Some(_))));
+            if known {
+                let origin = harness_proto::room_delivery::RoomOrigin {
+                    room_id: wake["roomId"].as_str().unwrap_or_default().to_owned(),
+                    room_name: wake["roomName"].as_str().unwrap_or_default().to_owned(),
+                    seq: wake["seq"].as_u64().unwrap_or_default(),
+                    from_member: wake["fromMember"].as_str().unwrap_or_default().to_owned(),
+                    member_kind: "harness_chat".into(),
+                    from_user: false,
+                    framed: true,
+                    external: true,
+                    from_display: wake["fromDisplay"].as_str().map(str::to_owned),
+                    from_github: wake["fromGithub"].as_str().map(str::to_owned),
+                    from_fingerprint: wake["fromFingerprint"].as_str().map(str::to_owned),
+                };
+                let text = harness_proto::room_delivery::format(
+                    &origin,
+                    wake["body"].as_str().unwrap_or_default(),
+                );
+                if let Err(err) = self.queue_message_with_behavior(chat_id, &text, Vec::new(), true) {
+                    // Left unacked: the next nudge retries it.
+                    tracing::warn!(chat = %chat_id, %err, "room wake: queue failed");
+                    continue;
+                }
+                queued += 1;
+                acked.push(id);
+            } else {
+                // A chat this device no longer has: nothing to wake, so the
+                // row is settled as dropped rather than retried forever.
+                tracing::info!(chat = %chat_id, "room wake for an unknown chat dropped");
+                dropped.push(id);
+            }
+        }
+        for (ids, dropped) in [(acked, false), (dropped, true)] {
+            if !ids.is_empty() {
+                let body = serde_json::json!({ "ids": ids, "dropped": dropped });
+                self.room_request("POST", "rooms/wakes/ack", &[], Some(body)).await?;
+            }
+        }
+        Ok(queued)
+    }
+
     /// The in-flight queued-attachment transfer set: current entries first,
     /// then a fresh snapshot per landed chunk (see `push_attachments`).
     pub fn watch_transfers(&self) -> watch::Receiver<Vec<harness_proto::TransferProgress>> {

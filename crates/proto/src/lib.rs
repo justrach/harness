@@ -10,6 +10,7 @@ pub mod graff_worktree;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
+pub mod room_delivery;
 pub mod sidebar_pins;
 pub mod view;
 pub mod workspace;

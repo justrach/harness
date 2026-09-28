@@ -124,6 +124,8 @@ fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
 /// message-attachments.ts `parseUserMessageImages`: split the visible prompt
 /// from its attachment-ref trailer.
 pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
+    // An agent-room delivery's machine tag is for the agent, not the reader.
+    let content = harness_proto::room_delivery::strip(content);
     let Some((body_end, refs_start)) = find_refs_marker(content) else {
         return ParsedUserMessage {
             text: content.to_string(),

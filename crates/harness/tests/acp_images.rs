@@ -28,6 +28,7 @@ async fn sent_prompt(images: bool) -> serde_json::Value {
     let harness = AcpHarness::graff().with_executable(fixture);
     let (_steer_tx, steering) = mpsc::channel(1);
     let controls = RunControls {
+        origin: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());
@@ -133,6 +134,7 @@ async fn follow_up_prompt(authorized: bool) -> serde_json::Value {
     let harness = AcpHarness::graff().with_executable(fixture);
     let (steer_tx, steering) = mpsc::channel(1);
     let controls = RunControls {
+        origin: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());

@@ -526,6 +526,9 @@ impl SessionsEngine {
         };
         let interrupt_token = CancellationToken::new();
         let controls = RunControls {
+            origin: Some(harness_adapters::RunOrigin {
+                chat_id: chat_id.to_string(),
+            }),
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),

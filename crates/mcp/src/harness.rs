@@ -316,6 +316,36 @@ impl Harness {
             .to_owned())
     }
 
+    /// One call to the edge's agent-room routes through the engine's sign-in.
+    /// A room's own refusal (`not_a_member`, `room_destroyed`, …) comes back
+    /// as an error the model can read.
+    pub async fn room_request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> anyhow::Result<Value> {
+        let query: Vec<(&str, &str)> = query.to_vec();
+        let reply = self
+            .call(
+                methods::ROOM_REQUEST,
+                json!({ "method": method, "path": path, "query": query, "body": body }),
+            )
+            .await?;
+        let status = reply.get("status").and_then(Value::as_u64).unwrap_or(0);
+        let body = reply.get("body").cloned().unwrap_or(Value::Null);
+        if !(200..300).contains(&status) {
+            let code = body.get("error").and_then(Value::as_str).unwrap_or("error");
+            let message = body.get("message").and_then(Value::as_str).unwrap_or(code);
+            if message == code {
+                bail!("room request failed ({status}): {code}");
+            }
+            bail!("room request failed ({status}): {code}: {message}");
+        }
+        Ok(body)
+    }
+
     /// Queue-row send for a busy chat whose harness cannot steer mid-turn:
     /// the host promotes it when the live turn ends.
     pub async fn queue_message(&self, chat_id: &str, text: &str) -> anyhow::Result<String> {

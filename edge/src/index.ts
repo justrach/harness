@@ -35,6 +35,14 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
+ *   GET  /rooms?member=&device=       — agent rooms the caller can see (room-actor.ts)
+ *   GET  /rooms/inbox?member=&device= — unread posts addressed to a member
+ *   GET  /rooms/invites               — rooms the caller is invited to
+ *   GET  /rooms/wakes                 — other people's wakes of the caller's chats
+ *   POST /rooms/wakes/ack             — delivered wakes
+ *   POST /rooms                       — create a room (`room1/{roomId}`)
+ *   GET  /room/:roomId/{state,messages,ws}
+ *   POST /room/:roomId/{join,leave,post,archive,destroy,invite,accept,decline,remove,wakes,release}
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
@@ -46,9 +54,13 @@ import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import { VaultRoom } from "./vault-room";
+import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
+import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
+import { sweepExpiredRooms } from "./room-store-pg";
+import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor };
 
 const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 
@@ -97,6 +109,106 @@ const forward = (
   headers.set(AUTH_USER_HEADER, userId);
   if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
+};
+
+/** Largest request body a room route takes (the actor caps JSON at 64 KiB). */
+const MAX_ROOM_BODY_BYTES = 64 * 1024;
+
+/** Forward into a room's actor with the verified user and org stamped on.
+ * The body is read here first, not streamed through: an actor that refuses
+ * before reading it (a destroyed or missing room) would otherwise leave the
+ * piped stream dangling, and the Worker throws "Can't read from request
+ * stream after response has been sent" — under load that took the runtime
+ * down. Room bodies are small, so buffering costs nothing. */
+const forwardRoom = async (
+  env: Env,
+  roomId: string,
+  request: Request,
+  userId: string,
+  orgId: string,
+  path: string,
+  search: URLSearchParams
+): Promise<Response> => {
+  let body: ArrayBuffer | undefined;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+  }
+  const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${roomId}`));
+  const url = new URL(request.url);
+  url.pathname = path;
+  search.set("room", roomId);
+  url.search = search.toString();
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  headers.set(AUTH_USER_HEADER, userId);
+  headers.set(AUTH_ORG_HEADER, orgId);
+  return stub.fetch(new Request(url.toString(), { method: request.method, body, headers }));
+};
+
+const ROOM_GET = new Set(["state", "messages", "ws"]);
+const ROOM_POST = new Set([
+  "join", "leave", "post", "archive", "destroy", "invite", "accept", "decline", "remove", "wakes", "release"
+]);
+
+/** Agent rooms (room-actor.ts). Access is by grant to the verified user; the
+ * listing, inbox, invites and wake queue read PostgreSQL directly, everything
+ * else goes through the room's actor. */
+const roomRoute = async (
+  request: Request,
+  env: Env,
+  url: URL,
+  parts: string[],
+  auth: { userId: string; orgId?: string }
+): Promise<Response | undefined> => {
+  if (parts[0] !== "rooms" && parts[0] !== "room") return undefined;
+  const orgId = auth.orgId ?? personalOrgId(auth.userId);
+  const store = roomStore(env);
+  if (!store) return json({ error: "rooms_unavailable" }, 503);
+  const who = () =>
+    memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
+  const limit = (fallback: number) =>
+    Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? fallback) || fallback, 200));
+  try {
+    if (parts[0] === "rooms" && parts.length === 1 && request.method === "GET") {
+      const listFor = url.searchParams.has("member") ? who() : undefined;
+      return json({ rooms: await store.listRooms(auth.userId, listFor) });
+    }
+    if (parts[0] === "rooms" && parts.length === 2 && request.method === "GET") {
+      if (parts[1] === "inbox") return json({ items: await store.inbox(auth.userId, who(), limit(50)) });
+      if (parts[1] === "invites") return json({ invites: await store.invites(auth.userId) });
+      // Another person's agents woke this user's chats: their engine collects
+      // and queues them, then acks.
+      if (parts[1] === "wakes") return json({ wakes: await store.pendingWakes(auth.userId, limit(100)) });
+    }
+    if (parts[0] === "rooms" && parts[1] === "wakes" && parts[2] === "ack" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { ids?: unknown; dropped?: unknown } | null;
+      const ids = Array.isArray(body?.ids) ? body.ids.filter((id): id is number => Number.isInteger(id)).slice(0, 500) : [];
+      await store.ackWakes(auth.userId, ids, Math.floor(Date.now() / 1000), body?.dropped === true);
+      return json({ ok: true, acked: ids.length });
+    }
+    if (parts[0] === "rooms" && parts.length === 1 && request.method === "POST") {
+      return await forwardRoom(env, newRoomId(), request, auth.userId, orgId, "/create", new URLSearchParams());
+    }
+    if (parts[0] === "room" && parts.length === 3 && ROOM_ID.test(parts[1])) {
+      const allowed = request.method === "GET" ? ROOM_GET : request.method === "POST" ? ROOM_POST : undefined;
+      if (allowed?.has(parts[2])) {
+        if (parts[2] === "ws" && request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+          return json({ error: "expected websocket" }, 426);
+        }
+        const search = new URLSearchParams(url.search);
+        search.delete("token");
+        return await forwardRoom(env, parts[1], request, auth.userId, orgId, `/${parts[2]}`, search);
+      }
+    }
+  } catch (err) {
+    if (err instanceof RoomError) return json({ error: err.code, message: err.message }, err.status);
+    console.error(JSON.stringify({ event: "rooms_error", error: String(err) }));
+    return json({ error: "store_unavailable" }, 503);
+  }
+  return json({ error: "not_found" }, 404);
 };
 
 const requestInit = (request: Request): RequestInit => ({
@@ -169,6 +281,9 @@ export default {
 
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
+
+    const room = await roomRoute(request, env, url, parts, auth);
+    if (room) return room;
 
     // ── login vault (docs/adr/0005): one room per user, named from the
     //    verified bearer only. The DO additionally requires a device
@@ -440,5 +555,20 @@ export default {
     }
 
     return json({ error: "not_found" }, 404);
+  },
+
+  /** Cron: delete expired ephemeral rooms whose actors never woke to do it,
+   * then tell each actor to wipe itself. */
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    if (!env.HYPERDRIVE) return;
+    const ids = await sweepExpiredRooms(env, Math.floor(Date.now() / 1000));
+    await Promise.all(
+      ids.map((id) =>
+        env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${id}`))
+          .fetch(`https://room/wipe?room=${id}`, { method: "POST" })
+          .catch((err) => console.error(JSON.stringify({ event: "room_wipe_failed", room: id, error: String(err) })))
+      )
+    );
+    if (ids.length > 0) console.log(JSON.stringify({ event: "rooms_swept", count: ids.length }));
   }
 } satisfies ExportedHandler<Env>;

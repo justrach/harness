@@ -11,6 +11,14 @@ export interface Env {
   /** Per-user login vaults (`vault1/{userId}`): encrypted agent logins synced
    * between a person's own devices (docs/adr/0005). */
   VAULT_ROOMS: DurableObjectNamespace;
+  /** Agent rooms (`room1/{roomId}`): the live actor per room; PostgreSQL
+   * through HYPERDRIVE is the store of record (room-actor.ts). */
+  ROOM_ACTORS: DurableObjectNamespace;
+  /** Agent rooms' PostgreSQL. Absent in `wrangler dev` unless a local connection string
+   * is supplied; rooms then use an in-memory store (dev auth only). */
+  HYPERDRIVE?: Hyperdrive;
+  /** Agent rooms' hop decay in seconds (default 600); tests shorten it. */
+  ROOM_HOP_DECAY_S?: string;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */

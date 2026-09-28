@@ -63,6 +63,16 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// The chat this run belongs to. Drivers that can hand the agent MCP
+    /// servers give it Harness's own (`harness mcp`: agent rooms, chat tools)
+    /// speaking for this chat. None for title runs and tests.
+    pub origin: Option<RunOrigin>,
+}
+
+/// See [`RunControls::origin`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOrigin {
+    pub chat_id: String,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
