@@ -13,3 +13,6 @@ edge/dist/
 .agents
 .graff/
 vendor/zui/Cargo.lock
+
+# Local search-index cache written by zigrep
+.zigrep_archive
