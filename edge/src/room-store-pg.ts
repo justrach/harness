@@ -9,6 +9,8 @@ import { withPg, type PgEnv } from "./pg";
 import {
   ROOM_LIMITS,
   type AccessRow,
+  type ClaimRow,
+  type LedgerBatch,
   type ExternalWakes,
   type InboxItem,
   type Invite,
@@ -81,6 +83,34 @@ const messageFrom = (r: Row): MessageRow => ({
   clientId: strOrNull(r.client_id),
   claimKey: strOrNull(r.claim_key),
   createdAt: num(r.created_at)
+});
+
+const messageTo = (m: MessageRow) => ({
+  seq: m.seq,
+  sender: m.sender,
+  sender_device: m.senderDevice,
+  sender_user_id: m.senderUserId,
+  from_user: m.fromUser,
+  kind: m.kind,
+  to_member: m.toMember,
+  body: m.body,
+  reply_to: m.replyTo,
+  mentions: m.mentions,
+  hop: m.hop,
+  client_id: m.clientId,
+  claim_key: m.claimKey,
+  created_at: m.createdAt
+});
+
+const memberTo = (m: MemberRow) => ({
+  member: m.member,
+  member_kind: m.memberKind,
+  member_ref: m.memberRef,
+  device_id: m.deviceId,
+  user_id: m.userId,
+  role: m.role,
+  read_seq: m.readSeq,
+  joined_at: m.joinedAt
 });
 
 const MESSAGE_COLUMNS = [
@@ -215,6 +245,124 @@ export class PgRoomStore implements RoomStore {
         access: access.rows.map(accessFrom),
         recent: recent.rows.map(messageFrom).reverse()
       };
+    });
+  }
+
+  /** The room row and its grants only: what a ledger-backed actor needs from
+   * PostgreSQL on wake (members, messages and claims live in the actor). */
+  loadAccess(id: string): Promise<{ room: RoomRow; access: AccessRow[] } | null> {
+    return this.run(async (pg) => {
+      const rooms = await pg.query("SELECT * FROM app.agent_rooms WHERE id = $1", [id]);
+      if (rooms.rows.length === 0) return null;
+      const access = await pg.query("SELECT * FROM app.agent_room_access WHERE room_id = $1 ORDER BY invited_at", [id]);
+      return { room: roomFrom(rooms.rows[0]), access: access.rows.map(accessFrom) };
+    });
+  }
+
+  /** Every claim in a room (a ledger hydrating a room that predates it). */
+  loadClaims(roomId: string): Promise<ClaimRow[]> {
+    return this.run(async (pg) => {
+      const res = await pg.query(
+        "SELECT claim_key, member, user_id, claimed_seq, state, updated_at FROM app.agent_room_claims WHERE room_id = $1",
+        [roomId]
+      );
+      return res.rows.map((r: Row) => ({
+        claimKey: r.claim_key as string,
+        member: r.member as string,
+        userId: r.user_id as string,
+        claimedSeq: num(r.claimed_seq),
+        state: r.state as ClaimRow["state"],
+        updatedAt: num(r.updated_at)
+      }));
+    });
+  }
+
+  /**
+   * Write a slice of an actor's ledger behind, in one transaction on its own
+   * connection (never the request session: a BEGIN there would swallow the
+   * actor's other queries). Idempotent: messages insert-or-skip by seq,
+   * read cursors only move forward, counters take the greater value, so a
+   * retried or overlapping flush changes nothing twice. "gone" means the room
+   * row no longer exists (destroyed or swept): the actor wipes, never recreates.
+   */
+  applyLedger(roomId: string, batch: LedgerBatch): Promise<"ok" | "gone"> {
+    return withPg(this.env, async (pg) => {
+      await pg.query("BEGIN");
+      try {
+        const room = await pg.query("SELECT 1 FROM app.agent_rooms WHERE id = $1 FOR UPDATE", [roomId]);
+        if (room.rows.length === 0) {
+          await pg.query("ROLLBACK");
+          return "gone";
+        }
+        if (batch.messages.length) {
+          await pg.query(
+            `INSERT INTO app.agent_room_messages (room_id, ${MESSAGE_SELECT})
+             SELECT $1, ${MESSAGE_SELECT}
+               FROM jsonb_to_recordset($2::jsonb) AS x(seq bigint, sender text, sender_device text,
+                 sender_user_id text, from_user boolean, kind text, to_member text, body text, reply_to bigint,
+                 mentions text[], hop smallint, client_id text, claim_key text, created_at bigint)
+             ON CONFLICT (room_id, seq) DO NOTHING`,
+            [roomId, JSON.stringify(batch.messages.map(messageTo))]
+          );
+        }
+        await pg.query(
+          `UPDATE app.agent_rooms SET last_seq = GREATEST(last_seq, $2),
+                  last_activity_at = GREATEST(last_activity_at, $3)
+            WHERE id = $1`,
+          [roomId, batch.lastSeq, batch.lastActivityAt]
+        );
+        if (batch.members.length) {
+          await pg.query(
+            `INSERT INTO app.agent_room_members (room_id, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at)
+             SELECT $1, member, member_kind, member_ref, device_id, user_id, role, read_seq, joined_at
+               FROM jsonb_to_recordset($2::jsonb) AS x(member text, member_kind text, member_ref text, device_id text,
+                 user_id text, role text, read_seq bigint, joined_at bigint)
+             ON CONFLICT (room_id, member, device_id) DO UPDATE
+               SET member_kind = excluded.member_kind, member_ref = excluded.member_ref,
+                   read_seq = GREATEST(app.agent_room_members.read_seq, excluded.read_seq)
+             WHERE app.agent_room_members.user_id = excluded.user_id`,
+            [roomId, JSON.stringify(batch.members.map(memberTo))]
+          );
+        }
+        if (batch.removed.length) {
+          await pg.query(
+            `DELETE FROM app.agent_room_members m
+              USING jsonb_to_recordset($2::jsonb) AS x(member text, device_id text)
+              WHERE m.room_id = $1 AND m.member = x.member AND m.device_id = x.device_id`,
+            [roomId, JSON.stringify(batch.removed.map((k) => ({ member: k.member, device_id: k.deviceId })))]
+          );
+        }
+        if (batch.claims.length) {
+          await pg.query(
+            `INSERT INTO app.agent_room_claims (room_id, claim_key, member, user_id, claimed_seq, state, updated_at)
+             SELECT $1, claim_key, member, user_id, claimed_seq, state, updated_at
+               FROM jsonb_to_recordset($2::jsonb) AS x(claim_key text, member text, user_id text,
+                 claimed_seq bigint, state text, updated_at bigint)
+             ON CONFLICT (room_id, claim_key) DO UPDATE
+               SET member = excluded.member, user_id = excluded.user_id, claimed_seq = excluded.claimed_seq,
+                   state = excluded.state, updated_at = excluded.updated_at
+             WHERE app.agent_room_claims.updated_at <= excluded.updated_at`,
+            [
+              roomId,
+              JSON.stringify(
+                batch.claims.map((c) => ({
+                  claim_key: c.claimKey,
+                  member: c.member,
+                  user_id: c.userId,
+                  claimed_seq: c.claimedSeq,
+                  state: c.state,
+                  updated_at: c.updatedAt
+                }))
+              )
+            ]
+          );
+        }
+        await pg.query("COMMIT");
+        return "ok";
+      } catch (err) {
+        await pg.query("ROLLBACK").catch(() => {});
+        throw err;
+      }
     });
   }
 
