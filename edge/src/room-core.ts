@@ -215,6 +215,16 @@ export interface WakeRequest {
   now: number;
 }
 
+/** One post's wake checks for all its cross-person targets at once. */
+export interface WakeBatch {
+  roomId: string;
+  seq: number;
+  fromUserId: string;
+  fromMember: string;
+  targets: MemberRow[];
+  now: number;
+}
+
 /** The store of record. PgRoomStore in production, MemoryRoomStore in tests. */
 export interface RoomStore {
   createRoom(room: RoomRow, owner: MemberRow): Promise<void>;
@@ -247,6 +257,9 @@ export interface RoomStore {
   /** Check another person's wake rules and, when allowed, record the wake
    * for their engine to deliver. */
   wakeCheck(wake: WakeRequest): Promise<WakeVerdict>;
+  /** {@link wakeCheck} for every target in one round trip; verdicts in
+   * target order. */
+  wakeCheckMany(batch: WakeBatch): Promise<WakeVerdict[]>;
   pendingWakes(userId: string, limit: number): Promise<PendingWake[]>;
   /** Settle wakes: delivered, or dropped (the chat is gone from that device). */
   ackWakes(userId: string, ids: number[], now: number, dropped?: boolean): Promise<void>;
@@ -799,24 +812,34 @@ export class RoomCore {
    * other people's go through those people's wake rules. */
   private async targets(message: MessageRow, sender: MemberRow, now: number) {
     const deliver: Delivery[] = [];
-    const external: ExternalWake[] = [];
-    if (message.hop >= HOP_CAP) return { deliver, external };
+    const others: MemberRow[] = [];
+    if (message.hop >= HOP_CAP) return { deliver, external: [] as ExternalWake[] };
     for (const m of this.members) {
       if (sameMember(m, sender) || !addressedTo(message, m.member)) continue;
       if (m.userId === sender.userId) {
         deliver.push({ member: m.member, memberKind: m.memberKind, memberRef: m.memberRef, deviceId: m.deviceId });
-        continue;
+      } else {
+        others.push(m);
       }
-      const verdict = await this.store.wakeCheck({
-        roomId: this.room.id,
-        seq: message.seq,
-        fromUserId: sender.userId,
-        fromMember: sender.member,
-        target: m,
-        now
-      });
-      external.push({ member: m.member, deviceId: m.deviceId, userId: m.userId, verdict });
     }
+    // One round trip for every other person's member: an @all in a full room
+    // would otherwise hold the room for a check per member.
+    const verdicts = others.length
+      ? await this.store.wakeCheckMany({
+          roomId: this.room.id,
+          seq: message.seq,
+          fromUserId: sender.userId,
+          fromMember: sender.member,
+          targets: others,
+          now
+        })
+      : [];
+    const external: ExternalWake[] = others.map((m, i) => ({
+      member: m.member,
+      deviceId: m.deviceId,
+      userId: m.userId,
+      verdict: verdicts[i] ?? "off"
+    }));
     return { deliver, external };
   }
 
@@ -1094,6 +1117,12 @@ export class MemoryRoomStore implements RoomStore {
       droppedAt: null
     });
     return "allowed";
+  }
+
+  async wakeCheckMany(batch: WakeBatch): Promise<WakeVerdict[]> {
+    const out: WakeVerdict[] = [];
+    for (const target of batch.targets) out.push(await this.wakeCheck({ ...batch, target }));
+    return out;
   }
 
   async pendingWakes(userId: string, limit: number): Promise<PendingWake[]> {

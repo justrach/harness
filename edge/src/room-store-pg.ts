@@ -4,7 +4,7 @@
  * Times are unix seconds; bigints come back from `pg` as strings and are
  * narrowed here (seqs, ids and seconds stay far below 2^53).
  */
-import type { Client } from "pg";
+import { Client } from "pg";
 import { withPg, type PgEnv } from "./pg";
 import {
   ROOM_LIMITS,
@@ -20,6 +20,7 @@ import {
   type RoomRow,
   type RoomStore,
   type RoomSummary,
+  type WakeBatch,
   type WakeRequest,
   type WakeVerdict
 } from "./room-core";
@@ -101,11 +102,64 @@ const MESSAGE_COLUMNS = [
 const MESSAGE_SELECT = MESSAGE_COLUMNS.join(", ");
 const qualified = (alias: string): string => MESSAGE_COLUMNS.map((c) => `${alias}.${c}`).join(", ");
 
+/** A PostgreSQL error answer (a SQLSTATE), as opposed to a broken connection. */
+const isSqlError = (err: unknown): boolean =>
+  typeof (err as { code?: unknown })?.code === "string" && /^[0-9A-Z]{5}$/.test((err as { code: string }).code);
+
 export class PgRoomStore implements RoomStore {
+  /** Held across the store calls of one busy stretch (see {@link session}). */
+  private client: Promise<Client> | null = null;
+  private held = 0;
+
   constructor(private readonly env: PgEnv) {}
 
-  private run<T>(fn: (client: Client) => Promise<T>): Promise<T> {
-    return withPg(this.env, fn);
+  /**
+   * Run `fn` with one connection for every store call inside it, instead of
+   * a fresh Hyperdrive connect per call (a post is several calls: append,
+   * wake checks, claims). Overlapping sessions share the connection; it
+   * closes when the last one ends, so an idle actor holds none. pg runs one
+   * query at a time per client, which the actor's own serialization already
+   * implies.
+   */
+  async session<T>(fn: () => Promise<T>): Promise<T> {
+    this.held++;
+    try {
+      return await fn();
+    } finally {
+      if (--this.held === 0) await this.disconnect();
+    }
+  }
+
+  private async disconnect(): Promise<void> {
+    const client = this.client;
+    this.client = null;
+    if (client) await client.then((c) => c.end()).catch(() => {});
+  }
+
+  private connect(): Promise<Client> {
+    if (!this.env.HYPERDRIVE) throw new Error("postgres is not configured (no HYPERDRIVE binding)");
+    const client = new Client({ connectionString: this.env.HYPERDRIVE.connectionString });
+    return client.connect().then(() => client);
+  }
+
+  private async run<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+    if (this.held === 0) return withPg(this.env, fn);
+    this.client ??= this.connect();
+    let client: Client;
+    try {
+      client = await this.client;
+    } catch (err) {
+      this.client = null;
+      throw err;
+    }
+    try {
+      return await fn(client);
+    } catch (err) {
+      // A dropped connection is replaced on the next call; a SQL error
+      // leaves the connection usable.
+      if (!isSqlError(err)) await this.disconnect();
+      throw err;
+    }
   }
 
   createRoom(room: RoomRow, owner: MemberRow): Promise<void> {
@@ -369,6 +423,29 @@ export class PgRoomStore implements RoomStore {
         [w.target.userId, w.fromUserId, w.roomId, w.seq, w.target.member, w.target.memberRef, w.target.deviceId, w.fromMember, w.now]
       );
       return (res.rows[0]?.result as WakeVerdict | undefined) ?? "off";
+    });
+  }
+
+  wakeCheckMany(b: WakeBatch): Promise<WakeVerdict[]> {
+    return this.run(async (pg) => {
+      const targets = b.targets.map((t) => ({
+        to_user_id: t.userId,
+        to_member: t.member,
+        to_ref: t.memberRef,
+        to_device: t.deviceId
+      }));
+      const res = await pg.query(
+        `SELECT to_user_id, to_member, to_device, result
+           FROM app.agent_wake_check_many($1, $2, $3, $4, $5, $6::jsonb)`,
+        [b.fromUserId, b.roomId, b.seq, b.fromMember, b.now, JSON.stringify(targets)]
+      );
+      // Rows come back in to_user_id order (deadlock-free locking); map them
+      // back to the caller's target order.
+      const key = (u: unknown, m: unknown, d: unknown) => `${u}\u0000${m}\u0000${d}`;
+      const byTarget = new Map<string, WakeVerdict>(
+        res.rows.map((r: Row) => [key(r.to_user_id, r.to_member, r.to_device ?? ""), r.result as WakeVerdict])
+      );
+      return b.targets.map((t) => byTarget.get(key(t.userId, t.member, t.deviceId)) ?? "off");
     });
   }
 

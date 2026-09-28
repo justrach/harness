@@ -67,6 +67,11 @@ export function roomStore(env: Env): RoomStore | undefined {
   return env.AUTH_MODE === "dev" ? devStore : undefined;
 }
 
+/** Run `fn` inside a store session when the store has them (one database
+ * connection for the whole request). */
+const inSession = <T>(store: RoomStore | undefined, fn: () => Promise<T>): Promise<T> =>
+  store instanceof PgRoomStore ? store.session(fn) : fn();
+
 /** The hibernation tag that finds one member's sockets. */
 const socketTag = (key: MemberKey): string => JSON.stringify([key.member, key.deviceId]);
 
@@ -78,6 +83,8 @@ interface SocketTag {
 
 export class RoomActor implements DurableObject {
   private core: RoomCore | null = null;
+  /** The actor's one store: requests share its database connection. */
+  private storeInstance: RoomStore | undefined;
   /** One load at a time: concurrent cold requests share it rather than each
    * building a RoomCore and the later one replacing the earlier mid-post. */
   private loading: Promise<RoomCore> | null = null;
@@ -94,9 +101,9 @@ export class RoomActor implements DurableObject {
   }
 
   private store(): RoomStore {
-    const store = roomStore(this.env);
-    if (!store) throw new RoomError(503, "rooms_unavailable", "no room store configured");
-    return store;
+    this.storeInstance ??= roomStore(this.env);
+    if (!this.storeInstance) throw new RoomError(503, "rooms_unavailable", "no room store configured");
+    return this.storeInstance;
   }
 
   private async destroyed(): Promise<boolean> {
@@ -176,6 +183,11 @@ export class RoomActor implements DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.storeInstance ??= roomStore(this.env);
+    return inSession(this.storeInstance, () => this.handle(request));
+  }
+
+  private async handle(request: Request): Promise<Response> {
     try {
       return await this.route(request);
     } catch (err) {
@@ -356,8 +368,13 @@ export class RoomActor implements DurableObject {
 
   /** Idle expiry for ephemeral rooms, on freshly loaded state. */
   async alarm(): Promise<void> {
+    this.storeInstance ??= roomStore(this.env);
+    return inSession(this.storeInstance, () => this.expire());
+  }
+
+  private async expire(): Promise<void> {
     if (await this.destroyed()) return;
-    const store = roomStore(this.env);
+    const store = this.storeInstance;
     const roomId = this.core?.room.id ?? (await this.ctx.storage.get<string>("room"));
     if (!store || !roomId) return;
     let core: RoomCore;
