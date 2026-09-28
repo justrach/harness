@@ -380,6 +380,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// A press released on an unfocused pane: a plain click focuses it, but
+    /// a drag that selected text there keeps its selection (and the pane
+    /// stays unfocused) so the text can be copied.
+    pub(super) fn release_on_peer_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::markdown::selection::selected_text().is_some() {
+            return;
+        }
+        self.focus_chat_pane(ix, window, cx);
+    }
+
     pub(super) fn cycle_chat_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.chat_split.as_ref().map(|split| split.cycled(forward)) {
             self.focus_chat_pane(ix, window, cx);
@@ -786,9 +796,13 @@ impl Shell {
             )
             // Ghostty dims unfocused splits.
             .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
-            .on_mouse_down(
+            // Focus on release, not press: focusing swaps which transcript
+            // draws this chat, so doing it on press threw away a text drag
+            // the moment it started (text in an unfocused pane couldn't be
+            // selected at all).
+            .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.focus_chat_pane(ix, window, cx)),
+                cx.listener(move |this, _, window, cx| this.release_on_peer_pane(ix, window, cx)),
             )
             .into_any_element()
     }

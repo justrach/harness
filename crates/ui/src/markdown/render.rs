@@ -1310,6 +1310,17 @@ thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Every text element registered this frame: `(key, text, bounds)`.
+#[cfg(test)]
+pub(crate) fn selection_test_entries() -> Vec<(String, String, gpui::Bounds<gpui::Pixels>)> {
+    REGISTRY.with(|r| {
+        r.borrow()
+            .iter()
+            .map(|e| (e.key.to_string(), e.text.to_string(), e.layout.bounds()))
+            .collect()
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
     REGISTRY.with(|r| {
