@@ -76,6 +76,20 @@ pub fn format(origin: &RoomOrigin, body: &str) -> String {
     text
 }
 
+/// `text` without a leading tag line, for showing a delivery to a person:
+/// the framed header already says where it came from.
+pub fn strip(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix(OPEN) else {
+        return text;
+    };
+    match rest.split_once(CLOSE) {
+        Some((tag, after)) if serde_json::from_str::<RoomOrigin>(tag).is_ok() => {
+            after.strip_prefix('\n').unwrap_or(after)
+        }
+        _ => text,
+    }
+}
+
 /// Split a leading tag off `text`. Only an agent delivery can be lifted: a
 /// tag claiming `from_user` is downgraded, so typed or forwarded text can
 /// never raise its own trust.
@@ -165,6 +179,15 @@ mod tests {
         assert_eq!(meta["from_github"], "sam");
         assert_eq!(meta["from_fingerprint"], "cg-0123456789");
         assert_eq!(lift(&format(&origin(), "hi")).1.unwrap()["from_account"], "same");
+    }
+
+    #[test]
+    fn strip_hides_only_a_real_tag() {
+        let text = format(&origin(), "hi");
+        assert!(strip(&text).starts_with("[room message from claude@laptop"));
+        assert_eq!(strip("hello"), "hello");
+        let broken = "<!--harness-room {not json} -->\nhi";
+        assert_eq!(strip(broken), broken);
     }
 
     #[test]
