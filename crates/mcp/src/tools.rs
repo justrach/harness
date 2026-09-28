@@ -1115,7 +1115,9 @@ mod tests {
                                     { "member": "claude@laptop", "memberKind": "graff",
                                       "memberRef": null, "deviceId": "laptop" }
                                 ],
-                                "unreadFrom": { "alpha": 1 }
+                                "unreadFrom": { "alpha": 1 },
+                                "redacted": { "email": 1 },
+                                "stripped": 0
                             })
                         }
                         _ => return Ok(RpcReply::Value(json!({ "status": 404, "body": { "error": "not_found" } }))),
@@ -1140,6 +1142,8 @@ mod tests {
             .unwrap();
         assert_eq!(posted["seq"], 3);
         assert_eq!(posted["unreadFrom"]["alpha"], 1);
+        // The poster sees what the room rewrote before storing.
+        assert_eq!(posted["redacted"]["email"], 1);
         // Only the Harness chat is queued; the graff peer pulls.
         assert_eq!(posted["woken"].as_array().unwrap().len(), 1);
 
