@@ -3085,6 +3085,7 @@ impl DocHost {
         let wakes = reply["body"]["wakes"].as_array().cloned().unwrap_or_default();
         let workspace = self.workspace();
         let mut acked = Vec::new();
+        let mut dropped = Vec::new();
         let mut queued = 0;
         for wake in wakes {
             // Each device drains only its own chats' wakes, so two devices
@@ -3107,6 +3108,8 @@ impl DocHost {
                     framed: true,
                     external: true,
                     from_display: wake["fromDisplay"].as_str().map(str::to_owned),
+                    from_github: wake["fromGithub"].as_str().map(str::to_owned),
+                    from_fingerprint: wake["fromFingerprint"].as_str().map(str::to_owned),
                 };
                 let text = harness_proto::room_delivery::format(
                     &origin,
@@ -3118,16 +3121,19 @@ impl DocHost {
                     continue;
                 }
                 queued += 1;
+                acked.push(id);
             } else {
                 // A chat this device no longer has: nothing to wake, so the
-                // row is settled rather than retried forever.
+                // row is settled as dropped rather than retried forever.
                 tracing::info!(chat = %chat_id, "room wake for an unknown chat dropped");
+                dropped.push(id);
             }
-            acked.push(id);
         }
-        if !acked.is_empty() {
-            self.room_request("POST", "rooms/wakes/ack", &[], Some(serde_json::json!({ "ids": acked })))
-                .await?;
+        for (ids, dropped) in [(acked, false), (dropped, true)] {
+            if !ids.is_empty() {
+                let body = serde_json::json!({ "ids": ids, "dropped": dropped });
+                self.room_request("POST", "rooms/wakes/ack", &[], Some(body)).await?;
+            }
         }
         Ok(queued)
     }

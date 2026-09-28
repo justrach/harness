@@ -87,6 +87,12 @@ export class RoomActor implements DurableObject {
     private readonly env: Env
   ) {}
 
+  /** `ROOM_HOP_DECAY_S` (seconds) overrides the default decay: tests shorten it. */
+  private options() {
+    const decay = Number(this.env.ROOM_HOP_DECAY_S);
+    return Number.isFinite(decay) && decay > 0 ? { hopDecayS: decay } : {};
+  }
+
   private store(): RoomStore {
     const store = roomStore(this.env);
     if (!store) throw new RoomError(503, "rooms_unavailable", "no room store configured");
@@ -128,7 +134,7 @@ export class RoomActor implements DurableObject {
 
   private async load(roomId: string): Promise<RoomCore> {
     if (await this.destroyed()) throw new RoomError(410, "room_destroyed");
-    const core = await RoomCore.load(this.store(), roomId);
+    const core = await RoomCore.load(this.store(), roomId, undefined, this.options());
     if (!core) {
       if ((await this.ctx.storage.get<string>("room")) !== undefined) {
         await this.wipe();
@@ -220,7 +226,7 @@ export class RoomActor implements DurableObject {
         throw new RoomError(409, "room_exists");
       }
       const body = await this.body(request);
-      this.core = await RoomCore.create(this.store(), roomId, orgId, caller, body);
+      this.core = await RoomCore.create(this.store(), roomId, orgId, caller, body, undefined, this.options());
       await this.ctx.storage.put("room", roomId);
       await this.schedule();
       return json(this.core.snapshot(caller), 201);

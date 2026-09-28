@@ -40,6 +40,15 @@ export const ROOM_LIMITS = {
 /** A post this many agent hops from a person's post wakes nobody. */
 export const HOP_CAP = 6;
 
+/** A wake chain whose last link is older than this starts over at hop 1, so
+ * a pair of agents that once hit the cap aren't muted in that room forever.
+ * An explicit reply keeps its parent's hop whatever its age. */
+export const HOP_DECAY_S = 600;
+
+export interface RoomOptions {
+  hopDecayS?: number;
+}
+
 export type RoomKind = "ephemeral" | "persistent";
 export type MemberKind = "harness_chat" | "graff" | "external";
 export type MessageKind = "message" | "claim" | "done" | "task";
@@ -173,8 +182,12 @@ export interface PendingWake {
   seq: number;
   fromMember: string;
   fromUserId: string;
-  /** The sender's account email, so the woken agent knows whose agent spoke. */
+  /** Who sent it, verified by the account, never an email or a self-chosen
+   * name: `@login` when their GitHub is linked through codegraff, else their
+   * account fingerprint (`cg-…`). */
   fromDisplay: string | null;
+  fromGithub: string | null;
+  fromFingerprint: string | null;
   toMember: string;
   toRef: string | null;
   toDevice: string;
@@ -190,7 +203,8 @@ export type WakeVerdict =
   | "blocked"
   | "not_listed"
   | "room_blocked"
-  | "capped";
+  | "capped"
+  | "unverified";
 
 export interface WakeRequest {
   roomId: string;
@@ -234,7 +248,8 @@ export interface RoomStore {
    * for their engine to deliver. */
   wakeCheck(wake: WakeRequest): Promise<WakeVerdict>;
   pendingWakes(userId: string, limit: number): Promise<PendingWake[]>;
-  ackWakes(userId: string, ids: number[], now: number): Promise<void>;
+  /** Settle wakes: delivered, or dropped (the chat is gone from that device). */
+  ackWakes(userId: string, ids: number[], now: number, dropped?: boolean): Promise<void>;
   /** Rooms the user has an accepted grant for; with `who`, only those where
    * that member is in, with its unread count. */
   listRooms(userId: string, who?: MemberKey): Promise<RoomSummary[]>;
@@ -451,7 +466,8 @@ export class RoomCore {
     private members: MemberRow[],
     private access: AccessRow[],
     private recent: MessageRow[],
-    private readonly clock: () => number = nowS
+    private readonly clock: () => number = nowS,
+    private readonly options: RoomOptions = {}
   ) {}
 
   static async create(
@@ -460,7 +476,8 @@ export class RoomCore {
     orgId: string,
     caller: Caller,
     body: Json,
-    clock: () => number = nowS
+    clock: () => number = nowS,
+    options: RoomOptions = {}
   ): Promise<RoomCore> {
     const args = parseCreate(body);
     const now = clock();
@@ -493,12 +510,17 @@ export class RoomCore {
       acceptedAt: now,
       externalWakes: "follow"
     };
-    return new RoomCore(store, room, [owner], [grant], [], clock);
+    return new RoomCore(store, room, [owner], [grant], [], clock, options);
   }
 
-  static async load(store: RoomStore, id: string, clock: () => number = nowS): Promise<RoomCore | null> {
+  static async load(
+    store: RoomStore,
+    id: string,
+    clock: () => number = nowS,
+    options: RoomOptions = {}
+  ): Promise<RoomCore | null> {
     const loaded = await store.loadRoom(id);
-    return loaded && new RoomCore(store, loaded.room, loaded.members, loaded.access, loaded.recent, clock);
+    return loaded && new RoomCore(store, loaded.room, loaded.members, loaded.access, loaded.recent, clock, options);
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -569,9 +591,13 @@ export class RoomCore {
         const chatProject = parseProjectRef(body.projectRef, "projectRef");
         if (chatProject !== this.room.projectRef) throw new RoomError(403, "wrong_project");
       }
+      // A member name belongs to one person per room, on every device: DMs
+      // and mentions address names, so a second owner would read the first's.
+      if (this.members.some((m) => m.member === incoming.member && m.userId !== caller.userId)) {
+        throw new RoomError(409, "member_name_taken");
+      }
       const existing = this.find(incoming);
       if (existing) {
-        if (existing.userId !== caller.userId) throw new RoomError(409, "member_name_taken");
         // Rejoining refreshes how the member is reached, never its role or cursor.
         const updated = { ...existing, memberKind: incoming.memberKind, memberRef: incoming.memberRef };
         await this.store.upsertMember(this.room.id, updated);
@@ -677,8 +703,10 @@ export class RoomCore {
    * that addressed the sender (what woke it). Unrelated traffic never
    * raises it, and a post nobody prompted starts at 1. A reply to a post
    * that fell out of the ring counts as capped: waking on unknown ancestry
-   * could restart a loop. Clamped at the cap. */
-  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null): number {
+   * could restart a loop. A chain found by that fallback (not an explicit
+   * reply) whose last link is older than the decay starts over at 1.
+   * Clamped at the cap. */
+  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null, now: number): number {
     if (fromUser) return 0;
     let parent: MessageRow | undefined;
     if (replyTo !== null) {
@@ -691,6 +719,8 @@ export class RoomCore {
       }
     }
     if (!parent) return 1;
+    const decay = this.options.hopDecayS ?? HOP_DECAY_S;
+    if (replyTo === null && now - parent.createdAt > decay) return 1;
     return Math.min(HOP_CAP, parent.fromUser ? 1 : parent.hop + 1);
   }
 
@@ -744,7 +774,7 @@ export class RoomCore {
         body: args.body,
         replyTo: args.replyTo,
         mentions,
-        hop: this.hopFor(fromUser, sender, args.replyTo),
+        hop: this.hopFor(fromUser, sender, args.replyTo, now),
         clientId: args.clientId,
         claimKey: args.claimKey,
         createdAt: now
@@ -887,7 +917,12 @@ export class MemoryRoomStore implements RoomStore {
   readonly rooms = new Map<string, MemoryRoom>();
   readonly users = new Map<string, string>();
   readonly rules = new Map<string, MemoryWakeRules>();
-  readonly wakes: (PendingWake & { toUserId: string; at: number; deliveredAt: number | null })[] = [];
+  readonly wakes: (PendingWake & {
+    toUserId: string;
+    at: number;
+    deliveredAt: number | null;
+    droppedAt: number | null;
+  })[] = [];
 
   private visible(r: MemoryRoom, userId: string): boolean {
     return r.access.some((a) => a.userId === userId && a.acceptedAt !== null);
@@ -1046,27 +1081,34 @@ export class MemoryRoomStore implements RoomStore {
       seq: w.seq,
       fromMember: w.fromMember,
       fromUserId: w.fromUserId,
-      fromDisplay: [...this.users].find(([, id]) => id === w.fromUserId)?.[0] ?? null,
+      fromDisplay: `cg-${w.fromUserId}`,
+      fromGithub: null,
+      fromFingerprint: `cg-${w.fromUserId}`,
       toMember: w.target.member,
       toRef: w.target.memberRef,
       toDevice: w.target.deviceId,
       toUserId: to,
       body,
       at: w.now,
-      deliveredAt: null
+      deliveredAt: null,
+      droppedAt: null
     });
     return "allowed";
   }
 
   async pendingWakes(userId: string, limit: number): Promise<PendingWake[]> {
     return this.wakes
-      .filter((w) => w.toUserId === userId && w.deliveredAt === null)
+      .filter((w) => w.toUserId === userId && w.deliveredAt === null && w.droppedAt === null)
       .slice(0, limit)
-      .map(({ toUserId: _to, at: _at, deliveredAt: _d, ...wake }) => wake);
+      .map(({ toUserId: _to, at: _at, deliveredAt: _d, droppedAt: _x, ...wake }) => wake);
   }
 
-  async ackWakes(userId: string, ids: number[], now: number): Promise<void> {
-    for (const w of this.wakes) if (w.toUserId === userId && ids.includes(w.id)) w.deliveredAt = now;
+  async ackWakes(userId: string, ids: number[], now: number, dropped = false): Promise<void> {
+    for (const w of this.wakes) {
+      if (w.toUserId !== userId || !ids.includes(w.id) || w.deliveredAt !== null || w.droppedAt !== null) continue;
+      if (dropped) w.droppedAt = now;
+      else w.deliveredAt = now;
+    }
   }
 
   async listRooms(userId: string, who?: MemberKey): Promise<RoomSummary[]> {

@@ -475,6 +475,8 @@ impl Tools {
                 framed: true,
                 external: false,
                 from_display: None,
+                from_github: None,
+                from_fingerprint: None,
             };
             let text = room_delivery::format(&origin, &args.text);
             woken.push(match self.harness.queue_message(chat_id, &text).await {

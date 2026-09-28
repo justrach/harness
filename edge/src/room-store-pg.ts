@@ -376,12 +376,12 @@ export class PgRoomStore implements RoomStore {
     return this.run(async (pg) => {
       const res = await pg.query(
         `SELECT w.id, w.room_id, r.name AS room_name, w.seq, w.from_member, w.from_user_id,
-                u.email AS from_display, w.to_member, w.to_ref, w.to_device, x.body
+                i.github_login, i.fingerprint, w.to_member, w.to_ref, w.to_device, x.body
            FROM app.agent_wake_log w
            JOIN app.agent_rooms r ON r.id = w.room_id
            JOIN app.agent_room_messages x ON x.room_id = w.room_id AND x.seq = w.seq
-           LEFT JOIN app.users u ON u.id::text = w.from_user_id
-          WHERE w.to_user_id = $1 AND w.delivered_at IS NULL
+           LEFT JOIN LATERAL app.agent_identity(ARRAY[w.from_user_id]) i ON true
+          WHERE w.to_user_id = $1 AND w.delivered_at IS NULL AND w.dropped_at IS NULL
           ORDER BY w.id LIMIT $2`,
         [userId, limit]
       );
@@ -392,7 +392,9 @@ export class PgRoomStore implements RoomStore {
         seq: num(r.seq),
         fromMember: r.from_member as string,
         fromUserId: r.from_user_id as string,
-        fromDisplay: strOrNull(r.from_display),
+        fromDisplay: r.github_login ? `@${r.github_login as string}` : strOrNull(r.fingerprint),
+        fromGithub: strOrNull(r.github_login),
+        fromFingerprint: strOrNull(r.fingerprint),
         toMember: r.to_member as string,
         toRef: strOrNull(r.to_ref),
         toDevice: r.to_device as string,
@@ -401,11 +403,11 @@ export class PgRoomStore implements RoomStore {
     });
   }
 
-  ackWakes(userId: string, ids: number[], now: number): Promise<void> {
+  ackWakes(userId: string, ids: number[], now: number, dropped = false): Promise<void> {
     return this.run(async (pg) => {
       await pg.query(
-        `UPDATE app.agent_wake_log SET delivered_at = $2
-          WHERE to_user_id = $1 AND id = ANY($3::bigint[]) AND delivered_at IS NULL`,
+        `UPDATE app.agent_wake_log SET ${dropped ? "dropped_at" : "delivered_at"} = $2
+          WHERE to_user_id = $1 AND id = ANY($3::bigint[]) AND delivered_at IS NULL AND dropped_at IS NULL`,
         [userId, now, ids]
       );
     });

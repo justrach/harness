@@ -104,6 +104,23 @@ describe("agent rooms", () => {
     expect(reset.deliver.length).toBe(2);
   });
 
+  it("lets a capped pair talk again once the chain goes quiet", async () => {
+    let now = 1_000;
+    const store = new MemoryRoomStore();
+    const core = await RoomCore.create(store, newRoomId(), ORG, me, { name: "B", ...alice }, () => now, { hopDecayS: 60 });
+    await core.join(me, bob);
+    for (let i = 0; i < HOP_CAP; i++) {
+      await core.post(me, { ...(i % 2 ? bob : alice), body: `@${i % 2 ? "alice" : "bob"} ping` });
+    }
+    const capped = await core.post(me, { ...bob, body: "@alice still?" });
+    expect(capped.deliver).toEqual([]);
+    // Within the burst the cap holds; after a quiet spell a fresh mention wakes.
+    now += 61;
+    const fresh = await core.post(me, { ...alice, body: "@bob new thread" });
+    expect(fresh.message.hop).toBe(1);
+    expect(fresh.deliver.map((d) => d.member)).toEqual(["bob"]);
+  });
+
   it("never raises the hop on unrelated traffic", async () => {
     const { core } = await room();
     for (let i = 0; i < 20; i++) await core.post(me, { ...(i % 2 ? alice : bob), body: `status ${i}` });
@@ -212,8 +229,14 @@ describe("agent rooms across people", () => {
     expect(await code(core.post(them, { ...alice, body: "I am alice" }))).toBe("not_your_member");
     expect(await code(core.read(them, { member: "alice", deviceId: "mac" }, 0, 10, true))).toBe("not_your_member");
     expect(await code(core.leave(them, alice))).toBe("not_your_member");
-    // Nor take over a member name someone else holds.
+    // Nor take over a member name someone else holds, on any device: DMs to
+    // "alice" must never reach them.
     expect(await code(core.join(them, { ...alice, memberRef: "chat-evil" }))).toBe("member_name_taken");
+    expect(await code(core.join(them, { ...alice, device: "their-laptop", memberRef: "chat-evil" }))).toBe(
+      "member_name_taken"
+    );
+    // The same person on a new device is fine.
+    expect(await code(core.join(me, { ...alice, device: "studio" }))).toBe("ok");
     const post = await core.post(them, { ...dave, body: "hello" });
     expect(post.message.senderUserId).toBe(them.userId);
   });
@@ -225,6 +248,7 @@ describe("agent rooms across people", () => {
     expect(r.external).toEqual([{ member: "dave", deviceId: "pc", userId: them.userId, verdict: "allowed" }]);
     const pending = await store.pendingWakes(them.userId, 10);
     expect(pending.map((w) => [w.toRef, w.fromMember, w.body])).toEqual([["chat-d", "alice", "@dave and @bob please look"]]);
+    expect(pending[0].fromDisplay).toMatch(/^cg-/);
     await store.ackWakes(them.userId, [pending[0].id], 2_000);
     expect(await store.pendingWakes(them.userId, 10)).toEqual([]);
 

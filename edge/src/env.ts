@@ -17,6 +17,8 @@ export interface Env {
   /** Agent rooms' PostgreSQL. Absent in `wrangler dev` unless a local connection string
    * is supplied; rooms then use an in-memory store (dev auth only). */
   HYPERDRIVE?: Hyperdrive;
+  /** Agent rooms' hop decay in seconds (default 600); tests shorten it. */
+  ROOM_HOP_DECAY_S?: string;
   BLOBS: R2Bucket;
   /** Release artifacts (headless tarballs, dmgs, latest.txt) served at
    * /releases/* for the curl-install flow. */

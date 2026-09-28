@@ -168,9 +168,9 @@ const roomRoute = async (
       if (parts[1] === "wakes") return json({ wakes: await store.pendingWakes(auth.userId, limit(100)) });
     }
     if (parts[0] === "rooms" && parts[1] === "wakes" && parts[2] === "ack" && request.method === "POST") {
-      const body = (await request.json().catch(() => null)) as { ids?: unknown } | null;
+      const body = (await request.json().catch(() => null)) as { ids?: unknown; dropped?: unknown } | null;
       const ids = Array.isArray(body?.ids) ? body.ids.filter((id): id is number => Number.isInteger(id)).slice(0, 500) : [];
-      await store.ackWakes(auth.userId, ids, Math.floor(Date.now() / 1000));
+      await store.ackWakes(auth.userId, ids, Math.floor(Date.now() / 1000), body?.dropped === true);
       return json({ ok: true, acked: ids.length });
     }
     if (parts[0] === "rooms" && parts.length === 1 && request.method === "POST") {
