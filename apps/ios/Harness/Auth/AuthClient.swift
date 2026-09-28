@@ -66,6 +66,19 @@ struct AuthClient {
         return try JSONDecoder().decode(Response.self, from: data).orgs
     }
 
+    /// Both halves of the sign-in go along: the edge refuses a delete unless
+    /// the access token and refresh credential belong to the same person.
+    func deleteAccount(accessToken: String, refreshToken: String) async throws -> AccountDeletion {
+        var request = URLRequest(url: baseURL.appending(path: "auth/account/delete"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["refreshToken": refreshToken, "confirm": "delete"])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        return AccountDeletion(status: http.statusCode, data: data)
+    }
+
     private func post<T: Decodable>(_ path: String, body: [String: String]) async throws -> T {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"

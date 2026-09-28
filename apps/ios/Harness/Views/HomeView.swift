@@ -21,6 +21,7 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    @State private var confirmDeleteAccount = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
@@ -172,9 +173,33 @@ struct HomeView: View {
                     }
                     .pickerStyle(.menu)
                     Button("Sign out", role: .destructive) { model.signOut() }
+                    if model.canDeleteAccount {
+                        Button("Delete account…", role: .destructive) { confirmDeleteAccount = true }
+                    }
                 } label: {
                     Image(systemName: "person.circle")
                 }
+            }
+        }
+        .alert("Delete your account?", isPresented: $confirmDeleteAccount) {
+            Button("Delete", role: .destructive) { Task { await model.deleteAccount() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes your CodeGraff account and everything Harness keeps for it: chats, sessions, devices, and the agent rooms you made. Your posts in other people's rooms lose their text. This can't be undone.")
+        }
+        .alert("Account not deleted", isPresented: Binding(
+            get: { model.accountDeletionError != nil },
+            set: { if !$0 { model.accountDeletionError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.accountDeletionError ?? "")
+        }
+        .overlay {
+            if model.accountDeletionBusy {
+                ProgressView("Deleting account…")
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
         }
         .sheet(isPresented: $showNewSpace) {

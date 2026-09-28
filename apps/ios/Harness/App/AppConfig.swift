@@ -83,6 +83,13 @@ final class AppConfig: @unchecked Sendable {
         }
     }
 
+    /// The CodeGraff pair with an access token good for at least a minute, so
+    /// no room refresh spends the refresh token while a caller holds it.
+    func currentTokens() async -> AuthTokens? {
+        guard mode == .codegraff, await currentToken() != nil else { return nil }
+        return lock.withLock { tokens }
+    }
+
     /// Join (or start) the one in-flight refresh. The task clears itself
     /// under the lock as its last act, so a caller either joins a live
     /// refresh or starts a fresh one — never a second concurrent POST.
