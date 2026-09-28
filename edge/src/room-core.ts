@@ -216,6 +216,26 @@ export interface WakeRequest {
 }
 
 /** One post's wake checks for all its cross-person targets at once. */
+/** One claim on a room's task board (app.agent_room_claims). */
+export interface ClaimRow {
+  claimKey: string;
+  member: string;
+  userId: string;
+  claimedSeq: number;
+  state: "held" | "done" | "released";
+  updatedAt: number;
+}
+
+/** What a ledger-backed actor writes behind to PostgreSQL in one flush. */
+export interface LedgerBatch {
+  messages: MessageRow[];
+  members: MemberRow[];
+  removed: MemberKey[];
+  claims: ClaimRow[];
+  lastSeq: number;
+  lastActivityAt: number;
+}
+
 export interface WakeBatch {
   roomId: string;
   seq: number;

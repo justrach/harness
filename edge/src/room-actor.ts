@@ -29,6 +29,7 @@
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { PgRoomStore } from "./room-store-pg";
+import { LedgerRoomStore } from "./room-ledger";
 import {
   MemoryRoomStore,
   RoomCore,
@@ -70,7 +71,17 @@ export function roomStore(env: Env): RoomStore | undefined {
 /** Run `fn` inside a store session when the store has them (one database
  * connection for the whole request). */
 const inSession = <T>(store: RoomStore | undefined, fn: () => Promise<T>): Promise<T> =>
-  store instanceof PgRoomStore ? store.session(fn) : fn();
+  store instanceof PgRoomStore || store instanceof LedgerRoomStore ? store.session(fn) : fn();
+
+/** A flush after the first write of a quiet spell goes out at once; later
+ * writes ride the alarm this long after the last flush. */
+const FLUSH_EVERY_MS = 1000;
+/** After a failed flush, try again this much later. */
+const FLUSH_RETRY_MS = 5000;
+/** The alarm is only the flusher's safety net (an evicted actor, a flush that
+ * kept failing): an in-memory timer does the work, so the alarm (a storage
+ * write that holds the actor's input gate) is set rarely. */
+const FLUSH_SAFETY_MS = 30_000;
 
 /** The hibernation tag that finds one member's sockets. */
 const socketTag = (key: MemberKey): string => JSON.stringify([key.member, key.deviceId]);
@@ -88,6 +99,19 @@ export class RoomActor implements DurableObject {
   /** One load at a time: concurrent cold requests share it rather than each
    * building a RoomCore and the later one replacing the earlier mid-post. */
   private loading: Promise<RoomCore> | null = null;
+  /** The ledger's write-behind: one flush at a time, and when the last ended. */
+  private flushing: Promise<void> | null = null;
+  private lastFlushAt = 0;
+  /** The safety-net alarm time for unflushed rows (null: nothing waiting). */
+  private flushDueAt: number | null = null;
+  /** The in-memory timer for the next flush. */
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the alarm is currently set to, so unchanged schedules skip the write. */
+  private alarmAt: number | null | undefined = undefined;
+  /** Devices owed a rooms-wakes nudge (device → its user), sent only once
+   * the posts that woke them are in PostgreSQL: their engine reads the body
+   * from there. A failed flush keeps them for the retry that lands. */
+  private pendingNudges = new Map<string, string>();
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -100,8 +124,21 @@ export class RoomActor implements DurableObject {
     return Number.isFinite(decay) && decay > 0 ? { hopDecayS: decay } : {};
   }
 
+  /** The ledger (the room's state in this actor's SQLite, written behind to
+   * PostgreSQL) unless ROOM_LEDGER=off; without Hyperdrive, the dev store. */
+  private makeStore(): RoomStore | undefined {
+    if (this.env.HYPERDRIVE && this.env.ROOM_LEDGER !== "off") {
+      return new LedgerRoomStore(this.ctx.storage, new PgRoomStore(this.env), () => this.onLedgerWrite());
+    }
+    return roomStore(this.env);
+  }
+
+  private ledger(): LedgerRoomStore | null {
+    return this.storeInstance instanceof LedgerRoomStore ? this.storeInstance : null;
+  }
+
   private store(): RoomStore {
-    this.storeInstance ??= roomStore(this.env);
+    this.storeInstance ??= this.makeStore();
     if (!this.storeInstance) throw new RoomError(503, "rooms_unavailable", "no room store configured");
     return this.storeInstance;
   }
@@ -128,6 +165,11 @@ export class RoomActor implements DurableObject {
     this.loading = null;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.ledger()?.forget();
+    this.flushDueAt = null;
+    this.alarmAt = null;
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
     await this.ctx.storage.put("destroyed", true);
   }
 
@@ -162,10 +204,81 @@ export class RoomActor implements DurableObject {
     return this.loaded(roomId);
   }
 
+  /** One alarm serves both idle expiry and the ledger's safety net. A
+   * schedule that wouldn't change it writes nothing. */
   private async schedule(): Promise<void> {
-    const at = this.core?.expiresAt();
-    if (at === null || at === undefined) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(at * 1000);
+    const expiry = this.core?.expiresAt();
+    const times = [expiry == null ? null : expiry * 1000, this.flushDueAt].filter((t): t is number => t !== null);
+    const at = times.length ? Math.min(...times) : null;
+    if (at === this.alarmAt) return;
+    this.alarmAt = at;
+    if (at === null) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(at);
+  }
+
+  /** A local write happened: flush now if we haven't lately, else on a timer;
+   * make sure the safety-net alarm exists while anything is unflushed. */
+  private onLedgerWrite(): void {
+    const now = Date.now();
+    if (this.flushDueAt === null) {
+      this.flushDueAt = now + FLUSH_SAFETY_MS;
+      this.ctx.waitUntil(this.schedule());
+    }
+    if (this.flushing || this.flushTimer) return;
+    const wait = this.lastFlushAt + FLUSH_EVERY_MS - now;
+    if (wait <= 0) {
+      this.ctx.waitUntil(this.flushNow());
+      return;
+    }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.ctx.waitUntil(this.flushNow());
+    }, wait);
+  }
+
+  /** Write the ledger behind until nothing is left (or it fails, or the room
+   * turns out to be gone, which wipes). Concurrent callers share one run. */
+  private flushNow(): Promise<void> {
+    const ledger = this.ledger();
+    const roomId = this.core?.room.id;
+    if (!ledger || !roomId) return Promise.resolve();
+    this.flushing ??= (async () => {
+      try {
+        for (let i = 0; i < 20; i++) {
+          const result = await ledger.flush(roomId);
+          if (result === "gone") {
+            await this.wipe();
+            return;
+          }
+          if (result === "diverged") {
+            // PostgreSQL has posts this ledger never wrote: rebuild from it
+            // (unflushed posts are re-appended after its last seq) and go on.
+            console.error(JSON.stringify({ event: "room_ledger_diverged", room: roomId }));
+            await this.reload(roomId);
+            continue;
+          }
+          if (result === "idle" || !ledger.hasUnflushed()) break;
+        }
+        // Writes that arrived during the flush get their own (timer) flush.
+        this.flushDueAt = ledger.hasUnflushed() ? Date.now() + FLUSH_SAFETY_MS : null;
+        // Everything is in PostgreSQL now: the woken devices can drain.
+        if (!ledger.hasUnflushed()) await this.sendPendingNudges();
+      } catch (err) {
+        console.error(JSON.stringify({ event: "room_ledger_flush_failed", room: roomId, error: String(err) }));
+        this.flushDueAt = Date.now() + FLUSH_RETRY_MS;
+      } finally {
+        this.lastFlushAt = Date.now();
+        this.flushing = null;
+        await this.schedule().catch(() => {});
+        if (this.flushDueAt !== null && !this.flushTimer && ledger.hasUnflushed()) {
+          this.flushTimer = setTimeout(() => {
+            this.flushTimer = null;
+            this.ctx.waitUntil(this.flushNow());
+          }, FLUSH_EVERY_MS);
+        }
+      }
+    })();
+    return this.flushing;
   }
 
   /** Live events go only to sockets whose person can still see the room. */
@@ -183,7 +296,7 @@ export class RoomActor implements DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
-    this.storeInstance ??= roomStore(this.env);
+    this.storeInstance ??= this.makeStore();
     return inSession(this.storeInstance, () => this.handle(request));
   }
 
@@ -299,7 +412,14 @@ export class RoomActor implements DurableObject {
         await this.schedule();
         if (!result.duplicate) {
           this.broadcast(core, { type: "message", roomId: core.room.id, message: result.message });
-          this.ctx.waitUntil(this.nudgeExternal(result.external));
+          // Another person's engine reads the wake's body from PostgreSQL, so
+          // the post must be written behind before their device is nudged.
+          if (result.external.some((w) => w.verdict === "allowed")) {
+            for (const w of result.external) {
+              if (w.verdict === "allowed" && w.deviceId) this.pendingNudges.set(w.deviceId, w.userId);
+            }
+            this.ctx.waitUntil(this.ledger() ? this.flushNow() : this.sendPendingNudges());
+          }
         }
         return json(result);
       }
@@ -346,6 +466,13 @@ export class RoomActor implements DurableObject {
     }
   }
 
+  private async sendPendingNudges(): Promise<void> {
+    if (!this.pendingNudges.size) return;
+    const owed = [...this.pendingNudges].map(([deviceId, userId]) => ({ deviceId, userId, verdict: "allowed" }));
+    this.pendingNudges.clear();
+    await this.nudgeExternal(owed);
+  }
+
   /** Tell each allowed target's device it has room wakes to collect. The
    * device room queues the nudge durably while the device is offline. */
   private async nudgeExternal(external: { deviceId: string; userId: string; verdict: string }[]): Promise<void> {
@@ -368,8 +495,27 @@ export class RoomActor implements DurableObject {
 
   /** Idle expiry for ephemeral rooms, on freshly loaded state. */
   async alarm(): Promise<void> {
-    this.storeInstance ??= roomStore(this.env);
-    return inSession(this.storeInstance, () => this.expire());
+    this.storeInstance ??= this.makeStore();
+    return inSession(this.storeInstance, async () => {
+      // A ledger left unflushed (the actor was evicted, or PostgreSQL was
+      // down) lands first; then idle expiry is judged on fresh state.
+      const ledger = this.ledger();
+      if (ledger) {
+        const roomId = this.core?.room.id ?? (await this.ctx.storage.get<string>("room"));
+        if (roomId && !this.core) {
+          try {
+            await this.loaded(roomId);
+          } catch {
+            return;
+          }
+        }
+        this.flushDueAt = null;
+        this.alarmAt = null; // it just fired
+        await this.flushNow();
+        if (await this.destroyed()) return;
+      }
+      await this.expire();
+    });
   }
 
   private async expire(): Promise<void> {
