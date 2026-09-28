@@ -11487,6 +11487,269 @@ mod tests {
         }
     }
 
+    /// Drag across one rendered text element of a finished answer (found by
+    /// a snippet of its text) and return what the selection copies.
+    fn drag_select_in_transcript(cx: &mut gpui::VisualTestContext, needle: &str) -> Option<String> {
+        let entries = crate::markdown::render::selection_test_entries();
+        let (key, _, bounds) = entries
+            .iter()
+            .find(|(_, text, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} must be painted; painted: {:?}", entries.iter().map(|e| &e.1).collect::<Vec<_>>()))
+            .clone();
+        let y = bounds.top() + px(8.0);
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: gpui::point(bounds.left() + px(1.0), y),
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: gpui::point(bounds.left() + px(120.0), y),
+            pressed_button: Some(gpui::MouseButton::Left),
+            ..Default::default()
+        });
+        let selected = crate::markdown::selection::selected_text();
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: gpui::point(bounds.left() + px(120.0), y),
+            ..Default::default()
+        });
+        crate::markdown::selection::clear_if_owner(&key);
+        selected
+    }
+
+    #[gpui::test]
+    fn text_in_a_finished_answer_is_selectable(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        let transcript = host.read_with(cx, |host, _| host.0.clone());
+        let mut user = assistant("u1", MessageStatus::Complete, vec![text_part("t", "can you ask it again")]);
+        user.role = MessageRole::User;
+        let body = "My message to zigrepper is being held again. That session (`zigrepper-1c`) requires you to approve incoming messages, so it hasn't seen the request yet.\n\n**To unblock it:** in the zigrepper session, approve the pending message from the Harness session (`harness-61`).\n\n> Review harness PR #80 and verify it in production with throwaway accounts.\n\nUntil zigrepper can run those checks, rooms stay on `1203cfee`, the version that passed every check.";
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = vec![
+                user,
+                assistant("a1", MessageStatus::Complete, vec![text_part("t", body)]),
+            ];
+            state.transcript_revision += 1;
+        });
+        for _ in 0..3 {
+            transcript.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        for needle in ["being held again", "throwaway accounts", "Until zigrepper"] {
+            let selected = drag_select_in_transcript(cx, needle);
+            assert!(
+                selected.as_deref().is_some_and(|s| !s.trim().is_empty()),
+                "dragging across {needle:?} selected {selected:?}"
+            );
+        }
+
+        // What a person does: the pointer rests on the message first (which
+        // reveals the timestamp strip and re-renders the row), then drags
+        // down from the first paragraph into the quote, a move at a time.
+        let entries = crate::markdown::render::selection_test_entries();
+        let find = |needle: &str| entries.iter().find(|(_, t, _)| t.contains(needle)).unwrap().clone();
+        let (first_key, _, first) = find("being held again");
+        let (_, _, quote) = find("throwaway accounts");
+        let start = gpui::point(first.left() + px(2.0), first.top() + px(8.0));
+        let end = gpui::point(quote.left() + px(80.0), quote.top() + px(8.0));
+        cx.simulate_event(gpui::MouseMoveEvent { position: start, ..Default::default() });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: start,
+            click_count: 1,
+            ..Default::default()
+        });
+        for step in 1..=8 {
+            let t = step as f32 / 8.0;
+            let position = gpui::point(
+                start.x + (end.x - start.x) * t,
+                start.y + (end.y - start.y) * t,
+            );
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position,
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        let selected = crate::markdown::selection::selected_text();
+        cx.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: end, ..Default::default() });
+        crate::markdown::selection::clear_if_owner(&first_key);
+        let selected = selected.unwrap_or_default();
+        assert!(
+            selected.contains("being held again") && selected.contains("To unblock it") && selected.contains("Review ha"),
+            "a hover-then-drag across paragraphs into the quote selected {selected:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn selection_survives_output_arriving_while_dragging(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        let transcript = host.read_with(cx, |host, _| host.0.clone());
+        let mut user = assistant("u1", MessageStatus::Complete, vec![text_part("t", "status?")]);
+        user.role = MessageRole::User;
+        let first = "My message to zigrepper is being held again, so it hasn't seen the request yet.\n\n> Review harness PR #80 and verify it in production.";
+        let set = |parts: Vec<MessagePart>, cx: &mut gpui::VisualTestContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![user.clone(), assistant("a1", MessageStatus::Streaming, parts)];
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        };
+        set(vec![text_part("t1", first)], cx);
+        set(vec![text_part("t1", first)], cx);
+        let entries = crate::markdown::render::selection_test_entries();
+        let (key, _, bounds) = entries.iter().find(|(_, t, _)| t.contains("being held again")).unwrap().clone();
+        let start = gpui::point(bounds.left() + px(2.0), bounds.top() + px(8.0));
+        cx.simulate_event(gpui::MouseDownEvent { button: gpui::MouseButton::Left, position: start, click_count: 1, ..Default::default() });
+        let mid = gpui::point(bounds.left() + px(60.0), bounds.top() + px(8.0));
+        cx.simulate_event(gpui::MouseMoveEvent { position: mid, pressed_button: Some(gpui::MouseButton::Left), ..Default::default() });
+        // The turn keeps going: more output lands on the same message.
+        for i in 0..4 {
+            set(
+                vec![
+                    text_part("t1", first),
+                    tool_part(&format!("tool{i}"), "cargo test"),
+                    text_part(&format!("t{}", i + 2), &format!("Still working, step {i}.")),
+                ],
+                cx,
+            );
+            let end = gpui::point(bounds.left() + px(120.0 + i as f32 * 10.0), bounds.top() + px(8.0));
+            cx.simulate_event(gpui::MouseMoveEvent { position: end, pressed_button: Some(gpui::MouseButton::Left), ..Default::default() });
+        }
+        let selected = crate::markdown::selection::selected_text();
+        cx.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: mid, ..Default::default() });
+        let after_up = crate::markdown::selection::selected_text();
+        // More output after the drag ends must not clear it either.
+        set(
+            vec![text_part("t1", first), text_part("t9", "Another update after you let go.")],
+            cx,
+        );
+        let after_more = crate::markdown::selection::selected_text();
+        crate::markdown::selection::clear_if_owner(&key);
+        assert!(selected.as_deref().is_some_and(|s| s.starts_with("My message")), "during streaming: {selected:?}");
+        assert!(after_up.as_deref().is_some_and(|s| s.starts_with("My message")), "after mouse up: {after_up:?}");
+        assert!(after_more.as_deref().is_some_and(|s| s.starts_with("My message")), "after more output: {after_more:?}");
+    }
+
+    #[gpui::test]
+    fn selection_in_a_split_pane_stays_in_that_pane(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        struct Split(Entity<Transcript>, Entity<Transcript>);
+        impl Render for Split {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .child(div().w(px(450.0)).h_full().child(self.0.clone()))
+                    .child(div().w(px(450.0)).h_full().child(self.1.clone()))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (left_state, right_state) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
+        });
+        let (split, cx) = cx.add_window_view(|_, cx| {
+            Split(
+                cx.new(|cx| Transcript::new(left_state.clone(), cx)),
+                cx.new(|cx| Transcript::new(right_state.clone(), cx)),
+            )
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        let (left, right) = split.read_with(cx, |s, _| (s.0.clone(), s.1.clone()));
+        for (state, chat, text) in [
+            (&left_state, "left-chat", "Left pane paragraph about something else entirely here."),
+            (&right_state, "right-chat", "Right pane answer you are trying to select and copy now."),
+        ] {
+            let mut user = assistant(&format!("{chat}-u"), MessageStatus::Complete, vec![text_part("t", "hi")]);
+            user.role = MessageRole::User;
+            state.update(cx, |state, _| {
+                state.selected_chat = Some(chat.into());
+                state.transcript_replayed = true;
+                state.transcript = vec![user, assistant(&format!("{chat}-a"), MessageStatus::Complete, vec![text_part("t", text)])];
+                state.transcript_revision += 1;
+            });
+        }
+        for _ in 0..3 {
+            left.update(cx, |this, cx| this.sync(cx));
+            right.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        let entries = crate::markdown::render::selection_test_entries();
+        let (key, _, bounds) = entries.iter().find(|(_, t, _)| t.starts_with("Right pane")).unwrap().clone();
+        let y = bounds.top() + px(8.0);
+        cx.simulate_event(gpui::MouseDownEvent { button: gpui::MouseButton::Left, position: gpui::point(bounds.left() + px(1.0), y), click_count: 1, ..Default::default() });
+        cx.simulate_event(gpui::MouseMoveEvent { position: gpui::point(bounds.left() + px(150.0), y), pressed_button: Some(gpui::MouseButton::Left), ..Default::default() });
+        let selected = crate::markdown::selection::selected_text();
+        cx.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: gpui::point(bounds.left() + px(150.0), y), ..Default::default() });
+        crate::markdown::selection::clear_if_owner(&key);
+        assert!(
+            selected.as_deref().is_some_and(|s| s.starts_with("Right pane")),
+            "a drag in the right pane selected {selected:?}"
+        );
+    }
+
     fn reasoning_part(id: &str, text: &str) -> MessagePart {
         MessagePart::Reasoning {
             id: id.into(),

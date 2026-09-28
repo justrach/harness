@@ -159,3 +159,34 @@ fn split_from_projectless_session_does_not_inherit_another_folder(cx: &mut TestA
         })
         .unwrap();
 }
+
+#[gpui::test]
+fn selecting_text_in_an_unfocused_pane_keeps_the_selection(cx: &mut TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let window = setup(cx, dir.path());
+    window
+        .update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat(Some("active"))];
+                state.select_chat(Some("original".into()), cx);
+            });
+            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            let focus = shell.chat_split.as_ref().unwrap().focus;
+            let other = 1 - focus;
+
+            // A drag in the unfocused pane selected some text: releasing it
+            // must not focus (and so rebuild) that pane.
+            crate::markdown::selection::begin_with_span("peer-row:0", "copy me", 0..4);
+            shell.release_on_peer_pane(other, window, cx);
+            assert_eq!(shell.chat_split.as_ref().unwrap().focus, focus, "a text drag must not move focus");
+            assert_eq!(crate::markdown::selection::selected_text().as_deref(), Some("copy"));
+            crate::markdown::selection::end_active_drag();
+            crate::markdown::selection::clear_if_owner("peer-row:0");
+
+            // A plain click (nothing selected) still focuses the pane.
+            shell.release_on_peer_pane(other, window, cx);
+            assert_eq!(shell.chat_split.as_ref().unwrap().focus, other, "a click focuses the pane");
+        })
+        .unwrap();
+}
