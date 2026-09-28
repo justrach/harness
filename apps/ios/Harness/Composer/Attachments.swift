@@ -48,9 +48,21 @@ private func nameFromPath(_ path: String) -> String {
     return name.isEmpty ? "image" : name
 }
 
+/// An agent-room delivery opens with a machine tag line for the agent
+/// (`<!--harness-room {…} -->`, harness-proto `room_delivery`); the framed
+/// header under it already says where the post came from, so readers skip it.
+func stripRoomDeliveryTag(_ content: String) -> String {
+    let open = "<!--harness-room {", close = "} -->"
+    guard content.hasPrefix(open), let end = content.range(of: close) else { return content }
+    var rest = content[end.upperBound...]
+    if rest.first == "\n" { rest = rest.dropFirst() }
+    return String(rest)
+}
+
 /// message-attachments.ts `parseUserMessageImages`: split the visible prompt
 /// from its attachment-ref trailer (case-insensitive marker, `- path` lines).
-func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
+func parseUserMessageImages(_ rawContent: String) -> ParsedUserMessage {
+    let content = stripRoomDeliveryTag(rawContent)
     let presentations = AppshotContext.presentations(content)
     let lines = content.components(separatedBy: "\n")
     var markerIx: Int?

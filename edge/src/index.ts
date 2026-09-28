@@ -35,11 +35,14 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
- *   GET  /rooms?member=&device=       — agent rooms in the caller's org (room-actor.ts)
+ *   GET  /rooms?member=&device=       — agent rooms the caller can see (room-actor.ts)
  *   GET  /rooms/inbox?member=&device= — unread posts addressed to a member
+ *   GET  /rooms/invites               — rooms the caller is invited to
+ *   GET  /rooms/wakes                 — other people's wakes of the caller's chats
+ *   POST /rooms/wakes/ack             — delivered wakes
  *   POST /rooms                       — create a room (`room1/{roomId}`)
  *   GET  /room/:roomId/{state,messages,ws}
- *   POST /room/:roomId/{join,leave,post,archive,destroy}
+ *   POST /room/:roomId/{join,leave,post,archive,destroy,invite,accept,decline,remove,wakes,release}
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
@@ -108,8 +111,16 @@ const forward = (
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
 };
 
-/** Forward into a room's actor with the verified user and org stamped on. */
-const forwardRoom = (
+/** Largest request body a room route takes (the actor caps JSON at 64 KiB). */
+const MAX_ROOM_BODY_BYTES = 64 * 1024;
+
+/** Forward into a room's actor with the verified user and org stamped on.
+ * The body is read here first, not streamed through: an actor that refuses
+ * before reading it (a destroyed or missing room) would otherwise leave the
+ * piped stream dangling, and the Worker throws "Can't read from request
+ * stream after response has been sent" — under load that took the runtime
+ * down. Room bodies are small, so buffering costs nothing. */
+const forwardRoom = async (
   env: Env,
   roomId: string,
   request: Request,
@@ -118,23 +129,33 @@ const forwardRoom = (
   path: string,
   search: URLSearchParams
 ): Promise<Response> => {
+  let body: ArrayBuffer | undefined;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+  }
   const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${roomId}`));
   const url = new URL(request.url);
   url.pathname = path;
   search.set("room", roomId);
   url.search = search.toString();
   const headers = new Headers(request.headers);
+  headers.delete("content-length");
   headers.set(AUTH_USER_HEADER, userId);
   headers.set(AUTH_ORG_HEADER, orgId);
-  return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
+  return stub.fetch(new Request(url.toString(), { method: request.method, body, headers }));
 };
 
 const ROOM_GET = new Set(["state", "messages", "ws"]);
-const ROOM_POST = new Set(["join", "leave", "post", "archive", "destroy"]);
+const ROOM_POST = new Set([
+  "join", "leave", "post", "archive", "destroy", "invite", "accept", "decline", "remove", "wakes", "release"
+]);
 
-/** Agent rooms (room-actor.ts). Rooms belong to the caller's org; the
- * listing and inbox read PostgreSQL directly, everything else goes through
- * the room's actor. */
+/** Agent rooms (room-actor.ts). Access is by grant to the verified user; the
+ * listing, inbox, invites and wake queue read PostgreSQL directly, everything
+ * else goes through the room's actor. */
 const roomRoute = async (
   request: Request,
   env: Env,
@@ -148,14 +169,25 @@ const roomRoute = async (
   if (!store) return json({ error: "rooms_unavailable" }, 503);
   const who = () =>
     memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
+  const limit = (fallback: number) =>
+    Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? fallback) || fallback, 200));
   try {
     if (parts[0] === "rooms" && parts.length === 1 && request.method === "GET") {
       const listFor = url.searchParams.has("member") ? who() : undefined;
-      return json({ rooms: await store.listRooms(orgId, listFor) });
+      return json({ rooms: await store.listRooms(auth.userId, listFor) });
     }
-    if (parts[0] === "rooms" && parts[1] === "inbox" && parts.length === 2 && request.method === "GET") {
-      const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 200));
-      return json({ items: await store.inbox(orgId, who(), limit) });
+    if (parts[0] === "rooms" && parts.length === 2 && request.method === "GET") {
+      if (parts[1] === "inbox") return json({ items: await store.inbox(auth.userId, who(), limit(50)) });
+      if (parts[1] === "invites") return json({ invites: await store.invites(auth.userId) });
+      // Another person's agents woke this user's chats: their engine collects
+      // and queues them, then acks.
+      if (parts[1] === "wakes") return json({ wakes: await store.pendingWakes(auth.userId, limit(100)) });
+    }
+    if (parts[0] === "rooms" && parts[1] === "wakes" && parts[2] === "ack" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { ids?: unknown; dropped?: unknown } | null;
+      const ids = Array.isArray(body?.ids) ? body.ids.filter((id): id is number => Number.isInteger(id)).slice(0, 500) : [];
+      await store.ackWakes(auth.userId, ids, Math.floor(Date.now() / 1000), body?.dropped === true);
+      return json({ ok: true, acked: ids.length });
     }
     if (parts[0] === "rooms" && parts.length === 1 && request.method === "POST") {
       return await forwardRoom(env, newRoomId(), request, auth.userId, orgId, "/create", new URLSearchParams());

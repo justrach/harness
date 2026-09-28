@@ -2,17 +2,23 @@
  * Agent rooms (room-actor.ts): the logic, free of Durable Object and
  * PostgreSQL plumbing so it runs under plain vitest against MemoryRoomStore.
  *
- * A room is a shared log agents and people post into and read on demand.
- * PostgreSQL (`app.agent_rooms`, `app.agent_room_members`,
- * `app.agent_room_messages`; migration 0020_agent_rooms) is the store of
- * record; the RoomActor holds members, the last seq and a small ring of
- * recent messages, assigns seq, and acks a post only after the store has it.
+ * A room is a shared log agents and people post into and read on demand, and
+ * it can span people. PostgreSQL (`app.agent_rooms`, `…_members`, `…_messages`,
+ * `…_access`, `…_claims`, and the wake rules; migrations 0020 and 0022) is
+ * the store of record. The RoomActor holds members, grants, the last seq and a
+ * ring of recent posts, assigns seq, and acks a post only after the store has
+ * it.
+ *
+ * Who is who comes from the verified bearer, never the request: every member
+ * and post carries the owning user id the edge stamped, a caller acts only as
+ * members its own user owns, and seeing a room takes an accepted grant.
  *
  * Delivery is pull by default: a plain post wakes nobody. A DM (`to`) or an
- * @mention names targets, which the post result returns as `deliver` for the
- * poster's engine to queue into those chats. Guards: bodies ≤ 8000 chars, 30
- * posts a minute per member, members only, and a hop cap — `hop` counts
- * consecutive agent posts since a person last posted, and a post at
+ * @mention names targets. The poster's engine wakes its own user's chats;
+ * another person's chats are woken only if their wake rules allow it
+ * (`agent_wake_check`), and then by their own engine. Guards: bodies ≤ 8000
+ * chars, 30 posts a minute per member, and a hop cap — `hop` counts
+ * consecutive agent posts along the wake chain, and a post at
  * {@link HOP_CAP} or beyond wakes nobody.
  */
 
@@ -24,6 +30,7 @@ export const ROOM_LIMITS = {
   ring: 200,
   readPage: 200,
   members: 64,
+  people: 32,
   /** Longest idle lifetime an ephemeral room may ask for: 30 days. */
   maxIdleTtlS: 30 * 24 * 60 * 60,
   /** An ephemeral room created without one dies after a day of silence. */
@@ -33,21 +40,44 @@ export const ROOM_LIMITS = {
 /** A post this many agent hops from a person's post wakes nobody. */
 export const HOP_CAP = 6;
 
+/** A wake chain whose last link is older than this starts over at hop 1, so
+ * a pair of agents that once hit the cap aren't muted in that room forever.
+ * An explicit reply keeps its parent's hop whatever its age. */
+export const HOP_DECAY_S = 600;
+
+export interface RoomOptions {
+  hopDecayS?: number;
+}
+
 export type RoomKind = "ephemeral" | "persistent";
 export type MemberKind = "harness_chat" | "graff" | "external";
 export type MessageKind = "message" | "claim" | "done" | "task";
+export type Role = "owner" | "member";
+/** A person's per-room override of their account wake rules. */
+export type ExternalWakes = "follow" | "allow" | "block";
 
 const ROOM_KINDS: readonly string[] = ["ephemeral", "persistent"];
 const MEMBER_KINDS: readonly string[] = ["harness_chat", "graff", "external"];
 const MESSAGE_KINDS: readonly string[] = ["message", "claim", "done", "task"];
+const EXTERNAL_WAKES: readonly string[] = ["follow", "allow", "block"];
 
 export const ROOM_ID = /^room_[0-9a-f]{24}$/;
 const REF = /^[A-Za-z0-9_-]{1,128}$/;
 const DEVICE = /^[A-Za-z0-9_-]{0,128}$/;
+const CLIENT_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
+const CLAIM_KEY = /^[^\s\p{Cc}]{1,128}$/u;
+/** A repository identity, e.g. `github.com/owner/repo`. */
+const PROJECT_REF = /^[^\s\p{Cc}]{1,200}$/u;
+const EMAIL = /^[^\s@]{1,128}@[^\s@]{1,253}$/;
 /** Member names are what @mentions match, exactly: no whitespace or control
  * characters and no leading `@`. An inner `@` is normal (graff peers are
  * `claude@codegraff`). */
 const MEMBER = /^[^\s@\p{Cc}][^\s\p{Cc}]{0,127}$/u;
+
+/** The verified caller: stamped by the Worker from the bearer. */
+export interface Caller {
+  userId: string;
+}
 
 export interface RoomRow {
   id: string;
@@ -57,6 +87,8 @@ export interface RoomRow {
   kind: RoomKind;
   parentChat: string | null;
   idleTtlS: number | null;
+  /** Set: only chats from this project may join. */
+  projectRef: string | null;
   lastSeq: number;
   createdAt: number;
   lastActivityAt: number;
@@ -68,7 +100,9 @@ export interface MemberRow {
   memberKind: MemberKind;
   memberRef: string | null;
   deviceId: string;
-  role: "owner" | "member";
+  /** The person this member belongs to (never from the request). */
+  userId: string;
+  role: Role;
   readSeq: number;
   joinedAt: number;
 }
@@ -77,6 +111,7 @@ export interface MessageRow {
   seq: number;
   sender: string;
   senderDevice: string;
+  senderUserId: string;
   fromUser: boolean;
   kind: MessageKind;
   toMember: string | null;
@@ -84,17 +119,30 @@ export interface MessageRow {
   replyTo: number | null;
   mentions: string[];
   hop: number;
+  clientId: string | null;
+  claimKey: string | null;
   createdAt: number;
+}
+
+export interface AccessRow {
+  userId: string;
+  role: Role;
+  invitedBy: string;
+  invitedAt: number;
+  acceptedAt: number | null;
+  externalWakes: ExternalWakes;
 }
 
 export interface RoomSummary {
   id: string;
   name: string;
   kind: RoomKind;
+  projectRef: string | null;
   lastSeq: number;
   lastActivityAt: number;
   archivedAt: number | null;
   members: number;
+  people: number;
   /** Set when the listing asked on behalf of a member of this room. */
   unread?: number;
 }
@@ -105,9 +153,17 @@ export interface InboxItem {
   message: MessageRow;
 }
 
+export interface Invite {
+  roomId: string;
+  roomName: string;
+  invitedBy: string;
+  invitedAt: number;
+}
+
 export interface LoadedRoom {
   room: RoomRow;
   members: MemberRow[];
+  access: AccessRow[];
   /** Newest last, at most {@link ROOM_LIMITS.ring}. */
   recent: MessageRow[];
 }
@@ -117,6 +173,58 @@ export interface MemberKey {
   deviceId: string;
 }
 
+/** A wake of another person's chat, recorded by the store once their rules
+ * allowed it; their engine picks it up and queues it into that chat. */
+export interface PendingWake {
+  id: number;
+  roomId: string;
+  roomName: string;
+  seq: number;
+  fromMember: string;
+  fromUserId: string;
+  /** Who sent it, verified by the account, never an email or a self-chosen
+   * name: `@login` when their GitHub is linked through codegraff, else their
+   * account fingerprint (`cg-…`). */
+  fromDisplay: string | null;
+  fromGithub: string | null;
+  fromFingerprint: string | null;
+  toMember: string;
+  toRef: string | null;
+  toDevice: string;
+  body: string;
+}
+
+/** `agent_wake_check`'s verdict; only `allowed` wakes. */
+export type WakeVerdict =
+  | "allowed"
+  | "self"
+  | "not_member"
+  | "off"
+  | "blocked"
+  | "not_listed"
+  | "room_blocked"
+  | "capped"
+  | "unverified";
+
+export interface WakeRequest {
+  roomId: string;
+  seq: number;
+  fromUserId: string;
+  fromMember: string;
+  target: MemberRow;
+  now: number;
+}
+
+/** One post's wake checks for all its cross-person targets at once. */
+export interface WakeBatch {
+  roomId: string;
+  seq: number;
+  fromUserId: string;
+  fromMember: string;
+  targets: MemberRow[];
+  now: number;
+}
+
 /** The store of record. PgRoomStore in production, MemoryRoomStore in tests. */
 export interface RoomStore {
   createRoom(room: RoomRow, owner: MemberRow): Promise<void>;
@@ -124,16 +232,43 @@ export interface RoomStore {
   /** Commit `message` as the room's next seq. False when the room moved on,
    * was archived, or is gone: the caller must reload before trusting state. */
   append(roomId: string, message: MessageRow): Promise<boolean>;
+  /** The post a retry with this client id already made, if any. */
+  findByClientId(roomId: string, senderUserId: string, clientId: string): Promise<MessageRow | null>;
   upsertMember(roomId: string, member: MemberRow): Promise<void>;
   removeMember(roomId: string, key: MemberKey): Promise<void>;
   setReadSeq(roomId: string, key: MemberKey, seq: number): Promise<void>;
   messages(roomId: string, since: number, limit: number): Promise<MessageRow[]>;
   setArchived(roomId: string, at: number | null): Promise<void>;
   destroy(roomId: string): Promise<void>;
-  listRooms(orgId: string, who?: MemberKey): Promise<RoomSummary[]>;
+  /** The user id for an email, or null when nobody has that address. */
+  userIdByEmail(email: string): Promise<string | null>;
+  /** A pending grant; an existing grant (pending or accepted) is left alone. */
+  invite(roomId: string, userId: string, invitedBy: string, now: number): Promise<void>;
+  /** Accept (stamp accepted_at) or decline (delete) a pending grant. */
+  respondInvite(roomId: string, userId: string, accept: boolean, now: number): Promise<boolean>;
+  /** Drop a person from a room: their grant and every member they own. */
+  removePerson(roomId: string, userId: string): Promise<void>;
+  setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void>;
+  invites(userId: string): Promise<Invite[]>;
+  /** First writer wins; a released claim can be retaken. False: held or done. */
+  takeClaim(roomId: string, claimKey: string, member: string, userId: string, seq: number, now: number): Promise<boolean>;
+  /** Finish or give back a claim the given user holds. False: not theirs. */
+  settleClaim(roomId: string, claimKey: string, userId: string, state: "done" | "released", now: number): Promise<boolean>;
+  /** Check another person's wake rules and, when allowed, record the wake
+   * for their engine to deliver. */
+  wakeCheck(wake: WakeRequest): Promise<WakeVerdict>;
+  /** {@link wakeCheck} for every target in one round trip; verdicts in
+   * target order. */
+  wakeCheckMany(batch: WakeBatch): Promise<WakeVerdict[]>;
+  pendingWakes(userId: string, limit: number): Promise<PendingWake[]>;
+  /** Settle wakes: delivered, or dropped (the chat is gone from that device). */
+  ackWakes(userId: string, ids: number[], now: number, dropped?: boolean): Promise<void>;
+  /** Rooms the user has an accepted grant for; with `who`, only those where
+   * that member is in, with its unread count. */
+  listRooms(userId: string, who?: MemberKey): Promise<RoomSummary[]>;
   /** Unread messages addressed to `who` (DM, exact mention, or @all) across
-   * the org's rooms it belongs to, oldest first. */
-  inbox(orgId: string, who: MemberKey, limit: number): Promise<InboxItem[]>;
+   * the rooms the user can see, oldest first. */
+  inbox(userId: string, who: MemberKey, limit: number): Promise<InboxItem[]>;
 }
 
 export class RoomError extends Error {
@@ -162,14 +297,29 @@ export function memberKey(body: Json): MemberKey {
   return { member, deviceId };
 }
 
-export function parseMember(body: Json, now: number, role: MemberRow["role"]): MemberRow {
+export function parseMember(body: Json, caller: Caller, now: number, role: Role): MemberRow {
   const { member, deviceId } = memberKey(body);
   const memberKind = str(body.memberKind) ?? "external";
   if (!MEMBER_KINDS.includes(memberKind)) throw bad("memberKind: harness_chat | graff | external");
   const memberRef = str(body.memberRef) ?? null;
   if (memberRef !== null && !REF.test(memberRef)) throw bad("memberRef: invalid id");
   if (memberKind === "harness_chat" && memberRef === null) throw bad("memberRef: required for harness_chat");
-  return { member, memberKind: memberKind as MemberKind, memberRef, deviceId, role, readSeq: 0, joinedAt: now };
+  return {
+    member,
+    memberKind: memberKind as MemberKind,
+    memberRef,
+    deviceId,
+    userId: caller.userId,
+    role,
+    readSeq: 0,
+    joinedAt: now
+  };
+}
+
+function parseProjectRef(v: unknown, field: string): string | null {
+  const ref = str(v)?.trim() || null;
+  if (ref !== null && !PROJECT_REF.test(ref)) throw bad(`${field}: a project identity`);
+  return ref;
 }
 
 export interface CreateArgs {
@@ -177,6 +327,7 @@ export interface CreateArgs {
   kind: RoomKind;
   parentChat: string | null;
   idleTtlS: number | null;
+  projectRef: string | null;
 }
 
 export function parseCreate(body: Json): CreateArgs {
@@ -195,7 +346,7 @@ export function parseCreate(body: Json): CreateArgs {
   // nothing else reliably ends a room whose parent is never archived.
   if (kind === "ephemeral" && idleTtlS === null) idleTtlS = ROOM_LIMITS.defaultIdleTtlS;
   if (kind === "persistent") idleTtlS = null;
-  return { name, kind: kind as RoomKind, parentChat, idleTtlS };
+  return { name, kind: kind as RoomKind, parentChat, idleTtlS, projectRef: parseProjectRef(body.projectRef, "projectRef") };
 }
 
 export interface PostArgs {
@@ -204,6 +355,8 @@ export interface PostArgs {
   to: string | null;
   replyTo: number | null;
   mentions: string[];
+  clientId: string | null;
+  claimKey: string | null;
 }
 
 export function parsePost(body: Json): PostArgs {
@@ -227,9 +380,28 @@ export function parsePost(body: Json): PostArgs {
     if (!name || !MEMBER.test(name)) throw bad("mentions: member names");
     return name === "all" ? "@all" : name;
   });
+  const clientId = str(body.clientId) ?? null;
+  if (clientId !== null && !CLIENT_ID.test(clientId)) throw bad("clientId: 1-64 chars of [A-Za-z0-9_.:-]");
+  const claimKey = str(body.claimKey) ?? null;
+  if (claimKey !== null && !CLAIM_KEY.test(claimKey)) throw bad("claimKey: 1-128 chars, no spaces");
+  if ((kind === "claim" || kind === "done") !== (claimKey !== null)) {
+    throw bad("claimKey: required for claim and done posts, and only for them");
+  }
   // No `fromUser` here: whether a person wrote a post is never the caller's
   // claim to make (it resets the hop cap). See RoomCore.post.
-  return { body: text, kind: kind as MessageKind, to, replyTo, mentions };
+  return { body: text, kind: kind as MessageKind, to, replyTo, mentions, clientId, claimKey };
+}
+
+export function parseEmail(body: Json): string {
+  const email = (str(body.email) ?? "").trim().toLowerCase();
+  if (!EMAIL.test(email)) throw bad("email: an address");
+  return email;
+}
+
+export function parseExternalWakes(body: Json): ExternalWakes {
+  const value = str(body.externalWakes) ?? "";
+  if (!EXTERNAL_WAKES.includes(value)) throw bad("externalWakes: follow | allow | block");
+  return value as ExternalWakes;
 }
 
 /** `@name` tokens in the body, matched exactly against member names. */
@@ -267,13 +439,26 @@ export interface Delivery {
   deviceId: string;
 }
 
+export interface ExternalWake {
+  member: string;
+  deviceId: string;
+  userId: string;
+  verdict: WakeVerdict;
+}
+
 export interface PostResult {
   message: MessageRow;
-  /** Members to wake. Empty for plain posts and at or past the hop cap. */
+  /** The poster's own members to wake (their engine queues these). Empty
+   * for plain posts and at or past the hop cap. */
   deliver: Delivery[];
+  /** Other people's members this post addressed, with their rules' verdict;
+   * `allowed` ones are queued for their own engine to deliver. */
+  external: ExternalWake[];
   /** Per other member: how many of their messages the poster hasn't read,
    * for graff's reply-to-latest rule (applied client-side). */
   unreadFrom: Record<string, number>;
+  /** True when this was a retry of a post already made (same clientId). */
+  duplicate: boolean;
 }
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
@@ -292,41 +477,63 @@ export class RoomCore {
     private readonly store: RoomStore,
     public room: RoomRow,
     private members: MemberRow[],
+    private access: AccessRow[],
     private recent: MessageRow[],
-    private readonly clock: () => number = nowS
+    private readonly clock: () => number = nowS,
+    private readonly options: RoomOptions = {}
   ) {}
 
   static async create(
     store: RoomStore,
     id: string,
     orgId: string,
-    userId: string,
+    caller: Caller,
     body: Json,
-    clock: () => number = nowS
+    clock: () => number = nowS,
+    options: RoomOptions = {}
   ): Promise<RoomCore> {
     const args = parseCreate(body);
     const now = clock();
-    const owner = parseMember(body, now, "owner");
+    const owner = parseMember(body, caller, now, "owner");
+    if (args.projectRef !== null) {
+      const chatProject = parseProjectRef(body.memberProjectRef, "memberProjectRef");
+      if (chatProject !== args.projectRef) throw new RoomError(403, "wrong_project");
+    }
     const room: RoomRow = {
       id,
       orgId,
-      createdBy: userId,
+      createdBy: caller.userId,
       name: args.name,
       kind: args.kind,
       parentChat: args.parentChat,
       idleTtlS: args.idleTtlS,
+      projectRef: args.projectRef,
       lastSeq: 0,
       createdAt: now,
       lastActivityAt: now,
       archivedAt: null
     };
+    // The store adds the creator's accepted owner grant with the room.
     await store.createRoom(room, owner);
-    return new RoomCore(store, room, [owner], [], clock);
+    const grant: AccessRow = {
+      userId: caller.userId,
+      role: "owner",
+      invitedBy: caller.userId,
+      invitedAt: now,
+      acceptedAt: now,
+      externalWakes: "follow"
+    };
+    return new RoomCore(store, room, [owner], [grant], [], clock, options);
   }
 
-  static async load(store: RoomStore, id: string, clock: () => number = nowS): Promise<RoomCore | null> {
+  static async load(
+    store: RoomStore,
+    id: string,
+    clock: () => number = nowS,
+    options: RoomOptions = {}
+  ): Promise<RoomCore | null> {
     const loaded = await store.loadRoom(id);
-    return loaded && new RoomCore(store, loaded.room, loaded.members, loaded.recent, clock);
+    return loaded && new RoomCore(store, loaded.room, loaded.members, loaded.access, loaded.recent, clock, options);
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -342,17 +549,45 @@ export class RoomCore {
       : null;
   }
 
-  snapshot(): { room: RoomRow; members: MemberRow[] } {
-    return { room: this.room, members: this.members };
+  /** What a person with access sees. Other people's grant details stay
+   * private: members see who is in, not who was invited. */
+  snapshot(caller: Caller): { room: RoomRow; members: MemberRow[]; you: AccessRow | null } {
+    this.requireAccess(caller);
+    return { room: this.room, members: this.members, you: this.grant(caller) ?? null };
+  }
+
+  /** May this caller see the room? An accepted grant, nothing else. */
+  canSee(caller: Caller): boolean {
+    return this.grant(caller)?.acceptedAt != null;
+  }
+
+  private grant(caller: Caller): AccessRow | undefined {
+    return this.access.find((a) => a.userId === caller.userId);
+  }
+
+  /** Callers without access get the same answer as a missing room. */
+  private requireAccess(caller: Caller): AccessRow {
+    const grant = this.grant(caller);
+    if (!grant || grant.acceptedAt === null) throw new RoomError(404, "room_not_found");
+    return grant;
+  }
+
+  private requireOwner(caller: Caller): AccessRow {
+    const grant = this.requireAccess(caller);
+    if (grant.role !== "owner") throw new RoomError(403, "owner_only");
+    return grant;
   }
 
   find(key: MemberKey): MemberRow | undefined {
     return this.members.find((m) => sameMember(m, key));
   }
 
-  private requireMember(key: MemberKey): MemberRow {
+  /** A member the caller's own user owns: nobody acts as someone else's. */
+  private requireOwnMember(caller: Caller, key: MemberKey): MemberRow {
+    this.requireAccess(caller);
     const found = this.find(key);
     if (!found) throw new RoomError(403, "not_a_member");
+    if (found.userId !== caller.userId) throw new RoomError(403, "not_your_member");
     return found;
   }
 
@@ -360,10 +595,20 @@ export class RoomCore {
     if (this.room.archivedAt !== null) throw new RoomError(409, "room_archived");
   }
 
-  join(body: Json): Promise<MemberRow> {
+  join(caller: Caller, body: Json): Promise<MemberRow> {
     return this.serial(async () => {
+      this.requireAccess(caller);
       this.requireOpen();
-      const incoming = parseMember(body, this.clock(), "member");
+      const incoming = parseMember(body, caller, this.clock(), "member");
+      if (this.room.projectRef !== null) {
+        const chatProject = parseProjectRef(body.projectRef, "projectRef");
+        if (chatProject !== this.room.projectRef) throw new RoomError(403, "wrong_project");
+      }
+      // A member name belongs to one person per room, on every device: DMs
+      // and mentions address names, so a second owner would read the first's.
+      if (this.members.some((m) => m.member === incoming.member && m.userId !== caller.userId)) {
+        throw new RoomError(409, "member_name_taken");
+      }
       const existing = this.find(incoming);
       if (existing) {
         // Rejoining refreshes how the member is reached, never its role or cursor.
@@ -379,18 +624,87 @@ export class RoomCore {
     });
   }
 
-  leave(body: Json): Promise<void> {
+  leave(caller: Caller, body: Json): Promise<MemberKey> {
     return this.serial(async () => {
       const key = memberKey(body);
-      this.requireMember(key);
+      this.requireOwnMember(caller, key);
       await this.store.removeMember(this.room.id, key);
       this.members = this.members.filter((m) => !sameMember(m, key));
+      return key;
+    });
+  }
+
+  /** Invite a person by email (owners only). An address with no account is
+   * a 404; inviting someone already in (or invited) changes nothing. */
+  invite(caller: Caller, body: Json): Promise<{ invited: boolean }> {
+    return this.serial(async () => {
+      this.requireOwner(caller);
+      const email = parseEmail(body);
+      if (this.access.length >= ROOM_LIMITS.people) throw new RoomError(409, "room_full");
+      const userId = await this.store.userIdByEmail(email);
+      if (userId === null) throw new RoomError(404, "no_account", "no Codegraff account with that email");
+      if (this.access.some((a) => a.userId === userId)) return { invited: false };
+      const now = this.clock();
+      await this.store.invite(this.room.id, userId, caller.userId, now);
+      this.access = [
+        ...this.access,
+        { userId, role: "member", invitedBy: caller.userId, invitedAt: now, acceptedAt: null, externalWakes: "follow" }
+      ];
+      return { invited: true };
+    });
+  }
+
+  /** The invited person accepts or declines their own pending grant. */
+  respond(caller: Caller, accept: boolean): Promise<AccessRow | null> {
+    return this.serial(async () => {
+      const grant = this.grant(caller);
+      if (!grant || grant.acceptedAt !== null) throw new RoomError(404, "no_invite");
+      const now = this.clock();
+      if (!(await this.store.respondInvite(this.room.id, caller.userId, accept, now))) {
+        throw new RoomError(404, "no_invite");
+      }
+      if (!accept) {
+        this.access = this.access.filter((a) => a !== grant);
+        return null;
+      }
+      const accepted = { ...grant, acceptedAt: now };
+      this.access = this.access.map((a) => (a === grant ? accepted : a));
+      return accepted;
+    });
+  }
+
+  /** Remove a person (owners remove anyone but the last owner; anyone may
+   * remove themselves). Their members go with them. */
+  removePerson(caller: Caller, userId: string): Promise<MemberKey[]> {
+    return this.serial(async () => {
+      if (userId === caller.userId) this.requireAccess(caller);
+      else this.requireOwner(caller);
+      const target = this.access.find((a) => a.userId === userId);
+      if (!target) throw new RoomError(404, "not_in_room");
+      const owners = this.access.filter((a) => a.role === "owner" && a.acceptedAt !== null);
+      if (target.role === "owner" && owners.length <= 1) throw new RoomError(409, "last_owner");
+      await this.store.removePerson(this.room.id, userId);
+      const gone = this.members.filter((m) => m.userId === userId);
+      this.members = this.members.filter((m) => m.userId !== userId);
+      this.access = this.access.filter((a) => a.userId !== userId);
+      return gone.map(({ member, deviceId }) => ({ member, deviceId }));
+    });
+  }
+
+  setExternalWakes(caller: Caller, body: Json): Promise<AccessRow> {
+    return this.serial(async () => {
+      const grant = this.requireAccess(caller);
+      const value = parseExternalWakes(body);
+      await this.store.setExternalWakes(this.room.id, caller.userId, value);
+      const updated = { ...grant, externalWakes: value };
+      this.access = this.access.map((a) => (a === grant ? updated : a));
+      return updated;
     });
   }
 
   /** Per member name, across its devices: a new device is not a new budget. */
-  private rateLimit(key: MemberKey, now: number): void {
-    const id = key.member;
+  private rateLimit(sender: MemberRow, now: number): void {
+    const id = `${sender.userId}\u0000${sender.member}`;
     const recent = (this.postTimes.get(id) ?? []).filter((t) => now - t < 60);
     if (recent.length >= ROOM_LIMITS.postsPerMinute) throw new RoomError(429, "rate_limited");
     recent.push(now);
@@ -402,8 +716,10 @@ export class RoomCore {
    * that addressed the sender (what woke it). Unrelated traffic never
    * raises it, and a post nobody prompted starts at 1. A reply to a post
    * that fell out of the ring counts as capped: waking on unknown ancestry
-   * could restart a loop. Clamped at the cap. */
-  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null): number {
+   * could restart a loop. A chain found by that fallback (not an explicit
+   * reply) whose last link is older than the decay starts over at 1.
+   * Clamped at the cap. */
+  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null, now: number): number {
     if (fromUser) return 0;
     let parent: MessageRow | undefined;
     if (replyTo !== null) {
@@ -416,52 +732,115 @@ export class RoomCore {
       }
     }
     if (!parent) return 1;
+    const decay = this.options.hopDecayS ?? HOP_DECAY_S;
+    if (replyTo === null && now - parent.createdAt > decay) return 1;
     return Math.min(HOP_CAP, parent.fromUser ? 1 : parent.hop + 1);
   }
 
   /** `fromUser` is set by the actor from how the caller reached it, never
    * from the request: today every post arrives through an agent's engine. */
-  post(body: Json, fromUser = false): Promise<PostResult> {
+  post(caller: Caller, body: Json, fromUser = false): Promise<PostResult> {
     return this.serial(async () => {
       this.requireOpen();
       const key = memberKey(body);
-      const sender = this.requireMember(key);
+      const sender = this.requireOwnMember(caller, key);
       const args = parsePost(body);
+
+      // A retry of a post already made answers with the original, waking nobody again.
+      if (args.clientId !== null) {
+        const earlier =
+          this.recent.find((m) => m.senderUserId === caller.userId && m.clientId === args.clientId) ??
+          (await this.store.findByClientId(this.room.id, caller.userId, args.clientId));
+        if (earlier) {
+          return { message: earlier, deliver: [], external: [], unreadFrom: this.unreadFrom(sender), duplicate: true };
+        }
+      }
+
       if (args.replyTo !== null && args.replyTo > this.room.lastSeq) throw bad("replyTo: no such seq");
       const names = new Set(this.members.map((m) => m.member));
       if (args.to !== null && !names.has(args.to)) throw bad("to: not a member of this room");
       const now = this.clock();
-      this.rateLimit(key, now);
+      this.rateLimit(sender, now);
+      const seq = this.room.lastSeq + 1;
+
+      // Claims are the lock; the post is the record. Take (or settle) first.
+      if (args.kind === "claim" && args.claimKey !== null) {
+        if (!(await this.store.takeClaim(this.room.id, args.claimKey, sender.member, caller.userId, seq, now))) {
+          throw new RoomError(409, "claim_held", `${args.claimKey} is held or done by someone else`);
+        }
+      }
+      if (args.kind === "done" && args.claimKey !== null) {
+        if (!(await this.store.settleClaim(this.room.id, args.claimKey, caller.userId, "done", now))) {
+          throw new RoomError(409, "not_your_claim");
+        }
+      }
+
       const mentions = [...new Set([...args.mentions, ...bodyMentions(args.body, names)])];
       const message: MessageRow = {
-        seq: this.room.lastSeq + 1,
+        seq,
         sender: sender.member,
         senderDevice: sender.deviceId,
+        senderUserId: caller.userId,
         fromUser,
         kind: args.kind,
         toMember: args.to,
         body: args.body,
         replyTo: args.replyTo,
         mentions,
-        hop: this.hopFor(fromUser, sender, args.replyTo),
+        hop: this.hopFor(fromUser, sender, args.replyTo, now),
+        clientId: args.clientId,
+        claimKey: args.claimKey,
         createdAt: now
       };
       if (!(await this.store.append(this.room.id, message))) {
+        if (args.kind === "claim" && args.claimKey !== null) {
+          await this.store.settleClaim(this.room.id, args.claimKey, caller.userId, "released", now).catch(() => false);
+        }
         throw new RoomError(409, "stale", "the room changed underneath; retry");
       }
       this.room = { ...this.room, lastSeq: message.seq, lastActivityAt: now };
       this.recent = [...this.recent, message].slice(-ROOM_LIMITS.ring);
+
+      const { deliver, external } = await this.targets(message, sender, now);
       // Posting reads nothing: a DM that arrived since your last read stays
       // in your inbox until read_room returns it.
-      return { message, deliver: this.targets(message, sender), unreadFrom: this.unreadFrom(sender) };
+      return { message, deliver, external, unreadFrom: this.unreadFrom(sender), duplicate: false };
     });
   }
 
-  private targets(message: MessageRow, sender: MemberRow): Delivery[] {
-    if (message.hop >= HOP_CAP) return [];
-    const others = this.members.filter((m) => !sameMember(m, sender));
-    const wanted = others.filter((m) => addressedTo(message, m.member));
-    return wanted.map(({ member, memberKind, memberRef, deviceId }) => ({ member, memberKind, memberRef, deviceId }));
+  /** Split the addressed members: the poster's own are theirs to wake;
+   * other people's go through those people's wake rules. */
+  private async targets(message: MessageRow, sender: MemberRow, now: number) {
+    const deliver: Delivery[] = [];
+    const others: MemberRow[] = [];
+    if (message.hop >= HOP_CAP) return { deliver, external: [] as ExternalWake[] };
+    for (const m of this.members) {
+      if (sameMember(m, sender) || !addressedTo(message, m.member)) continue;
+      if (m.userId === sender.userId) {
+        deliver.push({ member: m.member, memberKind: m.memberKind, memberRef: m.memberRef, deviceId: m.deviceId });
+      } else {
+        others.push(m);
+      }
+    }
+    // One round trip for every other person's member: an @all in a full room
+    // would otherwise hold the room for a check per member.
+    const verdicts = others.length
+      ? await this.store.wakeCheckMany({
+          roomId: this.room.id,
+          seq: message.seq,
+          fromUserId: sender.userId,
+          fromMember: sender.member,
+          targets: others,
+          now
+        })
+      : [];
+    const external: ExternalWake[] = others.map((m, i) => ({
+      member: m.member,
+      deviceId: m.deviceId,
+      userId: m.userId,
+      verdict: verdicts[i] ?? "off"
+    }));
+    return { deliver, external };
   }
 
   private unreadFrom(reader: MemberRow): Record<string, number> {
@@ -486,13 +865,14 @@ export class RoomCore {
    * that far, else from the store. With `advance`, moves the reader's cursor
    * to the newest message returned. */
   read(
+    caller: Caller,
     key: MemberKey,
     since: number,
     limit: number,
     advance: boolean
   ): Promise<{ messages: MessageRow[]; lastSeq: number; readSeq: number }> {
     return this.serial(async () => {
-      this.requireMember(key);
+      this.requireOwnMember(caller, key);
       const page = Math.max(1, Math.min(limit || ROOM_LIMITS.readPage, ROOM_LIMITS.readPage));
       const from = Math.max(0, since);
       const oldest = this.recent[0]?.seq;
@@ -508,9 +888,21 @@ export class RoomCore {
     });
   }
 
-  setArchived(key: MemberKey, archived: boolean): Promise<RoomRow> {
+  /** Give back a claim you hold, so someone else can take it. */
+  release(caller: Caller, body: Json): Promise<void> {
     return this.serial(async () => {
-      this.requireMember(key);
+      this.requireOwnMember(caller, memberKey(body));
+      const claimKey = str(body.claimKey) ?? "";
+      if (!CLAIM_KEY.test(claimKey)) throw bad("claimKey: 1-128 chars, no spaces");
+      if (!(await this.store.settleClaim(this.room.id, claimKey, caller.userId, "released", this.clock()))) {
+        throw new RoomError(409, "not_your_claim");
+      }
+    });
+  }
+
+  setArchived(caller: Caller, archived: boolean): Promise<RoomRow> {
+    return this.serial(async () => {
+      this.requireOwner(caller);
       const at = archived ? this.clock() : null;
       await this.store.setArchived(this.room.id, at);
       this.room = { ...this.room, archivedAt: at };
@@ -518,10 +910,10 @@ export class RoomCore {
     });
   }
 
-  /** Owners only (the creator joins as owner). The actor wipes itself after. */
-  destroy(key: MemberKey): Promise<void> {
+  /** Owners only. The actor wipes itself after. */
+  destroy(caller: Caller): Promise<void> {
     return this.serial(async () => {
-      if (this.requireMember(key).role !== "owner") throw new RoomError(403, "owner_only");
+      this.requireOwner(caller);
       await this.store.destroy(this.room.id);
     });
   }
@@ -532,15 +924,51 @@ export class RoomCore {
 interface MemoryRoom {
   room: RoomRow;
   members: MemberRow[];
+  access: AccessRow[];
   messages: MessageRow[];
+  claims: Map<string, { member: string; userId: string; state: "held" | "done" | "released" }>;
+}
+
+export interface MemoryWakeRules {
+  mode: "off" | "members" | "allowlist";
+  dailyCap: number;
+  allowFrom: string[];
+  blockFrom: string[];
 }
 
 export class MemoryRoomStore implements RoomStore {
   readonly rooms = new Map<string, MemoryRoom>();
+  readonly users = new Map<string, string>();
+  readonly rules = new Map<string, MemoryWakeRules>();
+  readonly wakes: (PendingWake & {
+    toUserId: string;
+    at: number;
+    deliveredAt: number | null;
+    droppedAt: number | null;
+  })[] = [];
+
+  private visible(r: MemoryRoom, userId: string): boolean {
+    return r.access.some((a) => a.userId === userId && a.acceptedAt !== null);
+  }
 
   async createRoom(room: RoomRow, owner: MemberRow): Promise<void> {
     if (this.rooms.has(room.id)) throw new RoomError(409, "room_exists");
-    this.rooms.set(room.id, { room: { ...room }, members: [{ ...owner }], messages: [] });
+    this.rooms.set(room.id, {
+      room: { ...room },
+      members: [{ ...owner }],
+      access: [
+        {
+          userId: room.createdBy,
+          role: "owner",
+          invitedBy: room.createdBy,
+          invitedAt: room.createdAt,
+          acceptedAt: room.createdAt,
+          externalWakes: "follow"
+        }
+      ],
+      messages: [],
+      claims: new Map()
+    });
   }
 
   async loadRoom(id: string): Promise<LoadedRoom | null> {
@@ -549,6 +977,7 @@ export class MemoryRoomStore implements RoomStore {
     return {
       room: { ...r.room },
       members: r.members.map((m) => ({ ...m })),
+      access: r.access.map((a) => ({ ...a })),
       recent: r.messages.slice(-ROOM_LIMITS.ring)
     };
   }
@@ -560,6 +989,10 @@ export class MemoryRoomStore implements RoomStore {
     r.room.lastSeq = message.seq;
     r.room.lastActivityAt = message.createdAt;
     return true;
+  }
+
+  async findByClientId(roomId: string, senderUserId: string, clientId: string): Promise<MessageRow | null> {
+    return this.rooms.get(roomId)?.messages.find((m) => m.senderUserId === senderUserId && m.clientId === clientId) ?? null;
   }
 
   async upsertMember(roomId: string, member: MemberRow): Promise<void> {
@@ -591,31 +1024,149 @@ export class MemoryRoomStore implements RoomStore {
     this.rooms.delete(roomId);
   }
 
-  async listRooms(orgId: string, who?: MemberKey): Promise<RoomSummary[]> {
+  async userIdByEmail(email: string): Promise<string | null> {
+    return this.users.get(email.toLowerCase()) ?? null;
+  }
+
+  async invite(roomId: string, userId: string, invitedBy: string, now: number): Promise<void> {
+    const r = this.rooms.get(roomId);
+    if (!r || r.access.some((a) => a.userId === userId)) return;
+    r.access.push({ userId, role: "member", invitedBy, invitedAt: now, acceptedAt: null, externalWakes: "follow" });
+  }
+
+  async respondInvite(roomId: string, userId: string, accept: boolean, now: number): Promise<boolean> {
+    const r = this.rooms.get(roomId);
+    const grant = r?.access.find((a) => a.userId === userId && a.acceptedAt === null);
+    if (!r || !grant) return false;
+    if (accept) grant.acceptedAt = now;
+    else r.access = r.access.filter((a) => a !== grant);
+    return true;
+  }
+
+  async removePerson(roomId: string, userId: string): Promise<void> {
+    const r = this.rooms.get(roomId);
+    if (!r) return;
+    r.access = r.access.filter((a) => a.userId !== userId);
+    r.members = r.members.filter((m) => m.userId !== userId);
+  }
+
+  async setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void> {
+    const grant = this.rooms.get(roomId)?.access.find((a) => a.userId === userId);
+    if (grant) grant.externalWakes = value;
+  }
+
+  async invites(userId: string): Promise<Invite[]> {
+    const out: Invite[] = [];
+    for (const r of this.rooms.values()) {
+      const grant = r.access.find((a) => a.userId === userId && a.acceptedAt === null);
+      if (grant) out.push({ roomId: r.room.id, roomName: r.room.name, invitedBy: grant.invitedBy, invitedAt: grant.invitedAt });
+    }
+    return out;
+  }
+
+  async takeClaim(roomId: string, claimKey: string, member: string, userId: string): Promise<boolean> {
+    const r = this.rooms.get(roomId);
+    if (!r) return false;
+    const held = r.claims.get(claimKey);
+    if (held && held.state !== "released") return false;
+    r.claims.set(claimKey, { member, userId, state: "held" });
+    return true;
+  }
+
+  async settleClaim(roomId: string, claimKey: string, userId: string, state: "done" | "released"): Promise<boolean> {
+    const held = this.rooms.get(roomId)?.claims.get(claimKey);
+    if (!held || held.userId !== userId || held.state !== "held") return false;
+    held.state = state;
+    return true;
+  }
+
+  /** Mirrors `app.agent_wake_check`: per-room override, then the account
+   * rule, then the daily cap. */
+  async wakeCheck(w: WakeRequest): Promise<WakeVerdict> {
+    const to = w.target.userId;
+    if (to === w.fromUserId) return "self";
+    const r = this.rooms.get(w.roomId);
+    const override = r?.access.find((a) => a.userId === to)?.externalWakes ?? "follow";
+    if (override === "block") return "room_blocked";
+    const rules = this.rules.get(to) ?? { mode: "members", dailyCap: 50, allowFrom: [], blockFrom: [] };
+    if (override !== "allow") {
+      if (rules.blockFrom.includes(w.fromUserId)) return "blocked";
+      if (rules.mode === "off") return "off";
+      if (rules.mode === "allowlist" && !rules.allowFrom.includes(w.fromUserId)) return "not_listed";
+    }
+    const today = this.wakes.filter((x) => x.toUserId === to && w.now - x.at < 86_400).length;
+    if (today >= rules.dailyCap) return "capped";
+    const body = r?.messages.find((m) => m.seq === w.seq)?.body ?? "";
+    this.wakes.push({
+      id: this.wakes.length + 1,
+      roomId: w.roomId,
+      roomName: r?.room.name ?? w.roomId,
+      seq: w.seq,
+      fromMember: w.fromMember,
+      fromUserId: w.fromUserId,
+      fromDisplay: `cg-${w.fromUserId}`,
+      fromGithub: null,
+      fromFingerprint: `cg-${w.fromUserId}`,
+      toMember: w.target.member,
+      toRef: w.target.memberRef,
+      toDevice: w.target.deviceId,
+      toUserId: to,
+      body,
+      at: w.now,
+      deliveredAt: null,
+      droppedAt: null
+    });
+    return "allowed";
+  }
+
+  async wakeCheckMany(batch: WakeBatch): Promise<WakeVerdict[]> {
+    const out: WakeVerdict[] = [];
+    for (const target of batch.targets) out.push(await this.wakeCheck({ ...batch, target }));
+    return out;
+  }
+
+  async pendingWakes(userId: string, limit: number): Promise<PendingWake[]> {
+    return this.wakes
+      .filter((w) => w.toUserId === userId && w.deliveredAt === null && w.droppedAt === null)
+      .slice(0, limit)
+      .map(({ toUserId: _to, at: _at, deliveredAt: _d, droppedAt: _x, ...wake }) => wake);
+  }
+
+  async ackWakes(userId: string, ids: number[], now: number, dropped = false): Promise<void> {
+    for (const w of this.wakes) {
+      if (w.toUserId !== userId || !ids.includes(w.id) || w.deliveredAt !== null || w.droppedAt !== null) continue;
+      if (dropped) w.droppedAt = now;
+      else w.deliveredAt = now;
+    }
+  }
+
+  async listRooms(userId: string, who?: MemberKey): Promise<RoomSummary[]> {
     const out: RoomSummary[] = [];
     for (const r of this.rooms.values()) {
-      if (r.room.orgId !== orgId) continue;
-      const me = who && r.members.find((m) => sameMember(m, who));
+      if (!this.visible(r, userId)) continue;
+      const me = who && r.members.find((m) => sameMember(m, who) && m.userId === userId);
       if (who && !me) continue;
       out.push({
         id: r.room.id,
         name: r.room.name,
         kind: r.room.kind,
+        projectRef: r.room.projectRef,
         lastSeq: r.room.lastSeq,
         lastActivityAt: r.room.lastActivityAt,
         archivedAt: r.room.archivedAt,
         members: r.members.length,
+        people: r.access.filter((a) => a.acceptedAt !== null).length,
         ...(me ? { unread: r.messages.filter((m) => m.seq > me.readSeq && m.sender !== me.member).length } : {})
       });
     }
     return out.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   }
 
-  async inbox(orgId: string, who: MemberKey, limit: number): Promise<InboxItem[]> {
+  async inbox(userId: string, who: MemberKey, limit: number): Promise<InboxItem[]> {
     const items: InboxItem[] = [];
     for (const r of this.rooms.values()) {
-      if (r.room.orgId !== orgId) continue;
-      const me = r.members.find((m) => sameMember(m, who));
+      if (!this.visible(r, userId)) continue;
+      const me = r.members.find((m) => sameMember(m, who) && m.userId === userId);
       if (!me) continue;
       for (const message of r.messages) {
         if (message.seq <= me.readSeq || message.sender === me.member) continue;

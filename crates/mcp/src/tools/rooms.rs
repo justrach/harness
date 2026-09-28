@@ -16,7 +16,7 @@ use crate::harness::short;
 
 fn room_schema(extra: Value) -> Value {
     let mut properties = json!({
-        "room": { "type": "string", "description": "Room id (room_…) or exact room name." }
+        "room": { "type": "string", "description": "The room's id (room_…) or its exact, case-sensitive name as list_rooms shows it." }
     });
     if let (Some(base), Some(more)) = (properties.as_object_mut(), extra.as_object()) {
         for (k, v) in more {
@@ -45,7 +45,8 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                     "name": { "type": "string" },
                     "kind": { "type": "string", "enum": ["ephemeral", "persistent"], "default": "ephemeral" },
                     "idle_ttl_secs": { "type": "integer", "minimum": 60 },
-                    "members": { "type": "array", "items": { "type": "string" } }
+                    "members": { "type": "array", "items": { "type": "string" } },
+                    "project": { "type": "boolean", "default": false, "description": "Bind the room to this chat's repository: only chats working in the same repository (same origin remote) can join." }
                 },
                 "required": ["name"]
             }),
@@ -64,14 +65,20 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "post_room",
-            description: "Post to a room. A plain post wakes nobody; members read it with read_room. To wake someone, @mention their member name in the text (or pass mentions), use @all, or DM with `to`. Woken chats get your post queued after their current turn. Returns your post's seq and how many unread posts each member has that you haven't seen: read those before replying.",
+            description: "Post to a room. A plain post wakes nobody; members read it with read_room. To wake someone, @mention their member name in the text (or pass mentions), use @all, or DM with `to`. Woken chats get your post queued after their current turn. Members may belong to other people: their chats are woken only if their own rules allow it (see `external` in the result). Returns your post's seq and how many unread posts each member has that you haven't seen: read those before replying. To take a task on a shared board, post kind 'claim' with a claim_key: the first claim wins and a taken task answers claim_held; post kind 'done' with the same key when finished.",
             input_schema: room_schema(json!({
                 "text": { "type": "string", "maxLength": 8000 },
                 "to": { "type": "string", "description": "Member name: a direct message only they are woken for." },
                 "mentions": { "type": "array", "items": { "type": "string" } },
                 "reply_to": { "type": "integer", "description": "The seq you are answering." },
-                "kind": { "type": "string", "enum": ["message", "claim", "done", "task"], "default": "message" }
+                "kind": { "type": "string", "enum": ["message", "claim", "done", "task"], "default": "message" },
+                "claim_key": { "type": "string", "description": "The task a claim or done post is about." }
             })),
+        },
+        ToolDef {
+            name: "release_claim",
+            description: "Give back a task you claimed so someone else can take it.",
+            input_schema: room_schema(json!({ "claim_key": { "type": "string" } })),
         },
         ToolDef {
             name: "read_room",
@@ -118,6 +125,8 @@ struct CreateArgs {
     idle_ttl_secs: Option<u64>,
     #[serde(default)]
     members: Vec<String>,
+    #[serde(default)]
+    project: bool,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +149,13 @@ struct PostArgs {
     mentions: Vec<String>,
     reply_to: Option<u64>,
     kind: Option<String>,
+    claim_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseArgs {
+    room: String,
+    claim_key: String,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +181,42 @@ struct Me {
     chat_id: String,
     device: String,
     name: String,
+    /// The repository this chat works in, as a project-bound room knows it.
+    project: Option<String>,
+}
+
+/// A repository's identity across people and machines: its `origin` remote
+/// without scheme, user or `.git` (`git@github.com:acme/app.git` →
+/// `github.com/acme/app`). Local paths differ per person; the remote doesn't.
+pub(super) fn project_ref(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let rest = remote.split_once("://").map_or(remote, |(_, rest)| rest);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    // `host:port/owner/repo` drops the port; scp-style `host:owner/repo`
+    // becomes `host/owner/repo`.
+    let rest = match rest.split_once(':') {
+        Some((host, path)) => {
+            let path = path.trim_start_matches('/');
+            let path = match path.split_once('/') {
+                Some((port, tail)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => tail,
+                _ => path,
+            };
+            format!("{host}/{path}")
+        }
+        None => rest.to_owned(),
+    };
+    let rest = rest.trim_end_matches('/').trim_end_matches(".git").to_ascii_lowercase();
+    (rest.contains('/') && !rest.starts_with('/')).then_some(rest)
+}
+
+/// The project ref for a checkout on this machine, if it has an origin.
+fn project_of(cwd: Option<&str>) -> Option<String> {
+    let cwd = cwd?;
+    let out = std::process::Command::new("git")
+        .args(["-C", cwd, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned()).and_then(|r| project_ref(&r))
 }
 
 /// A chat's member name: its title as one @-able word, else `chat-<id>`.
@@ -203,6 +255,7 @@ impl Tools {
             "post_room" => self.post_room(super::parse(args)?).await,
             "read_room" => self.read_room(super::parse(args)?).await,
             "room_inbox" => self.room_inbox().await,
+            "release_claim" => self.release_claim(super::parse(args)?).await,
             "archive_room" => self.archive_room(super::parse(args)?).await,
             "destroy_room" => self.destroy_room(super::parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -221,8 +274,10 @@ impl Tools {
             Some(device) => device,
             None => chat.device_id.clone(),
         };
+        let cwd = chat.source_context.as_ref().map(|c| c.repo_root.clone()).or(chat.cwd.clone());
         Ok(Me {
             name: member_name(chat.title.as_deref(), &chat.id),
+            project: project_of(cwd.as_deref()),
             chat_id: chat.id,
             device,
         })
@@ -243,7 +298,9 @@ impl Tools {
                 room["name"].as_str().unwrap_or_default().to_owned(),
             )),
             None if key.starts_with("room_") => Ok((key.to_owned(), key.to_owned())),
-            None => anyhow::bail!("no room named {key:?}"),
+            None => anyhow::bail!(
+                "no room named {key:?} that you can see (names are exact and case-sensitive; the room may have been destroyed, or you aren't in it — see list_rooms)"
+            ),
         }
     }
 
@@ -291,6 +348,13 @@ impl Tools {
         let me = self.me().await?;
         let kind = args.kind.unwrap_or_else(|| "ephemeral".into());
         let ttl = (kind == "ephemeral").then(|| args.idle_ttl_secs.unwrap_or(3600));
+        let project = if args.project {
+            Some(me.project.clone().ok_or_else(|| {
+                anyhow::anyhow!("this chat's checkout has no origin remote to bind the room to")
+            })?)
+        } else {
+            None
+        };
         let created = self
             .harness
             .room_request(
@@ -299,6 +363,7 @@ impl Tools {
                 &[],
                 Some(json!({
                     "name": args.name, "kind": kind, "idleTtlS": ttl, "parentChat": me.chat_id,
+                    "projectRef": project, "memberProjectRef": project,
                     "member": me.name, "device": me.device,
                     "memberKind": "harness_chat", "memberRef": me.chat_id
                 })),
@@ -325,7 +390,10 @@ impl Tools {
                 &[],
                 Some(json!({
                     "member": member_name(chat.title.as_deref(), &chat.id), "device": chat.device_id,
-                    "memberKind": "harness_chat", "memberRef": chat.id
+                    "memberKind": "harness_chat", "memberRef": chat.id,
+                    "projectRef": project_of(
+                        chat.source_context.as_ref().map(|c| c.repo_root.as_str()).or(chat.cwd.as_deref())
+                    )
                 })),
             )
             .await?;
@@ -345,7 +413,8 @@ impl Tools {
                 &[],
                 Some(json!({
                     "member": me.name, "device": me.device,
-                    "memberKind": "harness_chat", "memberRef": me.chat_id
+                    "memberKind": "harness_chat", "memberRef": me.chat_id,
+                    "projectRef": me.project
                 })),
             )
             .await
@@ -369,20 +438,22 @@ impl Tools {
         let (room_id, room_name) = self.resolve_room(&args.room).await?;
         let me = self.me().await?;
         let name = self.my_name_in(&room_id, &me).await?;
-        // Agents never post as a person: fromUser is always false here.
-        let posted = self
-            .harness
-            .room_request(
-                "POST",
-                &format!("room/{room_id}/post"),
-                &[],
-                Some(json!({
-                    "member": name, "device": me.device, "body": args.text, "to": args.to,
-                    "mentions": args.mentions, "replyTo": args.reply_to,
-                    "kind": args.kind.unwrap_or_else(|| "message".into()), "fromUser": false
-                })),
-            )
-            .await?;
+        // Agents never post as a person: fromUser is always false here. The
+        // client id makes one retry safe: a post that landed but whose answer
+        // was lost comes back as the original, not a second post.
+        let post = json!({
+            "member": name, "device": me.device, "body": args.text, "to": args.to,
+            "mentions": args.mentions, "replyTo": args.reply_to,
+            "kind": args.kind.unwrap_or_else(|| "message".into()), "claimKey": args.claim_key,
+            "clientId": uuid::Uuid::new_v4().simple().to_string(), "fromUser": false
+        });
+        let path = format!("room/{room_id}/post");
+        let posted = match self.harness.room_request("POST", &path, &[], Some(post.clone())).await {
+            Err(e) if !e.to_string().starts_with("room request failed (") => {
+                self.harness.room_request("POST", &path, &[], Some(post)).await?
+            }
+            other => other?,
+        };
         let message = &posted["message"];
         let seq = message["seq"].as_u64().unwrap_or_default();
         let mut woken = Vec::new();
@@ -404,6 +475,10 @@ impl Tools {
                 member_kind: "harness_chat".into(),
                 from_user: false,
                 framed: true,
+                external: false,
+                from_display: None,
+                from_github: None,
+                from_fingerprint: None,
             };
             let text = room_delivery::format(&origin, &args.text);
             woken.push(match self.harness.queue_message(chat_id, &text).await {
@@ -417,6 +492,8 @@ impl Tools {
             "seq": seq,
             "hop": message["hop"],
             "woken": woken,
+            "external": posted["external"],
+            "duplicate": posted["duplicate"],
             "unreadFrom": posted["unreadFrom"],
         }))
     }
@@ -452,6 +529,20 @@ impl Tools {
             "messages": read["messages"],
             "lastSeq": read["lastSeq"],
         }))
+    }
+
+    async fn release_claim(&self, args: ReleaseArgs) -> anyhow::Result<Value> {
+        let (room_id, _) = self.resolve_room(&args.room).await?;
+        let me = self.me().await?;
+        let name = self.my_name_in(&room_id, &me).await?;
+        self.harness
+            .room_request(
+                "POST",
+                &format!("room/{room_id}/release"),
+                &[],
+                Some(json!({ "member": name, "device": me.device, "claimKey": args.claim_key })),
+            )
+            .await
     }
 
     async fn room_inbox(&self) -> anyhow::Result<Value> {
@@ -495,7 +586,18 @@ impl Tools {
 
 #[cfg(test)]
 mod tests {
-    use super::member_name;
+    use super::{member_name, project_ref};
+
+    #[test]
+    fn project_refs_match_across_remote_spellings() {
+        let want = Some("github.com/acme/app".to_owned());
+        assert_eq!(project_ref("git@github.com:acme/app.git\n"), want);
+        assert_eq!(project_ref("https://github.com/Acme/app.git"), want);
+        assert_eq!(project_ref("ssh://git@github.com/acme/app"), want);
+        assert_eq!(project_ref("https://user:tok@github.com/acme/app/"), want);
+        assert_eq!(project_ref("ssh://git@github.com:22/acme/app.git"), want);
+        assert_eq!(project_ref("/local/path/repo"), None);
+    }
     use crate::harness::short;
 
     #[test]

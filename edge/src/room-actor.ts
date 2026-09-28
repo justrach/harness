@@ -2,8 +2,8 @@
  * RoomActor — one Durable Object per agent room (`room1/{roomId}`), the live
  * actor over PostgreSQL's store of record (room-core.ts has the logic).
  *
- * The actor holds members, last seq and a ring of recent posts in memory,
- * assigns seq, and acks a post only after PostgreSQL has it; then it
+ * The actor holds members, grants, last seq and a ring of recent posts in
+ * memory, assigns seq, and acks a post only after PostgreSQL has it; then it
  * broadcasts to connected sockets. It keeps nothing durable of its own but
  * two markers: `room` (its id, so a cold alarm knows what to load) and
  * `destroyed` (a tombstone that answers 410 room_destroyed forever). On wake
@@ -11,22 +11,42 @@
  * swept or destroyed elsewhere, so it wipes itself — the two sides heal
  * each other.
  *
+ * The caller is the user the Worker verified from the bearer (never the
+ * request body). A post that wakes another person's chat, once their rules
+ * allow it, nudges that chat's device with {@link ROOM_WAKES_NUDGE}; their
+ * engine then collects its wakes from `GET /rooms/wakes`.
+ *
  * Ephemeral rooms die of idleness: the alarm fires at last activity plus
  * idle_ttl_s and every post pushes it out. The edge cron's sweeper covers
  * actors that never wake.
  *
- * Internal routes (the Worker has checked the bearer and org):
- *   POST /create?room=      GET /state?room=      GET /ws?room=&member=&device=
- *   POST /join  /leave  /post  /archive  /destroy       (?room=)
+ * Internal routes (the Worker has checked the bearer):
+ *   POST /create?room=   GET /state?room=   GET /ws?room=&member=&device=
  *   GET  /messages?room=&member=&device=&since=&limit=&advance=1
- *   POST /wipe?room=        (Worker cron only; never routed from fetch)
+ *   POST /join /leave /post /archive /destroy /invite /accept /decline
+ *        /remove /wakes /release                                   (?room=)
+ *   POST /wipe?room=     (Worker cron only; never routed from fetch)
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { PgRoomStore } from "./room-store-pg";
-import { MemoryRoomStore, RoomCore, RoomError, memberKey, type Json, type RoomStore } from "./room-core";
+import {
+  MemoryRoomStore,
+  RoomCore,
+  RoomError,
+  memberKey,
+  type Caller,
+  type Json,
+  type MemberKey,
+  type RoomStore
+} from "./room-core";
 
-/** The verified caller's org, stamped by the Worker next to the user. */
+/** The verified caller's org, stamped by the Worker next to the user. New
+ * rooms record it; access is by grant, not org. */
 export const AUTH_ORG_HEADER = "x-harness-auth-org";
+
+/** The chat id a device nudge carries when it means "you have room wakes":
+ * not a chat (chat ids are UUIDs), so no chat doc is ever opened for it. */
+export const ROOM_WAKES_NUDGE = "rooms-wakes";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -47,16 +67,24 @@ export function roomStore(env: Env): RoomStore | undefined {
   return env.AUTH_MODE === "dev" ? devStore : undefined;
 }
 
+/** Run `fn` inside a store session when the store has them (one database
+ * connection for the whole request). */
+const inSession = <T>(store: RoomStore | undefined, fn: () => Promise<T>): Promise<T> =>
+  store instanceof PgRoomStore ? store.session(fn) : fn();
+
 /** The hibernation tag that finds one member's sockets. */
-const socketTag = (key: { member: string; deviceId: string }): string => JSON.stringify([key.member, key.deviceId]);
+const socketTag = (key: MemberKey): string => JSON.stringify([key.member, key.deviceId]);
 
 interface SocketTag {
   member: string;
   deviceId: string;
+  userId: string;
 }
 
 export class RoomActor implements DurableObject {
   private core: RoomCore | null = null;
+  /** The actor's one store: requests share its database connection. */
+  private storeInstance: RoomStore | undefined;
   /** One load at a time: concurrent cold requests share it rather than each
    * building a RoomCore and the later one replacing the earlier mid-post. */
   private loading: Promise<RoomCore> | null = null;
@@ -66,26 +94,36 @@ export class RoomActor implements DurableObject {
     private readonly env: Env
   ) {}
 
+  /** `ROOM_HOP_DECAY_S` (seconds) overrides the default decay: tests shorten it. */
+  private options() {
+    const decay = Number(this.env.ROOM_HOP_DECAY_S);
+    return Number.isFinite(decay) && decay > 0 ? { hopDecayS: decay } : {};
+  }
+
   private store(): RoomStore {
-    const store = roomStore(this.env);
-    if (!store) throw new RoomError(503, "rooms_unavailable", "no room store configured");
-    return store;
+    this.storeInstance ??= roomStore(this.env);
+    if (!this.storeInstance) throw new RoomError(503, "rooms_unavailable", "no room store configured");
+    return this.storeInstance;
   }
 
   private async destroyed(): Promise<boolean> {
     return (await this.ctx.storage.get<boolean>("destroyed")) === true;
   }
 
-  /** Drop everything, keep the tombstone, and tell connected sockets. */
-  private async wipe(): Promise<void> {
-    for (const ws of this.ctx.getWebSockets()) {
+  private closeSockets(sockets: WebSocket[], code: number, reason: string, notice?: unknown): void {
+    for (const ws of sockets) {
       try {
-        ws.send(JSON.stringify({ type: "destroyed" }));
-        ws.close(4410, "room_destroyed");
+        if (notice) ws.send(JSON.stringify(notice));
+        ws.close(code, reason);
       } catch {
         // Already gone.
       }
     }
+  }
+
+  /** Drop everything, keep the tombstone, and tell connected sockets. */
+  private async wipe(): Promise<void> {
+    this.closeSockets(this.ctx.getWebSockets(), 4410, "room_destroyed", { type: "destroyed" });
     this.core = null;
     this.loading = null;
     await this.ctx.storage.deleteAlarm();
@@ -103,7 +141,7 @@ export class RoomActor implements DurableObject {
 
   private async load(roomId: string): Promise<RoomCore> {
     if (await this.destroyed()) throw new RoomError(410, "room_destroyed");
-    const core = await RoomCore.load(this.store(), roomId);
+    const core = await RoomCore.load(this.store(), roomId, undefined, this.options());
     if (!core) {
       if ((await this.ctx.storage.get<string>("room")) !== undefined) {
         await this.wipe();
@@ -130,9 +168,12 @@ export class RoomActor implements DurableObject {
     else await this.ctx.storage.setAlarm(at * 1000);
   }
 
-  private broadcast(event: unknown): void {
+  /** Live events go only to sockets whose person can still see the room. */
+  private broadcast(core: RoomCore, event: unknown): void {
     const frame = JSON.stringify(event);
     for (const ws of this.ctx.getWebSockets()) {
+      const tag = ws.deserializeAttachment() as SocketTag | null;
+      if (!tag || !core.canSee({ userId: tag.userId })) continue;
       try {
         ws.send(frame);
       } catch {
@@ -142,6 +183,11 @@ export class RoomActor implements DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.storeInstance ??= roomStore(this.env);
+    return inSession(this.storeInstance, () => this.handle(request));
+  }
+
+  private async handle(request: Request): Promise<Response> {
     try {
       return await this.route(request);
     } catch (err) {
@@ -176,7 +222,7 @@ export class RoomActor implements DurableObject {
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const roomId = url.searchParams.get("room") ?? "";
-    const userId = request.headers.get(AUTH_USER_HEADER) ?? "";
+    const caller: Caller = { userId: request.headers.get(AUTH_USER_HEADER) ?? "" };
     const orgId = request.headers.get(AUTH_ORG_HEADER) ?? "";
     const path = url.pathname;
 
@@ -184,6 +230,7 @@ export class RoomActor implements DurableObject {
       await this.wipe();
       return json({ ok: true });
     }
+    if (!caller.userId) throw new RoomError(401, "unauthenticated");
 
     if (path === "/create" && request.method === "POST") {
       if (await this.destroyed()) throw new RoomError(410, "room_destroyed");
@@ -191,72 +238,92 @@ export class RoomActor implements DurableObject {
         throw new RoomError(409, "room_exists");
       }
       const body = await this.body(request);
-      this.core = await RoomCore.create(this.store(), roomId, orgId, userId, body);
+      this.core = await RoomCore.create(this.store(), roomId, orgId, caller, body, undefined, this.options());
       await this.ctx.storage.put("room", roomId);
       await this.schedule();
-      return json(this.core.snapshot(), 201);
+      return json(this.core.snapshot(caller), 201);
     }
 
-    const core = await this.loaded(roomId);
-    // Rooms are one org's: anyone else gets the same answer as a missing room.
-    if (core.room.orgId !== orgId) throw new RoomError(404, "room_not_found");
+    let core = await this.loaded(roomId);
+    // Grants also change outside this actor (the console accepts invites in
+    // PostgreSQL directly): re-read once before turning someone away.
+    if (!core.canSee(caller)) core = await this.reload(roomId);
+
+    // The invitee answers before they can see anything else.
+    if ((path === "/accept" || path === "/decline") && request.method === "POST") {
+      const grant = await core.respond(caller, path === "/accept");
+      if (grant) this.broadcast(core, { type: "person", userId: caller.userId });
+      return json({ ok: true, grant });
+    }
 
     if (path === "/ws" && request.method === "GET") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return json({ error: "expected websocket" }, 426);
       }
       const key = memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
-      if (!core.find(key)) throw new RoomError(403, "not_a_member");
+      const member = core.find(key);
+      if (!core.canSee(caller)) throw new RoomError(404, "room_not_found");
+      if (!member || member.userId !== caller.userId) throw new RoomError(403, "not_your_member");
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1], [socketTag(key)]);
-      pair[1].serializeAttachment({ member: key.member, deviceId: key.deviceId } satisfies SocketTag);
+      pair[1].serializeAttachment({ member: key.member, deviceId: key.deviceId, userId: caller.userId } satisfies SocketTag);
       pair[1].send(JSON.stringify({ type: "hello", lastSeq: core.room.lastSeq }));
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
-    if (path === "/state" && request.method === "GET") return json(core.snapshot());
+    if (path === "/state" && request.method === "GET") return json(core.snapshot(caller));
 
     if (path === "/messages" && request.method === "GET") {
       const key = memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
       const since = Number(url.searchParams.get("since") ?? 0) || 0;
       const limit = Number(url.searchParams.get("limit") ?? 0) || 0;
-      return json(await core.read(key, since, limit, url.searchParams.get("advance") === "1"));
+      return json(await core.read(caller, key, since, limit, url.searchParams.get("advance") === "1"));
     }
 
     if (request.method !== "POST") return json({ error: "not_found" }, 404);
     const body = await this.body(request);
     switch (path) {
       case "/join": {
-        const member = await core.join(body);
-        this.broadcast({ type: "member", member });
+        const member = await core.join(caller, body);
+        this.broadcast(core, { type: "member", member });
         return json({ member, lastSeq: core.room.lastSeq });
       }
       case "/leave": {
-        const key = memberKey(body);
-        await core.leave(body);
-        for (const ws of this.ctx.getWebSockets(socketTag(key))) {
-          try {
-            ws.close(4403, "left");
-          } catch {
-            // Already closed.
-          }
-        }
-        this.broadcast({ type: "left", member: key.member, device: key.deviceId });
+        const key = await core.leave(caller, body);
+        this.closeSockets(this.ctx.getWebSockets(socketTag(key)), 4403, "left");
+        this.broadcast(core, { type: "left", member: key.member, device: key.deviceId });
         return json({ ok: true });
       }
       case "/post": {
-        const result = await this.post(core, body);
+        const result = await this.post(core, caller, body);
         await this.schedule();
-        this.broadcast({ type: "message", roomId: core.room.id, message: result.message });
+        if (!result.duplicate) {
+          this.broadcast(core, { type: "message", roomId: core.room.id, message: result.message });
+          this.ctx.waitUntil(this.nudgeExternal(result.external));
+        }
         return json(result);
       }
+      case "/invite":
+        return json(await core.invite(caller, body));
+      case "/remove": {
+        const userId = typeof body.userId === "string" ? body.userId : caller.userId;
+        const gone = await core.removePerson(caller, userId);
+        for (const key of gone) this.closeSockets(this.ctx.getWebSockets(socketTag(key)), 4403, "removed");
+        this.broadcast(core, { type: "person_left", userId });
+        return json({ ok: true, members: gone });
+      }
+      case "/wakes":
+        return json({ grant: await core.setExternalWakes(caller, body) });
+      case "/release":
+        await core.release(caller, body);
+        return json({ ok: true });
       case "/archive": {
-        const room = await core.setArchived(memberKey(body), body.archived !== false);
-        this.broadcast({ type: "room", room });
+        const room = await core.setArchived(caller, body.archived !== false);
+        this.broadcast(core, { type: "room", room });
         return json({ room });
       }
       case "/destroy": {
-        await core.destroy(memberKey(body));
+        await core.destroy(caller);
         await this.wipe();
         return json({ ok: true });
       }
@@ -267,22 +334,47 @@ export class RoomActor implements DurableObject {
 
   /** A post the store refused as stale gets one retry on reloaded state; a
    * failed write reloads (the append may have committed) and reports 503. */
-  private async post(core: RoomCore, body: Json) {
+  private async post(core: RoomCore, caller: Caller, body: Json) {
     const roomId = core.room.id;
     try {
-      return await core.post(body);
+      return await core.post(caller, body);
     } catch (err) {
       if (err instanceof RoomError && err.code !== "stale") throw err;
       const fresh = await this.reload(roomId);
-      if (err instanceof RoomError) return fresh.post(body);
+      if (err instanceof RoomError) return fresh.post(caller, body);
       throw err;
     }
   }
 
+  /** Tell each allowed target's device it has room wakes to collect. The
+   * device room queues the nudge durably while the device is offline. */
+  private async nudgeExternal(external: { deviceId: string; userId: string; verdict: string }[]): Promise<void> {
+    const devices = new Map<string, string>();
+    for (const w of external) if (w.verdict === "allowed" && w.deviceId) devices.set(w.deviceId, w.userId);
+    await Promise.all(
+      [...devices].map(([deviceId, userId]) =>
+        this.env.DEVICE_ROOMS.get(this.env.DEVICE_ROOMS.idFromName(`d2/${deviceId}`))
+          .fetch("https://device/nudge", {
+            method: "POST",
+            headers: { [AUTH_USER_HEADER]: userId, "content-type": "application/json" },
+            body: JSON.stringify({ chatId: ROOM_WAKES_NUDGE })
+          })
+          .catch((err) =>
+            console.error(JSON.stringify({ event: "room_wake_nudge_failed", device: deviceId, error: String(err) }))
+          )
+      )
+    );
+  }
+
   /** Idle expiry for ephemeral rooms, on freshly loaded state. */
   async alarm(): Promise<void> {
+    this.storeInstance ??= roomStore(this.env);
+    return inSession(this.storeInstance, () => this.expire());
+  }
+
+  private async expire(): Promise<void> {
     if (await this.destroyed()) return;
-    const store = roomStore(this.env);
+    const store = this.storeInstance;
     const roomId = this.core?.room.id ?? (await this.ctx.storage.get<string>("room"));
     if (!store || !roomId) return;
     let core: RoomCore;

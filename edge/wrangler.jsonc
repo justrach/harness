@@ -31,10 +31,12 @@
     { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] },
     { "tag": "v6", "new_sqlite_classes": ["RoomActor"] }
   ],
-  // PostgreSQL (caching off): agent rooms' store of record. The id is not a
-  // secret; the connection string lives only in the Hyperdrive config.
+  // PostgreSQL (caching off): agent rooms' store of record, through the edge's
+  // own Hyperdrive config (origin connections capped at 8) so room bursts
+  // can't take the pool other services share. The id is not a secret; the
+  // connection string lives only in the Hyperdrive config.
   "hyperdrive": [
-    { "binding": "HYPERDRIVE", "id": "fc276656636d41fab743b1400c74d0da" }
+    { "binding": "HYPERDRIVE", "id": "d2a07d784bad47b8aabecf8565fa03a2" }
   ],
   // Agent-room sweeper (room-actor.ts): expired ephemeral rooms whose actors
   // never woke.
