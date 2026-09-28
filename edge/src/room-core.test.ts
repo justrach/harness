@@ -74,21 +74,39 @@ describe("agent rooms", () => {
     expect(r.deliver.map((d) => d.member)).toEqual(["claude@codegraff"]);
   });
 
-  it("counts agent hops since a person posted and stops waking at the cap", async () => {
+  it("counts hops along the wake chain and stops waking at the cap", async () => {
     const { core } = await room();
-    const human = await core.post({ ...alice, body: "@bob go", fromUser: true });
+    const human = await core.post({ ...alice, body: "@bob go" }, true);
     expect(human.message.hop).toBe(0);
     let last = human;
     const speakers = [bob, alice];
     for (let i = 1; i <= HOP_CAP; i++) {
-      last = await core.post({ ...speakers[i % 2], body: "@all next" });
+      const [me, other] = [speakers[(i + 1) % 2], speakers[i % 2]];
+      last = await core.post({ ...me, body: `@${other.member} next` });
       expect(last.message.hop).toBe(i);
     }
+    expect(last.message.hop).toBe(HOP_CAP);
     expect(last.deliver).toEqual([]);
     // A person posting resets the chain.
-    const reset = await core.post({ ...carol, body: "@all again", fromUser: true });
+    const reset = await core.post({ ...carol, body: "@all again" }, true);
     expect(reset.message.hop).toBe(0);
     expect(reset.deliver.length).toBe(2);
+  });
+
+  it("never raises the hop on unrelated traffic", async () => {
+    const { core } = await room();
+    for (let i = 0; i < 20; i++) await core.post({ ...(i % 2 ? alice : bob), body: `status ${i}` });
+    const ping = await core.post({ ...carol, body: "@bob can you look?" });
+    expect(ping.message.hop).toBe(1);
+    expect(ping.deliver.map((d) => d.member)).toEqual(["bob"]);
+  });
+
+  it("ignores a caller's claim to be a person", async () => {
+    const { core } = await room();
+    await core.post({ ...alice, body: "@bob one" });
+    const claimed = await core.post({ ...bob, body: "@alice two", fromUser: true });
+    expect(claimed.message.fromUser).toBe(false);
+    expect(claimed.message.hop).toBe(2);
   });
 
   it("enforces members only, body size, and the per-member rate", async () => {
@@ -96,8 +114,12 @@ describe("agent rooms", () => {
     expect(await code(core.post({ member: "mallory", device: "x", body: "hi" }))).toBe("not_a_member");
     expect(await code(core.read({ member: "mallory", deviceId: "x" }, 0, 10, false))).toBe("not_a_member");
     expect(await code(core.post({ ...alice, body: "x".repeat(ROOM_LIMITS.bodyChars + 1) }))).toBe("too_large");
+    expect(await code(core.post({ ...alice, body: "nul\u0000" }))).toBe("bad_request");
+    await core.join({ ...bob, device: "studio" });
     for (let i = 0; i < ROOM_LIMITS.postsPerMinute; i++) await core.post({ ...bob, body: `${i}` });
     expect(await code(core.post({ ...bob, body: "one more" }))).toBe("rate_limited");
+    // Another device of the same member shares the budget.
+    expect(await code(core.post({ ...bob, device: "studio", body: "sneaky" }))).toBe("rate_limited");
     // Another member's budget is separate.
     expect(await code(core.post({ ...alice, body: "fine" }))).toBe("ok");
   });
@@ -117,9 +139,12 @@ describe("agent rooms", () => {
     const who = { member: "bob", deviceId: "mac" };
     expect((await store.inbox(ORG, who, 10)).map((i) => i.message.body)).toEqual(["@bob one", "@all two"]);
     expect((await store.listRooms(ORG, who))[0].unread).toBe(3);
-    // Bob's reply reports what he hasn't read yet, per sender.
+    // Bob's reply reports what he hasn't read yet, per sender, and posting
+    // does not swallow the DMs waiting in his inbox.
     const reply = await core.post({ ...bob, body: "on it" });
     expect(reply.unreadFrom).toEqual({ alice: 2, carol: 1 });
+    expect((await store.inbox(ORG, who, 10)).length).toBe(2);
+    await core.read(who, 0, 50, true);
     expect(await store.inbox(ORG, who, 10)).toEqual([]);
     // Reading with advance moves the cursor.
     await core.post({ ...alice, body: "@bob three" });
@@ -139,8 +164,11 @@ describe("agent rooms", () => {
     expect(store.rooms.size).toBe(0);
   });
 
-  it("rejects an ephemeral room with no way to die, and reports idle expiry", async () => {
-    expect(await code(room({ kind: "ephemeral" }))).toBe("bad_request");
+  it("gives every ephemeral room an idle lifetime, and reports expiry", async () => {
+    const parented = await room({ kind: "ephemeral", parentChat: "chat-a" });
+    expect(parented.core.room.idleTtlS).toBe(ROOM_LIMITS.defaultIdleTtlS);
+    expect(await code(room({ kind: "ephemeral", idleTtlS: 2 ** 31 }))).toBe("bad_request");
+    expect((await room({ kind: "persistent", idleTtlS: 60 })).core.expiresAt()).toBeNull();
     let now = 1_000;
     const { core } = await room({ kind: "ephemeral", idleTtlS: 600 }, () => now);
     expect(core.expiresAt()).toBe(1_600);

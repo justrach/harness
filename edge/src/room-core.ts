@@ -23,7 +23,11 @@ export const ROOM_LIMITS = {
   postsPerMinute: 30,
   ring: 200,
   readPage: 200,
-  members: 64
+  members: 64,
+  /** Longest idle lifetime an ephemeral room may ask for: 30 days. */
+  maxIdleTtlS: 30 * 24 * 60 * 60,
+  /** An ephemeral room created without one dies after a day of silence. */
+  defaultIdleTtlS: 24 * 60 * 60
 };
 
 /** A post this many agent hops from a person's post wakes nobody. */
@@ -40,9 +44,10 @@ const MESSAGE_KINDS: readonly string[] = ["message", "claim", "done", "task"];
 export const ROOM_ID = /^room_[0-9a-f]{24}$/;
 const REF = /^[A-Za-z0-9_-]{1,128}$/;
 const DEVICE = /^[A-Za-z0-9_-]{0,128}$/;
-/** Member names are what @mentions match, exactly: no whitespace and no
- * leading `@`. An inner `@` is normal (graff peers are `claude@codegraff`). */
-const MEMBER = /^[^\s@][^\s]{0,127}$/;
+/** Member names are what @mentions match, exactly: no whitespace or control
+ * characters and no leading `@`. An inner `@` is normal (graff peers are
+ * `claude@codegraff`). */
+const MEMBER = /^[^\s@\p{Cc}][^\s\p{Cc}]{0,127}$/u;
 
 export interface RoomRow {
   id: string;
@@ -182,14 +187,14 @@ export function parseCreate(body: Json): CreateArgs {
   const parentChat = str(body.parentChat) ?? null;
   if (parentChat !== null && !REF.test(parentChat)) throw bad("parentChat: invalid id");
   const ttl = body.idleTtlS;
-  const idleTtlS = ttl === undefined || ttl === null ? null : Number(ttl);
-  if (idleTtlS !== null && (!Number.isInteger(idleTtlS) || idleTtlS <= 0)) {
-    throw bad("idleTtlS: positive integer seconds");
+  let idleTtlS = ttl === undefined || ttl === null ? null : Number(ttl);
+  if (idleTtlS !== null && (!Number.isInteger(idleTtlS) || idleTtlS <= 0 || idleTtlS > ROOM_LIMITS.maxIdleTtlS)) {
+    throw bad(`idleTtlS: whole seconds, 1 to ${ROOM_LIMITS.maxIdleTtlS}`);
   }
-  // Mirrors agent_rooms_ephemeral_can_die: an ephemeral room needs a way out.
-  if (kind === "ephemeral" && idleTtlS === null && parentChat === null) {
-    throw bad("an ephemeral room needs idleTtlS or parentChat");
-  }
+  // Every ephemeral room dies of idleness eventually, parent chat or not:
+  // nothing else reliably ends a room whose parent is never archived.
+  if (kind === "ephemeral" && idleTtlS === null) idleTtlS = ROOM_LIMITS.defaultIdleTtlS;
+  if (kind === "persistent") idleTtlS = null;
   return { name, kind: kind as RoomKind, parentChat, idleTtlS };
 }
 
@@ -199,12 +204,12 @@ export interface PostArgs {
   to: string | null;
   replyTo: number | null;
   mentions: string[];
-  fromUser: boolean;
 }
 
 export function parsePost(body: Json): PostArgs {
   const text = str(body.body) ?? "";
   if (text.trim().length === 0) throw bad("body: empty");
+  if (text.includes("\u0000")) throw bad("body: NUL characters");
   if (text.length > ROOM_LIMITS.bodyChars) {
     throw new RoomError(413, "too_large", `body: at most ${ROOM_LIMITS.bodyChars} chars`);
   }
@@ -222,7 +227,9 @@ export function parsePost(body: Json): PostArgs {
     if (!name || !MEMBER.test(name)) throw bad("mentions: member names");
     return name === "all" ? "@all" : name;
   });
-  return { body: text, kind: kind as MessageKind, to, replyTo, mentions, fromUser: body.fromUser === true };
+  // No `fromUser` here: whether a person wrote a post is never the caller's
+  // claim to make (it resets the hop cap). See RoomCore.post.
+  return { body: text, kind: kind as MessageKind, to, replyTo, mentions };
 }
 
 /** `@name` tokens in the body, matched exactly against member names. */
@@ -381,27 +388,40 @@ export class RoomCore {
     });
   }
 
+  /** Per member name, across its devices: a new device is not a new budget. */
   private rateLimit(key: MemberKey, now: number): void {
-    const id = `${key.member}\u0000${key.deviceId}`;
+    const id = key.member;
     const recent = (this.postTimes.get(id) ?? []).filter((t) => now - t < 60);
     if (recent.length >= ROOM_LIMITS.postsPerMinute) throw new RoomError(429, "rate_limited");
     recent.push(now);
     this.postTimes.set(id, recent);
   }
 
-  /** Consecutive agent hops: 0 for a person, else one past what it answers
-   * (the replied-to post, or else the latest post). A reply to a post that
-   * fell out of the ring is treated as capped: waking on unknown ancestry
-   * could restart a loop. */
-  private hopFor(fromUser: boolean, replyTo: number | null): number {
+  /** Consecutive agent hops along the wake chain: 0 for a person; else one
+   * past the post this answers — the replied-to post, or the latest post
+   * that addressed the sender (what woke it). Unrelated traffic never
+   * raises it, and a post nobody prompted starts at 1. A reply to a post
+   * that fell out of the ring counts as capped: waking on unknown ancestry
+   * could restart a loop. Clamped at the cap. */
+  private hopFor(fromUser: boolean, sender: MemberRow, replyTo: number | null): number {
     if (fromUser) return 0;
-    const parent =
-      replyTo !== null ? this.recent.find((m) => m.seq === replyTo) : this.recent[this.recent.length - 1];
-    if (!parent) return replyTo !== null ? HOP_CAP : 1;
-    return parent.fromUser ? 1 : parent.hop + 1;
+    let parent: MessageRow | undefined;
+    if (replyTo !== null) {
+      parent = this.recent.find((m) => m.seq === replyTo);
+      if (!parent) return HOP_CAP;
+    } else {
+      for (let i = this.recent.length - 1; i >= 0 && !parent; i--) {
+        const m = this.recent[i];
+        if (m.sender !== sender.member && addressedTo(m, sender.member)) parent = m;
+      }
+    }
+    if (!parent) return 1;
+    return Math.min(HOP_CAP, parent.fromUser ? 1 : parent.hop + 1);
   }
 
-  post(body: Json): Promise<PostResult> {
+  /** `fromUser` is set by the actor from how the caller reached it, never
+   * from the request: today every post arrives through an agent's engine. */
+  post(body: Json, fromUser = false): Promise<PostResult> {
     return this.serial(async () => {
       this.requireOpen();
       const key = memberKey(body);
@@ -417,13 +437,13 @@ export class RoomCore {
         seq: this.room.lastSeq + 1,
         sender: sender.member,
         senderDevice: sender.deviceId,
-        fromUser: args.fromUser,
+        fromUser,
         kind: args.kind,
         toMember: args.to,
         body: args.body,
         replyTo: args.replyTo,
         mentions,
-        hop: this.hopFor(args.fromUser, args.replyTo),
+        hop: this.hopFor(fromUser, sender, args.replyTo),
         createdAt: now
       };
       if (!(await this.store.append(this.room.id, message))) {
@@ -431,10 +451,9 @@ export class RoomCore {
       }
       this.room = { ...this.room, lastSeq: message.seq, lastActivityAt: now };
       this.recent = [...this.recent, message].slice(-ROOM_LIMITS.ring);
-      const unreadFrom = this.unreadFrom(sender);
-      // Posting reads everything up to your own post.
-      await this.markRead(sender, message.seq);
-      return { message, deliver: this.targets(message, sender), unreadFrom };
+      // Posting reads nothing: a DM that arrived since your last read stays
+      // in your inbox until read_room returns it.
+      return { message, deliver: this.targets(message, sender), unreadFrom: this.unreadFrom(sender) };
     });
   }
 

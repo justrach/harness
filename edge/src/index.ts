@@ -158,7 +158,7 @@ const roomRoute = async (
       return json({ items: await store.inbox(orgId, who(), limit) });
     }
     if (parts[0] === "rooms" && parts.length === 1 && request.method === "POST") {
-      return forwardRoom(env, newRoomId(), request, auth.userId, orgId, "/create", new URLSearchParams());
+      return await forwardRoom(env, newRoomId(), request, auth.userId, orgId, "/create", new URLSearchParams());
     }
     if (parts[0] === "room" && parts.length === 3 && ROOM_ID.test(parts[1])) {
       const allowed = request.method === "GET" ? ROOM_GET : request.method === "POST" ? ROOM_POST : undefined;
@@ -168,7 +168,7 @@ const roomRoute = async (
         }
         const search = new URLSearchParams(url.search);
         search.delete("token");
-        return forwardRoom(env, parts[1], request, auth.userId, orgId, `/${parts[2]}`, search);
+        return await forwardRoom(env, parts[1], request, auth.userId, orgId, `/${parts[2]}`, search);
       }
     }
   } catch (err) {

@@ -47,6 +47,9 @@ export function roomStore(env: Env): RoomStore | undefined {
   return env.AUTH_MODE === "dev" ? devStore : undefined;
 }
 
+/** The hibernation tag that finds one member's sockets. */
+const socketTag = (key: { member: string; deviceId: string }): string => JSON.stringify([key.member, key.deviceId]);
+
 interface SocketTag {
   member: string;
   deviceId: string;
@@ -54,6 +57,9 @@ interface SocketTag {
 
 export class RoomActor implements DurableObject {
   private core: RoomCore | null = null;
+  /** One load at a time: concurrent cold requests share it rather than each
+   * building a RoomCore and the later one replacing the earlier mid-post. */
+  private loading: Promise<RoomCore> | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -81,13 +87,21 @@ export class RoomActor implements DurableObject {
       }
     }
     this.core = null;
+    this.loading = null;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     await this.ctx.storage.put("destroyed", true);
   }
 
-  private async loaded(roomId: string): Promise<RoomCore> {
-    if (this.core) return this.core;
+  private loaded(roomId: string): Promise<RoomCore> {
+    if (this.core) return Promise.resolve(this.core);
+    this.loading ??= this.load(roomId).finally(() => {
+      this.loading = null;
+    });
+    return this.loading;
+  }
+
+  private async load(roomId: string): Promise<RoomCore> {
     if (await this.destroyed()) throw new RoomError(410, "room_destroyed");
     const core = await RoomCore.load(this.store(), roomId);
     if (!core) {
@@ -100,6 +114,14 @@ export class RoomActor implements DurableObject {
     this.core = core;
     await this.schedule();
     return core;
+  }
+
+  /** Drop the in-memory room and read it back: after a write the store
+   * refused or that failed midway, memory can't be trusted (a lost ack may
+   * have committed). A room that's gone is wiped (410). */
+  private reload(roomId: string): Promise<RoomCore> {
+    this.core = null;
+    return this.loaded(roomId);
   }
 
   private async schedule(): Promise<void> {
@@ -125,6 +147,16 @@ export class RoomActor implements DurableObject {
     } catch (err) {
       if (err instanceof RoomError) return fail(err);
       console.error(JSON.stringify({ event: "room_error", error: String(err) }));
+      // A write that failed on a missing row (swept or destroyed elsewhere)
+      // means this actor is serving a room that no longer exists.
+      const roomId = new URL(request.url).searchParams.get("room");
+      if (this.core && roomId) {
+        try {
+          await this.reload(roomId);
+        } catch (gone) {
+          if (gone instanceof RoomError) return fail(gone);
+        }
+      }
       return json({ error: "store_unavailable" }, 503);
     }
   }
@@ -176,7 +208,7 @@ export class RoomActor implements DurableObject {
       const key = memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
       if (!core.find(key)) throw new RoomError(403, "not_a_member");
       const pair = new WebSocketPair();
-      this.ctx.acceptWebSocket(pair[1], [`${key.member}\u0000${key.deviceId}`]);
+      this.ctx.acceptWebSocket(pair[1], [socketTag(key)]);
       pair[1].serializeAttachment({ member: key.member, deviceId: key.deviceId } satisfies SocketTag);
       pair[1].send(JSON.stringify({ type: "hello", lastSeq: core.room.lastSeq }));
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -200,12 +232,20 @@ export class RoomActor implements DurableObject {
         return json({ member, lastSeq: core.room.lastSeq });
       }
       case "/leave": {
+        const key = memberKey(body);
         await core.leave(body);
-        this.broadcast({ type: "left", member: body.member, device: body.device ?? "" });
+        for (const ws of this.ctx.getWebSockets(socketTag(key))) {
+          try {
+            ws.close(4403, "left");
+          } catch {
+            // Already closed.
+          }
+        }
+        this.broadcast({ type: "left", member: key.member, device: key.deviceId });
         return json({ ok: true });
       }
       case "/post": {
-        const result = await core.post(body);
+        const result = await this.post(core, body);
         await this.schedule();
         this.broadcast({ type: "message", roomId: core.room.id, message: result.message });
         return json(result);
@@ -225,20 +265,33 @@ export class RoomActor implements DurableObject {
     }
   }
 
-  /** Idle expiry for ephemeral rooms. */
+  /** A post the store refused as stale gets one retry on reloaded state; a
+   * failed write reloads (the append may have committed) and reports 503. */
+  private async post(core: RoomCore, body: Json) {
+    const roomId = core.room.id;
+    try {
+      return await core.post(body);
+    } catch (err) {
+      if (err instanceof RoomError && err.code !== "stale") throw err;
+      const fresh = await this.reload(roomId);
+      if (err instanceof RoomError) return fresh.post(body);
+      throw err;
+    }
+  }
+
+  /** Idle expiry for ephemeral rooms, on freshly loaded state. */
   async alarm(): Promise<void> {
     if (await this.destroyed()) return;
     const store = roomStore(this.env);
-    if (!store) return;
     const roomId = this.core?.room.id ?? (await this.ctx.storage.get<string>("room"));
-    if (!roomId) return;
-    const fresh = await RoomCore.load(store, roomId);
-    if (!fresh) {
-      await this.wipe();
-      return;
+    if (!store || !roomId) return;
+    let core: RoomCore;
+    try {
+      core = await this.reload(roomId);
+    } catch {
+      return; // Gone (and wiped) or the store is down; the sweeper covers it.
     }
-    this.core = fresh;
-    const at = fresh.expiresAt();
+    const at = core.expiresAt();
     if (at !== null && at * 1000 <= Date.now()) {
       await store.destroy(roomId);
       await this.wipe();
