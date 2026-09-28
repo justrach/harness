@@ -231,15 +231,6 @@ struct HomeView: View {
                                 subtitle: deviceTag(space))
             }
             Divider()
-            Picker(selection: $groupByRaw) {
-                ForEach(HomeGroupBy.allCases) { option in
-                    Label(option.label, systemImage: option.symbol).tag(option.rawValue)
-                }
-            } label: {
-                Label("Group by", systemImage: "square.stack.3d.up")
-            }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("home-group-by")
             Button {
                 showNewSpace = true
             } label: {
@@ -270,6 +261,45 @@ struct HomeView: View {
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Filter by space")
         .accessibilityIdentifier("space-filter")
+    }
+
+    /// Grouping sits on the filter row, where you look when sorting the list,
+    /// as a labeled pill: one tap opens the choices, one tap picks. (It used
+    /// to be a submenu at the foot of the space dropdown, under every space.)
+    private var groupPill: some View {
+        let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        let grouped = grouping != .none
+        return Menu {
+            Picker(selection: $groupByRaw) {
+                ForEach(HomeGroupBy.allCases) { option in
+                    Label(option.label, systemImage: option.symbol).tag(option.rawValue)
+                }
+            } label: {
+                Text("Group by")
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: grouped ? grouping.symbol : "square.stack.3d.up")
+                    .font(.system(size: 11, weight: .medium))
+                Text(grouped ? grouping.label : "Group")
+                    .font(Theme.sans(13, weight: grouped ? .semibold : .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .foregroundStyle(grouped ? Theme.text : Theme.textMuted)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Capsule().fill(grouped ? Theme.elementActive : Color.clear))
+            .overlay(Capsule().strokeBorder(grouped ? Color.clear : Theme.border, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Group by")
+        .accessibilityValue(grouping.label)
+        .accessibilityIdentifier("home-group-by")
     }
 
     private func deviceTag(_ space: Space) -> String {
@@ -343,7 +373,10 @@ struct HomeView: View {
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
         if !scoped.isEmpty {
             Section {
-                HomeStatusChips(selection: $statusFilter, counts: statusCounts(scoped))
+                HStack(spacing: 6) {
+                    HomeStatusChips(selection: $statusFilter, counts: statusCounts(scoped))
+                    groupPill
+                }
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))

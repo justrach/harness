@@ -13,11 +13,9 @@ final class HomeGroupingUITests: XCTestCase {
     }
 
     private func group(by option: String) {
-        let filter = app.buttons["space-filter"]
-        XCTAssertTrue(filter.waitForExistence(timeout: 10))
-        filter.tap()
-        let groupBy = app.buttons["Group by"]
-        XCTAssertTrue(groupBy.waitForExistence(timeout: 5))
+        // Its own bar button, not a submenu under every space.
+        let groupBy = app.buttons["home-group-by"]
+        XCTAssertTrue(groupBy.waitForExistence(timeout: 10))
         groupBy.tap()
         let choice = app.buttons[option]
         XCTAssertTrue(choice.waitForExistence(timeout: 5))
