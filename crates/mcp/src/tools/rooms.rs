@@ -16,7 +16,7 @@ use crate::harness::short;
 
 fn room_schema(extra: Value) -> Value {
     let mut properties = json!({
-        "room": { "type": "string", "description": "Room id (room_…) or exact room name." }
+        "room": { "type": "string", "description": "The room's id (room_…) or its exact, case-sensitive name as list_rooms shows it." }
     });
     if let (Some(base), Some(more)) = (properties.as_object_mut(), extra.as_object()) {
         for (k, v) in more {
@@ -298,7 +298,9 @@ impl Tools {
                 room["name"].as_str().unwrap_or_default().to_owned(),
             )),
             None if key.starts_with("room_") => Ok((key.to_owned(), key.to_owned())),
-            None => anyhow::bail!("no room named {key:?}"),
+            None => anyhow::bail!(
+                "no room named {key:?} that you can see (names are exact and case-sensitive; the room may have been destroyed, or you aren't in it — see list_rooms)"
+            ),
         }
     }
 
