@@ -35,6 +35,11 @@
  *   GET|PUT  /chat2/:chatId/diff
  *   GET  /chat2/:chatId/stats
  *   POST /chat2/:chatId/reset
+ *   GET  /rooms?member=&device=       — agent rooms in the caller's org (room-actor.ts)
+ *   GET  /rooms/inbox?member=&device= — unread posts addressed to a member
+ *   POST /rooms                       — create a room (`room1/{roomId}`)
+ *   GET  /room/:roomId/{state,messages,ws}
+ *   POST /room/:roomId/{join,leave,post,archive,destroy}
  */
 import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
@@ -46,9 +51,13 @@ import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import { VaultRoom } from "./vault-room";
+import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
+import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
+import { sweepExpiredRooms } from "./room-store-pg";
+import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor };
 
 const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 
@@ -97,6 +106,77 @@ const forward = (
   headers.set(AUTH_USER_HEADER, userId);
   if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
+};
+
+/** Forward into a room's actor with the verified user and org stamped on. */
+const forwardRoom = (
+  env: Env,
+  roomId: string,
+  request: Request,
+  userId: string,
+  orgId: string,
+  path: string,
+  search: URLSearchParams
+): Promise<Response> => {
+  const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${roomId}`));
+  const url = new URL(request.url);
+  url.pathname = path;
+  search.set("room", roomId);
+  url.search = search.toString();
+  const headers = new Headers(request.headers);
+  headers.set(AUTH_USER_HEADER, userId);
+  headers.set(AUTH_ORG_HEADER, orgId);
+  return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
+};
+
+const ROOM_GET = new Set(["state", "messages", "ws"]);
+const ROOM_POST = new Set(["join", "leave", "post", "archive", "destroy"]);
+
+/** Agent rooms (room-actor.ts). Rooms belong to the caller's org; the
+ * listing and inbox read PostgreSQL directly, everything else goes through
+ * the room's actor. */
+const roomRoute = async (
+  request: Request,
+  env: Env,
+  url: URL,
+  parts: string[],
+  auth: { userId: string; orgId?: string }
+): Promise<Response | undefined> => {
+  if (parts[0] !== "rooms" && parts[0] !== "room") return undefined;
+  const orgId = auth.orgId ?? personalOrgId(auth.userId);
+  const store = roomStore(env);
+  if (!store) return json({ error: "rooms_unavailable" }, 503);
+  const who = () =>
+    memberKey({ member: url.searchParams.get("member"), device: url.searchParams.get("device") ?? "" });
+  try {
+    if (parts[0] === "rooms" && parts.length === 1 && request.method === "GET") {
+      const listFor = url.searchParams.has("member") ? who() : undefined;
+      return json({ rooms: await store.listRooms(orgId, listFor) });
+    }
+    if (parts[0] === "rooms" && parts[1] === "inbox" && parts.length === 2 && request.method === "GET") {
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 200));
+      return json({ items: await store.inbox(orgId, who(), limit) });
+    }
+    if (parts[0] === "rooms" && parts.length === 1 && request.method === "POST") {
+      return forwardRoom(env, newRoomId(), request, auth.userId, orgId, "/create", new URLSearchParams());
+    }
+    if (parts[0] === "room" && parts.length === 3 && ROOM_ID.test(parts[1])) {
+      const allowed = request.method === "GET" ? ROOM_GET : request.method === "POST" ? ROOM_POST : undefined;
+      if (allowed?.has(parts[2])) {
+        if (parts[2] === "ws" && request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+          return json({ error: "expected websocket" }, 426);
+        }
+        const search = new URLSearchParams(url.search);
+        search.delete("token");
+        return forwardRoom(env, parts[1], request, auth.userId, orgId, `/${parts[2]}`, search);
+      }
+    }
+  } catch (err) {
+    if (err instanceof RoomError) return json({ error: err.code, message: err.message }, err.status);
+    console.error(JSON.stringify({ event: "rooms_error", error: String(err) }));
+    return json({ error: "store_unavailable" }, 503);
+  }
+  return json({ error: "not_found" }, 404);
 };
 
 const requestInit = (request: Request): RequestInit => ({
@@ -169,6 +249,9 @@ export default {
 
     const preview = previewRoute(request, env, auth);
     if (preview) return preview;
+
+    const room = await roomRoute(request, env, url, parts, auth);
+    if (room) return room;
 
     // ── login vault (docs/adr/0005): one room per user, named from the
     //    verified bearer only. The DO additionally requires a device
@@ -440,5 +523,20 @@ export default {
     }
 
     return json({ error: "not_found" }, 404);
+  },
+
+  /** Cron: delete expired ephemeral rooms whose actors never woke to do it,
+   * then tell each actor to wipe itself. */
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    if (!env.HYPERDRIVE) return;
+    const ids = await sweepExpiredRooms(env, Math.floor(Date.now() / 1000));
+    await Promise.all(
+      ids.map((id) =>
+        env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${id}`))
+          .fetch(`https://room/wipe?room=${id}`, { method: "POST" })
+          .catch((err) => console.error(JSON.stringify({ event: "room_wipe_failed", room: id, error: String(err) })))
+      )
+    );
+    if (ids.length > 0) console.log(JSON.stringify({ event: "rooms_swept", count: ids.length }));
   }
 } satisfies ExportedHandler<Env>;

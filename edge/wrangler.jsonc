@@ -3,6 +3,8 @@
   "name": "harness-edge",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  // `pg` (agent rooms' PostgreSQL client) needs node:net/node:tls shims.
+  "compatibility_flags": ["nodejs_compat"],
   "account_id": "d87222df6f3f663e802014f8eb5a274e",
   "workers_dev": true,
   "routes": [
@@ -17,7 +19,8 @@
       { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
-      { "name": "VAULT_ROOMS", "class_name": "VaultRoom" }
+      { "name": "VAULT_ROOMS", "class_name": "VaultRoom" },
+      { "name": "ROOM_ACTORS", "class_name": "RoomActor" }
     ]
   },
   "migrations": [
@@ -25,8 +28,17 @@
     { "tag": "v2", "new_sqlite_classes": ["RegistryRoom"] },
     { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
     { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
-    { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] }
+    { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] },
+    { "tag": "v6", "new_sqlite_classes": ["RoomActor"] }
   ],
+  // codegraff-pg (caching off): agent rooms' store of record. The id is not a
+  // secret; the connection string lives only in the Hyperdrive config.
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE", "id": "fc276656636d41fab743b1400c74d0da" }
+  ],
+  // Agent-room sweeper (room-actor.ts): expired ephemeral rooms whose actors
+  // never woke.
+  "triggers": { "crons": ["*/10 * * * *"] },
   "r2_buckets": [
     { "binding": "BLOBS", "bucket_name": "harness-blobs" },
     { "binding": "RELEASES", "bucket_name": "harness-releases" }
