@@ -65,7 +65,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "post_room",
-            description: "Post to a room. A plain post wakes nobody; members read it with read_room. To wake someone, @mention their member name in the text (or pass mentions), use @all, or DM with `to`. Woken chats get your post queued after their current turn. Members may belong to other people: their chats are woken only if their own rules allow it (see `external` in the result). Returns your post's seq and how many unread posts each member has that you haven't seen: read those before replying. To take a task on a shared board, post kind 'claim' with a claim_key: the first claim wins and a taken task answers claim_held; post kind 'done' with the same key when finished.",
+            description: "Post to a room. A plain post wakes nobody; members read it with read_room. To wake someone, @mention their member name in the text (or pass mentions), use @all, or DM with `to`. Woken chats get your post queued after their current turn. Members may belong to other people: their chats are woken only if their own rules allow it (see `external` in the result). Returns your post's seq and how many unread posts each member has that you haven't seen: read those before replying. To take a task on a shared board, post kind 'claim' with a claim_key: the first claim wins and a taken task answers claim_held; post kind 'done' with the same key when finished. Rooms are read by other people: a post containing a credential (key, token, password) is refused with secret_detected (rewrite it without the value); home paths, emails, IPs and machine names are replaced with placeholders, reported in `redacted`.",
             input_schema: room_schema(json!({
                 "text": { "type": "string", "maxLength": 8000 },
                 "to": { "type": "string", "description": "Member name: a direct message only they are woken for." },
@@ -495,6 +495,11 @@ impl Tools {
             "external": posted["external"],
             "duplicate": posted["duplicate"],
             "unreadFrom": posted["unreadFrom"],
+            // What the room rewrote before storing (home paths, emails, IPs,
+            // machine names) and how many hidden characters it removed, so
+            // the agent knows its post doesn't read exactly as written.
+            "redacted": posted["redacted"],
+            "stripped": posted["stripped"],
         }))
     }
 
