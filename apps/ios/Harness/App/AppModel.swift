@@ -254,6 +254,77 @@ final class AppModel {
 
     // MARK: Sign-in flows
 
+    /// The browser sheet a CodeGraff sign-in runs in.
+    @ObservationIgnored private let authSession = AuthSessionCoordinator()
+    /// A code exchange is under way (from the sheet or from a link that
+    /// finished in Safari): the sheet's own cancel must not reset the screen.
+    @ObservationIgnored private var exchanging = false
+    var signInBusy = false
+    var signInError: String?
+
+    /// CodeGraff browser sign-in → Harness callback → edge exchange with PKCE.
+    func startSignIn() {
+        let pending = PendingSignIn.start()
+        pending.save()
+        signInBusy = true
+        signInError = nil
+        authSession.start(url: Endpoints.authorizeURL(state: pending.state, challenge: pending.challenge),
+                          callbackScheme: Endpoints.callbackScheme) { [weak self] outcome in
+            Task { @MainActor in self?.sheetFinished(outcome) }
+        }
+    }
+
+    private func sheetFinished(_ outcome: AuthSessionCoordinator.Outcome) {
+        switch outcome {
+        case .success(let url):
+            handleSignInCallback(url)
+        case .cancelled:
+            if !exchanging { signInBusy = false }
+        case .failure(let message):
+            if !exchanging {
+                signInBusy = false
+                signInError = message
+            }
+        }
+    }
+
+    /// A `harness://callback` from the sheet, or from Safari when a magic link
+    /// finished the sign-in there. Only the pending sign-in's own state is
+    /// accepted, and only once.
+    func handleSignInCallback(_ url: URL) {
+        guard let pending = PendingSignIn.load() else { return }
+        let code: String
+        do {
+            code = try pending.code(from: url)
+        } catch PendingSignIn.CallbackError.stateMismatch {
+            // Someone else's (or an older) link: keep waiting for ours.
+            signInError = PendingSignIn.CallbackError.stateMismatch.errorDescription
+            return
+        } catch {
+            PendingSignIn.clear()
+            signInBusy = false
+            signInError = error.localizedDescription
+            return
+        }
+        PendingSignIn.clear()
+        exchanging = true
+        signInBusy = true
+        signInError = nil
+        authSession.cancel()
+        Task {
+            defer {
+                exchanging = false
+                signInBusy = false
+            }
+            do {
+                try await signIn(edgeURL: Endpoints.edgeURL, code: code, codeVerifier: pending.verifier,
+                                 redirectURI: Endpoints.redirectURI, nonce: pending.state)
+            } catch {
+                signInError = error.localizedDescription
+            }
+        }
+    }
+
     /// CodeGraff paste-code exchange. Returns the org list for the picker (or
     /// connects straight away when exactly one org exists).
     func signIn(edgeURL: URL, code: String, codeVerifier: String,
@@ -429,8 +500,13 @@ final class AppModel {
         }
     }
 
-    /// `harness://chat/<id>` (a Live Activity tap) opens that session.
+    /// `harness://chat/<id>` (a Live Activity tap) opens that session;
+    /// `harness://callback` finishes a sign-in that ended in Safari.
     func openDeepLink(_ url: URL) {
+        if PendingSignIn.isCallback(url) {
+            handleSignInCallback(url)
+            return
+        }
         guard url.scheme == "harness", url.host == "chat" else { return }
         let chatId = url.lastPathComponent
         guard !chatId.isEmpty, chatId != "/" else { return }

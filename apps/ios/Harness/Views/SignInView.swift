@@ -34,9 +34,6 @@ enum Endpoints {
 
 struct SignInView: View {
     @Environment(AppModel.self) private var model
-    @State private var busy = false
-    @State private var error: String?
-    @State private var authSession = AuthSessionCoordinator()
 
     var body: some View {
         ZStack {
@@ -61,10 +58,10 @@ struct SignInView: View {
 
                 VStack(spacing: 12) {
                     Button {
-                        signIn()
+                        model.startSignIn()
                     } label: {
                         Group {
-                            if busy {
+                            if model.signInBusy {
                                 ProgressView()
                                     .tint(Theme.bg)
                             } else {
@@ -78,10 +75,10 @@ struct SignInView: View {
                         .background(Theme.text, in: RoundedRectangle(cornerRadius: 16))
                     }
                     .buttonStyle(.plain)
-                    .disabled(busy)
-                    .opacity(busy ? 0.6 : 1)
+                    .disabled(model.signInBusy)
+                    .opacity(model.signInBusy ? 0.6 : 1)
 
-                    if let error {
+                    if let error = model.signInError {
                         Text(error)
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.danger)
@@ -93,51 +90,6 @@ struct SignInView: View {
             }
             .padding(.horizontal, 32)
             .frame(maxWidth: 480)
-        }
-    }
-
-    /// CodeGraff browser sign-in → Harness callback → edge exchange with PKCE.
-    private func signIn() {
-        busy = true
-        error = nil
-        let state = UUID().uuidString
-        let verifier = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-            + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let digest = Data(SHA256.hash(data: Data(verifier.utf8)))
-        let challenge = digest.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        authSession.start(url: Endpoints.authorizeURL(state: state, challenge: challenge),
-                          callbackScheme: Endpoints.callbackScheme) { result in
-            Task { @MainActor in
-                switch result {
-                case .cancelled:
-                    busy = false
-                case .failure(let message):
-                    busy = false
-                    error = message
-                case .success(let callbackURL):
-                    let params = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?
-                        .queryItems ?? []
-                    let code = params.first { $0.name == "code" }?.value
-                    let cbState = params.first { $0.name == "state" }?.value
-                    guard let code, cbState == state else {
-                        busy = false
-                        error = "Callback missing code or state mismatch"
-                        return
-                    }
-                    do {
-                        try await model.signIn(edgeURL: Endpoints.edgeURL, code: code,
-                                               codeVerifier: verifier,
-                                               redirectURI: Endpoints.redirectURI,
-                                               nonce: state)
-                    } catch {
-                        self.error = error.localizedDescription
-                    }
-                    busy = false
-                }
-            }
         }
     }
 }
@@ -154,6 +106,13 @@ final class AuthSessionCoordinator: NSObject, ASWebAuthenticationPresentationCon
     }
 
     private var session: ASWebAuthenticationSession?
+
+    /// Close the sheet: the sign-in finished somewhere else (a magic link
+    /// opened in Safari). The completion then reports `.cancelled`.
+    func cancel() {
+        session?.cancel()
+        session = nil
+    }
 
     func start(url: URL, callbackScheme: String, completion: @escaping (Outcome) -> Void) {
         let session = ASWebAuthenticationSession(url: url,
