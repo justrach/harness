@@ -66,6 +66,7 @@ for line in sys.stdin:
         .with_graff_draft_subagents(Arc::new(AtomicBool::new(true)));
     let (steering_tx, steering) = mpsc::channel(1);
     let controls = RunControls {
+        origin: None,
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());

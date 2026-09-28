@@ -1545,6 +1545,24 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::ROOM_REQUEST => {
+                #[derive(Deserialize)]
+                struct P {
+                    method: String,
+                    path: String,
+                    #[serde(default)]
+                    query: Vec<(String, String)>,
+                    #[serde(default)]
+                    body: Option<serde_json::Value>,
+                }
+                let p: P = parse_params(params)?;
+                let reply = self
+                    .doc_host
+                    .room_request(&p.method, &p.path, &p.query, p.body)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&reply)
+            }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             methods::LIST_HARNESSES => RpcReply::value(&self.registry.descriptors()),

@@ -14,7 +14,7 @@ export interface Env {
   /** Agent rooms (`room1/{roomId}`): the live actor per room; PostgreSQL
    * through HYPERDRIVE is the store of record (room-actor.ts). */
   ROOM_ACTORS: DurableObjectNamespace;
-  /** codegraff-pg. Absent in `wrangler dev` unless a local connection string
+  /** Agent rooms' PostgreSQL. Absent in `wrangler dev` unless a local connection string
    * is supplied; rooms then use an in-memory store (dev auth only). */
   HYPERDRIVE?: Hyperdrive;
   BLOBS: R2Bucket;

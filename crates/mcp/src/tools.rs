@@ -18,6 +18,8 @@ use harness_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
+
+mod rooms;
 use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
 
 /// Default and ceiling for the blocking waits.
@@ -359,11 +361,13 @@ impl Tools {
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
-        catalog()
+        let mut tools = catalog();
+        tools.extend(rooms::catalog());
+        tools
     }
 
     pub fn has(&self, name: &str) -> bool {
-        catalog().iter().any(|t| t.name == name)
+        catalog().iter().any(|t| t.name == name) || rooms::handles(name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -384,6 +388,7 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            other if rooms::handles(other) => return self.call_room_tool(other, args).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -1090,9 +1095,65 @@ mod tests {
                         .push((method.to_owned(), params));
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::ROOM_REQUEST => {
+                    let path = params["path"].as_str().unwrap_or_default().to_owned();
+                    let body = match (params["method"].as_str(), path.as_str()) {
+                        (Some("GET"), "rooms") => json!({ "rooms": [
+                            { "id": "room_0123456789abcdef01234567", "name": "build" }
+                        ]}),
+                        (Some("GET"), p) if p.ends_with("/state") => json!({ "members": [
+                            { "member": "beta", "memberRef": "chat-beta-2", "deviceId": "dev-local", "readSeq": 0 },
+                            { "member": "alpha", "memberRef": "chat-alpha-1", "deviceId": "dev-local", "readSeq": 0 }
+                        ]}),
+                        (Some("POST"), p) if p.ends_with("/post") => {
+                            self.writes.lock().unwrap().push((method.to_owned(), params.clone()));
+                            json!({
+                                "message": { "seq": 3, "hop": 1 },
+                                "deliver": [
+                                    { "member": "alpha", "memberKind": "harness_chat",
+                                      "memberRef": "chat-alpha-1", "deviceId": "dev-local" },
+                                    { "member": "claude@laptop", "memberKind": "graff",
+                                      "memberRef": null, "deviceId": "laptop" }
+                                ],
+                                "unreadFrom": { "alpha": 1 }
+                            })
+                        }
+                        _ => return Ok(RpcReply::Value(json!({ "status": 404, "body": { "error": "not_found" } }))),
+                    };
+                    RpcReply::Value(json!({ "status": 200, "body": body }))
+                }
                 other => return Err(RpcError::UnknownMethod(other.into())),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn post_room_queues_framed_peer_mail_for_mentioned_chats() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin { chat_id: Some("chat-beta-2".into()), device_id: Some("dev-local".into()) },
+        );
+        let posted = tools
+            .call("post_room", json!({ "room": "build", "text": "@alpha tests are green" }))
+            .await
+            .unwrap();
+        assert_eq!(posted["seq"], 3);
+        assert_eq!(posted["unreadFrom"]["alpha"], 1);
+        // Only the Harness chat is queued; the graff peer pulls.
+        assert_eq!(posted["woken"].as_array().unwrap().len(), 1);
+
+        let writes = world.writes.lock().unwrap();
+        let (_, post) = writes.iter().find(|(m, _)| m == methods::ROOM_REQUEST).unwrap();
+        assert_eq!(post["body"]["member"], "beta");
+        assert_eq!(post["body"]["fromUser"], false);
+        let (_, queued) = writes.iter().find(|(m, _)| m == methods::QUEUE_MESSAGE).unwrap();
+        assert_eq!(queued["chatId"], "chat-alpha-1");
+        let (text, meta) = harness_proto::room_delivery::lift(queued["text"].as_str().unwrap());
+        assert!(text.starts_with("[room message from beta · room build #3 · agent, advisory]: @alpha tests are green"));
+        let meta = meta.unwrap();
+        assert_eq!(meta["room_id"], "room_0123456789abcdef01234567");
+        assert_eq!(meta["from_user"], false);
     }
 
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
@@ -1102,7 +1163,8 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_is_well_formed() {
-        let defs = catalog();
+        let mut defs = catalog();
+        defs.extend(rooms::catalog());
         let mut names: Vec<&str> = defs.iter().map(|d| d.name).collect();
         names.sort_unstable();
         names.dedup();

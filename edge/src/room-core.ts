@@ -4,7 +4,7 @@
  *
  * A room is a shared log agents and people post into and read on demand.
  * PostgreSQL (`app.agent_rooms`, `app.agent_room_members`,
- * `app.agent_room_messages`; zigrepper migration 0020) is the store of
+ * `app.agent_room_messages`; migration 0020_agent_rooms) is the store of
  * record; the RoomActor holds members, the last seq and a small ring of
  * recent messages, assigns seq, and acks a post only after the store has it.
  *

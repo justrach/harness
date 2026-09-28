@@ -1,7 +1,6 @@
 /**
  * RoomStore over PostgreSQL: `app.agent_rooms`, `app.agent_room_members`,
- * `app.agent_room_messages` (zigrepper database/postgres/migrations/
- * 0020_agent_rooms.sql). Times are unix seconds; bigints come back from `pg`
+ * `app.agent_room_messages` (migration 0020_agent_rooms). Times are unix seconds; bigints come back from `pg`
  * as strings and are narrowed here (seqs and seconds stay far below 2^53).
  */
 import type { Client } from "pg";

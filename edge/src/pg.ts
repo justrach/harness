@@ -1,5 +1,5 @@
 /**
- * PostgreSQL (codegraff-pg) through Hyperdrive. Hyperdrive keeps the pooled
+ * PostgreSQL through Hyperdrive. Hyperdrive keeps the pooled
  * connections to the origin, so a short-lived client per use is cheap:
  * connect, run, close. The connection string lives only in the Hyperdrive
  * config, never in this repo. Same helper as the codegraff gateway's.

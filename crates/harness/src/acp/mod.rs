@@ -540,6 +540,29 @@ fn exo_bridge_programs() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Harness's own MCP server (`harness mcp`: agent rooms and chat tools),
+/// speaking for the run's chat, as an ACP stdio server entry. Only graff gets
+/// it for now: graff trusts client-provided servers without a consent
+/// prompt and frames room deliveries as advisory peer mail; other ACP agents
+/// would ask the person before every room call.
+fn harness_mcp_servers(harness: HarnessId, origin: Option<&crate::RunOrigin>) -> Value {
+    let (HarnessId::Graff, Some(origin), Some(program)) =
+        (harness, origin, exo_bridge_programs().into_iter().next())
+    else {
+        return json!([]);
+    };
+    let mut env = vec![json!({ "name": "HARNESS_CHAT_ID", "value": origin.chat_id })];
+    if let Ok(port) = std::env::var("HARNESS_IPC_PORT") {
+        env.push(json!({ "name": "HARNESS_IPC_PORT", "value": port }));
+    }
+    json!([{
+        "name": "harness",
+        "command": program.to_string_lossy(),
+        "args": ["mcp"],
+        "env": env,
+    }])
+}
+
 /// Where Exo's setup docs put the `exo-cli` client (`ln -s … ~/bin/exo-cli`).
 fn exo_cli_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -2899,6 +2922,9 @@ fn prompt_turn(
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
+        // A room delivery's tag line becomes `_meta["harness/room"]`, so the
+        // agent can tell another agent's post from the user's words.
+        let (text, room) = harness_proto::room_delivery::lift(&text);
         let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
@@ -2906,6 +2932,9 @@ fn prompt_turn(
         });
         if let Some(id) = prompt_id {
             params["_meta"] = json!({ "promptId": id, "requestId": id });
+        }
+        if let Some(room) = room {
+            params["_meta"]["harness/room"] = room;
         }
         client.request("session/prompt", params).await
     })
@@ -3427,6 +3456,7 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        origin,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
 
@@ -3458,7 +3488,10 @@ async fn run_session(session: Session) {
         let images_supported = accepts_images(&init);
         let init_commands = scan_available_commands(&init);
 
-        let session_params = json!({ "cwd": request.cwd, "mcpServers": [] });
+        let session_params = json!({
+            "cwd": request.cwd,
+            "mcpServers": harness_mcp_servers(harness, origin.as_ref()),
+        });
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());

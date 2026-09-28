@@ -3020,6 +3020,53 @@ impl DocHost {
         });
     }
 
+    /// Agent rooms (edge `room-actor.ts`): one authed HTTP call to the edge's
+    /// `/rooms…` or `/room/{id}/…` routes, answered as `{status, body}` so the
+    /// caller sees the room's own errors (`not_a_member`, `room_destroyed`).
+    /// Only room paths pass: this is not a general edge proxy.
+    pub async fn room_request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        let room_path = path == "rooms"
+            || path == "rooms/inbox"
+            || path
+                .strip_prefix("room/")
+                .is_some_and(|rest| rest.split('/').count() == 2 && !rest.contains(".."));
+        if !room_path {
+            return Err(format!("not a room path: {path}"));
+        }
+        let edge = self
+            .inner
+            .config
+            .edge
+            .clone()
+            .ok_or("rooms need a signed-in engine (no edge configured)")?;
+        let bearer = edge.bearer().await.map_err(|e| e.to_string())?;
+        let url = format!("{}/{path}", edge.url.trim_end_matches('/'));
+        let request = match method {
+            "GET" => self.inner.http.get(&url),
+            "POST" => self.inner.http.post(&url).json(&body.unwrap_or_else(|| serde_json::json!({}))),
+            other => return Err(format!("unsupported method {other}")),
+        };
+        let res = request
+            .query(query)
+            .bearer_auth(&bearer)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| describe_http_error(e).to_string())?;
+        let status = res.status().as_u16();
+        let body = res
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        Ok(serde_json::json!({ "status": status, "body": body }))
+    }
+
     /// The in-flight queued-attachment transfer set: current entries first,
     /// then a fresh snapshot per landed chunk (see `push_attachments`).
     pub fn watch_transfers(&self) -> watch::Receiver<Vec<harness_proto::TransferProgress>> {

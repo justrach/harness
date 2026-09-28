@@ -15,7 +15,7 @@ The GUI and engine communicate through local IPC when they run separately. Local
 
 ## Sync service
 
-The TypeScript Worker at `edge/` implements the Harness sync protocol. Its deployment source is now `../zigrepper/services/harness-edge`, using `https://edge.codegraff.com`. The worker validates Harness tokens before forwarding requests into Durable Objects. Session, chat, registry, preview, and device rooms use WebSockets for live updates; R2 stores attachments and release artifacts. The CLI and iOS app use the same endpoint. See `docs/chat2-sync.md` and `docs/registry-sync.md` for wire details.
+The TypeScript Worker at `edge/` implements the Harness sync protocol. It deploys from this directory to `https://edge.codegraff.com`. The worker validates Harness tokens before forwarding requests into Durable Objects. Session, chat, registry, preview, and device rooms use WebSockets for live updates; R2 stores attachments and release artifacts. The CLI and iOS app use the same endpoint. Agent rooms add one live Durable Object per room over PostgreSQL. See `docs/chat2-sync.md`, `docs/registry-sync.md` and `docs/agent-rooms.md` for wire details.
 
 A synced device can request files and commands from another device through the relay. Treat account access as access to the connected device's workspace files, including ignored files when that option is enabled.
 

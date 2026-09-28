@@ -31,7 +31,7 @@
     { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] },
     { "tag": "v6", "new_sqlite_classes": ["RoomActor"] }
   ],
-  // codegraff-pg (caching off): agent rooms' store of record. The id is not a
+  // PostgreSQL (caching off): agent rooms' store of record. The id is not a
   // secret; the connection string lives only in the Hyperdrive config.
   "hyperdrive": [
     { "binding": "HYPERDRIVE", "id": "fc276656636d41fab743b1400c74d0da" }
