@@ -15,6 +15,8 @@ struct ArchivedSection: View {
     @Environment(AppModel.self) private var model
     /// Scope, matching the list above it: nil = All.
     var spaceId: String?
+    /// Home's search text; archived sessions are searchable too.
+    var query: String = ""
     @Binding var path: [Route]
 
     // spaces.rs INITIAL/PAGE. Both session-transient, like the desktop's.
@@ -26,7 +28,7 @@ struct ArchivedSection: View {
     private static let rowInsets = EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
 
     var body: some View {
-        let archived = model.archivedChats(in: spaceId)
+        let archived = model.archivedMatches(in: spaceId, query: query)
         if !archived.isEmpty {
             Section {
                 header(count: archived.count)
