@@ -22,6 +22,8 @@
  * {@link HOP_CAP} or beyond wakes nobody.
  */
 
+import { GuardRefusal, IdentifierRefusal, guardIdentifier, guardText, type PersonalKind } from "./room-guard";
+
 export const ROOM_LIMITS = {
   bodyChars: 8000,
   nameChars: 80,
@@ -309,6 +311,18 @@ const str = (v: unknown): string | undefined => (typeof v === "string" ? v : und
 
 const bad = (message: string): RoomError => new RoomError(400, "bad_request", message);
 
+/** room-guard's refusals as the room's errors: a credential is 422
+ * secret_detected, a bad identifier 400. */
+function guarded<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (err) {
+    if (err instanceof GuardRefusal) throw new RoomError(422, "secret_detected", err.message);
+    if (err instanceof IdentifierRefusal) throw bad(err.message);
+    throw err;
+  }
+}
+
 export function memberKey(body: Json): MemberKey {
   const member = str(body.member);
   const deviceId = str(body.device) ?? "";
@@ -319,6 +333,8 @@ export function memberKey(body: Json): MemberKey {
 
 export function parseMember(body: Json, caller: Caller, now: number, role: Role): MemberRow {
   const { member, deviceId } = memberKey(body);
+  // Checked when a name is taken, not on every use: existing members keep working.
+  guarded(() => guardIdentifier("member", member));
   const memberKind = str(body.memberKind) ?? "external";
   if (!MEMBER_KINDS.includes(memberKind)) throw bad("memberKind: harness_chat | graff | external");
   const memberRef = str(body.memberRef) ?? null;
@@ -351,8 +367,10 @@ export interface CreateArgs {
 }
 
 export function parseCreate(body: Json): CreateArgs {
-  const name = (str(body.name) ?? "").trim();
-  if (name.length < 1 || name.length > ROOM_LIMITS.nameChars) throw bad("name: 1-80 chars");
+  const raw = (str(body.name) ?? "").trim();
+  if (raw.length < 1 || raw.length > ROOM_LIMITS.nameChars) throw bad("name: 1-80 chars");
+  const name = guarded(() => guardText("name", raw)).text.trim();
+  if (name.length < 1) throw bad("name: 1-80 chars");
   const kind = str(body.kind) ?? "persistent";
   if (!ROOM_KINDS.includes(kind)) throw bad("kind: ephemeral | persistent");
   const parentChat = str(body.parentChat) ?? null;
@@ -377,6 +395,10 @@ export interface PostArgs {
   mentions: string[];
   clientId: string | null;
   claimKey: string | null;
+  /** Personal details rewritten in the body, by kind. */
+  redacted: Partial<Record<PersonalKind, number>>;
+  /** Invisible characters removed from the body. */
+  stripped: number;
 }
 
 export function parsePost(body: Json): PostArgs {
@@ -386,6 +408,8 @@ export function parsePost(body: Json): PostArgs {
   if (text.length > ROOM_LIMITS.bodyChars) {
     throw new RoomError(413, "too_large", `body: at most ${ROOM_LIMITS.bodyChars} chars`);
   }
+  const clean = guarded(() => guardText("body", text));
+  if (clean.text.trim().length === 0) throw bad("body: empty");
   const kind = str(body.kind) ?? "message";
   if (!MESSAGE_KINDS.includes(kind)) throw bad("kind: message | claim | done | task");
   const to = str(body.to) ?? null;
@@ -402,14 +426,26 @@ export function parsePost(body: Json): PostArgs {
   });
   const clientId = str(body.clientId) ?? null;
   if (clientId !== null && !CLIENT_ID.test(clientId)) throw bad("clientId: 1-64 chars of [A-Za-z0-9_.:-]");
+  if (clientId !== null) guarded(() => guardIdentifier("clientId", clientId));
   const claimKey = str(body.claimKey) ?? null;
   if (claimKey !== null && !CLAIM_KEY.test(claimKey)) throw bad("claimKey: 1-128 chars, no spaces");
+  if (claimKey !== null) guarded(() => guardIdentifier("claimKey", claimKey));
   if ((kind === "claim" || kind === "done") !== (claimKey !== null)) {
     throw bad("claimKey: required for claim and done posts, and only for them");
   }
   // No `fromUser` here: whether a person wrote a post is never the caller's
   // claim to make (it resets the hop cap). See RoomCore.post.
-  return { body: text, kind: kind as MessageKind, to, replyTo, mentions, clientId, claimKey };
+  return {
+    body: clean.text,
+    kind: kind as MessageKind,
+    to,
+    replyTo,
+    mentions,
+    clientId,
+    claimKey,
+    redacted: clean.redacted,
+    stripped: clean.stripped
+  };
 }
 
 export function parseEmail(body: Json): string {
@@ -479,6 +515,10 @@ export interface PostResult {
   unreadFrom: Record<string, number>;
   /** True when this was a retry of a post already made (same clientId). */
   duplicate: boolean;
+  /** Personal details rewritten before storing, by kind (see room-guard). */
+  redacted: Partial<Record<PersonalKind, number>>;
+  /** Invisible characters removed before storing. */
+  stripped: number;
 }
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
@@ -772,7 +812,15 @@ export class RoomCore {
           this.recent.find((m) => m.senderUserId === caller.userId && m.clientId === args.clientId) ??
           (await this.store.findByClientId(this.room.id, caller.userId, args.clientId));
         if (earlier) {
-          return { message: earlier, deliver: [], external: [], unreadFrom: this.unreadFrom(sender), duplicate: true };
+          return {
+            message: earlier,
+            deliver: [],
+            external: [],
+            unreadFrom: this.unreadFrom(sender),
+            duplicate: true,
+            redacted: {},
+            stripped: 0
+          };
         }
       }
 
@@ -824,7 +872,15 @@ export class RoomCore {
       const { deliver, external } = await this.targets(message, sender, now);
       // Posting reads nothing: a DM that arrived since your last read stays
       // in your inbox until read_room returns it.
-      return { message, deliver, external, unreadFrom: this.unreadFrom(sender), duplicate: false };
+      return {
+        message,
+        deliver,
+        external,
+        unreadFrom: this.unreadFrom(sender),
+        duplicate: false,
+        redacted: args.redacted,
+        stripped: args.stripped
+      };
     });
   }
 
