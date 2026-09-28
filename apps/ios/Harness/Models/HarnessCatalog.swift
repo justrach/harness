@@ -67,6 +67,7 @@ enum HarnessCatalog {
         "devin": "Devin",
         "grok": "Grok",
         "hermes": "Hermes",
+        "graff": "CodeGraff",
         "pi": "Pi",
         "cursor": "Cursor",
         "opencode": "OpenCode",
@@ -93,6 +94,13 @@ enum HarnessCatalog {
 
     static func models(for harness: String) -> [ModelInfo] {
         switch harness {
+        case "graff":
+            // Offline fallback; a connected desktop supplies its live Graff catalog.
+            return [
+                ModelInfo(id: "xiaomi/mimo-v2.6-flash", label: "MiMo V2.6 Flash",
+                          description: "Xiaomi model through CodeGraff",
+                          reasoningLevels: ["low", "medium", "high"]),
+            ]
         case "grok":
             return [
                 ModelInfo(id: "grok-4.5", label: "Grok 4.5",

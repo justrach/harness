@@ -1,5 +1,6 @@
 // Sign-in with CodeGraff OAuth and PKCE. The edge verifies the OIDC identity.
-// The harness mark on black, one white button — the old mobile app's Gate.
+// Authenticated workspaces require login; a clearly labeled offline sample
+// workspace is available for exploring the app without an account.
 //
 // Endpoints are fixed to production (the old app's rule: mobile always talks
 // to prod; a stale override once broke sign-in in the worst ghost way).
@@ -80,6 +81,31 @@ struct SignInView: View {
                     .buttonStyle(.plain)
                     .disabled(busy)
                     .opacity(busy ? 0.6 : 1)
+
+                    Button {
+                        model.enterDemoMode()
+                    } label: {
+                        Text("Try demo")
+                            .font(Theme.sans(15, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 16)
+                                    .strokeBorder(Theme.border, lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("try-demo")
+                    .disabled(busy)
+                    .opacity(busy ? 0.6 : 1)
+
+                    Text("Explore a sample workspace. No account or connected desktop required. Agent responses are simulated.")
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     if let error {
                         Text(error)
