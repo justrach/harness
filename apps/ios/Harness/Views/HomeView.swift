@@ -23,6 +23,8 @@ struct HomeView: View {
     @State private var showProjectlessDevices = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
+    @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
+    @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
 
@@ -222,6 +224,15 @@ struct HomeView: View {
                                 subtitle: deviceTag(space))
             }
             Divider()
+            Picker(selection: $groupByRaw) {
+                ForEach(HomeGroupBy.allCases) { option in
+                    Label(option.label, systemImage: option.symbol).tag(option.rawValue)
+                }
+            } label: {
+                Label("Group by", systemImage: "square.stack.3d.up")
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("home-group-by")
             Button {
                 showNewSpace = true
             } label: {
@@ -318,44 +329,76 @@ struct HomeView: View {
 
     // MARK: Sessions
 
-    private var sessionsSection: some View {
-        Section {
-            let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
-            if chats.isEmpty {
+    @ViewBuilder private var sessionsSection: some View {
+        let chats = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
+        let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        if chats.isEmpty {
+            Section {
                 Text("No sessions yet — start one with +")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.textFaint)
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             }
-            ForEach(chats) { chat in
-                // Location shows even when scoped — without it the row's
-                // first line is just a floating dot and a timestamp.
-                ChatRow(chat: chat, showLocation: true) {
-                    open(.chat(chat.id))
-                }
-                .listRowBackground(selectedChatId == chat.id
-                    ? AnyView(RoundedRectangle(cornerRadius: 10).fill(Theme.elementActive)
-                        .padding(.horizontal, 8))
-                    : AnyView(Color.clear))
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
-                .sessionPinAction(chat: chat, model: model)
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button {
-                        // withAnimation, not a value-keyed .animation: the row
-                        // leaves THIS section and lands in the archived shelf
-                        // — one coordinated List diff, or the hand-off jumps.
-                        withAnimation(Motion.resort) {
-                            model.archive(chatId: chat.id)
+        } else {
+            ForEach(HomeGrouping.groups(chats, by: grouping)) { group in
+                let collapsed = grouping != .none && collapsedGroups.contains(group.id)
+                Section {
+                    if !collapsed {
+                        ForEach(group.chats) { chat in
+                            sessionRow(chat)
                         }
-                    } label: {
-                        Label("Archive", systemImage: "archivebox")
                     }
-                    .tint(Theme.surfaceRaised)
+                } header: {
+                    if grouping != .none {
+                        HomeGroupHeader(group: group, collapsed: collapsed) {
+                            withAnimation(Motion.resort) { toggleGroup(group.id) }
+                        }
+                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 2, trailing: 12))
+                    }
                 }
+                .listSectionSeparator(.hidden)
             }
             .motionAnimation(Motion.resort, value: chats.map(\.id))
+        }
+    }
+
+    /// Collapsed section ids, persisted (comma-separated).
+    private var collapsedGroups: Set<String> {
+        Set(collapsedGroupsRaw.split(separator: ",").map(String.init))
+    }
+
+    private func toggleGroup(_ id: String) {
+        var groups = collapsedGroups
+        if groups.remove(id) == nil { groups.insert(id) }
+        collapsedGroupsRaw = groups.sorted().joined(separator: ",")
+    }
+
+    private func sessionRow(_ chat: Chat) -> some View {
+        // Location shows even when scoped — without it the row's
+        // first line is just a floating dot and a timestamp.
+        ChatRow(chat: chat, showLocation: true) {
+            open(.chat(chat.id))
+        }
+        .listRowBackground(selectedChatId == chat.id
+            ? AnyView(RoundedRectangle(cornerRadius: 10).fill(Theme.elementActive)
+                .padding(.horizontal, 8))
+            : AnyView(Color.clear))
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
+        .sessionPinAction(chat: chat, model: model)
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button {
+                // withAnimation, not a value-keyed .animation: the row
+                // leaves THIS section and lands in the archived shelf
+                // — one coordinated List diff, or the hand-off jumps.
+                withAnimation(Motion.resort) {
+                    model.archive(chatId: chat.id)
+                }
+            } label: {
+                Label("Archive", systemImage: "archivebox")
+            }
+            .tint(Theme.surfaceRaised)
         }
     }
 }
