@@ -103,6 +103,9 @@ pub(crate) fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The device-nudge id meaning "room wakes are waiting" (edge
+/// `room-actor.ts` `ROOM_WAKES_NUDGE`); chat ids are UUIDs, so it never names a chat.
+pub const ROOM_WAKES_NUDGE: &str = "rooms-wakes";
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Data directory (default `~/.harness`, dev `~/.harness-dev`).
@@ -433,6 +436,21 @@ impl EngineCore {
             harness_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
         let doc_host = self.doc_host.clone();
         let on_nudge: harness_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
+            // Not a chat: another person's agent woke one of this user's
+            // chats in an agent room. Collect those wakes (the drain acks
+            // what it queued; the rest wait for the next nudge).
+            if chat_id == ROOM_WAKES_NUDGE {
+                let host = doc_host.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        match host.drain_room_wakes().await {
+                            Ok(queued) => tracing::info!(queued, "room wakes drained"),
+                            Err(err) => tracing::warn!(%err, "room wakes: drain failed"),
+                        }
+                    });
+                }
+                return true;
+            }
             match doc_host.enqueue_wakeup(&chat_id) {
                 Ok(()) => true,
                 Err(err) => {

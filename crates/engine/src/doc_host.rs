@@ -3033,6 +3033,9 @@ impl DocHost {
     ) -> Result<serde_json::Value, String> {
         let room_path = path == "rooms"
             || path == "rooms/inbox"
+            || path == "rooms/invites"
+            || path == "rooms/wakes"
+            || path == "rooms/wakes/ack"
             || path
                 .strip_prefix("room/")
                 .is_some_and(|rest| rest.split('/').count() == 2 && !rest.contains(".."));
@@ -3065,6 +3068,68 @@ impl DocHost {
             .await
             .unwrap_or(serde_json::Value::Null);
         Ok(serde_json::json!({ "status": status, "body": body }))
+    }
+
+    /// Collect the room wakes other people's agents left for this user's
+    /// chats on this device (edge `GET /rooms/wakes`), queue each into its
+    /// chat as advisory peer mail from another person, and ack them. Run on
+    /// the `rooms-wakes` device nudge; the nudge is durable, so a device that
+    /// was offline drains when it reconnects. Returns how many were queued.
+    pub async fn drain_room_wakes(&self) -> Result<usize, String> {
+        let reply = self
+            .room_request("GET", "rooms/wakes", &[("limit".into(), "100".into())], None)
+            .await?;
+        if reply["status"].as_u64() != Some(200) {
+            return Err(format!("rooms/wakes answered {}", reply["status"]));
+        }
+        let wakes = reply["body"]["wakes"].as_array().cloned().unwrap_or_default();
+        let workspace = self.workspace();
+        let mut acked = Vec::new();
+        let mut queued = 0;
+        for wake in wakes {
+            // Each device drains only its own chats' wakes, so two devices
+            // of the same person never queue one twice.
+            if wake["toDevice"].as_str() != Some(self.device_id()) {
+                continue;
+            }
+            let Some(id) = wake["id"].as_u64() else { continue };
+            let chat_id = wake["toRef"].as_str().unwrap_or_default();
+            let known = !chat_id.is_empty()
+                && workspace.is_some_and(|w| matches!(w.chat(chat_id), Ok(Some(_))));
+            if known {
+                let origin = harness_proto::room_delivery::RoomOrigin {
+                    room_id: wake["roomId"].as_str().unwrap_or_default().to_owned(),
+                    room_name: wake["roomName"].as_str().unwrap_or_default().to_owned(),
+                    seq: wake["seq"].as_u64().unwrap_or_default(),
+                    from_member: wake["fromMember"].as_str().unwrap_or_default().to_owned(),
+                    member_kind: "harness_chat".into(),
+                    from_user: false,
+                    framed: true,
+                    external: true,
+                    from_display: wake["fromDisplay"].as_str().map(str::to_owned),
+                };
+                let text = harness_proto::room_delivery::format(
+                    &origin,
+                    wake["body"].as_str().unwrap_or_default(),
+                );
+                if let Err(err) = self.queue_message_with_behavior(chat_id, &text, Vec::new(), true) {
+                    // Left unacked: the next nudge retries it.
+                    tracing::warn!(chat = %chat_id, %err, "room wake: queue failed");
+                    continue;
+                }
+                queued += 1;
+            } else {
+                // A chat this device no longer has: nothing to wake, so the
+                // row is settled rather than retried forever.
+                tracing::info!(chat = %chat_id, "room wake for an unknown chat dropped");
+            }
+            acked.push(id);
+        }
+        if !acked.is_empty() {
+            self.room_request("POST", "rooms/wakes/ack", &[], Some(serde_json::json!({ "ids": acked })))
+                .await?;
+        }
+        Ok(queued)
     }
 
     /// The in-flight queued-attachment transfer set: current entries first,
