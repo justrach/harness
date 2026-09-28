@@ -43,6 +43,11 @@ describe("room guard: credentials are refused", () => {
     it(`refuses ${what}`, () => expect(refused(text)).not.toBeNull());
   }
 
+  it("picks the article by the kind's first letter", () => {
+    expect(() => guardText("body", j("-----BEGIN ", "RSA PRIVATE KEY-----\nMIIE", rand(40)))).toThrow(/looks like a private key/);
+    expect(() => guardText("body", j("sk-", "proj-", rand(40)))).toThrow(/looks like an API key/);
+  });
+
   it("sees through zero-width characters wedged into a key", () => {
     const split = gh.slice(0, 3) + "\u200B" + gh.slice(3, 10) + "\u2060" + gh.slice(10);
     expect(() => guardText("body", `here: ${split}`)).toThrow(/access token/);
@@ -70,7 +75,7 @@ describe("room guard: credentials are refused", () => {
     } catch (err) {
       message = (err as Error).message;
     }
-    expect(message).toMatch(/access token \(line 2\)/);
+    expect(message).toMatch(/looks like an access token \(line 2\)/);
     expect(message).not.toContain(gh.slice(4));
   });
 });

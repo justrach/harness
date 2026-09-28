@@ -388,8 +388,9 @@ export class GuardRefusal extends Error {
     readonly finding: Finding
   ) {
     const where = finding.via === "text" ? `line ${finding.line}` : `line ${finding.line}, after undoing ${finding.via}`;
+    const article = /^[aeiou]/i.test(finding.kind) ? "an" : "a";
     super(
-      `${field}: looks like a ${finding.kind} (${where}). Rooms are read by other people and their agents; ` +
+      `${field}: looks like ${article} ${finding.kind} (${where}). Rooms are read by other people and their agents; ` +
         "remove it and post again. Refer to credentials by name, never by value."
     );
   }
