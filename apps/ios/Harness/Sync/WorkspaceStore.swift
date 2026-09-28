@@ -383,7 +383,8 @@ final class WorkspaceStore {
                         createdAt: f["createdAt"]?.int64Value ?? 0,
                         spaceId: f["spaceId"]?.stringValue,
                         lastSeenAt: f["lastSeenAt"]?.int64Value,
-                        roomGen: f["roomGen"]?.int64Value.map(Int.init))
+                        roomGen: f["roomGen"]?.int64Value.map(Int.init),
+                        lastPromptAt: f["lastPromptAt"]?.int64Value)
         }
 
         var rows: [String: SessionRow] = [:]
