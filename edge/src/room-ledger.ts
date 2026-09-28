@@ -172,6 +172,10 @@ export class LedgerRoomStore implements RoomStore {
       // destroyed elsewhere is gone, and the console edits grants there.
       const pg = await this.pg.loadAccess(id);
       if (!pg) return null;
+      // PostgreSQL moved past what this ledger ever wrote: posts landed there
+      // without it (ROOM_LEDGER was off, or an older version ran). Trusting
+      // the ledger would reuse those seqs and the flush would drop ours.
+      if (pg.room.lastSeq > this.flushedSeq()) return this.rehydrate(id);
       const room: RoomRow = { ...local, archivedAt: pg.room.archivedAt };
       return { room, members: this.members(), access: pg.access, recent: this.recent() };
     }
@@ -181,6 +185,77 @@ export class LedgerRoomStore implements RoomStore {
     const claims = await this.pg.loadClaims(id);
     this.hydrate(loaded, claims);
     return loaded;
+  }
+
+  /**
+   * Rebuild the ledger from PostgreSQL, then put back what only this ledger
+   * had: unflushed posts are re-appended after PostgreSQL's last seq (they
+   * were never visible outside this actor but for its live sockets), and
+   * unflushed member, removal and claim changes are re-applied as dirty.
+   */
+  private async rehydrate(id: string): Promise<LoadedRoom | null> {
+    const unflushed = this.rows("SELECT row FROM ledger_messages WHERE flushed = 0 ORDER BY seq").map(
+      (r) => JSON.parse(r.row as string) as MessageRow
+    );
+    const dirtyMembers = this.rows("SELECT row FROM ledger_members WHERE dirty > 0").map(
+      (r) => JSON.parse(r.row as string) as MemberRow
+    );
+    const removed = this.rows("SELECT member, device_id FROM ledger_removed").map((r) => ({
+      member: r.member as string,
+      deviceId: r.device_id as string
+    }));
+    const dirtyClaims = this.rows("SELECT row FROM ledger_claims WHERE dirty > 0").map(
+      (r) => JSON.parse(r.row as string) as ClaimRow
+    );
+    const loaded = await this.pg.loadRoom(id);
+    if (!loaded) return null;
+    const claims = await this.pg.loadClaims(id);
+    console.log(
+      JSON.stringify({ event: "room_ledger_rehydrate", room: id, pgSeq: loaded.room.lastSeq, reappended: unflushed.length })
+    );
+    this.init();
+    this.storage.transactionSync(() => {
+      this.hydrateRows(loaded, claims);
+      let room = loaded.room;
+      for (const m of unflushed) {
+        const moved: MessageRow = { ...m, seq: room.lastSeq + 1 };
+        this.sql.exec(
+          "INSERT INTO ledger_messages (seq, row, sender_user_id, client_id, flushed) VALUES (?, ?, ?, ?, 0)",
+          moved.seq,
+          JSON.stringify(moved),
+          moved.senderUserId,
+          moved.clientId
+        );
+        room = { ...room, lastSeq: moved.seq, lastActivityAt: Math.max(room.lastActivityAt, moved.createdAt) };
+      }
+      this.saveRoom(room);
+      if (unflushed.length) this.setMeta("dirty_room", "1");
+      for (const m of dirtyMembers) {
+        const pgRow = loaded.members.find((x) => x.member === m.member && x.deviceId === m.deviceId);
+        const merged = pgRow ? { ...m, readSeq: Math.max(m.readSeq, pgRow.readSeq) } : m;
+        this.sql.exec(
+          `INSERT INTO ledger_members (member, device_id, row, dirty) VALUES (?, ?, ?, 1)
+           ON CONFLICT (member, device_id) DO UPDATE SET row = excluded.row, dirty = 1`,
+          m.member,
+          m.deviceId,
+          JSON.stringify(merged)
+        );
+      }
+      for (const k of removed) {
+        this.sql.exec("DELETE FROM ledger_members WHERE member = ? AND device_id = ?", k.member, k.deviceId);
+        this.sql.exec("INSERT OR IGNORE INTO ledger_removed (member, device_id) VALUES (?, ?)", k.member, k.deviceId);
+      }
+      for (const c of dirtyClaims) {
+        this.sql.exec(
+          `INSERT INTO ledger_claims (claim_key, row, dirty) VALUES (?, ?, 1)
+           ON CONFLICT (claim_key) DO UPDATE SET row = excluded.row, dirty = 1`,
+          c.claimKey,
+          JSON.stringify(c)
+        );
+      }
+    });
+    if (unflushed.length || dirtyMembers.length || removed.length || dirtyClaims.length) this.touched();
+    return { room: this.localRoom()!, members: this.members(), access: loaded.access, recent: this.recent() };
   }
 
   private hydrate(loaded: LedgerHydration, claims: ClaimRow[]): void {
@@ -196,6 +271,9 @@ export class LedgerRoomStore implements RoomStore {
     this.saveRoom(loaded.room);
     const oldest = loaded.recent.length ? loaded.recent[0].seq : loaded.room.lastSeq + 1;
     this.setMeta("local_from", String(oldest));
+    // Everything hydrated came from PostgreSQL, so it is flushed by definition.
+    this.setMeta("flushed_seq", String(loaded.room.lastSeq));
+    this.setMeta("dirty_room", "0");
     for (const m of loaded.members) {
       this.sql.exec(
         "INSERT INTO ledger_members (member, device_id, row, dirty) VALUES (?, ?, ?, 0)",
@@ -344,7 +422,7 @@ export class LedgerRoomStore implements RoomStore {
    * exists there (destroyed or swept); the caller wipes. Rows written while
    * the flush was in flight stay dirty (their counters moved) for the next one.
    */
-  async flush(roomId: string): Promise<"ok" | "gone" | "idle"> {
+  async flush(roomId: string): Promise<"ok" | "gone" | "idle" | "diverged"> {
     const room = this.localRoom();
     if (!room || room.id !== roomId) return "idle";
     const messages = this.rows("SELECT row FROM ledger_messages WHERE flushed = 0 ORDER BY seq LIMIT ?", FLUSH_BATCH).map(
@@ -369,7 +447,7 @@ export class LedgerRoomStore implements RoomStore {
       lastActivityAt: room.lastActivityAt
     };
     const result = await this.pg.applyLedger(roomId, batch);
-    if (result === "gone") return "gone";
+    if (result === "gone" || result === "diverged") return result;
     // Mark exactly what was sent; anything that changed meanwhile stays dirty.
     if (messages.length) {
       this.exec("UPDATE ledger_messages SET flushed = 1 WHERE seq BETWEEN ? AND ?", messages[0].seq, lastSeq);

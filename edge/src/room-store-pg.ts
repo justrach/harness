@@ -285,7 +285,7 @@ export class PgRoomStore implements RoomStore {
    * retried or overlapping flush changes nothing twice. "gone" means the room
    * row no longer exists (destroyed or swept): the actor wipes, never recreates.
    */
-  applyLedger(roomId: string, batch: LedgerBatch): Promise<"ok" | "gone"> {
+  applyLedger(roomId: string, batch: LedgerBatch): Promise<"ok" | "gone" | "diverged"> {
     return withPg(this.env, async (pg) => {
       await pg.query("BEGIN");
       try {
@@ -295,15 +295,37 @@ export class PgRoomStore implements RoomStore {
           return "gone";
         }
         if (batch.messages.length) {
-          await pg.query(
+          const inserted = await pg.query(
             `INSERT INTO app.agent_room_messages (room_id, ${MESSAGE_SELECT})
              SELECT $1, ${MESSAGE_SELECT}
                FROM jsonb_to_recordset($2::jsonb) AS x(seq bigint, sender text, sender_device text,
                  sender_user_id text, from_user boolean, kind text, to_member text, body text, reply_to bigint,
                  mentions text[], hop smallint, client_id text, claim_key text, created_at bigint)
-             ON CONFLICT (room_id, seq) DO NOTHING`,
+             ON CONFLICT (room_id, seq) DO NOTHING
+             RETURNING seq`,
             [roomId, JSON.stringify(batch.messages.map(messageTo))]
           );
+          // A seq that already exists is fine when it's this same post (a
+          // retried flush); a different post there means the ledger and
+          // PostgreSQL diverged, and skipping it would lose ours silently.
+          if (inserted.rows.length < batch.messages.length) {
+            const landed = new Set(inserted.rows.map((r: Row) => num(r.seq)));
+            const skipped = batch.messages.filter((m) => !landed.has(m.seq));
+            const existing = await pg.query(
+              `SELECT seq, sender_user_id, created_at, body FROM app.agent_room_messages
+                WHERE room_id = $1 AND seq = ANY($2::bigint[])`,
+              [roomId, skipped.map((m) => m.seq)]
+            );
+            const bySeq = new Map(existing.rows.map((r: Row) => [num(r.seq), r]));
+            const diverged = skipped.some((m) => {
+              const r = bySeq.get(m.seq);
+              return !r || r.sender_user_id !== m.senderUserId || num(r.created_at) !== m.createdAt || r.body !== m.body;
+            });
+            if (diverged) {
+              await pg.query("ROLLBACK");
+              return "diverged";
+            }
+          }
         }
         await pg.query(
           `UPDATE app.agent_rooms SET last_seq = GREATEST(last_seq, $2),

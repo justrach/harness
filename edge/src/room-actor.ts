@@ -108,6 +108,10 @@ export class RoomActor implements DurableObject {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   /** What the alarm is currently set to, so unchanged schedules skip the write. */
   private alarmAt: number | null | undefined = undefined;
+  /** Devices owed a rooms-wakes nudge (device → its user), sent only once
+   * the posts that woke them are in PostgreSQL: their engine reads the body
+   * from there. A failed flush keeps them for the retry that lands. */
+  private pendingNudges = new Map<string, string>();
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -246,10 +250,19 @@ export class RoomActor implements DurableObject {
             await this.wipe();
             return;
           }
+          if (result === "diverged") {
+            // PostgreSQL has posts this ledger never wrote: rebuild from it
+            // (unflushed posts are re-appended after its last seq) and go on.
+            console.error(JSON.stringify({ event: "room_ledger_diverged", room: roomId }));
+            await this.reload(roomId);
+            continue;
+          }
           if (result === "idle" || !ledger.hasUnflushed()) break;
         }
         // Writes that arrived during the flush get their own (timer) flush.
         this.flushDueAt = ledger.hasUnflushed() ? Date.now() + FLUSH_SAFETY_MS : null;
+        // Everything is in PostgreSQL now: the woken devices can drain.
+        if (!ledger.hasUnflushed()) await this.sendPendingNudges();
       } catch (err) {
         console.error(JSON.stringify({ event: "room_ledger_flush_failed", room: roomId, error: String(err) }));
         this.flushDueAt = Date.now() + FLUSH_RETRY_MS;
@@ -402,7 +415,10 @@ export class RoomActor implements DurableObject {
           // Another person's engine reads the wake's body from PostgreSQL, so
           // the post must be written behind before their device is nudged.
           if (result.external.some((w) => w.verdict === "allowed")) {
-            this.ctx.waitUntil(this.flushNow().then(() => this.nudgeExternal(result.external)));
+            for (const w of result.external) {
+              if (w.verdict === "allowed" && w.deviceId) this.pendingNudges.set(w.deviceId, w.userId);
+            }
+            this.ctx.waitUntil(this.ledger() ? this.flushNow() : this.sendPendingNudges());
           }
         }
         return json(result);
@@ -448,6 +464,13 @@ export class RoomActor implements DurableObject {
       if (err instanceof RoomError) return fresh.post(caller, body);
       throw err;
     }
+  }
+
+  private async sendPendingNudges(): Promise<void> {
+    if (!this.pendingNudges.size) return;
+    const owed = [...this.pendingNudges].map(([deviceId, userId]) => ({ deviceId, userId, verdict: "allowed" }));
+    this.pendingNudges.clear();
+    await this.nudgeExternal(owed);
   }
 
   /** Tell each allowed target's device it has room wakes to collect. The
