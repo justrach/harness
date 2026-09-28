@@ -1,4 +1,5 @@
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.localhost$/;
@@ -39,11 +40,19 @@ export function previewSignal(value: unknown): object | undefined {
  * metadata and SDP/ICE coordination live here; binary preview frames are rejected. */
 export class PreviewRoom {
   constructor(private state: DurableObjectState, _env: Env) {
-    state.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_catalog (device TEXT PRIMARY KEY, services TEXT NOT NULL)");
+    this.schema();
     state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+  private schema(): void {
+    this.state.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_catalog (device TEXT PRIMARY KEY, services TEXT NOT NULL)");
   }
   async fetch(request: Request): Promise<Response> {
     if (!request.headers.get(AUTH_USER_HEADER)) return new Response("Unauthorized", { status: 401 });
+    // Account deletion (purge.ts): the Worker names this room from the verified user.
+    if (isPurge(request, new URL(request.url))) {
+      await wipeObject(this.state, () => this.schema());
+      return new Response(JSON.stringify({ purged: true }), { headers: { "content-type": "application/json" } });
+    }
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
     const device = new URL(request.url).searchParams.get("device") ?? "";
     if (!ID.test(device)) return new Response("Invalid device", { status: 400 });

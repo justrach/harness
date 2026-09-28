@@ -26,6 +26,7 @@
  *   POST /join /leave /post /archive /destroy /invite /accept /decline
  *        /remove /wakes /release                                   (?room=)
  *   POST /wipe?room=     (Worker cron only; never routed from fetch)
+ *   POST /forget?room=   (account deletion only; never routed from fetch)
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { PgRoomStore } from "./room-store-pg";
@@ -61,7 +62,7 @@ const fail = (err: RoomError): Response => json({ error: err.code, message: err.
 
 /** `wrangler dev` without Hyperdrive: one isolate, so a module-level map
  * behaves like a shared database for local testing. Never used in prod. */
-const devStore = new MemoryRoomStore();
+export const devStore = new MemoryRoomStore();
 
 export function roomStore(env: Env): RoomStore | undefined {
   if (env.HYPERDRIVE) return new PgRoomStore(env);
@@ -344,6 +345,7 @@ export class RoomActor implements DurableObject {
       return json({ ok: true });
     }
     if (!caller.userId) throw new RoomError(401, "unauthenticated");
+    if (path === "/forget" && request.method === "POST") return this.forget(roomId, caller);
 
     if (path === "/create" && request.method === "POST") {
       if (await this.destroyed()) throw new RoomError(410, "room_destroyed");
@@ -450,6 +452,36 @@ export class RoomActor implements DurableObject {
       default:
         return json({ error: "not_found" }, 404);
     }
+  }
+
+  /** Account deletion: a room the person created is destroyed as by
+   * `/destroy`; in anyone else's room they leave and their posts lose their
+   * text. A room that is already gone counts as done. */
+  private async forget(roomId: string, caller: Caller): Promise<Response> {
+    let core: RoomCore;
+    try {
+      core = await this.loaded(roomId);
+    } catch (err) {
+      if (err instanceof RoomError && (err.status === 404 || err.status === 410)) return json({ ok: true, gone: true });
+      throw err;
+    }
+    if (core.room.createdBy === caller.userId) {
+      try {
+        await core.destroy(caller);
+        await this.wipe();
+        return json({ ok: true, destroyed: true });
+      } catch (err) {
+        // No longer an owner of the room they made: leave it like anyone else.
+        if (!(err instanceof RoomError)) throw err;
+      }
+    }
+    // A write-behind already under way read its rows before the redaction.
+    if (this.flushing) await this.flushing.catch(() => {});
+    const gone = await core.forget(caller.userId);
+    for (const key of gone) this.closeSockets(this.ctx.getWebSockets(socketTag(key)), 4403, "removed");
+    this.broadcast(core, { type: "person_left", userId: caller.userId });
+    if (this.ledger()) await this.flushNow();
+    return json({ ok: true, members: gone.length });
   }
 
   /** A post the store refused as stale gets one retry on reloaded state; a

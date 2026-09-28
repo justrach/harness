@@ -6,6 +6,7 @@ import {
   ROOM_LIMITS,
   RoomCore,
   RoomError,
+  FORGOTTEN_BODY,
   bodyMentions,
   newRoomId,
   type Caller,
@@ -311,5 +312,23 @@ describe("agent rooms across people", () => {
     expect(gone).toEqual([{ member: "dave", deviceId: "pc" }]);
     expect(core.canSee(them)).toBe(false);
     expect(core.find({ member: "dave", deviceId: "pc" })).toBeUndefined();
+  });
+
+  it("forgets a deleted account: gone from the room, text removed, claims released", async () => {
+    const { store, core } = await shared();
+    await core.post(them, { ...dave, body: "their plan, @alice" });
+    await core.post(them, { ...dave, kind: "claim", claimKey: "task-1", body: "mine" });
+    await core.post(me, { ...alice, body: "this one stays" });
+
+    expect(await core.forget(them.userId)).toEqual([{ member: "dave", deviceId: "pc" }]);
+    expect(core.canSee(them)).toBe(false);
+    const read = await core.read(me, { member: "bob", deviceId: "mac" }, 0, 10, false);
+    const theirs = read.messages.filter((m) => m.senderUserId === them.userId);
+    expect(theirs.map((m) => m.seq)).toEqual([1, 2]);
+    expect(theirs.every((m) => m.body === FORGOTTEN_BODY && m.mentions.length === 0)).toBe(true);
+    expect(read.messages.find((m) => m.senderUserId === me.userId)?.body).toBe("this one stays");
+    const stored = store.rooms.get(core.room.id)!.messages.filter((m) => m.senderUserId === them.userId);
+    expect(stored.every((m) => m.body === FORGOTTEN_BODY)).toBe(true);
+    expect(await code(core.post(me, { ...alice, kind: "claim", claimKey: "task-1", body: "taking it" }))).toBe("ok");
   });
 });

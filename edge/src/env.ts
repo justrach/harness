@@ -14,6 +14,8 @@ export interface Env {
   /** Agent rooms (`room1/{roomId}`): the live actor per room; PostgreSQL
    * through HYPERDRIVE is the store of record (room-actor.ts). */
   ROOM_ACTORS: DurableObjectNamespace;
+  /** Account deletion jobs (`purge1/{userId}`, account-purge.ts). */
+  ACCOUNT_PURGE: DurableObjectNamespace;
   /** Agent rooms' PostgreSQL. Absent in `wrangler dev` unless a local connection string
    * is supplied; rooms then use an in-memory store (dev auth only). */
   HYPERDRIVE?: Hyperdrive;

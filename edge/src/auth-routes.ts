@@ -4,6 +4,7 @@
  *  - POST /auth/exchange     — CodeGraff code + PKCE → Harness tokens.
  *  - POST /auth/refresh      — rotate CodeGraff refresh token.
  *  - GET  /auth/orgs         — the caller's personal workspace.
+ *  - POST /auth/account/delete — delete the caller's account (account-delete.ts).
  *  - GET  /auth/cli/callback — headless sign-in: shows a paste-able code.
  *  - GET  /auth/ios/callback — forwards the code to the iOS app scheme.
  *
@@ -13,6 +14,7 @@
 import { bearerFromRequest, personalOrgId, verifyToken } from "./auth";
 import type { Env } from "./env";
 import { CodegraffAuthFailed, exchange, refresh } from "./codegraff";
+import { deleteAccount } from "./account-delete";
 
 const json = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), {
@@ -74,6 +76,11 @@ export const handleAuthRoute = async (
       );
       return authFailed(e);
     }
+  }
+
+  if (parts[1] === "account" && parts[2] === "delete" && parts.length === 3 && request.method === "POST") {
+    if (!configured) return notConfigured();
+    return deleteAccount(request, env);
   }
 
   if (parts[1] === "orgs" && parts.length === 2) {

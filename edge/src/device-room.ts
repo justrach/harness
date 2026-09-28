@@ -18,6 +18,7 @@ import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 export interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */
@@ -97,12 +98,16 @@ export class DeviceRoom implements DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     void env;
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    );
-    ensureNudges(ctx.storage.sql);
+    this.schema();
     this.blobs = createBlobStore(ctx.storage.sql);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  private schema(): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    ensureNudges(sql);
+    createBlobStore(sql);
   }
 
   private getMeta(key: string): string | undefined {
@@ -147,6 +152,13 @@ export class DeviceRoom implements DurableObject {
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return new Response("unauthenticated", { status: 401 });
     const owner = this.getMeta("owner");
+
+    // Account deletion (purge.ts): only the owner's device room is wiped.
+    if (isPurge(request, url)) {
+      if (owner !== userId) return json({ purged: false });
+      await wipeObject(this.ctx, () => this.schema());
+      return json({ purged: true });
+    }
 
     if (url.pathname === "/ws") {
       const role = url.searchParams.get("role") === "host" ? "host" : "client";

@@ -32,6 +32,7 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -96,6 +97,18 @@ export class ChatRoom implements DurableObject {
 
     const sql = this.ctx.storage.sql;
     const owner = getMeta(sql, "owner");
+
+    // Account deletion (purge.ts): only the owner's chat is wiped.
+    if (isPurge(request, url)) {
+      if (owner !== userId) return json({ purged: false });
+      this.presence.clear();
+      this.quotas.clear();
+      await wipeObject(this.ctx, () => {
+        ensureChatLog(sql);
+        createBlobStore(sql);
+      });
+      return json({ purged: true, backup: `backup/chat2/${this.ctx.id.toString()}/latest.json` });
+    }
 
     if (url.pathname === "/ws") {
       // Claim-on-first-join ownership, then owner-only forever (the s2

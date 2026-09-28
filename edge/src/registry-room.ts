@@ -21,6 +21,7 @@
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Tombstones older than this are purged; cursors from before the purge
@@ -56,17 +57,20 @@ export class RegistryRoom implements DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS rows (kind TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, deleted INTEGER NOT NULL, del_hlc TEXT, fields TEXT NOT NULL, clocks TEXT NOT NULL, PRIMARY KEY (kind, id))"
-    );
-    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    );
+    this.schema();
     // Same protocol-level keepalive as SessionRoom — and the same caveat: a
     // pong is runtime-answered and proves nothing about this DO's health.
     // Clients judge liveness by probe frames (crates/sync/src/registry.rs).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  private schema(): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS rows (kind TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL, deleted INTEGER NOT NULL, del_hlc TEXT, fields TEXT NOT NULL, clocks TEXT NOT NULL, PRIMARY KEY (kind, id))"
+    );
+    sql.exec("CREATE INDEX IF NOT EXISTS rows_seq ON rows (seq)");
+    sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
   }
 
   // ── meta helpers ──────────────────────────────────────────────────────────
@@ -154,6 +158,22 @@ export class RegistryRoom implements DurableObject {
     const url = new URL(request.url);
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
+
+    // Account deletion (purge.ts). The Worker names this room from the
+    // verified user, so no owner check: hand back every chat, session and
+    // device id it lists (tombstones too, since a deleted chat's rooms can
+    // still hold data) for the purge to wipe next, then wipe the registry.
+    if (isPurge(request, url)) {
+      const ids: Record<string, string[]> = { chats: [], sessions: [], devices: [] };
+      for (const raw of this.ctx.storage.sql.exec(
+        "SELECT kind, id FROM rows WHERE kind IN ('chats', 'sessions', 'devices')"
+      )) {
+        ids[raw.kind as string].push(raw.id as string);
+      }
+      this.presence.clear();
+      await wipeObject(this.ctx, () => this.schema());
+      return json({ purged: true, ids, backup: `backup/registry/${this.ctx.id.toString()}/latest.json` });
+    }
 
     if (url.pathname === "/ws") {
       const device = url.searchParams.get("device") ?? "";
