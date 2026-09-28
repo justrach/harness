@@ -131,6 +131,8 @@ jobs:
           plutil -insert manageAppVersionAndBuildNumber -bool false "$options"
           if [ "$AUDIENCE" = "internal" ]; then
             plutil -insert testFlightInternalTestingOnly -bool true "$options"
+          else
+            plutil -insert testFlightInternalTestingOnly -bool false "$options"
           fi
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/Harness.xcarchive" \

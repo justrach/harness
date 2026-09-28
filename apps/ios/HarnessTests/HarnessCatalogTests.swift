@@ -2,6 +2,17 @@ import XCTest
 @testable import Harness
 
 final class HarnessCatalogTests: XCTestCase {
+    func testCodeGraffSessionUsesItsOwnBrandAndModelFallback() {
+        // The real wire ID must not fall through to the Claude badge/catalog.
+        XCTAssertEqual(HarnessCatalog.label(for: "graff"), "CodeGraff")
+        XCTAssertEqual(BrandMark.forHarness("graff"), .graff)
+        XCTAssertNil(BrandMark.brandTint(for: "graff"))
+        let model = HarnessCatalog.defaultModel(for: "graff")
+        XCTAssertEqual(model.id, "xiaomi/mimo-v2.6-flash")
+        XCTAssertEqual(HarnessCatalog.defaultReasoning(for: model), "high")
+        XCTAssertEqual(HarnessCatalog.modelLabel(harness: "graff", modelId: model.id), "MiMo V2.6 Flash")
+    }
+
     func testCodexFallbackStartsWithAstraAndExposesItsTraits() {
         let models = HarnessCatalog.models(for: "codex")
         let astra = models.first

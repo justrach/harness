@@ -44,42 +44,40 @@ final class DemoDataset {
                          path: "/srv/deploys/edge", name: nil, gitDetected: true,
                          gitCheckedAt: now, checkoutId: nil, createdAt: now - 86_400_000 * 4)
 
-        let claude = ChatConfig(harness: "claude-code", model: "claude-fable-5",
-                                reasoning: "xhigh", sandbox: "workspace-write")
-        let codex = ChatConfig(harness: "codex", model: "gpt-5.6-terra",
+        let graff = ChatConfig(harness: "graff", model: "xiaomi/mimo-v2.6-flash",
                                reasoning: "high", sandbox: "workspace-write")
 
         let chats = [
             Chat(id: "chat-veil", deviceId: "dev-mac", title: "Streaming veil on transcript rows",
                  archived: false, cwd: "/Users/dev/.harness/worktrees/harness-veil-fade",
                  branch: "veil-fade", checkoutId: nil,
-                 config: claude, lastMessagePreview: "Porting the paint-only fade…",
+                 config: graff, lastMessagePreview: "Porting the paint-only fade…",
                  lastMessageAt: now - 40_000, createdAt: now - 3_600_000,
                  spaceId: harness.id, lastSeenAt: now),
             Chat(id: "chat-picker", deviceId: "dev-mac", title: "Model picker catalog sync",
                  archived: false, cwd: harness.path, branch: "main", checkoutId: nil,
-                 config: claude, lastMessagePreview: "Which device owns the catalog?",
+                 config: graff, lastMessagePreview: "Which device owns the catalog?",
                  lastMessageAt: now - 120_000, createdAt: now - 7_200_000,
                  spaceId: harness.id, lastSeenAt: now - 130_000),
             Chat(id: "chat-tabs", deviceId: "dev-mac", title: "Tool group header colors",
                  archived: false, cwd: harness.path, branch: "main", checkoutId: nil,
-                 config: codex, lastMessagePreview: "Done — failed children stay quiet.",
+                 config: graff, lastMessagePreview: "Done — failed children stay quiet.",
                  lastMessageAt: now - 900_000, createdAt: now - 86_400_000,
                  spaceId: harness.id, lastSeenAt: now - 3_600_000),
             Chat(id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
                  archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
-                 config: claude, lastMessagePreview: "Hibernation-safe flush timer",
+                 config: graff, lastMessagePreview: "Hibernation-safe flush timer",
                  lastMessageAt: now - 86_400_000, createdAt: now - 86_400_000 * 2,
                  spaceId: edge.id, lastSeenAt: now - 86_400_000),
             // Archived — populate the shelf under the active list.
             Chat(id: "chat-oklch", deviceId: "dev-mac", title: "OKLCH conversion drift",
                  archived: true, cwd: harness.path, branch: "main", checkoutId: nil,
-                 config: claude, lastMessagePreview: "Gamma encode matches now.",
+                 config: graff, lastMessagePreview: "Gamma encode matches now.",
                  lastMessageAt: now - 86_400_000 * 3, createdAt: now - 86_400_000 * 4,
                  spaceId: harness.id, lastSeenAt: now - 86_400_000 * 3),
             Chat(id: "chat-presence", deviceId: "dev-vps", title: "Presence beat coalescing",
                  archived: true, cwd: edge.path, branch: nil, checkoutId: nil,
-                 config: codex, lastMessagePreview: "Batched to one beat per 25s.",
+                 config: graff, lastMessagePreview: "Batched to one beat per 25s.",
                  lastMessageAt: now - 86_400_000 * 6, createdAt: now - 86_400_000 * 7,
                  spaceId: edge.id, lastSeenAt: now - 86_400_000 * 6),
         ]
@@ -90,25 +88,9 @@ final class DemoDataset {
                                       status: .awaitingInput, startedAt: now - 400_000,
                                       updatedAt: now - 10_000),
         ]
-        let changeRequests = [
-            "chat-veil": ChangeRequestSummary(
-                provider: "github", number: 90, title: "Stream pull request status on every client",
-                url: "https://github.com/harness-sh/harness/pull/90", state: .open,
-                baseRef: "main", headRef: "veil-fade"
-            ),
-            "chat-picker": ChangeRequestSummary(
-                provider: "github", number: 84, title: "Synchronize model catalogs",
-                url: "https://github.com/harness-sh/harness/pull/84", state: .merged,
-                baseRef: "main", headRef: "main"
-            ),
-            "chat-tabs": ChangeRequestSummary(
-                provider: "github", number: 77, title: "Refine tool group colors",
-                url: "https://github.com/harness-sh/harness/pull/77", state: .closed,
-                baseRef: "main", headRef: "main"
-            ),
-        ]
+        // Sample work must not link to unrelated real-world pull requests.
         return DemoDataset(devices: [mac, vps], spaces: [harness, edge],
-                           chats: chats, sessions: sessions, changeRequests: changeRequests)
+                           chats: chats, sessions: sessions)
     }
 
     // MARK: Fake filesystem (folder browser demo)
