@@ -1155,6 +1155,23 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// When the chat was last prompted by a person (a send or steer), as
+    /// opposed to `lastMessageAt`, which agent replies bump too. Lists order
+    /// by it so a session sits where you last called it. Its own field, so
+    /// per-field merging keeps it through full-row upserts.
+    pub fn set_chat_last_prompt(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("lastPromptAt", json!(at.timestamp_millis()))]),
+        );
+        Ok(true)
+    }
+
     /// Tombstone: delete the chat row (and its session-status row). The
     /// per-chat session doc remains — this removes the index entry only.
     pub fn delete_chat(&mut self, chat_id: &str) -> Result<bool, DocError> {

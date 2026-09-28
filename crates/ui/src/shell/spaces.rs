@@ -1813,6 +1813,14 @@ struct ActiveChatRow {
     group: Option<(String, String)>,
 }
 
+/// When a person last called the chat: its last prompt, else (older hosts)
+/// its last message, else its creation.
+fn called_at(chat: &harness_proto::Chat) -> chrono::DateTime<chrono::Utc> {
+    chat.last_prompt_at
+        .or(chat.last_message_at)
+        .unwrap_or(chat.created_at)
+}
+
 pub(super) fn compare_sidebar_chats(
     sort: SidebarSort,
     left: &harness_proto::Chat,
@@ -1820,10 +1828,10 @@ pub(super) fn compare_sidebar_chats(
 ) -> std::cmp::Ordering {
     let primary = match sort {
         SidebarSort::Created => right.created_at.cmp(&left.created_at),
-        SidebarSort::LastUpdated => right
-            .last_message_at
-            .unwrap_or(right.created_at)
-            .cmp(&left.last_message_at.unwrap_or(left.created_at)),
+        // "Last called": when a person last prompted the session, so an agent
+        // still replying doesn't pull its row above sessions called since.
+        // Hosts that predate the stamp fall back to the last message.
+        SidebarSort::LastUpdated => called_at(right).cmp(&called_at(left)),
     };
     primary.then_with(|| left.id.cmp(&right.id))
 }
@@ -3267,7 +3275,7 @@ impl Shell {
             "By device",
             "By project",
             "None",
-            "Last updated",
+            "Last called",
             "Created",
             "Branch",
             "Harness",
@@ -6381,6 +6389,7 @@ mod tests {
 
     fn chat(id: &str) -> harness_proto::Chat {
         harness_proto::Chat {
+            last_prompt_at: None,
             id: id.into(),
             device_id: "device".into(),
             title: None,

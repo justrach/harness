@@ -3531,6 +3531,7 @@ mod tests {
             .unwrap()
             .to_utc();
         Chat {
+            last_prompt_at: None,
             id: id.into(),
             device_id: "dev".into(),
             title: None,

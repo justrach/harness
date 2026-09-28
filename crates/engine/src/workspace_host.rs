@@ -840,6 +840,16 @@ impl WorkspaceHost {
         }
     }
 
+    /// A person prompted the chat (send or steer): sidebar freshness plus the
+    /// `lastPromptAt` stamp lists order by. Agent replies go through
+    /// [`Self::note_message`] only.
+    pub fn note_prompt(&self, chat_id: &str, text: &str) {
+        self.note_message(chat_id, text);
+        if let Err(err) = self.mutate(|doc| doc.set_chat_last_prompt(chat_id, Utc::now())) {
+            tracing::warn!(chat = %chat_id, error = %err, "registry last-prompt write failed");
+        }
+    }
+
     /// Resume continuity: stamp the chat row with the harness-native session id
     /// of its latest run and the cwd it was created under. An empty `session_id`
     /// tombstones the row ("do not resume" after a rejected resume). Best-effort:
@@ -927,6 +937,7 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                last_prompt_at: None,
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,

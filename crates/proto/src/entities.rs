@@ -230,6 +230,11 @@ pub struct Chat {
     /// human started; a dangling id (parent deleted) is tolerated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// When a person last prompted this chat (a send or steer); agent
+    /// replies move `last_message_at`, never this. Session lists order by
+    /// it. Written only by the host's registry stamp, never by row upserts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_at: Option<DateTime<Utc>>,
 }
 
 impl Chat {

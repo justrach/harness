@@ -566,6 +566,8 @@ pub enum SidebarOrganization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SidebarSort {
+    /// Shown as "Last called": when a person last prompted each session.
+    /// The name is kept for saved settings.
     #[default]
     LastUpdated,
     Created,

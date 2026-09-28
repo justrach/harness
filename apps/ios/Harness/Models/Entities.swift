@@ -92,6 +92,13 @@ struct Chat: Identifiable, Hashable {
     /// Sync room generation (docs/chat2-sync.md M2): absent/1 = legacy s2
     /// (never dialed from mobile), 2 = chat2. The host flips it when seeding.
     var roomGen: Int? = nil
+    /// When a person last prompted this chat (a send or steer). Agent replies
+    /// move `lastMessageAt`, never this. Nil from hosts that predate it.
+    var lastPromptAt: Int64? = nil
+
+    /// Where the chat sits in lists: when you last called it; older hosts
+    /// without the stamp fall back to the last message, then creation.
+    var calledAt: Int64 { lastPromptAt ?? lastMessageAt ?? createdAt }
 
     var displayTitle: String {
         if let title, !title.isEmpty { return title }
@@ -195,16 +202,19 @@ func chatIndicator(chat: Chat, live: SessionStatus?) -> ChatIndicator {
     }
 }
 
-/// The Sessions list order: PURE RECENCY, id tiebreak — a port of state.rs
-/// `sort_active`. Status drives the dot, never the position.
+/// The Sessions list order: when you last CALLED each session (your last
+/// send or steer, `Chat.calledAt`), newest first, id tiebreak. Status drives
+/// the dot, never the position.
 ///
 /// This used to bucket by attention first, which is what the desktop did
 /// before 55e1845: opening a completed session marks it seen (completed →
-/// idle), and the row then dropped a bucket out from under the pointer. The
-/// dots carry urgency instead, so the order never moves on its own.
+/// idle), and the row then dropped a bucket out from under the pointer. It
+/// then sorted by the last message of any kind, so a working agent's replies
+/// kept pulling its row above sessions called more recently. Keyed on your
+/// prompts, the order moves only when you call something.
 func sortActive(_ chats: [Chat]) -> [Chat] {
     chats.sorted { a, b in
-        let ta = a.lastMessageAt ?? a.createdAt, tb = b.lastMessageAt ?? b.createdAt
+        let ta = a.calledAt, tb = b.calledAt
         if ta != tb { return ta > tb }
         return a.id < b.id
     }

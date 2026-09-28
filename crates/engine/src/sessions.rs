@@ -451,7 +451,7 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_prompt(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -464,7 +464,7 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
-                    self.inner.note_message(chat_id, &request.prompt);
+                    self.inner.note_prompt(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
                 // Keep the already-written doc entry's id for the fresh run
@@ -551,7 +551,7 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        self.inner.note_prompt(chat_id, &request.prompt);
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
@@ -649,7 +649,7 @@ impl SessionsEngine {
         }
         if self.is_live(chat_id, &run_id) {
             self.set_status(chat_id, SessionStatus::Working, false);
-            self.inner.note_message(chat_id, prompt);
+            self.inner.note_prompt(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
         // The run died around the send. Exit drain claimed the entry → its
@@ -665,7 +665,7 @@ impl SessionsEngine {
         if reclaimed {
             return Ok(SteerOutcome::NotSteerable);
         }
-        self.inner.note_message(chat_id, prompt);
+        self.inner.note_prompt(chat_id, prompt);
         Ok(SteerOutcome::Accepted)
     }
 
@@ -1206,6 +1206,16 @@ impl Inner {
             Err(error) => {
                 tracing::warn!(chat = %chat_id, %error, "could not persist Jev effort");
             }
+        }
+    }
+
+    /// A person's prompt: freshness plus the `lastPromptAt` stamp lists order by.
+    fn note_prompt(&self, chat_id: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(ws) = self.workspace() {
+            ws.note_prompt(chat_id, text);
         }
     }
 

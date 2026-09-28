@@ -252,6 +252,7 @@ fn device(id: &str, name: &str) -> Device {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        last_prompt_at: None,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("First chat".into()),
@@ -505,6 +506,21 @@ fn future_harness_chat_rows_stay_visible_without_their_config() {
     );
     // The well-formed sibling keeps its config untouched.
     assert!(chats.iter().any(|c| c.id == "chat-1" && c.config.is_some()));
+}
+
+#[test]
+fn last_prompt_is_its_own_field_and_survives_upserts() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_device(&device("dev-a", "laptop")).unwrap();
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert!(ws.set_chat_last_prompt("chat-1", ts(7_000)).unwrap());
+    // An agent reply moves lastMessageAt, never lastPromptAt.
+    ws.set_chat_last_message("chat-1", "reply", ts(9_000)).unwrap();
+    // A full-row upsert (rename, config change) leaves it alone.
+    ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    let row = ws.overlay_row(KIND_CHATS, "chat-1").unwrap();
+    assert_eq!(row.fields.get("lastPromptAt"), Some(&serde_json::json!(ts(7_000).timestamp_millis())));
+    assert!(!ws.set_chat_last_prompt("nope", ts(1)).unwrap());
 }
 
 #[test]

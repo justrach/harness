@@ -715,6 +715,8 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    #[serde(default)]
+    last_prompt_at: Option<i64>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -756,6 +758,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            last_prompt_at: raw.last_prompt_at.map(dt),
         }
     }
 }
@@ -841,6 +844,7 @@ mod tests {
 
     fn chat(id: &str, device_id: &str) -> Chat {
         Chat {
+            last_prompt_at: None,
             id: id.into(),
             device_id: device_id.into(),
             title: Some("First chat".into()),
