@@ -26,9 +26,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     env:
-      AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}
-      AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-      AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+      # The iOS team's Admin key, kept apart from the Developer-role
+      # AC_API_KEY_* that release.yml notarizes with: automatic signing needs
+      # Admin to create the distribution certificate and profiles.
+      AC_API_KEY_P8: ${{ secrets.IOS_AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.IOS_AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.IOS_AC_API_ISSUER_ID }}
       AUDIENCE: ${{ inputs.audience || 'internal' }}
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +42,7 @@ jobs:
           set -euo pipefail
           for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
             if [ -z "${!name:-}" ]; then
-              echo "Required repository secret $name is not configured." >&2
+              echo "Required repository secret IOS_$name is not configured." >&2
               exit 2
             fi
           done
@@ -124,7 +127,7 @@ jobs:
           plutil -insert method -string app-store-connect "$options"
           plutil -insert destination -string upload "$options"
           plutil -insert signingStyle -string automatic "$options"
-          plutil -insert teamID -string 5XY3M483YQ "$options"
+          plutil -insert teamID -string WWP9DLJ27P "$options"
           plutil -insert manageAppVersionAndBuildNumber -bool false "$options"
           if [ "$AUDIENCE" = "internal" ]; then
             plutil -insert testFlightInternalTestingOnly -bool true "$options"
