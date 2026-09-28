@@ -111,8 +111,16 @@ const forward = (
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
 };
 
-/** Forward into a room's actor with the verified user and org stamped on. */
-const forwardRoom = (
+/** Largest request body a room route takes (the actor caps JSON at 64 KiB). */
+const MAX_ROOM_BODY_BYTES = 64 * 1024;
+
+/** Forward into a room's actor with the verified user and org stamped on.
+ * The body is read here first, not streamed through: an actor that refuses
+ * before reading it (a destroyed or missing room) would otherwise leave the
+ * piped stream dangling, and the Worker throws "Can't read from request
+ * stream after response has been sent" — under load that took the runtime
+ * down. Room bodies are small, so buffering costs nothing. */
+const forwardRoom = async (
   env: Env,
   roomId: string,
   request: Request,
@@ -121,15 +129,23 @@ const forwardRoom = (
   path: string,
   search: URLSearchParams
 ): Promise<Response> => {
+  let body: ArrayBuffer | undefined;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+    body = await request.arrayBuffer();
+    if (body.byteLength > MAX_ROOM_BODY_BYTES) return json({ error: "too_large" }, 413);
+  }
   const stub = env.ROOM_ACTORS.get(env.ROOM_ACTORS.idFromName(`room1/${roomId}`));
   const url = new URL(request.url);
   url.pathname = path;
   search.set("room", roomId);
   url.search = search.toString();
   const headers = new Headers(request.headers);
+  headers.delete("content-length");
   headers.set(AUTH_USER_HEADER, userId);
   headers.set(AUTH_ORG_HEADER, orgId);
-  return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
+  return stub.fetch(new Request(url.toString(), { method: request.method, body, headers }));
 };
 
 const ROOM_GET = new Set(["state", "messages", "ws"]);
