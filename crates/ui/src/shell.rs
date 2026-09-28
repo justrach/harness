@@ -13322,6 +13322,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, window, cx| {
                 let chat = |id: &str| harness_proto::Chat {
+                    last_prompt_at: None,
                     id: id.into(),
                     device_id: "local".into(),
                     title: None,
@@ -13407,6 +13408,7 @@ mod exit_regressions {
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, cx| {
                     state.chats = vec![harness_proto::Chat {
+                        last_prompt_at: None,
                         id: "chat".into(),
                         device_id: "local".into(),
                         title: None,
@@ -13489,6 +13491,7 @@ mod exit_regressions {
                 shell.state.update(cx, |state, cx| {
                     state.apply_spaces(vec![space("harness"), space("folio")]);
                     state.chats = vec![harness_proto::Chat {
+                        last_prompt_at: None,
                         id: "harness-chat".into(),
                         device_id: "local".into(),
                         title: None,
@@ -13687,6 +13690,7 @@ mod exit_regressions {
                 shell.state.update(cx, |state, cx| {
                     state.apply_spaces(vec![space("harness"), space("folio")]);
                     state.chats = vec![harness_proto::Chat {
+                        last_prompt_at: None,
                         id: "folio-chat".into(),
                         device_id: "local".into(),
                         title: None,
@@ -13807,6 +13811,7 @@ mod exit_regressions {
             .update(cx, |shell, window, cx| {
                 shell.state.update(cx, |state, _| {
                     state.chats = vec![harness_proto::Chat {
+                        last_prompt_at: None,
                         id: "graff-chat".into(),
                         device_id: "local".into(),
                         title: None,
@@ -13937,6 +13942,7 @@ mod exit_regressions {
         let reset = |shell: &mut Shell, cx: &mut Context<Shell>| {
             shell.state.update(cx, |state, _| {
                 state.chats = vec![harness_proto::Chat {
+                    last_prompt_at: None,
                     id: "graff-chat".into(),
                     device_id: "local".into(),
                     title: None,

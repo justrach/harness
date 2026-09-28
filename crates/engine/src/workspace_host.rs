@@ -937,6 +937,7 @@ impl WorkspaceHost {
         };
         self.mutate(|doc| {
             doc.upsert_chat(&Chat {
+                last_prompt_at: None,
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
                 title: None,

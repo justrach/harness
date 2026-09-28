@@ -54,6 +54,7 @@ fn space(id: &str) -> Space {
 
 fn chat(project: Option<&str>) -> Chat {
     Chat {
+        last_prompt_at: None,
         id: "original".into(),
         device_id: "local".into(),
         title: None,

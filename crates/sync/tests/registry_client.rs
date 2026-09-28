@@ -31,6 +31,7 @@ fn device(id: &str) -> Device {
 
 fn chat(id: &str, device_id: &str) -> Chat {
     Chat {
+        last_prompt_at: None,
         id: id.into(),
         device_id: device_id.into(),
         title: Some("chat".into()),

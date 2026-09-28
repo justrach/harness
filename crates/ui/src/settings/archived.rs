@@ -408,6 +408,7 @@ mod tests {
 
     fn chat(id: &str, archived: bool) -> Chat {
         Chat {
+            last_prompt_at: None,
             id: id.into(),
             device_id: "d".into(),
             title: None,

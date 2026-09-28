@@ -630,6 +630,7 @@ mod tests {
 
     fn chat(id: &str, title: Option<&str>) -> Chat {
         Chat {
+            last_prompt_at: None,
             id: id.into(),
             device_id: "dev".into(),
             title: title.map(str::to_owned),

@@ -86,8 +86,9 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 // Sort orders
 // ---------------------------------------------------------------------------
 
-/// Active-list order: pure recency (`last_message_at` desc, `created_at`
-/// fallback), id tiebreak so the sort is total. Deliberately NOT
+/// Active-list order: when each chat was last CALLED (`last_prompt_at` desc,
+/// then `last_message_at` for hosts without the stamp, then `created_at`),
+/// id tiebreak so the sort is total. Agent replies don't move a row. Deliberately NOT
 /// attention-bucketed: status drives the DOT, never the position — bucketing
 /// meant that merely OPENING a completed session (completed → seen → idle)
 /// dropped its row under the pointer (user report: "their position in the
@@ -95,9 +96,11 @@ pub fn attention_rank(status: ChatIndicator) -> u8 {
 /// recency order and let the dots carry urgency; [`attention_rank`] still
 /// aggregates the space rows' urgency dot.
 pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
+    // When a person last called the chat (its last prompt); agent replies
+    // don't move a row. Hosts that predate the stamp: the last message.
     rows.sort_by(|(_, a), (_, b)| {
-        let ka = a.last_message_at.unwrap_or(a.created_at);
-        let kb = b.last_message_at.unwrap_or(b.created_at);
+        let ka = a.last_prompt_at.or(a.last_message_at).unwrap_or(a.created_at);
+        let kb = b.last_prompt_at.or(b.last_message_at).unwrap_or(b.created_at);
         kb.cmp(&ka).then_with(|| a.id.cmp(&b.id))
     });
 }
@@ -699,5 +702,37 @@ mod checkout_tests {
             checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
             "New worktree"
         );
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn chat(id: &str, prompt: Option<i64>, message: Option<i64>) -> Chat {
+        let at = |ms| chrono::Utc.timestamp_millis_opt(ms).unwrap();
+        let mut c: Chat = serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": "d", "archived": false, "createdAt": at(0)
+        }))
+        .unwrap();
+        c.last_prompt_at = prompt.map(at);
+        c.last_message_at = message.map(at);
+        c
+    }
+
+    #[test]
+    fn orders_by_last_call_not_by_agent_replies() {
+        let busy = chat("busy", Some(1_000), Some(9_000));
+        let fresh = chat("fresh", Some(5_000), Some(5_000));
+        let old_host = chat("old-host", None, Some(4_000));
+        let mut rows = vec![
+            (ChatIndicator::Idle, &busy),
+            (ChatIndicator::Idle, &old_host),
+            (ChatIndicator::Idle, &fresh),
+        ];
+        sort_active(&mut rows);
+        let ids: Vec<&str> = rows.iter().map(|(_, c)| c.id.as_str()).collect();
+        assert_eq!(ids, ["fresh", "old-host", "busy"]);
     }
 }
