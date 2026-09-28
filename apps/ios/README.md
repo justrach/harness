@@ -31,8 +31,12 @@ iOS app and tests, selects the next numeric build number from App Store
 Connect, archives with automatic signing, uploads an internal-only TestFlight
 build, and waits for Apple processing to report `VALID`.
 
-The workflow uses the `AC_API_KEY_P8`, `AC_API_KEY_ID`, and
-`AC_API_ISSUER_ID` repository secrets.
+The app is **Harness by CodeGraff** (App Store Connect app 6816844026) on
+team `WWP9DLJ27P`. The workflow uses the `IOS_AC_API_KEY_P8`,
+`IOS_AC_API_KEY_ID`, and `IOS_AC_API_ISSUER_ID` repository secrets: an App
+Store Connect API key with the Admin role, which automatic signing needs to
+create the distribution certificate and profiles. They are separate from the
+Developer-role `AC_API_KEY_*` secrets the macOS release notarizes with.
 
 ### Connecting
 
