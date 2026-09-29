@@ -3,6 +3,9 @@ package harness.codegraff.android
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import harness.codegraff.android.demo.DemoDataset
+import harness.codegraff.android.model.AgentDescriptor
+import harness.codegraff.android.model.AgentReadiness
+import harness.codegraff.android.model.DeviceAgents
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.model.ChangeRequestSummary
@@ -70,6 +73,8 @@ data class WorkspaceState(
     val pinnedSessionIds: List<String>,
     /** Wall clock, refreshed on a slow tick and on writes: relative times and stale-session checks read it. */
     val now: Long,
+    /** What each computer reports in `ListHarnesses`, by device id. Demo only until live sync is wired on Android. */
+    val agents: Map<String, List<AgentDescriptor>> = emptyMap(),
 ) {
     private val chatsById by lazy(LazyThreadSafetyMode.NONE) { chats.associateBy { it.id } }
 
@@ -90,6 +95,11 @@ data class WorkspaceState(
     fun deviceOnline(deviceId: String): Boolean {
         val seen = devices.firstOrNull { it.id == deviceId }?.lastSeenAt ?: return false
         return now - seen < PRESENCE_FRESH_MS
+    }
+
+    /** Whether an agent has been brought in: every computer's agents, judged by [AgentReadiness]. */
+    val agentReadiness: AgentReadiness by lazy(LazyThreadSafetyMode.NONE) {
+        AgentReadiness.evaluate(devices.map { DeviceAgents(it.id, it.name, deviceOnline(it.id), agents[it.id].orEmpty()) })
     }
 
     fun chatsIn(spaceId: String): List<Chat> =
@@ -154,6 +164,12 @@ class AppModel(
 
     val workspace: StateFlow<WorkspaceState> get() = _workspace
 
+    companion object {
+        /** Demo rig: which dataset a new model starts with (`onboarding-*`; anything else is the standard demo). Set from an intent extra. */
+        @Volatile
+        var scenario: String? = null
+    }
+
     /** The workspace and all transcripts as one value. */
     val state: AppState get() = AppState(_workspace.value, _entries.value)
 
@@ -168,9 +184,14 @@ class AppModel(
 
     init {
         val now = clock()
-        val demo = DemoDataset.standard(now)
+        val demo = when (scenario) {
+            "onboarding-nocomputer" -> DemoDataset.onboarding(now, computerOnline = false, agentReady = false)
+            "onboarding-noagent" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = false)
+            "onboarding-ready" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = true)
+            else -> DemoDataset.standard(now)
+        }
         _workspace = MutableStateFlow(
-            WorkspaceState(demo.devices, demo.spaces, demo.chats, demo.sessions, demo.changeRequests, emptyList(), now),
+            WorkspaceState(demo.devices, demo.spaces, demo.chats, demo.sessions, demo.changeRequests, emptyList(), now, demo.agents),
         )
         _entries = MutableStateFlow(demo.entries)
     }

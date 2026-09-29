@@ -62,6 +62,7 @@ enum HarnessCatalog {
     /// Display names for every harness id the fleet can produce, including
     /// ones this device's static list doesn't offer (acp/mod.rs specs).
     static let knownLabels: [String: String] = [
+        "graff": "Graff",
         "claude-code": "Claude Code",
         "codex": "Codex",
         "devin": "Devin",

@@ -1,5 +1,6 @@
 package harness.codegraff.android.demo
 
+import harness.codegraff.android.model.AgentDescriptor
 import harness.codegraff.android.model.ChangeRequestState
 import harness.codegraff.android.model.ChangeRequestSummary
 import harness.codegraff.android.model.Chat
@@ -32,8 +33,26 @@ class DemoDataset(
     val sessions: Map<String, SessionRow>,
     val changeRequests: Map<String, ChangeRequestSummary>,
     val entries: Map<String, List<MessageEntry>>,
+    /** What each computer reports in `ListHarnesses`, by device id (onboarding). */
+    val agents: Map<String, List<AgentDescriptor>> = emptyMap(),
 ) {
     companion object {
+        /** The three onboarding agents, all found and on. */
+        private val allAgentsReady = listOf(AgentDescriptor("graff"), AgentDescriptor("claude-code"), AgentDescriptor("codex"))
+
+        /**
+         * A signed-in account with nothing in it yet, for the "Bring in your agent" screen (intent extra `scenario`:
+         * `onboarding-nocomputer`, `onboarding-noagent`, `onboarding-ready`).
+         */
+        fun onboarding(now: Long, computerOnline: Boolean, agentReady: Boolean): DemoDataset {
+            val mac = DeviceRow("dev-mac", "MacBook Pro", "macos", if (computerOnline) now else now - DAY, now - 2 * DAY)
+            val agents = if (agentReady) allAgentsReady else listOf(
+                AgentDescriptor("graff", installed = true, enabled = false),
+                AgentDescriptor("claude-code", installed = false, canInstall = true),
+            )
+            return DemoDataset(listOf(mac), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyMap(), mapOf(mac.id to agents))
+        }
+
         private const val MIN = 60_000L
         private const val DAY = 86_400_000L
 
@@ -115,7 +134,10 @@ class DemoDataset(
                     "https://github.com/harness-sh/harness/pull/77", ChangeRequestState.Closed, "main", "main",
                 ),
             )
-            return DemoDataset(listOf(mac, vps), listOf(harness, edge), chats, sessions, changeRequests, transcripts(now))
+            return DemoDataset(
+                listOf(mac, vps), listOf(harness, edge), chats, sessions, changeRequests, transcripts(now),
+                agents = mapOf(mac.id to allAgentsReady, vps.id to listOf(AgentDescriptor("graff"))),
+            )
         }
 
         private fun user(id: String, text: String, at: Long) = MessageEntry(

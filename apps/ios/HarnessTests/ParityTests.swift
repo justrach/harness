@@ -390,6 +390,33 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    // MARK: Bring in your agent
+
+    private func deviceAgents(_ d: [String: Any]) -> DeviceAgents {
+        let agents = (d["agents"] as! [[String: Any]]).map { a in
+            AgentDescriptor(id: a["id"] as! String, installed: a["installed"] as? Bool ?? true,
+                            canInstall: a["canInstall"] as? Bool ?? false, enabled: a["enabled"] as? Bool)
+        }
+        return DeviceAgents(id: d["id"] as! String, name: d["name"] as! String, online: d["online"] as! Bool, agents: agents)
+    }
+
+    func testTheAgentReadinessRulesMatch() throws {
+        let v = try load("vectors/agent-readiness.json")
+        XCTAssertEqual(v["agents"] as? [String], OnboardingAgent.all.map(\.id))
+        XCTAssertEqual(v["downloadUrl"] as? String, AgentReadiness.downloadURL)
+        for c in try rows(v, "cases") {
+            let devices = (c["devices"] as! [[String: Any]]).map(deviceAgents)
+            let report = AgentReadiness.evaluate(devices)
+            let expected = try XCTUnwrap(c["expect"] as? [String: Any])
+            let name = "\(c["name"] ?? "")"
+            XCTAssertEqual(report.state.rawValue, expected["state"] as? String, name)
+            let rows = try XCTUnwrap(expected["agents"] as? [[String: Any]])
+            XCTAssertEqual(report.rows.map(\.agent.id), rows.map { $0["id"] as! String }, name)
+            XCTAssertEqual(report.rows.map(\.status.wireName), rows.map { $0["status"] as! String }, name)
+            XCTAssertEqual(report.rows.map(\.deviceIds), rows.map { $0["devices"] as! [String] }, name)
+        }
+    }
+
     /// Test double for a value the uploader's `@Sendable` closures read while the test moves it on.
     private final class Box<T>: @unchecked Sendable {
         var value: T

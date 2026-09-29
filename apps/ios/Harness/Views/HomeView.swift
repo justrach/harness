@@ -413,12 +413,19 @@ struct HomeView: View {
                 && !model.archivedMatches(in: selectedSpace?.id, query: searchText).isEmpty
             if !archivedHit {
                 Section {
-                    Text(scoped.isEmpty ? "No sessions yet — start one with +" : "No matching sessions")
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.textFaint)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .accessibilityIdentifier("home-empty")
+                    if scoped.isEmpty {
+                        // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
+                        BringYourAgentView()
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    } else {
+                        Text("No matching sessions")
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textFaint)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .accessibilityIdentifier("home-empty")
+                    }
                 }
             }
         } else {

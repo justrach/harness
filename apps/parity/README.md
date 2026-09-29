@@ -8,7 +8,9 @@ each app runs its own test against the same files, so neither can drift without 
 | `vectors/message-queue.json` | queue labels, one-line text, moves, host-action results, edit leases | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/account-deletion.json` | every answer the edge can give and the exact message shown | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/home-grouping.json` | project and device sections, the Pinned section | `ParityTests.swift` | `ParityTest.kt` |
+| `vectors/agent-readiness.json` | when "Bring in your agent" is done: per computer, which of Graff, Claude Code and OpenAI Codex is ready, switched off, installable or missing | `ParityTests.swift` | `ParityTest.kt` |
 | `ux-contract.json` | user-visible strings and the queue panel's layout numbers | `ParityTests.swift` | `ParityTest.kt` |
+| `vectors/agent-readiness.json` | when an agent counts as brought in (Graff, Claude Code, OpenAI Codex on an online computer), and the download link | `ParityTests.swift` | `ParityTest.kt` |
 | `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 

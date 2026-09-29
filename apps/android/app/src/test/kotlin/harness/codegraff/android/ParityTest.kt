@@ -5,6 +5,10 @@ package harness.codegraff.android
 // them fails a test on the other.
 
 import harness.codegraff.android.model.ATTACHMENT_ONLY_TEXT
+import harness.codegraff.android.model.AgentDescriptor
+import harness.codegraff.android.model.AgentReadiness
+import harness.codegraff.android.model.DeviceAgents
+import harness.codegraff.android.model.OnboardingAgent
 import harness.codegraff.android.model.AccountDeletion
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.HomeGroup
@@ -307,6 +311,38 @@ class ParityTest {
         for (count in 0..8) {
             val visible = minOf(count, most)
             assertEquals("count $count", visible * row + maxOf(0, visible - 1) * gap, QueueUX.listHeightDp(count))
+        }
+    }
+
+    // MARK: Bring in your agent
+
+    @Test
+    fun theAgentReadinessRulesMatch() {
+        val v = load("vectors/agent-readiness.json")
+        assertEquals(v.getJSONArray("agents").strings(), OnboardingAgent.ALL.map { it.id })
+        assertEquals(v.getString("downloadUrl"), AgentReadiness.DOWNLOAD_URL)
+        for (c in v.rows("cases")) {
+            val devices = c.rows("devices").map { d ->
+                DeviceAgents(
+                    d.getString("id"), d.getString("name"), d.getBoolean("online"),
+                    d.rows("agents").map { a ->
+                        AgentDescriptor(
+                            a.getString("id"),
+                            installed = if (a.has("installed")) a.getBoolean("installed") else true,
+                            canInstall = if (a.has("canInstall")) a.getBoolean("canInstall") else false,
+                            enabled = if (a.has("enabled")) a.getBoolean("enabled") else null,
+                        )
+                    },
+                )
+            }
+            val report = AgentReadiness.evaluate(devices)
+            val expected = c.getJSONObject("expect")
+            val name = c.getString("name")
+            assertEquals(name, expected.getString("state"), report.state.name.replaceFirstChar { it.lowercase() })
+            val rows = expected.rows("agents")
+            assertEquals(name, rows.map { it.getString("id") }, report.rows.map { it.agent.id })
+            assertEquals(name, rows.map { it.getString("status") }, report.rows.map { it.status.wireName })
+            assertEquals(name, rows.map { it.getJSONArray("devices").strings() }, report.rows.map { it.deviceIds })
         }
     }
 

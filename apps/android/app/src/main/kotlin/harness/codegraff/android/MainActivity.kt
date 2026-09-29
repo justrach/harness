@@ -15,6 +15,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        AppModel.scenario = intent?.getStringExtra("scenario")
         PerfSharing.init(this)
         // Only a launch counts as startup; a rotation or a return to the app is not one.
         if (Perf.isColdStart()) Perf.watchFirstFrame(this)
