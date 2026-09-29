@@ -344,6 +344,8 @@ class ParityTest {
         assertEquals(v.getJSONObject("refreshHz").getInt("max"), PerfStatsBatch.MAX_REFRESH_HZ)
         assertEquals(v.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
         assertEquals(v.getBoolean("sharingDefault"), PerfSharing.DEFAULT_ENABLED)
+        assertEquals(v.getString("endpoint"), PerfSharing.endpoint)
+        assertTrue(PerfTransport.isAllowed(v.getString("endpoint")))
         val wire = load("perf-contract.json").getJSONObject("wire")
         assertEquals(wire.keys().asSequence().associateWith { wire.getString(it) }, PerfMetric.forSpan)
     }

@@ -332,6 +332,8 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(hz["max"], PerfStatsBatch.refreshHzRange.upperBound)
         XCTAssertEqual(v["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
         XCTAssertEqual(v["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
+        XCTAssertEqual(v["endpoint"] as? String, PerfSharing.endpoint)
+        XCTAssertTrue(PerfTransport.isAllowed(try XCTUnwrap(v["endpoint"] as? String)))
         let wire = try XCTUnwrap(try load("perf-contract.json")["wire"] as? [String: String])
         XCTAssertEqual(wire, PerfMetric.forSpan)
     }

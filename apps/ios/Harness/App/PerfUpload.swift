@@ -306,9 +306,9 @@ enum PerfSharing {
     /// Pinned in `apps/parity/vectors/perf-stats.json`.
     static let defaultEnabled = true
 
-    /// Where batches go: the same stats endpoint the desktop app uses. Unset until the server accepts iOS and Android
-    /// batches; with no endpoint nothing is offered and nothing is sent.
-    static let endpoint: String? = nil
+    /// Where batches go: the stats endpoint the desktop app already uses, which accepts the mobile schema. Pinned in
+    /// `apps/parity/vectors/perf-stats.json`. With no endpoint nothing is offered and nothing is sent.
+    static let endpoint: String? = "https://otel.codegraff.com/v1/harness/stats"
 
     static var available: Bool { endpoint != nil }
     /// `bool(forKey:)` reads an unset key as false, which would make "never chosen" mean off.

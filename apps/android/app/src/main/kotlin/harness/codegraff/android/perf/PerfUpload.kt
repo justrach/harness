@@ -100,8 +100,11 @@ object PerfSharing {
 
     private var prefs: SharedPreferences? = null
 
-    /** Where reports go. Unset until the backend is agreed; with no endpoint nothing is offered and nothing is sent. */
-    val endpoint: String? = null
+    /**
+     * Where batches go: the stats endpoint the desktop app already uses, which accepts the mobile schema. Pinned in
+     * `apps/parity/vectors/perf-stats.json`. With no endpoint nothing is offered and nothing is sent.
+     */
+    val endpoint: String? = "https://otel.codegraff.com/v1/harness/stats"
 
     val available: Boolean get() = endpoint != null
 

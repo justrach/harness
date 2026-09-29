@@ -44,7 +44,6 @@
     "max": 240
   },
   "sharingDefault": true,
-  "path": "/v1/harness/stats",
   "batches": [
     {
       "name": "android batch: buckets, boundaries, clamping and an unknown metric",
@@ -823,5 +822,6 @@
     }
   ],
   "maxWindowMs": 518400000,
-  "maxVersionLength": 32
+  "maxVersionLength": 32,
+  "endpoint": "https://otel.codegraff.com/v1/harness/stats"
 }

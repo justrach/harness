@@ -26,9 +26,9 @@ ranges (22 bounds from 1 ms to 60 s plus an overflow range), so batches from any
 to exact fleet percentiles. The desktop app already did this (`crates/ui/src/perf_stats.rs`); iOS and Android now send
 the same batch with `os` set to `ios` or `android` and their own metric names.
 
-On by default, with a "Share anonymous performance data" switch in Settings to turn it off, and only active once the
-server accepts mobile batches (`PerfSharing.endpoint` on each app, unset until then; with no endpoint the switch is
-hidden and nothing is sent). While it is on, a batch goes out as the app goes to the background. A person who has turned
+On by default, with a "Share anonymous performance data" switch in Settings to turn it off. `PerfSharing.endpoint` on
+each app is `https://otel.codegraff.com/v1/harness/stats` (pinned in `vectors/perf-stats.json`); with no endpoint the
+switch is hidden and nothing is sent. While it is on, a batch goes out as the app goes to the background. A person who has turned
 it off stays off: only a never-chosen setting reads as on.
 
 - **Content:** `vectors/perf-stats.json` pins the JSON both apps produce (`schema` `harness.mobile.stats.v1`): `os`,
