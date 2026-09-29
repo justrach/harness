@@ -43,6 +43,12 @@ The same design the iOS app uses to stay smooth on long, streaming sessions:
   filtering, grouping, counting and syntax highlighting, and `contentType` on every list.
 - **Streaming veil.** Appended text fades in through a paint-only alpha (`ui/session/Veil.kt`, a port of
   `Veil.swift`); a frame loop runs only while a chunk is fading.
+- **Cheap scrolling rows.** Row backgrounds and press washes are drawn, not recomposed or clipped per
+  row; the tool rail and quote bar are painted behind the row instead of using `IntrinsicSize` (which
+  measures each row twice); only collapsible bubbles animate their size.
+- **Baseline profile** (`app/src/main/baseline-prof.txt`) covers the app plus the Compose runtime, UI,
+  foundation and animation code, so the first swipe after install is not interpreted. A profile generated
+  by a Macrobenchmark run should replace it once that module exists.
 - The reply list is reversed, so the bottom stays anchored with no per-token scroll call, and a slow
   15 s clock (not every write) moves relative times forward.
 

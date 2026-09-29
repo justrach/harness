@@ -15,6 +15,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -72,10 +74,11 @@ fun Modifier.pressWashClickable(
     role: Role = Role.Button,
 ): Modifier {
     val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
-    val shape = RoundedCornerShape(cornerRadius)
+    // The pressed state is read while drawing, so a touch repaints the wash without recomposing
+    // the row, and no per-row clip layer is needed (the wash itself is a rounded rect).
+    val pressed = source.collectIsPressedAsState()
+    val wash = Theme.palette.elementHover
     return this
-        .clip(shape)
-        .background(if (pressed) Theme.palette.elementHover else Color.Transparent, shape)
+        .drawBehind { if (pressed.value) drawRoundRect(wash, cornerRadius = CornerRadius(cornerRadius.toPx())) }
         .clickable(interactionSource = source, indication = null, enabled = enabled, role = role, onClick = onClick)
 }

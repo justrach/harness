@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
@@ -40,13 +41,16 @@ import harness.codegraff.android.ui.components.pressWashClickable
 /** "project @ device", the project name in its own tint (projectless sessions stay muted). */
 @Composable
 fun projectLocation(chat: Chat, state: WorkspaceState): AnnotatedString {
-    val device = state.deviceName(chat.deviceId)
-    val spaceId = chat.spaceId ?: return AnnotatedString("No project @ $device")
-    val project = state.space(chat)?.displayName ?: chat.cwd?.trimEnd('/')?.substringAfterLast('/') ?: "?"
-    val tint = Theme.palette.projectTint(spaceId)
-    return buildAnnotatedString {
-        withStyle(SpanStyle(color = tint)) { append(project) }
-        append(" @ $device")
+    val palette = Theme.palette
+    return remember(chat.deviceId, chat.spaceId, chat.cwd, state.spaces, state.devices, palette) {
+        val device = state.deviceName(chat.deviceId)
+        val spaceId = chat.spaceId ?: return@remember AnnotatedString("No project @ $device")
+        val project = state.space(chat)?.displayName ?: chat.cwd?.trimEnd('/')?.substringAfterLast('/') ?: "?"
+        val tint = palette.projectTint(spaceId)
+        buildAnnotatedString {
+            withStyle(SpanStyle(color = tint)) { append(project) }
+            append(" @ $device")
+        }
     }
 }
 
@@ -65,7 +69,9 @@ fun ChatRow(chat: Chat, state: WorkspaceState, showLocation: Boolean, modifier: 
     val subline = p.textMuted.opacity(0.5f)
     val pinned = state.isPinned(chat.id)
     val time = relativeTime(chat.lastMessageAt ?: chat.createdAt, state.now)
-    val description = "${chat.displayTitle}, ${state.deviceName(chat.deviceId)}, ${indicator.label ?: time}"
+    val description = remember(chat.displayTitle, chat.deviceId, indicator, time) {
+        "${chat.displayTitle}, ${state.deviceName(chat.deviceId)}, ${indicator.label ?: time}"
+    }
 
     Box(modifier.fillMaxWidth()) {
         Column(

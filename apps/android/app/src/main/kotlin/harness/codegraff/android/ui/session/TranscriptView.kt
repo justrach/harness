@@ -45,6 +45,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.semantics.contentDescription
@@ -143,7 +146,8 @@ private fun UserBubble(text: String, pending: Boolean) {
                 .background(p.surfaceRaised, RoundedCornerShape(Theme.bubbleRadius))
                 .combinedClickable(onClick = {}, onLongClick = { clipboard.setText(AnnotatedString(text)) })
                 .padding(horizontal = 16.dp, vertical = 10.dp)
-                .animateContentSize(),
+                // Only bubbles that can collapse pay for the size animation.
+                .then(if (collapsible) Modifier.animateContentSize() else Modifier),
         ) {
             Text(
                 text, style = sans(17f, FontWeight.Normal, 26f), color = p.text,
@@ -215,18 +219,26 @@ private fun ToolChipRow(tool: ToolItem, continues: Boolean) {
     val p = Theme.palette
     var expanded by rememberSaveable(tool.call.tag + tool.call.chipDetail) { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    val rail = p.borderStrong
     Row(
-        Modifier.fillMaxWidth().height(IntrinsicSize.Min).heightIn(min = 44.dp)
+        // The connecting rail is painted behind the row instead of stretching a child with
+        // IntrinsicSize, which would measure every tool row twice while it scrolls in.
+        Modifier.fillMaxWidth().heightIn(min = 44.dp)
+            .drawBehind {
+                val x = 13.dp.toPx()
+                val width = 1.dp.toPx()
+                drawRect(rail, Offset(x - width / 2, 0f), Size(width, 5.dp.toPx()))
+                if (continues) {
+                    val top = 33.dp.toPx()
+                    drawRect(rail, Offset(x - width / 2, top), Size(width, (size.height - top).coerceAtLeast(0f)))
+                }
+            }
             .combinedClickableCompat(onClick = { expanded = !expanded }, onLongClick = { clipboard.setText(AnnotatedString(tool.call.expandedDetail)) })
             .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" },
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(Modifier.width(26.dp).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Box(Modifier.width(1.dp).height(5.dp).background(p.borderStrong))
-            Box(Modifier.size(width = 26.dp, height = 18.dp), contentAlignment = Alignment.Center) {
-                GlyphView(tool.call.glyph(), 14.dp, if (tool.isError) p.danger else p.textMuted, strokeWidth = 1.7f)
-            }
-            Box(Modifier.width(1.dp).weight(1f).background(if (continues) p.borderStrong else androidx.compose.ui.graphics.Color.Transparent))
+        Box(Modifier.padding(top = 10.dp).size(width = 26.dp, height = 18.dp), contentAlignment = Alignment.Center) {
+            GlyphView(tool.call.glyph(), 14.dp, if (tool.isError) p.danger else p.textMuted, strokeWidth = 1.7f)
         }
         Column(Modifier.weight(1f).padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {

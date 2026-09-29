@@ -26,6 +26,9 @@ import androidx.compose.runtime.withFrameNanos
 import harness.codegraff.android.theme.opacity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
@@ -166,9 +169,13 @@ fun MarkdownBlockView(block: MdBlock, modifier: Modifier = Modifier, veil: RowVe
             else RichText(block.spans, size, line, FontWeight.SemiBold, modifier = modifier.fillMaxWidth())
         }
         is MdBlock.Code -> CodeBlock(block, modifier)
-        is MdBlock.Blockquote -> Row(modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-            Box(Modifier.width(3.dp).fillMaxHeight().background(p.borderStrong, RoundedCornerShape(2.dp)))
-            Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        is MdBlock.Blockquote -> Row(
+            // The bar is painted behind the text: no IntrinsicSize double measure while scrolling.
+            modifier.fillMaxWidth().drawBehind {
+                drawRoundRect(p.borderStrong, size = Size(3.dp.toPx(), size.height), cornerRadius = CornerRadius(2.dp.toPx()))
+            },
+        ) {
+            Column(Modifier.padding(start = 15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 block.children.forEach { child ->
                     if (child is MdBlock.Paragraph) {
                         RichText(child.spans, MD.TEXT_SIZE, MD.LINE_HEIGHT, base = p.textMuted)
