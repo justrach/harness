@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -136,7 +137,8 @@ fun HomeScreen(
             if (scoped.isNotEmpty()) {
                 item(key = "filters") {
                     Row(
-                        Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 6.dp).horizontalScroll(rememberScrollState()),
+                        // Chips draw 28dp inside 44dp touch targets, so the row needs less padding to keep its rhythm.
+                        Modifier.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 0.dp).horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -365,24 +367,31 @@ private fun HomeStatusChips(selection: HomeStatusFilter, counts: Map<HomeStatusF
     HomeStatusFilter.entries.forEach { filter ->
         val selected = selection == filter
         val count = counts[filter] ?: 0
-        Row(
-            Modifier.height(28.dp)
-                .background(if (selected) p.elementActive else Color.Transparent, CircleShape)
-                .border(1.dp, if (selected) Color.Transparent else p.border, CircleShape)
-                .clip(CircleShape)
+        // The chip is drawn 28dp tall but the touch target is the full 44dp row.
+        Box(
+            Modifier.heightIn(min = 44.dp)
                 // Tapping the active chip again clears it.
-                .clickable(role = Role.Tab) { onSelect(if (selected && filter != HomeStatusFilter.All) HomeStatusFilter.All else filter) }
-                .semantics { this.selected = selected }
-                .padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                .clickable(interactionSource = null, indication = null, role = Role.Tab) {
+                    onSelect(if (selected && filter != HomeStatusFilter.All) HomeStatusFilter.All else filter)
+                }
+                .semantics { this.selected = selected },
+            contentAlignment = Alignment.Center,
         ) {
-            if (filter != HomeStatusFilter.All) {
-                Box(Modifier.size(6.dp).background(if (filter == HomeStatusFilter.Running) p.statusWorking else p.warning, CircleShape))
-            }
-            Text(filter.label, style = sans(13f, if (selected) FontWeight.SemiBold else FontWeight.Medium), color = if (selected) p.text else p.textMuted)
-            if (filter != HomeStatusFilter.All && count > 0) {
-                Text("$count", style = sans(12f, FontWeight.Medium), color = if (selected) p.text else p.textFaint)
+            Row(
+                Modifier.height(28.dp)
+                    .background(if (selected) p.elementActive else Color.Transparent, CircleShape)
+                    .border(1.dp, if (selected) Color.Transparent else p.border, CircleShape)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (filter != HomeStatusFilter.All) {
+                    Box(Modifier.size(6.dp).background(if (filter == HomeStatusFilter.Running) p.statusWorking else p.warning, CircleShape))
+                }
+                Text(filter.label, style = sans(13f, if (selected) FontWeight.SemiBold else FontWeight.Medium), color = if (selected) p.text else p.textMuted)
+                if (filter != HomeStatusFilter.All && count > 0) {
+                    Text("$count", style = sans(12f, FontWeight.Medium), color = if (selected) p.text else p.textFaint)
+                }
             }
         }
     }
@@ -395,20 +404,24 @@ private fun GroupPill(grouping: HomeGroupBy, onSelect: (HomeGroupBy) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val grouped = grouping != HomeGroupBy.None
     Box {
-        Row(
-            Modifier.height(28.dp)
-                .background(if (grouped) p.elementActive else Color.Transparent, CircleShape)
-                .border(1.dp, if (grouped) Color.Transparent else p.border, CircleShape)
-                .clip(CircleShape)
-                .clickable(role = Role.Button) { open = true }
-                .semantics { contentDescription = "Group by"; stateDescription = grouping.label }
-                .padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        Box(
+            Modifier.heightIn(min = 44.dp)
+                .clickable(interactionSource = null, indication = null, role = Role.Button) { open = true }
+                .semantics { contentDescription = "Group by"; stateDescription = grouping.label },
+            contentAlignment = Alignment.Center,
         ) {
-            GlyphView(groupGlyph(grouping, true), 12.dp, if (grouped) p.text else p.textMuted, strokeWidth = 2f)
-            Text(if (grouped) grouping.label else "Group", style = sans(13f, if (grouped) FontWeight.SemiBold else FontWeight.Medium), color = if (grouped) p.text else p.textMuted)
-            GlyphView(Glyph.ChevronDown, 9.dp, p.textFaint, strokeWidth = 3f)
+            Row(
+                Modifier.height(28.dp)
+                    .background(if (grouped) p.elementActive else Color.Transparent, CircleShape)
+                    .border(1.dp, if (grouped) Color.Transparent else p.border, CircleShape)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                GlyphView(groupGlyph(grouping, true), 12.dp, if (grouped) p.text else p.textMuted, strokeWidth = 2f)
+                Text(if (grouped) grouping.label else "Group", style = sans(13f, if (grouped) FontWeight.SemiBold else FontWeight.Medium), color = if (grouped) p.text else p.textMuted)
+                GlyphView(Glyph.ChevronDown, 9.dp, p.textFaint, strokeWidth = 3f)
+            }
         }
         HarnessMenu(open, { open = false }) {
             HomeGroupBy.entries.forEach { option ->
@@ -538,7 +551,7 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.archivedShelf(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp)
                     .pressWashClickable({ open = !open; shown = ARCHIVED_INITIAL }, cornerRadius = 6.dp)
                     .semantics { contentDescription = if (open) "Collapse archived" else "Expand archived, ${archived.size} sessions" }
-                    .padding(horizontal = 10.dp).padding(top = 12.dp, bottom = 4.dp),
+                    .heightIn(min = 44.dp).padding(horizontal = 10.dp).padding(top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
