@@ -146,7 +146,13 @@ export class AccountPurge implements DurableObject {
     }
   }
 
+  /** One batch at a time: the purges are subrequests, which let other events
+   * in, and a second alarm run would read and work the same batch. */
   async alarm(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => this.runBatch());
+  }
+
+  private async runBatch(): Promise<void> {
     const job = await this.ctx.storage.get<Job>("job");
     if (!job || job.doneAt) return;
     const batch = await this.ctx.storage.list<Queued>({ prefix: "q:", limit: BATCH });
