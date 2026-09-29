@@ -361,7 +361,7 @@ struct NewSessionView: View {
             .padding(.horizontal, 12)
             .frame(height: 40)
             .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(ink(0.08), lineWidth: 1))
+            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
         }
         .buttonStyle(ChipPressButtonStyle())
     }
@@ -578,7 +578,7 @@ struct ComposerChip: View {
             .padding(.horizontal, 13)
             .frame(height: 40)
             .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(ink(0.08), lineWidth: 1))
+            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
         }
         .buttonStyle(ChipPressButtonStyle())
     }

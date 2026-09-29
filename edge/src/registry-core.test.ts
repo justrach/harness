@@ -46,6 +46,25 @@ describe("sidebar pin validation", () => {
   });
 });
 
+describe("desktop appearance", () => {
+  // The op shape RegistryDoc::set_appearance emits (crates/doc/src/registry/appearance.rs);
+  // phones read the merged row's mode/light/dark fields.
+  it("accepts the desktop's appearance op and merges changed fields only", () => {
+    const first: Op = {
+      kind: "preferences",
+      id: "appearance",
+      op: "upsert",
+      set: { mode: "system", light: "codegraff-light", dark: "codegraff-dark" },
+      hlc: hlc(1000, "desktop")
+    };
+    expect(validateOp(first)).toBeNull();
+    const row = applied(undefined, first);
+    const next: Op = { ...first, set: { dark: "nord" }, hlc: hlc(2000, "desktop") };
+    expect(validateOp(next)).toBeNull();
+    expect(applied(row, next).fields).toEqual({ mode: "system", light: "codegraff-light", dark: "nord" });
+  });
+});
+
 describe("hlc", () => {
   it("orders by (ms, counter, device) lexicographically", () => {
     expect(hlc(2) > hlc(1)).toBe(true);

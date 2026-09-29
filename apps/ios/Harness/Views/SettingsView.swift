@@ -7,8 +7,21 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
     @State private var confirmDeleteAccount = false
+
+    /// "Codegraff · System", or the two variant names when light and dark
+    /// come from different families.
+    private var themeSummary: String {
+        let store = ThemeStore.shared
+        let family = { (id: String) -> String? in
+            guard let familyId = store.catalog.variant(id)?.familyId else { return nil }
+            return store.catalog.families.first { $0.id == familyId }?.name
+        }
+        let light = family(store.selectedId(for: .light))
+        let dark = family(store.selectedId(for: .dark))
+        let name = light == dark ? (light ?? store.active.name) : store.active.name
+        return store.isMatchingDesktop ? "\(name) · Desktop" : "\(name) · \(store.mode.label)"
+    }
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -33,9 +46,12 @@ struct SettingsView: View {
                 }
 
                 Section("Appearance") {
-                    Picker("Theme", selection: $appearance) {
-                        ForEach(AppearancePreference.allCases) { Text($0.label).tag($0.rawValue) }
+                    NavigationLink {
+                        AppearanceView()
+                    } label: {
+                        LabeledContent("Theme", value: themeSummary)
                     }
+                    .accessibilityIdentifier("settings-appearance")
                 }
 
                 Section("About") {

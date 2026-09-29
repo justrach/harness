@@ -227,6 +227,9 @@ struct HomeView: View {
             if model.launchSheet == "newspace" {
                 model.launchSheet = nil
                 showNewSpace = true
+            } else if model.launchSheet == "settings" {
+                model.launchSheet = nil
+                showSettings = true
             }
         }
     }

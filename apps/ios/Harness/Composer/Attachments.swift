@@ -517,7 +517,7 @@ struct AttachmentStripView: View {
                         .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .overlay(RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(ink(0.11), lineWidth: 1))
+                            .strokeBorder(hairline(0.11), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .overlay(alignment: .topTrailing) {
@@ -529,7 +529,7 @@ struct AttachmentStripView: View {
                             .foregroundStyle(Theme.text)
                             .frame(width: 18, height: 18)
                             .background(.black.opacity(0.65), in: Circle())
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
+                            .overlay(Circle().strokeBorder(hairline(0.2), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                     .offset(x: 5, y: -5)
@@ -623,7 +623,7 @@ struct AttachmentThumbView: View {
         }
         .background(ink(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(ink(0.11), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(hairline(0.11), lineWidth: 1))
         .task(id: "\(deviceId)|\(path)") {
             cache.load(deviceId: deviceId, path: path)
         }
