@@ -166,7 +166,7 @@ func adaptive(dark: Color, light: Color) -> Color {
     return Color(uiColor: UIColor { $0.userInterfaceStyle == .light ? light : dark })
 }
 
-/// The account menu's Appearance pick; `system` follows iOS.
+/// The Appearance pick in Settings; `system` follows iOS.
 enum AppearancePreference: String, CaseIterable, Identifiable {
     case system, light, dark
 

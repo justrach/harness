@@ -21,7 +21,7 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
-    @State private var confirmDeleteAccount = false
+    @State private var showSettings = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
@@ -30,7 +30,6 @@ struct HomeView: View {
     @State private var searchText = ""
     @State private var statusFilter: HomeStatusFilter = .all
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.system.rawValue
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
@@ -162,45 +161,17 @@ struct HomeView: View {
                 newButton
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if model.demo != nil {
-                        Text("Demo mode")
-                    }
-                    Picker(selection: $appearance) {
-                        ForEach(AppearancePreference.allCases) { Text($0.label).tag($0.rawValue) }
-                    } label: {
-                        Label("Appearance", systemImage: "circle.lefthalf.filled")
-                    }
-                    .pickerStyle(.menu)
-                    Button("Sign out", role: .destructive) { model.signOut() }
-                    if model.canDeleteAccount {
-                        Button("Delete account…", role: .destructive) { confirmDeleteAccount = true }
-                    }
+                Button {
+                    showSettings = true
                 } label: {
                     Image(systemName: "person.circle")
                 }
+                .accessibilityLabel("Settings")
+                .accessibilityIdentifier("home-settings")
             }
         }
-        .alert("Delete your account?", isPresented: $confirmDeleteAccount) {
-            Button("Delete", role: .destructive) { Task { await model.deleteAccount() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This permanently deletes your CodeGraff account and everything Harness keeps for it: chats, sessions, devices, and the agent rooms you made. Your posts in other people's rooms lose their text. This can't be undone.")
-        }
-        .alert("Account not deleted", isPresented: Binding(
-            get: { model.accountDeletionError != nil },
-            set: { if !$0 { model.accountDeletionError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(model.accountDeletionError ?? "")
-        }
-        .overlay {
-            if model.accountDeletionBusy {
-                ProgressView("Deleting account…")
-                    .padding(20)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
         }
         .sheet(isPresented: $showNewSpace) {
             NewSpaceSheet { spaceId in
