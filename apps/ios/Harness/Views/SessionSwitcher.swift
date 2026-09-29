@@ -1,6 +1,9 @@
 // Session switcher — the phone's answer to the desktop's side-by-side panes.
-// A floating glass pill counts the other sessions that need you or are still
-// running; tapping it lists them, and picking one jumps straight there.
+// A floating glass pill shows the sessions you're juggling as a row of status
+// dots; tapping it lists them, and picking one jumps straight there.
+//
+// Like panes, a session keeps its place: the order is when you last called
+// each one (the Home order), and a run finishing only changes its dot.
 
 import SwiftUI
 
@@ -10,66 +13,66 @@ extension EnvironmentValues {
     @Entry var switchToSession: ((String) -> Void)? = nil
 }
 
-/// The sessions worth a glance, excluding the one on screen.
-struct ActiveSessions {
-    /// A question, a failure, or a finished run not yet looked at — most
-    /// urgent first.
-    var needsYou: [Chat] = []
-    var running: [Chat] = []
+/// The sessions you're juggling, in the order you last called them: anything
+/// running or waiting on you, plus what you called recently, so a session that
+/// finished and was read stays put instead of vanishing.
+struct JuggledSessions {
+    /// A session called this recently stays even once it's idle.
+    static let recentWindowMs: Int64 = 3 * 60 * 60 * 1000
+    static let limit = 10
 
-    var isEmpty: Bool { needsYou.isEmpty && running.isEmpty }
+    var chats: [Chat] = []
+    var indicators: [String: ChatIndicator] = [:]
 
     @MainActor
-    init(model: AppModel, excluding chatId: String? = nil) {
-        var needsYou: [(Chat, ChatIndicator)] = []
-        for chat in model.overviewChats where chat.id != chatId {
+    init(model: AppModel) {
+        let now = nowMs()
+        for chat in sortActive(model.overviewChats) {
             let indicator = model.indicator(for: chat)
-            switch indicator {
-            case .awaitingInput, .errored, .completed: needsYou.append((chat, indicator))
-            case .working: running.append(chat)
-            case .idle: break
-            }
+            guard indicator != .idle || now - chat.calledAt < Self.recentWindowMs else { continue }
+            chats.append(chat)
+            indicators[chat.id] = indicator
+            if chats.count == Self.limit { break }
         }
-        // Stable: within one status the list's own order stands.
-        self.needsYou = needsYou.enumerated()
-            .sorted { ($0.element.1.rawValue, $0.offset) < ($1.element.1.rawValue, $1.offset) }
-            .map(\.element.0)
+    }
+
+    func others(than chatId: String?) -> [Chat] { chats.filter { $0.id != chatId } }
+
+    func count(_ matches: (ChatIndicator) -> Bool, excluding chatId: String?) -> Int {
+        others(than: chatId).filter { matches(indicators[$0.id] ?? .idle) }.count
     }
 }
 
-/// Floating glass pill: "● 2 need you · ● 3 running", in the Home status
-/// chips' colors. `compact` drops the words for the session screen, where it
-/// shares the bottom with the composer.
+/// Floating glass pill: one status dot per juggled session, in order, with
+/// the open one ringed. Home adds "2 need you · 1 running"; the session
+/// screen keeps just the dots, sharing the bottom with the composer.
 struct SessionSwitcherPill: View {
     @Environment(AppModel.self) private var model
-    var excluding: String?
+    var current: String?
     var compact = false
     @State private var showSheet = false
 
+    private static let maxDots = 6
+
     var body: some View {
         let _ = model.connectivity.pulse
-        let active = ActiveSessions(model: model, excluding: excluding)
+        let juggled = JuggledSessions(model: model)
+        let hasOthers = !juggled.others(than: current).isEmpty
         Group {
-            if !active.isEmpty {
+            if hasOthers {
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     showSheet = true
                 } label: {
-                    HStack(spacing: compact ? 8 : 10) {
-                        if !active.needsYou.isEmpty {
-                            count(active.needsYou.count, color: Theme.warning,
-                                  word: "need you")
-                        }
-                        if !active.needsYou.isEmpty, !active.running.isEmpty, !compact {
-                            Text("·").foregroundStyle(Theme.textFaint)
-                        }
-                        if !active.running.isEmpty {
-                            count(active.running.count, color: Theme.statusWorking,
-                                  word: "running")
+                    HStack(spacing: 10) {
+                        dots(juggled)
+                        if !compact, let summary = summary(juggled) {
+                            Text(summary)
+                                .font(Theme.sans(14, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(Theme.text)
                         }
                     }
-                    .font(Theme.sans(compact ? 13 : 14, weight: .medium))
-                    .foregroundStyle(Theme.text)
                     .padding(.horizontal, compact ? 12 : 16)
                     .frame(height: compact ? 36 : 44)
                     .contentShape(Capsule())
@@ -77,55 +80,102 @@ struct SessionSwitcherPill: View {
                 .buttonStyle(.plain)
                 .glassEffect(.regular.interactive(), in: Capsule())
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
-                .accessibilityLabel(accessibilityText(active))
+                .accessibilityLabel(accessibilityText(juggled))
                 .accessibilityIdentifier("session-switcher")
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
         }
-        .motionAnimation(Motion.fadeQuick, value: active.isEmpty)
+        .motionAnimation(Motion.fadeQuick, value: hasOthers)
         .sheet(isPresented: $showSheet) {
-            SessionSwitcherSheet(excluding: excluding)
+            SessionSwitcherSheet(current: current)
         }
     }
 
-    private func count(_ n: Int, color: Color, word: String) -> some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(compact ? "\(n)" : "\(n) \(word)").monospacedDigit()
+    private func dots(_ juggled: JuggledSessions) -> some View {
+        let shown = juggled.chats.prefix(Self.maxDots)
+        let extra = juggled.chats.count - shown.count
+        return HStack(spacing: 5) {
+            ForEach(shown) { chat in
+                let indicator = juggled.indicators[chat.id] ?? .idle
+                Circle()
+                    .fill(dotColor(indicator))
+                    .frame(width: 7, height: 7)
+                    .padding(2)
+                    .overlay {
+                        if chat.id == current {
+                            Circle().strokeBorder(Theme.text.opacity(0.7), lineWidth: 1.2)
+                        }
+                    }
+            }
+            if extra > 0 {
+                Text("+\(extra)")
+                    .font(Theme.sans(12, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+            }
         }
     }
 
-    private func accessibilityText(_ active: ActiveSessions) -> String {
+    /// The Home status chips' colors: needs you, running; finished-and-read
+    /// sessions read as a quiet grey dot.
+    private func dotColor(_ indicator: ChatIndicator) -> Color {
+        switch indicator {
+        case .working: return Theme.statusWorking
+        case .awaitingInput, .errored, .completed: return Theme.warning
+        case .idle: return ink(0.25)
+        }
+    }
+
+    private func summary(_ juggled: JuggledSessions) -> String? {
+        let needsYou = juggled.count(HomeStatusFilter.attention.matches, excluding: current)
+        let running = juggled.count(HomeStatusFilter.running.matches, excluding: current)
         var parts: [String] = []
-        if !active.needsYou.isEmpty { parts.append("\(active.needsYou.count) need you") }
-        if !active.running.isEmpty { parts.append("\(active.running.count) running") }
-        return "Sessions: " + parts.joined(separator: ", ")
+        if needsYou > 0 { parts.append("\(needsYou) need you") }
+        if running > 0 { parts.append("\(running) running") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func accessibilityText(_ juggled: JuggledSessions) -> String {
+        let others = juggled.others(than: current).count
+        return "\(others) other sessions" + (summary(juggled).map { ", \($0)" } ?? "")
     }
 }
 
-/// The pill's list: Needs you, then Running. Picking a row jumps there.
+/// The pill's list: the juggled sessions in the same order, the open one
+/// marked. Picking a row jumps there.
 struct SessionSwitcherSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.switchToSession) private var switchToSession
-    var excluding: String?
+    var current: String?
 
     var body: some View {
-        let active = ActiveSessions(model: model, excluding: excluding)
+        let juggled = JuggledSessions(model: model)
         NavigationStack {
             List {
-                if active.isEmpty {
-                    Text("Nothing else is running or waiting on you.")
-                        .foregroundStyle(Theme.textMuted)
-                }
-                if !active.needsYou.isEmpty {
-                    Section("Needs you") { rows(active.needsYou) }
-                }
-                if !active.running.isEmpty {
-                    Section("Running") { rows(active.running) }
+                Section {
+                    ForEach(juggled.chats) { chat in
+                        ChatRow(chat: chat, showLocation: true) {
+                            dismiss()
+                            if chat.id != current { switchToSession?(chat.id) }
+                        }
+                        .overlay(alignment: .leading) {
+                            if chat.id == current {
+                                Capsule()
+                                    .fill(Theme.text.opacity(0.7))
+                                    .frame(width: 3)
+                                    .padding(.vertical, 10)
+                                    .offset(x: -6)
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                        .accessibilityIdentifier("switcher-\(chat.id)")
+                        .accessibilityValue(chat.id == current ? "Open" : "")
+                    }
+                } footer: {
+                    Text("In the order you last called them. Sessions stay while they run or need you, and for a few hours after you last called them.")
                 }
             }
-            .navigationTitle("Active sessions")
+            .navigationTitle("Your sessions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -136,16 +186,5 @@ struct SessionSwitcherSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .harnessAppearance()
-    }
-
-    private func rows(_ chats: [Chat]) -> some View {
-        ForEach(chats) { chat in
-            ChatRow(chat: chat, showLocation: true) {
-                dismiss()
-                switchToSession?(chat.id)
-            }
-            .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
-            .accessibilityIdentifier("switcher-\(chat.id)")
-        }
     }
 }

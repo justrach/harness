@@ -12,25 +12,41 @@ final class SessionSwitcherUITests: XCTestCase {
         app.launch()
     }
 
-    /// The demo has sessions running and waiting on you: the pill lists
-    /// them, and picking one opens it with the pill still there for the rest.
-    func testPillListsActiveSessionsAndJumpsBetweenThem() {
+    private var rows: XCUIElementQuery {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "switcher-"))
+    }
+
+    /// Row ids top to bottom. A row with a pull request badge is two buttons
+    /// carrying the row's id, so each id counts once.
+    private var order: [String] {
+        var seen = Set<String>()
+        return rows.allElementsBoundByIndex.map(\.identifier).filter { seen.insert($0).inserted }
+    }
+
+    private func row(_ id: String) -> XCUIElement {
+        app.buttons.matching(identifier: id).firstMatch
+    }
+
+    /// The demo has sessions running and waiting on you. The pill lists them
+    /// in one fixed order; in a session the open one stays in its place,
+    /// marked, and picking another swaps it in.
+    func testPillListsSessionsInOneOrderAndJumpsBetweenThem() {
         let pill = app.buttons["session-switcher"]
         XCTAssertTrue(pill.waitForExistence(timeout: 10))
         pill.tap()
-
-        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "switcher-"))
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
-        let first = rows.firstMatch.identifier
-        rows.firstMatch.tap()
+        let order = self.order
+        XCTAssertGreaterThan(order.count, 1)
+        row(order[0]).tap()
 
-        // In the session: the compact pill offers the others.
+        // In the session: same list, same order, the open one marked.
         let inSession = app.buttons["session-switcher"]
         XCTAssertTrue(inSession.waitForExistence(timeout: 10))
         inSession.tap()
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons[first].exists, "the open session isn't offered again")
-        rows.firstMatch.tap()
+        XCTAssertEqual(self.order, order)
+        XCTAssertEqual(row(order[0]).value as? String, "Open")
+        row(order[1]).tap()
 
         // Jumping swaps the session: one Back returns Home.
         XCTAssertTrue(app.buttons["session-switcher"].waitForExistence(timeout: 10))
