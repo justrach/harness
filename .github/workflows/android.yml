@@ -122,10 +122,12 @@ jobs:
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          # The Android Test Device image is the light, CI-oriented one: the full Google APIs image is slow to
+          # recreate an activity on a two-core hosted runner.
+          api-level: 33
           arch: x86_64
-          target: google_apis
-          profile: pixel_6
+          target: aosp_atd
+          profile: Nexus 6
           ram-size: 4096M
           heap-size: 512M
           disable-animations: true
@@ -135,10 +137,12 @@ jobs:
         if: steps.first.outcome == 'failure'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          # The Android Test Device image is the light, CI-oriented one: the full Google APIs image is slow to
+          # recreate an activity on a two-core hosted runner.
+          api-level: 33
           arch: x86_64
-          target: google_apis
-          profile: pixel_6
+          target: aosp_atd
+          profile: Nexus 6
           ram-size: 4096M
           heap-size: 512M
           disable-animations: true
