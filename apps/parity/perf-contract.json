@@ -1,0 +1,28 @@
+{
+  "comment": "The operations both mobile apps time, the milliseconds each may take before it counts as slow, and the metric name each is reported under in the anonymous batch (`wire`; the desktop app already reports app_launch_ms and conversation_load_ms under the same names). Android reports them from Perf.kt (PerfSpan), iOS from PerfMonitor.swift (PerfSpan); each app's parity test checks its own source against this file. Frame cost is reported as frame_cost_ms on Android and main_turn_ms on iOS: the two measure different things, so they have different names.",
+  "spans": {
+    "startup.firstFrame": 1000,
+    "nav.open": 100,
+    "transcript.rows": 8,
+    "markdown.parse": 4,
+    "home.group": 4,
+    "send.apply": 8,
+    "main.stall": 100
+  },
+  "strings": {
+    "settingsRow": "Performance",
+    "copyReport": "Copy report",
+    "reset": "Reset",
+    "shareToggle": "Share anonymous performance data",
+    "shareFootnote": "Sends numbers only: how long things took, grouped into ranges, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time."
+  },
+  "wire": {
+    "startup.firstFrame": "app_launch_ms",
+    "nav.open": "conversation_load_ms",
+    "transcript.rows": "transcript_rows_ms",
+    "markdown.parse": "markdown_parse_ms",
+    "home.group": "home_group_ms",
+    "send.apply": "send_apply_ms",
+    "main.stall": "main_stall_ms"
+  }
+}

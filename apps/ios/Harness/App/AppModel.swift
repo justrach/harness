@@ -373,6 +373,7 @@ final class AppModel {
     func enterDemoMode() {
         demo = DemoDataset.standard()
         demoPinnedSessionIds = []
+        DraftStore.persistsToDisk = false
         phase = .ready
     }
 
@@ -385,6 +386,8 @@ final class AppModel {
         config = nil
         demo = nil
         demoPinnedSessionIds = []
+        DraftStore.wipeAll()
+        DraftStore.persistsToDisk = true
         Keychain.delete(key: "codegraffAccessToken")
         Keychain.delete(key: "codegraffRefreshToken")
         DocDisk.wipeAll()  // local doc state belongs to the signed-in identity

@@ -252,7 +252,8 @@ struct ComposerView: View {
     let chat: Chat
     let runLive: Bool
 
-    @State private var text = ""
+    // What was typed and not sent comes back with the chat (DraftStore).
+    @State private var text: String
     @State private var attachments: [StagedAttachment] = []
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPicker = false
@@ -272,6 +273,13 @@ struct ComposerView: View {
     /// Distinguishes a live composer from an async acquire that completed
     /// after navigation removed this view.
     @State private var queueEditorVisible = false
+
+    init(store: SessionStore, chat: Chat, runLive: Bool) {
+        self.store = store
+        self.chat = chat
+        self.runLive = runLive
+        _text = State(initialValue: DraftStore.load(DraftStore.chatKey(chat.id)))
+    }
 
     private var harness: String { chat.config?.harness ?? "claude-code" }
 
@@ -446,6 +454,10 @@ struct ComposerView: View {
                     uploadError = "Edit protection may have expired — review before sending."
                 }
             }
+        }
+        // A queued row being retyped is not the draft: the draft stays as it was until the edit ends.
+        .onChange(of: text) { _, new in
+            if editingQueuedId == nil { DraftStore.save(new, for: DraftStore.chatKey(chat.id)) }
         }
         .onAppear {
             queueEditorVisible = true
@@ -622,7 +634,7 @@ struct ComposerView: View {
         guard !prompt.isEmpty || !staged.isEmpty else { return }
 
         if staged.isEmpty {
-            deliver(content: prompt, paths: [])
+            Perf.measure(PerfSpan.sendApply) { deliver(content: prompt, paths: []) }
             clearDraft(matching: submittedText)
             return
         }

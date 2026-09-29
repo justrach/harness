@@ -80,16 +80,22 @@ struct HomeView: View {
 
     @ViewBuilder
     private func destination(_ route: Route) -> some View {
-        switch route {
-        case .space(let id): SpaceView(spaceId: id, path: $path)
-        case .chat(let id): SessionView(chatId: id)
-        case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+        Group {
+            switch route {
+            case .space(let id): SpaceView(spaceId: id, path: $path)
+            case .chat(let id): SessionView(chatId: id)
+            case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+            }
         }
+        // Tap to the page it opened.
+        .onAppear { Perf.shared.finishInteraction(PerfSpan.navigationOpen) }
     }
 
     /// Open a route from the list. In the split layout the sidebar replaces
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
+        // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
+        if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
         if splitLayout { path = [route] } else { path.append(route) }
     }
 
@@ -416,7 +422,8 @@ struct HomeView: View {
                 }
             }
         } else {
-            ForEach(HomeGrouping.groups(chats, by: grouping)) { group in
+            let pinned = Set(chats.map(\.id).filter(model.isPinned(chatId:)))
+            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned) }) { group in
                 let collapsed = grouping != .none && collapsedGroups.contains(group.id)
                 Section {
                     if !collapsed {
