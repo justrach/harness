@@ -447,8 +447,14 @@ struct ComposerView: View {
                 }
             }
         }
+        .onChange(of: text) { _, newText in
+            // A queue edit borrows the field; its text is not the draft.
+            guard queueEdit == nil else { return }
+            model.composerDrafts[chat.id] = newText.isEmpty ? nil : newText
+        }
         .onAppear {
             queueEditorVisible = true
+            if text.isEmpty, let draft = model.composerDrafts[chat.id] { text = draft }
             if model.launchSheet == "config" {
                 model.launchSheet = nil
                 showModelPicker = true

@@ -35,9 +35,11 @@ struct HomeView: View {
         model.spaces.first { $0.id == spaceFilter }
     }
 
-    /// iPad (and other wide windows): the session list becomes a sidebar
-    /// next to the open session, like the desktop. Compact width keeps the
-    /// phone's single stack.
+    /// iPad, a foldable phone opened (its inner display is regular width) and
+    /// other wide windows: the session list becomes a sidebar next to the open
+    /// session, like the desktop. Compact width (a phone, a foldable's cover
+    /// display) keeps the single stack. The split view sizes its own columns
+    /// so they follow the fold when the device is partly open.
     private var splitLayout: Bool { horizontalSizeClass == .regular }
 
     var body: some View {
@@ -66,6 +68,12 @@ struct HomeView: View {
             }
         }
         .environment(\.switchToSession, switchTo)
+        .onChange(of: splitLayout) { _, isSplit in
+            // Opening or closing a foldable swaps the stack and the split. The
+            // split's detail column shows one route, a phone stack can hold
+            // several. Keep the screen the user was looking at.
+            if isSplit, path.count > 1, let last = path.last { path = [last] }
+        }
     }
 
     /// The session switcher's jump: from inside a session, swap that session
@@ -183,7 +191,7 @@ struct HomeView: View {
                 Button {
                     showSettings = true
                 } label: {
-                    Image(systemName: "person.circle")
+                    Label("Settings", systemImage: "person.circle")
                 }
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("home-settings")
@@ -376,7 +384,9 @@ struct HomeView: View {
                 Label("New space…", systemImage: "folder.badge.plus")
             }
         } label: {
-            Image(systemName: "plus")
+            // A title as well as the symbol: the bar shows the symbol, and the
+            // overflow menu on a foldable's side bar needs the title.
+            Label("New session", systemImage: "plus")
         }
         .accessibilityLabel("New session")
         .accessibilityIdentifier("new-session")

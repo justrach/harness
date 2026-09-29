@@ -68,6 +68,10 @@ final class AppModel {
     private var config: AppConfig?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathKey: String?
+    /// Unsent composer text by chat. Folding or unfolding a foldable swaps the
+    /// stack for the split layout and rebuilds the open session, which would
+    /// otherwise drop what was being typed.
+    @ObservationIgnored var composerDrafts: [String: String] = [:]
 
     // Persisted connection settings.
     @ObservationIgnored @AppStorage("harnessEdgeURL") var edgeURLString = "https://edge.codegraff.com"
