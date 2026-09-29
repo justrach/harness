@@ -1,6 +1,7 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! a Rename dialog (Mutate renameDevice), and Remove for an offline device
+//! (Mutate forgetDevice, behind a confirm).
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -21,6 +22,16 @@ use crate::theme::Theme;
 /// A device that pinged within this window shows a presence dot (engines
 /// heartbeat every 15s; 70s tolerates a couple of missed beats).
 pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
+
+/// Confirm-dialog copy for removing a device that hosts `sessions` chats. Pure.
+pub fn remove_device_copy(name: &str, sessions: usize) -> String {
+    let what = match sessions {
+        0 => format!("Removing “{name}” takes it off your devices list."),
+        1 => format!("Removing “{name}” also deletes its 1 session from every device."),
+        n => format!("Removing “{name}” also deletes its {n} sessions from every device."),
+    };
+    format!("{what} If it comes back online it rejoins on its own, without them.")
+}
 
 /// Presence: last-seen within the online window (future timestamps count). Pure.
 pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
@@ -117,6 +128,8 @@ pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
     rename: Option<RenameDialog>,
+    /// Device id awaiting the Remove confirm.
+    remove_confirm: Option<String>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
@@ -136,6 +149,7 @@ impl DevicesPage {
             state,
             scroll: widgets::PageScroll::default(),
             rename: None,
+            remove_confirm: None,
             copied: None,
             error: None,
             task: None,
@@ -276,6 +290,76 @@ impl DevicesPage {
         cx.notify();
     }
 
+    fn submit_remove(&mut self, cx: &mut Context<Self>) {
+        let Some(device_id) = self.remove_confirm.take() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({
+            "op": "forgetDevice",
+            "deviceId": device_id,
+        });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(format!("Remove failed: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_remove_dialog(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).for_popup();
+        let device_id = self.remove_confirm.as_deref()?;
+        let (name, sessions) = {
+            let state = self.state.read(cx);
+            (
+                state.device_name(device_id).unwrap_or("this device").to_string(),
+                state.chats.iter().filter(|c| c.device_id == device_id).count(),
+            )
+        };
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, "Remove device?"))
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .child(popover::dialog_body(&theme, remove_device_copy(&name, sessions))),
+            )
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "remove-device-cancel")
+                            .id("remove-device-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.remove_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove")
+                            .id("remove-device-confirm")
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_remove(cx))),
+                    ),
+            )
+            .into_any_element();
+        Some(popover::modal("remove-device-dialog", viewport, card))
+    }
+
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
         self.copied = Some(device_id);
@@ -384,7 +468,10 @@ impl Render for DevicesPage {
             )
         };
         let copied = self.copied.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let dialog = match self.render_rename_dialog(window.viewport_size(), cx) {
+            Some(dialog) => Some(dialog),
+            None => self.render_remove_dialog(window.viewport_size(), cx),
+        };
         let emerald = theme.success; // emerald-400
         let count = devices.len();
 
@@ -398,6 +485,11 @@ impl Render for DevicesPage {
                 let copy_id = device.id.clone();
                 let rename_id = device.id.clone();
                 let rename_name = device.name.clone();
+                let remove_id = device.id.clone();
+                // Only a device that is offline and not this one can go: this
+                // device would re-register on its next boot, and a live one
+                // is still hosting its sessions (the engine refuses both too).
+                let removable = !online && !is_local;
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -535,6 +627,28 @@ impl Render for DevicesPage {
                             )
                             .child(SharedString::from("Rename")),
                     )
+                    .when(removable, |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("device-remove", ix))
+                                .opacity(0.7)
+                                .hover(|s| {
+                                    s.opacity(1.0)
+                                        .bg(crate::theme::ink(0.06))
+                                        .text_color(theme.danger)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_confirm = Some(remove_id.clone());
+                                    cx.notify();
+                                }))
+                                .child(
+                                    crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
+                                        .size(px(14.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Remove")),
+                        )
+                    })
                     .into_any_element()
             })
             .collect();
@@ -672,6 +786,17 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    #[test]
+    fn remove_copy_counts_what_goes_with_the_device() {
+        let none = remove_device_copy("old sandbox", 0);
+        assert!(none.contains("takes it off your devices list"));
+        assert!(!none.contains("session"));
+        assert!(remove_device_copy("mini", 1).contains("its 1 session from every device"));
+        let many = remove_device_copy("mini", 4);
+        assert!(many.contains("its 4 sessions from every device"));
+        assert!(many.contains("rejoins on its own"));
     }
 
     #[test]

@@ -25,6 +25,15 @@ use harness_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, Sidebar
 use crate::schema::DocError;
 use crate::workspace::{DeletedSpace, WorkspaceState};
 
+/// Result of a `forget_device` cascade — what went with the device row, so
+/// the engine can drop local run state / doc-host handles for the chats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForgottenDevice {
+    pub existed: bool,
+    pub space_ids: Vec<String>,
+    pub chat_ids: Vec<String>,
+}
+
 /// Row kinds — synced sidebar entities plus user preferences.
 pub const KIND_DEVICES: &str = "devices";
 pub const KIND_SPACES: &str = "spaces";
@@ -774,6 +783,62 @@ impl RegistryDoc {
             .collect();
         devices.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(devices)
+    }
+
+    /// Forget a (dead) device: one batch tombstones its device row and every
+    /// space, chat and session-status row it owns — the server applies the
+    /// batch atomically, so peers never see a half-removed device. This
+    /// forgets, it does not ban: a device that boots again re-upserts its own
+    /// row (a newer HLC revives the tombstone) and rejoins without the removed
+    /// sessions. Returns the removed chat ids so the engine can drop local
+    /// state.
+    pub fn forget_device(&mut self, device_id: &str) -> Result<ForgottenDevice, DocError> {
+        let existed = self.row_exists(KIND_DEVICES, device_id);
+        let space_ids: Vec<String> = self
+            .read_spaces()?
+            .into_iter()
+            .filter(|s| s.device_id == device_id)
+            .map(|s| s.id)
+            .collect();
+        let chat_ids: Vec<String> = self
+            .read_chats()?
+            .into_iter()
+            .filter(|c| {
+                c.device_id == device_id
+                    || c
+                        .space_id
+                        .as_deref()
+                        .is_some_and(|sp| space_ids.iter().any(|id| id == sp))
+            })
+            .map(|c| c.id)
+            .collect();
+        // Status rows are keyed by chat id; a stray row for a chat that is
+        // already gone still belongs to the device and goes with it.
+        let stray_sessions: Vec<String> = self
+            .read_sessions()?
+            .into_iter()
+            .filter(|s| s.device_id == device_id && !chat_ids.contains(&s.chat_id))
+            .map(|s| s.chat_id)
+            .collect();
+        let mut keys: Vec<(&str, &str)> =
+            Vec::with_capacity(chat_ids.len() * 2 + space_ids.len() + stray_sessions.len() + 1);
+        for chat_id in &chat_ids {
+            keys.push((KIND_CHATS, chat_id));
+            keys.push((KIND_SESSIONS, chat_id));
+        }
+        for chat_id in &stray_sessions {
+            keys.push((KIND_SESSIONS, chat_id));
+        }
+        for space_id in &space_ids {
+            keys.push((KIND_SPACES, space_id));
+        }
+        keys.push((KIND_DEVICES, device_id));
+        self.delete_row_ops(&keys);
+        Ok(ForgottenDevice {
+            existed,
+            space_ids,
+            chat_ids,
+        })
     }
 
     // ── spaces ──────────────────────────────────────────────────────────────

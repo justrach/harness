@@ -340,6 +340,86 @@ async fn two_engines_share_a_workspace() {
     )
     .await;
 
+    // Forget: a device can't remove itself…
+    let err = client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "forgetDevice", "deviceId": "dev-b" }),
+        )
+        .await
+        .expect_err("forgetting this device is refused");
+    assert!(err.to_string().contains("this device"), "{err}");
+    // …nor a device whose heartbeat is fresh (A beats over the bridge)…
+    let err = client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "forgetDevice", "deviceId": "dev-a" }),
+        )
+        .await
+        .expect_err("forgetting a live device is refused");
+    assert!(err.to_string().contains("online"), "{err}");
+    // …but a dead device goes, with everything it owned, on every replica.
+    a.workspace.upsert_device_row(&harness_proto::Device {
+        id: "dev-dead".into(),
+        name: "old sandbox".into(),
+        platform: "linux".into(),
+        last_seen_at: None,
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: Vec::new(),
+    });
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({
+                "op": "createSpace", "spaceId": "space-dead", "deviceId": "dev-dead", "path": "/work"
+            }),
+        )
+        .await
+        .expect("create dead device's space");
+    wait_for(
+        || {
+            b.workspace
+                .read_spaces()
+                .unwrap_or_default()
+                .iter()
+                .any(|s| s.id == "space-dead")
+        },
+        "dead device's space on B",
+    )
+    .await;
+    client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "forgetDevice", "deviceId": "dev-dead" }),
+        )
+        .await
+        .expect("forget dead device");
+    for core in [&a, &b] {
+        wait_for(
+            || {
+                let devices: Vec<String> = core
+                    .workspace
+                    .read_devices()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|d| d.id)
+                    .collect();
+                let spaces: Vec<String> = core
+                    .workspace
+                    .read_spaces()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| s.id)
+                    .collect();
+                devices == ["dev-a", "dev-b"] && spaces == ["space-1"]
+            },
+            "forgotten device gone on both",
+        )
+        .await;
+    }
+
     drop(link);
     a.shutdown().await;
     b.shutdown().await;

@@ -11,7 +11,7 @@
 //! - `WatchSessions` → stream of `Session[]`: this engine's live statuses merged with
 //!   remote devices' workspace session rows
 //! - `Mutate {op, …}` → `{ok}` — workspace entity mutations (createChat, renameChat,
-//!   setChatArchived, deleteChat, renameDevice, markChatSeen)
+//!   setChatArchived, deleteChat, renameDevice, forgetDevice, markChatSeen)
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
@@ -599,6 +599,11 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    /// Forget a dead device: tombstones its device row plus every space,
+    /// chat and session-status row it owns. Refused for this device and for
+    /// a device that is online.
+    #[serde(rename_all = "camelCase")]
+    ForgetDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -1072,6 +1077,15 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            MutateParams::ForgetDevice { device_id } => {
+                let forgotten = self.workspace.forget_device(&device_id).map_err(failed)?;
+                // Drop any cached docs for the removed chats. They were hosted
+                // by the forgotten device, so there are no local runs to stop.
+                for chat_id in forgotten.chat_ids {
+                    self.doc_host.purge_chat(&chat_id);
+                }
+                Ok(())
+            }
             MutateParams::MarkChatSeen { chat_id, at } => {
                 let at = at
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)

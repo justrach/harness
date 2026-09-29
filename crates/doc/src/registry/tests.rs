@@ -742,6 +742,86 @@ fn delete_space_cascades_and_converges() {
 }
 
 #[test]
+fn forget_device_cascades_converges_and_a_returning_device_rejoins() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "sandbox")).unwrap();
+    a.upsert_space(&space("sp-a", "dev-a", "/work/repo")).unwrap();
+    let mut in_space = chat("chat-a1", "dev-a");
+    in_space.space_id = Some("sp-a".into());
+    a.upsert_chat(&in_space).unwrap();
+    a.upsert_chat(&chat("chat-a2", "dev-a")).unwrap();
+    a.upsert_session(&session("chat-a1", "dev-a", SessionStatus::Working))
+        .unwrap();
+    // A stray status row whose chat row is already gone still goes.
+    a.upsert_session(&session("chat-gone", "dev-a", SessionStatus::Idle))
+        .unwrap();
+
+    let mut b = RegistryDoc::new("dev-b");
+    b.upsert_device(&device("dev-b", "laptop")).unwrap();
+    b.upsert_space(&space("sp-b", "dev-b", "/Users/me/repo"))
+        .unwrap();
+    b.upsert_chat(&chat("chat-b1", "dev-b")).unwrap();
+    b.upsert_session(&session("chat-b1", "dev-b", SessionStatus::Idle))
+        .unwrap();
+
+    let mut server = HashMap::new();
+    let mut seq = 0u64;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(a.read_all().unwrap(), b.read_all().unwrap());
+
+    // dev-a goes dark; the laptop forgets it.
+    let forgotten = b.forget_device("dev-a").unwrap();
+    assert!(forgotten.existed);
+    assert_eq!(forgotten.space_ids, vec!["sp-a".to_string()]);
+    assert_eq!(
+        forgotten.chat_ids,
+        vec!["chat-a1".to_string(), "chat-a2".to_string()]
+    );
+    // One atomic batch, and the overlay hides it before the server acks.
+    assert_eq!(b.pending_len(), 1);
+    assert_eq!(b.read_devices().unwrap().len(), 1);
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+
+    for ws in [&a, &b] {
+        let state = ws.read_all().unwrap();
+        let ids = |v: Vec<&str>| v.into_iter().map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            ids(state.devices.iter().map(|d| d.id.as_str()).collect()),
+            ids(vec!["dev-b"])
+        );
+        assert_eq!(
+            ids(state.spaces.iter().map(|s| s.id.as_str()).collect()),
+            ids(vec!["sp-b"])
+        );
+        assert_eq!(
+            ids(state.chats.iter().map(|c| c.id.as_str()).collect()),
+            ids(vec!["chat-b1"])
+        );
+        assert_eq!(
+            ids(state.sessions.iter().map(|s| s.chat_id.as_str()).collect()),
+            ids(vec!["chat-b1"])
+        );
+    }
+
+    // Forgetting again (or an unknown id) is a harmless no-op report.
+    let again = b.forget_device("dev-a").unwrap();
+    assert!(!again.existed);
+    assert!(again.chat_ids.is_empty());
+    assert!(again.space_ids.is_empty());
+
+    // The device boots again: its boot upsert (newer HLC) revives the row,
+    // but the forgotten sessions stay gone.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    a.upsert_device(&device("dev-a", "sandbox")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    for ws in [&a, &b] {
+        let state = ws.read_all().unwrap();
+        assert_eq!(state.devices.len(), 2);
+        assert!(state.chats.iter().all(|c| c.device_id == "dev-b"));
+    }
+}
+
+#[test]
 fn persistence_round_trips_rows_pending_and_cursor() {
     let mut doc = RegistryDoc::new("dev-a");
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();

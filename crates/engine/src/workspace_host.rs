@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use chrono::Utc;
 use tokio::sync::watch;
 
-use harness_doc::{DeletedSpace, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
+use harness_doc::{DeletedSpace, ForgottenDevice, REGISTRY_DOC_ID, RegistryDoc, WorkspaceDoc};
 use harness_proto::{Chat, ChatConfig, Device, Session, SidebarPreferencesState, Space};
 use harness_sync::{DocsStore, RegistryClient, RegistryTuning};
 
@@ -1134,6 +1134,24 @@ impl WorkspaceHost {
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
+    }
+
+    /// Settings → Devices "Remove": forget a dead device and everything it
+    /// owns (see [`RegistryDoc::forget_device`]). Refuses this device (it
+    /// would re-register on the next boot anyway) and a device whose
+    /// heartbeat is fresh — removing a live host would yank its sessions
+    /// out from under it. Anything short of positive liveness is allowed:
+    /// the confirm dialog is the user's judgement that it is gone.
+    pub fn forget_device(&self, device_id: &str) -> Result<ForgottenDevice, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other("can't remove this device".into()));
+        }
+        if self.peer_liveness(device_id) == harness_rpc::PeerLiveness::Live {
+            return Err(EngineError::Other(
+                "device is online; remove it once it's offline".into(),
+            ));
+        }
+        Ok(self.mutate(|doc| doc.forget_device(device_id))?)
     }
 
     // ── git metadata (diff-sync host writes) ────────────────────────────────
