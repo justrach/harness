@@ -1,6 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteAccount } from "../../src/account-delete";
+import { SECOND_PASS_MS } from "../../src/account-purge";
 import { issueRefreshCredential } from "../../src/auth";
 import { encodeHlc } from "../../src/registry-core";
 import { devStore } from "../../src/room-actor";
@@ -64,6 +65,13 @@ const drain = async (userId: string, until: (s: Status) => boolean) => {
 const start = (userId: string) =>
   stub(env.ACCOUNT_PURGE, `purge1/${userId}`).fetch("https://p/start", { method: "POST", body: JSON.stringify({ userId }) });
 
+/** The second pass waits out the access-token lifetime: move the job's clock past it. */
+const elapse = (userId: string) =>
+  runInDurableObject(stub(env.ACCOUNT_PURGE, `purge1/${userId}`), async (_i, state) => {
+    const job = await state.storage.get<{ startedAt: number }>("job");
+    await state.storage.put("job", { ...job, startedAt: (job?.startedAt ?? 0) - SECOND_PASS_MS });
+  });
+
 describe("account purge", () => {
   it("wipes what the person owns, leaves other people's data, and wipes again after tokens expire", async () => {
     const me = person();
@@ -126,10 +134,27 @@ describe("account purge", () => {
     // new chat before the second pass.
     await pushRegistry(me, [{ kind: "chats", id: `${me}-late` }]);
     await seedChat(`${me}-late`, me);
+    await elapse(me);
     await drain(me, (s) => typeof s.doneAt === "number");
     expect(await chatRows(`${me}-late`)).toEqual({ owner: null, rows: 0 });
     expect(await chatRows(`${other}-c9`)).toEqual({ owner: other, rows: 1 });
     expect(await (await start(me)).json()).toMatchObject({ status: "done" });
+  });
+
+  it("leaves the second pass queued until the tokens have expired", async () => {
+    const me = person();
+    await start(me);
+    await drain(me, (s) => s.pass === 2);
+
+    // Alarms that land early (a retry, or one delivered around the pass change) do nothing.
+    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(stub(env.ACCOUNT_PURGE, `purge1/${me}`));
+    const early = await status(me);
+    expect(early).toMatchObject({ pass: 2, doneAt: null });
+    expect(early.queued).toBeGreaterThan(0);
+
+    await elapse(me);
+    await drain(me, (s) => typeof s.doneAt === "number");
+    expect(await status(me)).toMatchObject({ queued: 0 });
   });
 
   it("destroys the rooms a person made and redacts them from everyone else's", async () => {

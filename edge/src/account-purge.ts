@@ -155,6 +155,14 @@ export class AccountPurge implements DurableObject {
   private async runBatch(): Promise<void> {
     const job = await this.ctx.storage.get<Job>("job");
     if (!job || job.doneAt) return;
+    // The second pass is for after every token has expired. An alarm that lands
+    // early (a retry, or one delivered around the pass change) must not run it:
+    // a desktop still signed in could re-seed after the job is done.
+    const secondPassAt = job.startedAt + SECOND_PASS_MS;
+    if (job.pass === 2 && Date.now() < secondPassAt) {
+      await this.ctx.storage.setAlarm(secondPassAt);
+      return;
+    }
     const batch = await this.ctx.storage.list<Queued>({ prefix: "q:", limit: BATCH });
     if (batch.size === 0) return this.finishPass(job);
 
