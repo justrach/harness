@@ -74,7 +74,7 @@ class DemoDataset(
 
         fun standard(now: Long): DemoDataset {
             val mac = DeviceRow("dev-mac", "MacBook Pro", "macos", now, now - 30 * DAY)
-            val vps = DeviceRow("dev-vps", "hetzner-01", "linux", now - 10 * MIN, now - 12 * DAY)
+            val vps = DeviceRow("dev-vps", "Codegraff Cloud", "linux", now - 10 * MIN, now - 12 * DAY)
             val harness = Space("space-harness", mac.id, "/Users/dev/harness", null, true, now - 9 * DAY)
             val edge = Space("space-edge", vps.id, "/srv/deploys/edge", null, true, now - 4 * DAY)
 
