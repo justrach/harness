@@ -55,6 +55,9 @@ pub(super) struct ChatSplit {
     /// Each unfocused pane's parked composer picks (the focused pane's are
     /// live in the pickers); only a new-session canvas pane reads its own.
     pub drafts: Vec<Option<CanvasDraft>>,
+    /// The chat each empty unfocused pane showed before a chats frame arrived
+    /// without it. It goes back in when a later frame lists it again.
+    pub vanished: Vec<Option<String>>,
     pub zoomed: bool,
 }
 
@@ -75,6 +78,7 @@ impl ChatSplit {
             shares: vec![1.0],
             projects: vec![project],
             drafts: vec![None],
+            vanished: vec![None],
             zoomed: false,
         });
         if split.axis != axis || split.panes.len() >= MAX_CHAT_PANES {
@@ -91,6 +95,7 @@ impl ChatSplit {
         let project = split.projects[split.focus].clone();
         split.projects.insert(at, project);
         split.drafts.insert(at, None);
+        split.vanished.insert(at, None);
         split.focus = at;
         split.zoomed = false;
         Some(split)
@@ -104,6 +109,8 @@ impl ChatSplit {
         }
         self.panes[self.focus] = selected;
         let target = self.panes[ix].take();
+        // Focusing an emptied pane makes it a canvas; its lost chat stays lost.
+        self.vanished[ix] = None;
         self.focus = ix;
         self.zoomed = false;
         Some(target)
@@ -209,6 +216,7 @@ impl ChatSplit {
         self.panes.remove(closed);
         self.projects.remove(closed);
         self.drafts.remove(closed);
+        self.vanished.remove(closed);
         let next = closed.saturating_sub(1).min(self.panes.len() - 1);
         self.shares[next] += share;
         if even {
@@ -216,6 +224,7 @@ impl ChatSplit {
         }
         self.focus = next;
         self.zoomed = false;
+        self.vanished[next] = None;
         Some(self.panes[next].take())
     }
 
@@ -242,6 +251,37 @@ impl ChatSplit {
         self.focus = ix;
         self.zoomed = false;
         Some(from)
+    }
+
+    /// Empty the panes whose chat is gone from the chats list. `archived(id)`
+    /// is `None` when the list lacks the chat, else whether it is archived.
+    /// An archived chat's pane simply closes; a missing chat is remembered,
+    /// because a list can lack a chat only briefly and emptying the pane for
+    /// good turned it into a new-session canvas (user report, 2026-09-29).
+    pub fn prune(&mut self, archived: impl Fn(&str) -> Option<bool>) {
+        for (pane, vanished) in self.panes.iter_mut().zip(self.vanished.iter_mut()) {
+            match pane.as_deref().map(&archived) {
+                Some(None) => {
+                    *vanished = pane.take();
+                    tracing::info!(chat = vanished.as_deref(), "split pane's chat left the chats list");
+                }
+                Some(Some(true)) => *pane = None,
+                _ => {}
+            }
+        }
+    }
+
+    /// Put each remembered chat back in its pane once `live` lists it again,
+    /// unless the pane has been focused or filled since.
+    pub fn restore_returned(&mut self, live: impl Fn(&str) -> bool) {
+        for (ix, (pane, vanished)) in self.panes.iter_mut().zip(self.vanished.iter_mut()).enumerate() {
+            if pane.is_some() || ix == self.focus {
+                *vanished = None;
+            } else if let Some(id) = vanished.take_if(|id| live(id)) {
+                tracing::info!(chat = %id, "chat is back in the chats list; restoring its split pane");
+                *pane = Some(id);
+            }
+        }
     }
 
     pub fn to_saved(&self) -> crate::settings::SavedChatLayout {
@@ -280,6 +320,7 @@ impl ChatSplit {
             shares: saved.shares.iter().map(|s| s / total).collect(),
             projects,
             drafts: vec![None; len],
+            vanished: vec![None; len],
             zoomed: false,
         })
     }
@@ -499,14 +540,9 @@ impl Shell {
             }
         }
         if state.chats_synced {
-            for pane in split.panes.iter_mut() {
-                if pane
-                    .as_deref()
-                    .is_some_and(|id| !state.chats.iter().any(|c| c.id == id && !c.archived))
-                {
-                    *pane = None;
-                }
-            }
+            let chat = |id: &str| state.chats.iter().find(|c| c.id == id);
+            split.prune(|id| chat(id).map(|c| c.archived));
+            split.restore_returned(|id| chat(id).is_some_and(|c| !c.archived));
         }
         self.sync_chat_panes(cx);
     }
@@ -1376,6 +1412,38 @@ mod chat_split_tests {
         broken = saved;
         broken.shares.pop();
         assert!(ChatSplit::from_saved(&broken, |_| true).is_none());
+    }
+
+    fn three() -> ChatSplit {
+        // a | b | (focused)
+        ChatSplit::split(Some(two("a")), SplitAxis::Horizontal, Some("b".into()), None).unwrap()
+    }
+
+    #[test]
+    fn a_chat_that_leaves_the_list_briefly_returns_to_its_pane() {
+        let mut split = three();
+        let listed = |ids: &'static [&'static str]| move |id: &str| ids.contains(&id).then_some(false);
+        split.prune(listed(&["a"]));
+        assert_eq!(split.panes, vec![Some("a".into()), None, None]);
+        split.restore_returned(|id| id == "a");
+        assert_eq!(split.panes[1], None, "still missing");
+        split.restore_returned(|id| ["a", "b"].contains(&id));
+        assert_eq!(split.panes, vec![Some("a".into()), Some("b".into()), None], "back in place, not a canvas");
+    }
+
+    #[test]
+    fn a_returning_chat_never_displaces_a_newer_pick_or_an_archive() {
+        let mut split = three();
+        // `a` is archived: its pane closes for good. `b` leaves the list, and
+        // its emptied pane is focused as a new canvas before `b` returns.
+        split.prune(|id| (id == "a").then_some(true));
+        assert_eq!(split.panes, vec![None, None, None]);
+        split.focus_pane(1, Some("c".into()));
+        split.restore_returned(|_| true);
+        assert_eq!(split.panes, vec![None, None, Some("c".into())]);
+        // Closing a pane keeps the memory aligned with the panes.
+        split.close_focused();
+        assert_eq!(split.vanished.len(), split.panes.len());
     }
 
     #[test]
