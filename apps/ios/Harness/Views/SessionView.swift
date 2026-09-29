@@ -123,6 +123,7 @@ struct SessionView: View {
                         }
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working)
+                            .id(chat.id)
                     }
                 }
                 .padding(.bottom, 8)

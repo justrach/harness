@@ -48,4 +48,23 @@ final class HomeGroupingUITests: XCTestCase {
         group(by: "None")
         XCTAssertFalse(headers("device:").firstMatch.waitForExistence(timeout: 2))
     }
+
+    /// A pinned session leaves its project and sits in a Pinned section above them all.
+    func testPinnedSessionsGatherAboveTheGroups() {
+        let title = "Tool group header colors"
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.swipeRight()
+        let pin = app.buttons["Pin"]
+        if pin.waitForExistence(timeout: 3) { pin.tap() }
+        group(by: "Project")
+
+        let pinned = app.buttons["home-group-pinned"]
+        XCTAssertTrue(pinned.waitForExistence(timeout: 5), "no Pinned section")
+        let firstProject = headers("project:").firstMatch
+        XCTAssertTrue(firstProject.waitForExistence(timeout: 5))
+        XCTAssertLessThan(pinned.frame.minY, firstProject.frame.minY, "Pinned should sit above the project groups")
+        XCTAssertTrue(pinned.label.hasPrefix("Pinned"))
+    }
 }
+

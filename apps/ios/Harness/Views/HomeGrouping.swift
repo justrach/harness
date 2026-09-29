@@ -1,6 +1,8 @@
 // Home list grouping: the session list split into sections by project or by
 // device. The list is recency-ordered (pins first); grouping keeps that order
-// inside each section and places a section where its newest session sits.
+// inside each section and places a section where its newest session sits. Pinned
+// sessions leave their sections and gather in a "Pinned" section above them all,
+// so a pin is never buried inside a group.
 
 import SwiftUI
 
@@ -31,6 +33,8 @@ enum HomeGroupBy: String, CaseIterable, Identifiable {
 struct HomeGroup: Identifiable, Equatable {
     enum Kind: Equatable {
         case all
+        /// Pinned sessions, gathered above every project or device section.
+        case pinned
         /// nil: sessions without a project.
         case project(spaceId: String?)
         case device(deviceId: String)
@@ -42,7 +46,18 @@ struct HomeGroup: Identifiable, Equatable {
 }
 
 enum HomeGrouping {
-    static func groups(_ chats: [Chat], by grouping: HomeGroupBy) -> [HomeGroup] {
+    static func groups(_ chats: [Chat], by grouping: HomeGroupBy,
+                       pinned: Set<String> = []) -> [HomeGroup] {
+        guard grouping != .none else {
+            return [HomeGroup(id: "all", kind: .all, chats: chats)]
+        }
+        let pins = chats.filter { pinned.contains($0.id) }
+        guard !pins.isEmpty else { return sections(chats, by: grouping) }
+        return [HomeGroup(id: "pinned", kind: .pinned, chats: pins)]
+            + sections(chats.filter { !pinned.contains($0.id) }, by: grouping)
+    }
+
+    private static func sections(_ chats: [Chat], by grouping: HomeGroupBy) -> [HomeGroup] {
         switch grouping {
         case .none:
             return [HomeGroup(id: "all", kind: .all, chats: chats)]
@@ -114,6 +129,7 @@ struct HomeGroupHeader: View {
     private var title: String {
         switch group.kind {
         case .all: return "All"
+        case .pinned: return "Pinned"
         case .project(let spaceId?):
             return model.spaces.first { $0.id == spaceId }?.displayName
                 ?? group.chats.first?.cwd.map { ($0 as NSString).lastPathComponent }
@@ -125,6 +141,10 @@ struct HomeGroupHeader: View {
 
     @ViewBuilder private var marker: some View {
         switch group.kind {
+        case .pinned:
+            Image(systemName: "pin.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
         case .project(let spaceId?):
             Circle().fill(Theme.projectTint(spaceId)).frame(width: 8, height: 8)
         case .device(let deviceId):

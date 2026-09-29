@@ -416,7 +416,8 @@ struct HomeView: View {
                 }
             }
         } else {
-            ForEach(HomeGrouping.groups(chats, by: grouping)) { group in
+            let pinned = Set(chats.map(\.id).filter(model.isPinned(chatId:)))
+            ForEach(HomeGrouping.groups(chats, by: grouping, pinned: pinned)) { group in
                 let collapsed = grouping != .none && collapsedGroups.contains(group.id)
                 Section {
                     if !collapsed {

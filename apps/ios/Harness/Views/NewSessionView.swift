@@ -18,7 +18,7 @@ struct NewSessionView: View {
     @AppStorage("newSessionModel") private var storedModel = ""
     @AppStorage("newSessionReasoning") private var storedReasoning = ""
 
-    @State private var draft = ""
+    @State private var draft: String
     @State private var selectedHostId: String?
     @State private var showHostPicker = false
     @State private var showPicker = false
@@ -44,6 +44,12 @@ struct NewSessionView: View {
     /// Basis for the leading header's fixed width (SessionView's pattern —
     /// iOS 26 proposes leading toolbar items almost nothing).
     @State private var viewWidth: CGFloat = 0
+
+    init(destination: NewSessionDestination, path: Binding<[Route]>) {
+        self.destination = destination
+        self._path = path
+        _draft = State(initialValue: DraftStore.load(DraftStore.newSessionKey(destination)))
+    }
 
     private var effectiveDestination: NewSessionDestination {
         if case .projectless = destination, let selectedHostId {
@@ -260,6 +266,9 @@ struct NewSessionView: View {
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
                       maxSelectionCount: 8, matching: .images)
+        .onChange(of: draft) { _, new in
+            DraftStore.save(new, for: DraftStore.newSessionKey(destination))
+        }
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             stage(items)
