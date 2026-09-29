@@ -189,12 +189,17 @@ impl Scene {
         self.quads.sort_by_key(|quad| quad.order);
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
+        // Sprites of one order are grouped by texture: a batch draws from one
+        // texture, and tile ids, numbered per texture, would interleave them.
+        self.monochrome_sprites.sort_by_key(|sprite| {
+            (sprite.order, sprite.tile.texture_id.index, sprite.tile.tile_id)
+        });
+        self.subpixel_sprites.sort_by_key(|sprite| {
+            (sprite.order, sprite.tile.texture_id.index, sprite.tile.tile_id)
+        });
+        self.polychrome_sprites.sort_by_key(|sprite| {
+            (sprite.order, sprite.tile.texture_id.index, sprite.tile.tile_id)
+        });
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_blurs.sort_by_key(|blur| blur.order);
     }
