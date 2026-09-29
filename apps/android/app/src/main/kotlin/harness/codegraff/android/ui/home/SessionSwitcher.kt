@@ -32,7 +32,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.ChatIndicator
 import harness.codegraff.android.model.HomeStatusFilter
@@ -43,13 +43,14 @@ import harness.codegraff.android.theme.sans
 import harness.codegraff.android.ui.LocalSwitchToSession
 import harness.codegraff.android.ui.components.HarnessSheet
 import harness.codegraff.android.ui.components.glass
+import harness.codegraff.android.ui.components.rememberHaptics
 
 /**
  * The sessions you're juggling, in the order you last called them: anything running or waiting
  * on you, plus what you called recently, so a session that finished and was read stays put
  * instead of vanishing (SessionSwitcher.swift).
  */
-class JuggledSessions(state: AppState) {
+class JuggledSessions(state: WorkspaceState) {
     val chats: List<Chat>
     private val indicators: Map<String, ChatIndicator>
 
@@ -89,10 +90,11 @@ private const val MAX_DOTS = 6
  * bottom with the composer.
  */
 @Composable
-fun SessionSwitcherPill(state: AppState, current: String?, compact: Boolean, modifier: Modifier = Modifier) {
-    val juggled = JuggledSessions(state)
+fun SessionSwitcherPill(state: WorkspaceState, current: String?, compact: Boolean, modifier: Modifier = Modifier) {
+    val juggled = remember(state) { JuggledSessions(state) }
     val hasOthers = juggled.others(current).isNotEmpty()
     var showSheet by remember { mutableStateOf(false) }
+    val haptics = rememberHaptics()
     val p = Theme.palette
     val summary = summaryText(juggled, current)
     val description = "${juggled.others(current).size} other sessions" + (summary?.let { ", $it" } ?: "")
@@ -102,7 +104,7 @@ fun SessionSwitcherPill(state: AppState, current: String?, compact: Boolean, mod
             Modifier
                 .height(if (compact) 36.dp else 44.dp)
                 .glass(CircleShape, elevated = true)
-                .clickable(role = Role.Button) { showSheet = true }
+                .clickable(role = Role.Button) { haptics.light(); showSheet = true }
                 .semantics { contentDescription = description }
                 .padding(horizontal = if (compact) 12.dp else 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -154,7 +156,7 @@ private fun summaryText(juggled: JuggledSessions, current: String?): String? {
 
 /** The pill's list: the juggled sessions in the same order, the open one marked. Picking a row jumps there. */
 @Composable
-fun SessionSwitcherSheet(state: AppState, current: String?, onDismiss: () -> Unit) {
+fun SessionSwitcherSheet(state: WorkspaceState, current: String?, onDismiss: () -> Unit) {
     val juggled = JuggledSessions(state)
     val switchTo = LocalSwitchToSession.current
     val p = Theme.palette

@@ -71,6 +71,7 @@ import harness.codegraff.android.theme.Motion
 import harness.codegraff.android.theme.Theme
 import harness.codegraff.android.theme.sans
 import harness.codegraff.android.ui.components.glass
+import harness.codegraff.android.ui.components.rememberHaptics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -118,8 +119,9 @@ fun ComposerShell(
     val hasContent = draft.trim().isNotEmpty() || attachments.isNotEmpty()
     val buttonActive = if (showStop && !hasContent) true else sendEnabled && hasContent && !busy
 
+    val haptics = rememberHaptics()
     fun sendOrStop() {
-        if (showStop && !hasContent) onStop() else if (buttonActive) onSend()
+        if (showStop && !hasContent) { haptics.medium(); onStop() } else if (buttonActive) { haptics.light(); onSend() }
     }
 
     @Composable

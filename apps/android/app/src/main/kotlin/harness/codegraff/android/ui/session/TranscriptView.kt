@@ -30,8 +30,14 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.input.pointer.pointerInput
+import harness.codegraff.android.model.MdBlock
+import harness.codegraff.android.theme.rememberReduceMotion
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -74,28 +80,42 @@ fun TranscriptView(
     rows: List<TranscriptRow>,
     listState: LazyListState,
     contentPadding: PaddingValues,
+    veils: VeilStore,
     modifier: Modifier = Modifier,
 ) {
+    val reduceMotion = rememberReduceMotion()
+    val focus = LocalFocusManager.current
+    // The list is reversed once, not per recomposition, and only when the rows change.
+    val reversed = remember(rows) { rows.asReversed() }
     LazyColumn(
-        modifier.fillMaxWidth(),
+        // Tapping the transcript dismisses the keyboard, like the iOS tap-to-blur.
+        modifier.fillMaxWidth().pointerInput(Unit) { detectTapGestures { focus.clearFocus() } },
         state = listState,
         reverseLayout = true,
         contentPadding = contentPadding,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        items(rows.asReversed(), key = { it.id }) { row ->
+        items(reversed, key = { it.id }, contentType = { it.kind::class }) { row ->
             Box(
-                Modifier.widthIn(max = MaxContentWidth).fillMaxWidth().padding(horizontal = 16.dp).padding(top = row.topGap.dp),
-            ) { TranscriptRowView(row) }
+                Modifier.widthIn(max = MaxContentWidth).fillMaxWidth().padding(horizontal = 20.dp).padding(top = row.topGap.dp),
+            ) { TranscriptRowView(row, veils, reduceMotion) }
         }
     }
 }
 
 @Composable
-private fun TranscriptRowView(row: TranscriptRow) {
+private fun TranscriptRowView(row: TranscriptRow, veils: VeilStore, reduceMotion: Boolean) {
     when (val kind = row.kind) {
         is RowKind.User -> UserBubble(kind.text, pending = kind.pending)
-        is RowKind.Markdown -> MarkdownBlockView(kind.block)
+        is RowKind.Markdown -> {
+            val veilable = kind.block is MdBlock.Paragraph || kind.block is MdBlock.Heading
+            val length = when (val b = kind.block) {
+                is MdBlock.Paragraph -> b.spans.sumOf { it.text.length }
+                is MdBlock.Heading -> b.spans.sumOf { it.text.length }
+                else -> 0
+            }
+            MarkdownBlockView(kind.block, veil = if (kind.streaming && veilable && !reduceMotion) veils.veil(row.id, length) else null)
+        }
         is RowKind.ToolGroup -> ToolGroupView(row.id, kind.tools, kind.autoOpen)
         is RowKind.InputChip -> InputChipView(kind.header, kind.resolved)
         is RowKind.ErrorChip -> ErrorChipView(kind.message)

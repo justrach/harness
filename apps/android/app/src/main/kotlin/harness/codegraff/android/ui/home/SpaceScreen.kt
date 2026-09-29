@@ -28,7 +28,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import harness.codegraff.android.AppModel
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.model.NewSessionDestination
 import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
@@ -47,7 +47,7 @@ import harness.codegraff.android.ui.components.statusBarHeight
 @Composable
 fun SpaceScreen(
     spaceId: String,
-    state: AppState,
+    state: WorkspaceState,
     model: AppModel,
     showBack: Boolean,
     onBack: () -> Unit,

@@ -46,12 +46,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import harness.codegraff.android.AppModel
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.HarnessCatalog
 import harness.codegraff.android.model.MessagePart
 import harness.codegraff.android.model.SessionStatus
-import harness.codegraff.android.model.TranscriptRowBuilder
+import harness.codegraff.android.model.TranscriptBuilderCache
+import androidx.compose.runtime.collectAsState
 import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
 import harness.codegraff.android.theme.GlyphView
@@ -60,6 +61,7 @@ import harness.codegraff.android.theme.Theme
 import harness.codegraff.android.theme.sans
 import harness.codegraff.android.ui.components.BranchContextChip
 import harness.codegraff.android.ui.components.GlassCircleButton
+import harness.codegraff.android.ui.components.rememberHaptics
 import harness.codegraff.android.ui.components.statusBarHeight
 import harness.codegraff.android.ui.components.HarnessPulse
 import harness.codegraff.android.ui.components.PullRequestBadge
@@ -80,7 +82,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SessionScreen(
     chatId: String,
-    state: AppState,
+    state: WorkspaceState,
     model: AppModel,
     showBack: Boolean,
     onBack: () -> Unit,
@@ -99,8 +101,14 @@ fun SessionScreen(
     DisposableEffect(chatId) { onDispose { model.markSeen(chatId) } }
 
     val status = state.liveStatus(chat)
-    val entries = state.entries(chatId)
-    val rows = remember(entries) { TranscriptRowBuilder.rows(entries) }
+    // This session's transcript is its own flow: a streamed token recomposes this screen, not Home.
+    val entries by remember(chatId) { model.entriesFlow(chatId) }.collectAsState(initial = model.entries(chatId))
+    // Owned per session so settled parts parse once and unchanged rows keep their identity.
+    val cache = remember(chatId) { TranscriptBuilderCache() }
+    val veils = remember(chatId) { VeilStore() }
+    val rows = remember(entries) { cache.rows(entries) }
+    val tall = LocalConfiguration.current.screenHeightDp >= 480
+    val haptics = rememberHaptics()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val topInset = statusBarHeight()
@@ -112,7 +120,8 @@ fun SessionScreen(
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 TranscriptView(
                     rows, listState,
-                    contentPadding = PaddingValues(top = topInset + 56.dp, bottom = 12.dp),
+                    contentPadding = PaddingValues(top = topInset + 56.dp, bottom = if (tall) 24.dp else 8.dp),
+                    veils = veils,
                 )
                 if (rows.isEmpty() && chat.lastMessageAt != null) {
                     Box(Modifier.fillMaxSize().background(p.bg)) { TranscriptSkeleton() }
@@ -120,7 +129,7 @@ fun SessionScreen(
                 // Bottom-right, clear of the centered jump-to-latest button.
                 SessionSwitcherPill(state, current = chat.id, compact = true, modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp))
                 androidx.compose.animation.AnimatedVisibility(jumpVisible, Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp), enter = fadeIn(), exit = fadeOut()) {
-                    GlassCircleButton({ scope.launch { listState.animateScrollToItem(0) } }, "Jump to latest", size = 40.dp) {
+                    GlassCircleButton({ haptics.light(); scope.launch { listState.animateScrollToItem(0) } }, "Jump to latest", size = 40.dp) {
                         androidx.compose.foundation.layout.Box(Modifier.rotate(180f)) { GlyphView(Glyph.ArrowUp, 18.dp, p.text, strokeWidth = 2.2f) }
                     }
                 }
@@ -138,7 +147,6 @@ fun SessionScreen(
                     )
                 },
             ) {
-                val tall = LocalConfiguration.current.screenHeightDp >= 480
                 val sendState = false // sends are local in demo mode
                 if (tall || status == SessionStatus.Working || status == SessionStatus.Errored || sendState) {
                     StatusStrip(chat, status, state)
@@ -184,7 +192,7 @@ fun SessionScreen(
  * reserves its height so the composer never shifts.
  */
 @Composable
-private fun StatusStrip(chat: Chat, status: SessionStatus?, state: AppState) {
+private fun StatusStrip(chat: Chat, status: SessionStatus?, state: WorkspaceState) {
     val p = Theme.palette
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(status) {
@@ -212,7 +220,7 @@ private fun StatusStrip(chat: Chat, status: SessionStatus?, state: AppState) {
 
 /** The live-chat composer: input, the photo attach button, the model and trait chips (harness stays locked mid-chat), and the morphing action button. */
 @Composable
-private fun ChatComposer(state: AppState, model: AppModel, chat: Chat, runLive: Boolean) {
+private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, runLive: Boolean) {
     var draft by rememberSaveable(chat.id) { mutableStateOf("") }
     var attachments by remember(chat.id) { mutableStateOf(listOf<StagedAttachment>()) }
     var showModelPicker by remember { mutableStateOf(false) }

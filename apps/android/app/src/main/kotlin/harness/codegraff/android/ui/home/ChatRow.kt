@@ -20,7 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.ChatIndicator
 import harness.codegraff.android.model.relativeTime
@@ -39,7 +39,7 @@ import harness.codegraff.android.ui.components.pressWashClickable
 
 /** "project @ device", the project name in its own tint (projectless sessions stay muted). */
 @Composable
-fun projectLocation(chat: Chat, state: AppState): AnnotatedString {
+fun projectLocation(chat: Chat, state: WorkspaceState): AnnotatedString {
     val device = state.deviceName(chat.deviceId)
     val spaceId = chat.spaceId ?: return AnnotatedString("No project @ $device")
     val project = state.space(chat)?.displayName ?: chat.cwd?.trimEnd('/')?.substringAfterLast('/') ?: "?"
@@ -58,7 +58,7 @@ fun projectLocation(chat: Chat, state: AppState): AnnotatedString {
  * "space @ device" because the phone's list interleaves every device (HomeView.swift ChatRow).
  */
 @Composable
-fun ChatRow(chat: Chat, state: AppState, showLocation: Boolean, modifier: Modifier = Modifier, onSelect: () -> Unit) {
+fun ChatRow(chat: Chat, state: WorkspaceState, showLocation: Boolean, modifier: Modifier = Modifier, onSelect: () -> Unit) {
     val p = Theme.palette
     val indicator = state.indicator(chat)
     val pullRequest = state.changeRequest(chat)

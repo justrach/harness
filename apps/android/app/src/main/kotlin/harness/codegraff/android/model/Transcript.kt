@@ -136,6 +136,48 @@ data class TranscriptRow(
     val topGap: Float = 0f,
 )
 
+/**
+ * Row-build cache (TranscriptBuilderCache in TranscriptView.swift): a memo of parsed text parts keyed by
+ * "{entryId}#{partId}", so a settled part is parsed exactly once and a streamed token re-parses only the
+ * live tail rather than the whole transcript. Rows that did not change keep their identity, which lets
+ * the lazy list skip them. Owned per session, not per composition, so re-opening a chat re-parses nothing.
+ */
+class TranscriptBuilderCache {
+    private class Parsed(val source: String, val blocks: List<MdBlock>)
+
+    private val parsed = HashMap<String, Parsed>()
+    private var lastEntries: List<MessageEntry>? = null
+    private var lastPending: List<PendingSend>? = null
+    private var lastRows: List<TranscriptRow> = emptyList()
+
+    /** How many markdown parses this cache has run (a test hook). */
+    var parseCount = 0
+        private set
+
+    fun rows(entries: List<MessageEntry>, pendingSends: List<PendingSend> = emptyList()): List<TranscriptRow> {
+        if (entries === lastEntries && pendingSends == lastPending) return lastRows
+        val live = HashSet<String>()
+        val built = TranscriptRowBuilder.rows(entries, pendingSends) { key, text ->
+            live += key
+            val hit = parsed[key]
+            if (hit != null && hit.source == text) {
+                hit.blocks
+            } else {
+                parseCount++
+                parseMarkdown(text).also { parsed[key] = Parsed(text, it) }
+            }
+        }
+        // Drop memos for parts that no longer exist; the size guard keeps the append-only path allocation-free.
+        if (parsed.size > live.size) parsed.keys.retainAll(live)
+        val previous = lastRows.associateBy { it.id }
+        val rows = built.map { row -> previous[row.id]?.takeIf { it == row } ?: row }
+        lastEntries = entries
+        lastPending = pendingSends
+        lastRows = rows
+        return rows
+    }
+}
+
 object TranscriptRowBuilder {
     /** MD.blockGap. */
     const val BLOCK_GAP = 12f
@@ -143,9 +185,13 @@ object TranscriptRowBuilder {
     private const val SPACE_MD = 12f
     private const val SPACE_SM = 8f
 
-    fun rows(entries: List<MessageEntry>, pendingSends: List<PendingSend> = emptyList()): List<TranscriptRow> {
+    fun rows(
+        entries: List<MessageEntry>,
+        pendingSends: List<PendingSend> = emptyList(),
+        parse: (key: String, text: String) -> List<MdBlock> = { _, text -> parseMarkdown(text) },
+    ): List<TranscriptRow> {
         val rows = mutableListOf<TranscriptRow>()
-        for (entry in entries) rowsForEntry(entry, rows)
+        for (entry in entries) rowsForEntry(entry, rows, parse)
         // Optimistic echo: pending sends share their client-minted id, so the host's real entry replaces them without a flicker.
         val ids = entries.map { it.id }.toSet()
         for (pending in pendingSends) {
@@ -167,7 +213,11 @@ object TranscriptRowBuilder {
 
     private fun isToolGroup(row: TranscriptRow?) = row?.kind is RowKind.ToolGroup
 
-    private fun rowsForEntry(entry: MessageEntry, rows: MutableList<TranscriptRow>) {
+    private fun rowsForEntry(
+        entry: MessageEntry,
+        rows: MutableList<TranscriptRow>,
+        parse: (key: String, text: String) -> List<MdBlock>,
+    ) {
         val streaming = entry.status == MessageStatus.Streaming
         val settled = entry.status != null && !streaming
 
@@ -206,7 +256,7 @@ object TranscriptRowBuilder {
                     if (part.text.isEmpty()) return@forEachIndexed
                     val key = "${entry.id}#${part.id}"
                     val isLiveTail = streaming && ix == lastPartIx
-                    val blocks = parseMarkdown(part.text)
+                    val blocks = parse(key, part.text)
                     blocks.forEachIndexed { blockIx, block ->
                         val last = blockIx == blocks.lastIndex
                         rows += TranscriptRow(

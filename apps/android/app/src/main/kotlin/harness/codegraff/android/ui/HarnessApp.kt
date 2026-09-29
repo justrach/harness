@@ -20,6 +20,7 @@ import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,7 +57,9 @@ private val SidebarWidth = 380.dp
  */
 @Composable
 fun HarnessApp(model: AppModel) {
-    val state by model.state.collectAsState()
+    val state by model.workspace.collectAsState()
+    // Keeps relative times and stale-session checks moving without tying them to every write.
+    LaunchedEffect(model) { model.runClock() }
     var signedIn by rememberSaveable { mutableStateOf(true) }
     if (!signedIn) {
         SignInScreen(onDemo = { signedIn = true })

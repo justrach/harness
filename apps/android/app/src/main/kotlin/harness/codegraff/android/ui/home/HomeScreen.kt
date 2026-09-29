@@ -59,7 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 import harness.codegraff.android.AppModel
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.HomeFilter
 import harness.codegraff.android.model.HomeGroup
@@ -72,6 +72,7 @@ import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
 import harness.codegraff.android.theme.GlyphView
 import harness.codegraff.android.theme.HarnessBadge
+import harness.codegraff.android.theme.Motion
 import harness.codegraff.android.theme.Theme
 import harness.codegraff.android.theme.sans
 import harness.codegraff.android.ui.Route
@@ -90,7 +91,7 @@ import harness.codegraff.android.ui.rememberPref
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
-    state: AppState,
+    state: WorkspaceState,
     model: AppModel,
     selectedChatId: String?,
     listState: LazyListState,
@@ -110,11 +111,17 @@ fun HomeScreen(
     var statusFilter by rememberSaveable { mutableStateOf(HomeStatusFilter.All) }
 
     val selectedSpace = state.spaces.firstOrNull { it.id == spaceFilter.value }
-    val scoped = selectedSpace?.let { state.chatsIn(it.id) } ?: state.overviewChats
-    val chats = HomeFilter.apply(scoped, searchText, statusFilter, state::indicator, state::filterNames)
     val grouping = HomeGroupBy.fromKey(groupByPref.value)
     val collapsedGroups = collapsedPref.value.split(',').filter { it.isNotEmpty() }.toSet()
-    val archived = state.archivedMatches(selectedSpace?.id, searchText)
+    // Filtering, grouping and counting are the list's real work: redo it only when an input changes,
+    // not on every recomposition (typing in search, a dropdown opening, a chip animating).
+    val scoped = remember(state, selectedSpace) { selectedSpace?.let { state.chatsIn(it.id) } ?: state.overviewChats }
+    val chats = remember(state, scoped, searchText, statusFilter) {
+        HomeFilter.apply(scoped, searchText, statusFilter, state::indicator, state::filterNames)
+    }
+    val groups = remember(chats, grouping) { HomeGrouping.groups(chats, grouping) }
+    val counts = remember(state, scoped) { statusCounts(state, scoped) }
+    val archived = remember(state, selectedSpace, searchText) { state.archivedMatches(selectedSpace?.id, searchText) }
     val topInset = statusBarHeight()
 
     Box(modifier.fillMaxSize().background(p.surface)) {
@@ -133,7 +140,7 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        HomeStatusChips(statusFilter, statusCounts(state, scoped)) { statusFilter = it }
+                        HomeStatusChips(statusFilter, counts) { statusFilter = it }
                         GroupPill(grouping) { groupByPref.set(it.name.lowercase()) }
                     }
                 }
@@ -150,7 +157,7 @@ fun HomeScreen(
                     }
                 }
             } else {
-                HomeGrouping.groups(chats, grouping).forEach { group ->
+                groups.forEach { group ->
                     val collapsed = grouping != HomeGroupBy.None && group.id in collapsedGroups
                     if (grouping != HomeGroupBy.None) {
                         item(key = "header-${group.id}") {
@@ -161,8 +168,12 @@ fun HomeScreen(
                         }
                     }
                     if (!collapsed) {
-                        items(group.chats, key = { it.id }) { chat ->
-                            SessionRow(chat, state, model, selected = chat.id == selectedChatId) { onOpen(Route.Chat(chat.id)) }
+                        items(group.chats, key = { it.id }, contentType = { "session" }) { chat ->
+                            // Rows glide to their new place when the order changes (Motion.resort).
+                            SessionRow(
+                                chat, state, model, selected = chat.id == selectedChatId,
+                                modifier = Modifier.animateItem(fadeInSpec = null, placementSpec = Motion.resort(), fadeOutSpec = null),
+                            ) { onOpen(Route.Chat(chat.id)) }
                         }
                     }
                 }
@@ -209,7 +220,7 @@ fun HomeScreen(
     }
 }
 
-private fun statusCounts(state: AppState, chats: List<Chat>): Map<HomeStatusFilter, Int> {
+private fun statusCounts(state: WorkspaceState, chats: List<Chat>): Map<HomeStatusFilter, Int> {
     val counts = HashMap<HomeStatusFilter, Int>()
     for (chat in chats) {
         val indicator = state.indicator(chat)
@@ -221,7 +232,7 @@ private fun statusCounts(state: AppState, chats: List<Chat>): Map<HomeStatusFilt
 // MARK: bar controls
 
 @Composable
-private fun SpaceDropdown(state: AppState, title: String?, selectedId: String, onSelect: (String) -> Unit, onNewSpace: () -> Unit) {
+private fun SpaceDropdown(state: WorkspaceState, title: String?, selectedId: String, onSelect: (String) -> Unit, onNewSpace: () -> Unit) {
     val p = Theme.palette
     var open by remember { mutableStateOf(false) }
     Box {
@@ -247,12 +258,12 @@ private fun SpaceDropdown(state: AppState, title: String?, selectedId: String, o
     }
 }
 
-private fun deviceTag(state: AppState, deviceId: String): String =
+private fun deviceTag(state: WorkspaceState, deviceId: String): String =
     if (state.deviceOnline(deviceId)) "@ ${state.deviceName(deviceId)}" else "@ ${state.deviceName(deviceId)} · offline"
 
 @Composable
 private fun NewButton(
-    state: AppState,
+    state: WorkspaceState,
     selectedSpaceId: String?,
     onOpen: (Route) -> Unit,
     onShowHostPicker: () -> Unit,
@@ -415,7 +426,7 @@ private fun groupGlyph(by: HomeGroupBy, pill: Boolean): Glyph = when (by) {
 
 /** A section header: the project's color dot or the device's online dot, the name, the session count, and a chevron that collapses. */
 @Composable
-private fun HomeGroupHeader(group: HomeGroup, state: AppState, collapsed: Boolean, toggle: () -> Unit) {
+private fun HomeGroupHeader(group: HomeGroup, state: WorkspaceState, collapsed: Boolean, toggle: () -> Unit) {
     val p = Theme.palette
     val title = when (val kind = group.kind) {
         HomeGroup.Kind.All -> "All"
@@ -452,7 +463,7 @@ private fun HomeGroupHeader(group: HomeGroup, state: AppState, collapsed: Boolea
     }
 }
 
-private fun deviceGlyph(state: AppState, deviceId: String): Glyph = when (state.devices.firstOrNull { it.id == deviceId }?.platform) {
+private fun deviceGlyph(state: WorkspaceState, deviceId: String): Glyph = when (state.devices.firstOrNull { it.id == deviceId }?.platform) {
     "linux" -> Glyph.Server
     "windows" -> Glyph.Monitor
     "ios" -> Glyph.Phone
@@ -463,7 +474,10 @@ private fun deviceGlyph(state: AppState, deviceId: String): Glyph = when (state.
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SessionRow(chat: Chat, state: AppState, model: AppModel, selected: Boolean, onOpen: () -> Unit) {
+internal fun SessionRow(
+    chat: Chat, state: WorkspaceState, model: AppModel, selected: Boolean,
+    modifier: Modifier = Modifier, onOpen: () -> Unit,
+) {
     val p = Theme.palette
     val pinned = state.isPinned(chat.id)
     val swipe = rememberSwipeToDismissBoxState(
@@ -477,7 +491,7 @@ internal fun SessionRow(chat: Chat, state: AppState, model: AppModel, selected: 
     )
     SwipeToDismissBox(
         state = swipe,
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 1.dp),
+        modifier = modifier.padding(horizontal = 12.dp, vertical = 1.dp),
         backgroundContent = {
             val towardArchive = swipe.dismissDirection == SwipeToDismissBoxValue.EndToStart
             val towardPin = swipe.dismissDirection == SwipeToDismissBoxValue.StartToEnd
@@ -513,7 +527,7 @@ private const val ARCHIVED_PAGE = 25
  * Swipe-to-unarchive mirrors the active rows' swipe-to-archive (ArchivedShelf.swift).
  */
 internal fun androidx.compose.foundation.lazy.LazyListScope.archivedShelf(
-    archived: List<Chat>, state: AppState, model: AppModel, selectedChatId: String?, onOpen: (Route) -> Unit,
+    archived: List<Chat>, state: WorkspaceState, model: AppModel, selectedChatId: String?, onOpen: (Route) -> Unit,
 ) {
     item(key = "archived") {
         var open by rememberSaveable { mutableStateOf(true) }
@@ -555,7 +569,7 @@ internal fun androidx.compose.foundation.lazy.LazyListScope.archivedShelf(
 /** Slim row: dimmed harness mark, muted title, time-ago (spaces.rs archived row). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ArchivedRow(chat: Chat, state: AppState, model: AppModel, onOpen: () -> Unit) {
+private fun ArchivedRow(chat: Chat, state: WorkspaceState, model: AppModel, onOpen: () -> Unit) {
     val p = Theme.palette
     val swipe = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->

@@ -7,7 +7,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,7 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import harness.codegraff.android.AppModel
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.demo.DemoDataset
 import harness.codegraff.android.model.CheckoutKind
 import harness.codegraff.android.model.ChatConfig
@@ -78,7 +80,7 @@ import harness.codegraff.android.ui.sheets.SessionHostPickerSheet
 @Composable
 fun NewSessionScreen(
     destination: NewSessionDestination,
-    state: AppState,
+    state: WorkspaceState,
     model: AppModel,
     showBack: Boolean,
     onBack: () -> Unit,
@@ -157,8 +159,10 @@ fun NewSessionScreen(
 
     Column(modifier.fillMaxSize().background(p.bg).imePadding().navigationBarsPadding()) {
         // Canvas: tap dismisses the keyboard, like the old app.
+        val focus = androidx.compose.ui.platform.LocalFocusManager.current
         Box(
-            Modifier.weight(1f).fillMaxWidth().background(p.bg),
+            Modifier.weight(1f).fillMaxWidth().background(p.bg)
+                .pointerInput(Unit) { detectTapGestures { focus.clearFocus() } },
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(24.dp)) {

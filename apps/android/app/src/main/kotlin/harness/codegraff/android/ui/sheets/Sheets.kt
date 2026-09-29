@@ -33,7 +33,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import harness.codegraff.android.AppModel
-import harness.codegraff.android.AppState
+import harness.codegraff.android.WorkspaceState
 import harness.codegraff.android.demo.DemoDataset
 import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
@@ -51,7 +51,7 @@ import harness.codegraff.android.ui.components.pressWashClickable
 
 /** Projectless drafts need only a host, including when there are no spaces (SessionHostPickerSheet.swift). */
 @Composable
-fun SessionHostPickerSheet(state: AppState, selectedDeviceId: String?, onSelected: (String) -> Unit, onDismiss: () -> Unit) {
+fun SessionHostPickerSheet(state: WorkspaceState, selectedDeviceId: String?, onSelected: (String) -> Unit, onDismiss: () -> Unit) {
     val p = Theme.palette
     HarnessSheet("Select a device", onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -86,7 +86,7 @@ fun SessionHostPickerSheet(state: AppState, selectedDeviceId: String?, onSelecte
  * (NewSpaceSheet in SpaceView.swift).
  */
 @Composable
-fun NewSpaceSheet(state: AppState, model: AppModel, onCreated: (String) -> Unit, onDismiss: () -> Unit) {
+fun NewSpaceSheet(state: WorkspaceState, model: AppModel, onCreated: (String) -> Unit, onDismiss: () -> Unit) {
     val p = Theme.palette
     val devices = state.executionDevices
     var deviceId by remember { mutableStateOf<String?>(null) }

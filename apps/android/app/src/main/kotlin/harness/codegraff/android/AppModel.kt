@@ -24,26 +24,42 @@ import harness.codegraff.android.model.sortActive
 import harness.codegraff.android.model.sortPinnedFirst
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.random.Random
 
-/** Everything the screens read: one snapshot of the (demo) workspace. */
-data class AppState(
+/**
+ * Everything Home, the switcher and the session header read: the workspace minus transcripts.
+ * Streaming a reply changes only the entries, never this, so those screens do not recompose per
+ * token (the same split the iOS app gets from observing the workspace and each session store
+ * separately). Derived lists are computed once per instance.
+ */
+data class WorkspaceState(
     val devices: List<DeviceRow>,
     val spaces: List<Space>,
     val chats: List<Chat>,
     val sessions: Map<String, SessionRow>,
     val changeRequests: Map<String, ChangeRequestSummary>,
-    val entries: Map<String, List<MessageEntry>>,
     val pinnedSessionIds: List<String>,
+    /** Wall clock, refreshed on a slow tick and on writes: relative times and stale-session checks read it. */
     val now: Long,
 ) {
-    fun chat(id: String): Chat? = chats.firstOrNull { it.id == id }
+    private val chatsById by lazy(LazyThreadSafetyMode.NONE) { chats.associateBy { it.id } }
 
-    fun entries(chatId: String): List<MessageEntry> = entries[chatId].orEmpty()
+    /** Active sessions in Home order: pins first, then when you last called each one. */
+    val overviewChats: List<Chat> by lazy(LazyThreadSafetyMode.NONE) {
+        val liveSpaces = spaces.map { it.id }.toSet()
+        sortPinnedFirst(chats.filter { !it.archived && (it.spaceId?.let(liveSpaces::contains) ?: true) }, pinnedSessionIds)
+    }
+
+    val executionDevices: List<DeviceRow> by lazy(LazyThreadSafetyMode.NONE) { devices.filter { it.canHostSessions } }
+
+    fun chat(id: String): Chat? = chatsById[id]
 
     fun space(chat: Chat): Space? = chat.spaceId?.let { id -> spaces.firstOrNull { it.id == id } }
 
@@ -53,16 +69,6 @@ data class AppState(
         val seen = devices.firstOrNull { it.id == deviceId }?.lastSeenAt ?: return false
         return now - seen < PRESENCE_FRESH_MS
     }
-
-    val executionDevices: List<DeviceRow> get() = devices.filter { it.canHostSessions }
-
-    /** Active sessions in Home order: pins first, then when you last called each one. */
-    val overviewChats: List<Chat>
-        get() {
-            val liveSpaces = spaces.map { it.id }.toSet()
-            val live = chats.filter { !it.archived && (it.spaceId?.let(liveSpaces::contains) ?: true) }
-            return sortPinnedFirst(live, pinnedSessionIds)
-        }
 
     fun chatsIn(spaceId: String): List<Chat> =
         sortPinnedFirst(chats.filter { !it.archived && it.spaceId == spaceId }, pinnedSessionIds)
@@ -89,18 +95,37 @@ data class AppState(
     fun filterNames(chat: Chat): HomeFilterNames = HomeFilterNames(space(chat)?.displayName, deviceName(chat.deviceId))
 }
 
+/** A snapshot of the workspace and every transcript, for tests and one-shot reads. */
+data class AppState(val workspace: WorkspaceState, val entries: Map<String, List<MessageEntry>>) {
+    fun entries(chatId: String): List<MessageEntry> = entries[chatId].orEmpty()
+}
+
 /**
- * Screen state for the app. Today it drives the offline demo dataset, the same starting
- * point as the iOS `-demo` mode; the live sync client will replace it behind the same
- * [AppState]. Which session is open is UI state (the navigation path), not model state.
+ * Screen state for the app. Today it drives the offline demo dataset, the same starting point as the
+ * iOS `-demo` mode; the live sync client will replace it behind the same flows. Which session is open
+ * is UI state (the navigation path), not model state.
+ *
+ * The workspace and the transcripts are separate flows on purpose: a streamed token replaces only one
+ * chat's entry list, so only that session's screen recomposes.
  */
 class AppModel(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Fixed delay between streamed words; null uses the demo's 30-140 ms jitter. */
     private val tickMs: Long? = null,
 ) : ViewModel() {
-    private val _state: MutableStateFlow<AppState>
-    val state: StateFlow<AppState> get() = _state
+    private val _workspace: MutableStateFlow<WorkspaceState>
+    private val _entries: MutableStateFlow<Map<String, List<MessageEntry>>>
+
+    val workspace: StateFlow<WorkspaceState> get() = _workspace
+
+    /** The workspace and all transcripts as one value. */
+    val state: AppState get() = AppState(_workspace.value, _entries.value)
+
+    /** One chat's transcript. Emits only when that chat's list is replaced. */
+    fun entriesFlow(chatId: String): Flow<List<MessageEntry>> =
+        _entries.map { it[chatId].orEmpty() }.distinctUntilChanged { a, b -> a === b }
+
+    fun entries(chatId: String): List<MessageEntry> = _entries.value[chatId].orEmpty()
 
     private var streamJob: Job? = null
     private var counter = 0
@@ -108,25 +133,38 @@ class AppModel(
     init {
         val now = clock()
         val demo = DemoDataset.standard(now)
-        _state = MutableStateFlow(
-            AppState(
-                devices = demo.devices, spaces = demo.spaces, chats = demo.chats, sessions = demo.sessions,
-                changeRequests = demo.changeRequests, entries = demo.entries,
-                pinnedSessionIds = emptyList(), now = now,
-            ),
+        _workspace = MutableStateFlow(
+            WorkspaceState(demo.devices, demo.spaces, demo.chats, demo.sessions, demo.changeRequests, emptyList(), now),
         )
+        _entries = MutableStateFlow(demo.entries)
     }
 
-    private fun update(block: (AppState) -> AppState) {
-        _state.update { block(it).copy(now = clock()) }
+    /** Refreshes `now` on a slow interval so relative times and stale-session checks move on. Launch from the UI's lifecycle. */
+    suspend fun runClock(everyMs: Long = 15_000) {
+        while (true) {
+            delay(everyMs)
+            _workspace.update { it.copy(now = clock()) }
+        }
+    }
+
+    private fun update(block: (WorkspaceState) -> WorkspaceState) {
+        _workspace.update { block(it).copy(now = clock()) }
     }
 
     private fun updateChat(chatId: String, block: (Chat) -> Chat) = update { s ->
         s.copy(chats = s.chats.map { if (it.id == chatId) block(it) else it })
     }
 
+    private fun setEntries(chatId: String, block: (List<MessageEntry>) -> List<MessageEntry>) =
+        _entries.update { it + (chatId to block(it[chatId].orEmpty())) }
+
     /** Opening a session marks it seen, which clears its "needs you" state. */
-    fun markSeen(chatId: String) = updateChat(chatId) { it.copy(lastSeenAt = clock()) }
+    fun markSeen(chatId: String) {
+        // Skip the write when nothing would change: leaving a session marks it seen again.
+        val chat = _workspace.value.chat(chatId) ?: return
+        if (!chat.unseen) return
+        updateChat(chatId) { it.copy(lastSeenAt = clock()) }
+    }
 
     fun archive(chatId: String) = updateChat(chatId) { it.copy(archived = true) }
 
@@ -172,13 +210,14 @@ class AppModel(
         streamJob?.cancel()
         val at = clock()
         val liveId = "a-$at"
-        val device = state.value.chat(chatId)?.deviceId ?: "dev-mac"
-        update { s ->
-            val entries = s.entries(chatId) +
+        val device = _workspace.value.chat(chatId)?.deviceId ?: "dev-mac"
+        setEntries(chatId) { entries ->
+            entries +
                 MessageEntry("u-$at", MessageRole.User, listOf(MessagePart.Text("t0", trimmed)), at, "ios-demo", MessageStatus.Complete) +
                 MessageEntry(liveId, MessageRole.Assistant, listOf(MessagePart.Text("t0", "")), at, device, MessageStatus.Streaming)
+        }
+        update { s ->
             s.copy(
-                entries = s.entries + (chatId to entries),
                 sessions = s.sessions + (chatId to SessionRow(chatId, device, SessionStatus.Working, at, at)),
                 chats = s.chats.map {
                     if (it.id != chatId) it else it.copy(
@@ -215,11 +254,9 @@ class AppModel(
     /** Stop: cancel the live reply and settle the entry as aborted. */
     fun interrupt(chatId: String) {
         streamJob?.cancel()
+        setEntries(chatId) { entries -> entries.map { e -> if (e.status == MessageStatus.Streaming) e.copy(status = MessageStatus.Aborted) else e } }
         update { s ->
             s.copy(
-                entries = s.entries + (chatId to s.entries(chatId).map { e ->
-                    if (e.status == MessageStatus.Streaming) e.copy(status = MessageStatus.Aborted) else e
-                }),
                 sessions = s.sessions + (chatId to (s.sessions[chatId]?.copy(status = SessionStatus.Idle, startedAt = null, updatedAt = clock())
                     ?: SessionRow(chatId, s.chat(chatId)?.deviceId.orEmpty(), SessionStatus.Idle, null, clock()))),
             )
@@ -228,21 +265,16 @@ class AppModel(
 
     /** Answer an open input request: the chip resolves and the session stops waiting on you. */
     fun respondInput(chatId: String, requestId: String, @Suppress("UNUSED_PARAMETER") answers: List<UserInputAnswer>) {
-        update { s ->
-            s.copy(
-                entries = s.entries + (chatId to s.entries(chatId).map { e ->
-                    e.copy(parts = e.parts.map { p -> if (p is MessagePart.Input && p.requestId == requestId) p.copy(resolved = true) else p })
-                }),
-                sessions = s.sessions - chatId,
-            )
+        setEntries(chatId) { entries ->
+            entries.map { e ->
+                e.copy(parts = e.parts.map { p -> if (p is MessagePart.Input && p.requestId == requestId) p.copy(resolved = true) else p })
+            }
         }
+        update { s -> s.copy(sessions = s.sessions - chatId) }
     }
 
-    private fun setReply(chatId: String, replyId: String, text: String, status: MessageStatus) = update { s ->
-        s.copy(
-            entries = s.entries + (chatId to s.entries(chatId).map { e ->
-                if (e.id == replyId) e.copy(parts = listOf(MessagePart.Text("t0", text)), status = status) else e
-            }),
-        )
+    /** A streamed token: touches only this chat's transcript, never the workspace. */
+    private fun setReply(chatId: String, replyId: String, text: String, status: MessageStatus) = setEntries(chatId) { entries ->
+        entries.map { e -> if (e.id == replyId) e.copy(parts = listOf(MessagePart.Text("t0", text)), status = status) else e }
     }
 }

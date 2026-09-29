@@ -17,7 +17,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import harness.codegraff.android.theme.opacity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -101,15 +107,63 @@ private fun RichText(spans: List<MdSpan>, size: Float, line: Float, weight: Font
     Text(text, style = sans(size, weight, line), color = base, modifier = modifier)
 }
 
-/** One top-level markdown block as a transcript row. */
+/**
+ * Live text: newly appended characters fade in through [RowVeil]'s alpha, paint only. A frame loop runs
+ * only while a chunk is still fading, so a settled row costs nothing.
+ */
 @Composable
-fun MarkdownBlockView(block: MdBlock, modifier: Modifier = Modifier) {
+private fun VeiledRichText(
+    spans: List<MdSpan>, size: Float, line: Float, veil: RowVeil,
+    weight: FontWeight = FontWeight.Normal, modifier: Modifier = Modifier,
+) {
+    val p = Theme.palette
+    val total = spans.sumOf { it.text.length }
+    // Register the delta before the text is built, so the new chunk's first frame is already dim.
+    veil.noteLength(total)
+    var frame by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(total) {
+        while (veil.isFading) withFrameNanos { frame = it }
+    }
+    @Suppress("UNUSED_VARIABLE") val subscribe = frame
+    val segments = veil.segments(total)
+    val text = buildAnnotatedString {
+        var offset = 0
+        for (span in spans) {
+            val length = span.text.length
+            val base = if (span.code) p.inlineCodeText else p.text
+            for (segment in segments) {
+                val lo = maxOf(segment.start, offset)
+                val hi = minOf(segment.end, offset + length)
+                if (lo >= hi) continue
+                val piece = span.text.substring(lo - offset, hi - offset)
+                val style = if (span.code) {
+                    SpanStyle(fontFamily = CodeFont, fontSize = (size - 1.5f).sp, color = base.opacity(segment.alpha), background = p.inlineCodeWash)
+                } else {
+                    SpanStyle(
+                        fontWeight = if (span.bold) FontWeight.SemiBold else weight,
+                        fontStyle = if (span.italic) FontStyle.Italic else null, color = base.opacity(segment.alpha),
+                    )
+                }
+                withStyle(style) { append(piece) }
+            }
+            offset += length
+        }
+    }
+    Text(text, style = sans(size, weight, line), color = p.text, modifier = modifier)
+}
+
+/** One top-level markdown block as a transcript row. [veil] is set for the live tail block of a streaming reply. */
+@Composable
+fun MarkdownBlockView(block: MdBlock, modifier: Modifier = Modifier, veil: RowVeil? = null) {
     val p = Theme.palette
     when (block) {
-        is MdBlock.Paragraph -> RichText(block.spans, MD.TEXT_SIZE, MD.LINE_HEIGHT, modifier = modifier.fillMaxWidth())
+        is MdBlock.Paragraph ->
+            if (veil != null) VeiledRichText(block.spans, MD.TEXT_SIZE, MD.LINE_HEIGHT, veil, modifier = modifier.fillMaxWidth())
+            else RichText(block.spans, MD.TEXT_SIZE, MD.LINE_HEIGHT, modifier = modifier.fillMaxWidth())
         is MdBlock.Heading -> {
             val (size, line) = MD.heading(block.level)
-            RichText(block.spans, size, line, FontWeight.SemiBold, modifier = modifier.fillMaxWidth())
+            if (veil != null) VeiledRichText(block.spans, size, line, veil, FontWeight.SemiBold, modifier.fillMaxWidth())
+            else RichText(block.spans, size, line, FontWeight.SemiBold, modifier = modifier.fillMaxWidth())
         }
         is MdBlock.Code -> CodeBlock(block, modifier)
         is MdBlock.Blockquote -> Row(modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
@@ -149,8 +203,12 @@ private fun CodeBlock(block: MdBlock.Code, modifier: Modifier) {
         if (!block.lang.isNullOrEmpty()) {
             Text(block.lang, style = sans(11f), color = p.textMuted, modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp))
         }
+        // Highlighting is the costly part of a code row: do it once per block, not per recomposition.
+        val highlighted = remember(block, p) {
+            highlight(block.text, block.lang, p.text, p.tokenKeyword, p.tokenString, p.tokenNumber, p.textFaint)
+        }
         Text(
-            highlight(block.text, block.lang, p.text, p.tokenKeyword, p.tokenString, p.tokenNumber, p.textFaint),
+            highlighted,
             style = mono(MD.CODE_TEXT_SIZE, lineHeight = MD.CODE_LINE_HEIGHT), color = p.text,
             softWrap = false,
             modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp),

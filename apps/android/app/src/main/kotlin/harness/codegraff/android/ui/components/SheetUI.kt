@@ -145,8 +145,9 @@ fun SheetSelectRow(
     onClick: () -> Unit,
 ) {
     val p = Theme.palette
+    val haptics = rememberHaptics()
     Row(
-        modifier.fillMaxWidth().pressWashClickable(onClick, cornerRadius = 0.dp, role = Role.RadioButton)
+        modifier.fillMaxWidth().pressWashClickable({ haptics.selection(); onClick() }, cornerRadius = 0.dp, role = Role.RadioButton)
             .semantics { this.selected = selected }
             .padding(horizontal = 16.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -210,10 +211,11 @@ fun PickRow(
 ) {
     val p = Theme.palette
     val shape = RoundedCornerShape(12.dp)
+    val haptics = rememberHaptics()
     Row(
         modifier.fillMaxWidth().clip(shape)
             .background(if (selected) p.text else p.ink(0.03f), shape)
-            .clickable(role = Role.RadioButton, onClick = onClick)
+            .clickable(role = Role.RadioButton) { haptics.selection(); onClick() }
             .semantics { this.selected = selected }
             .padding(horizontal = 14.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,

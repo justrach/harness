@@ -30,7 +30,24 @@ Not built yet, in the order they are needed for a real connection:
 3. CodeGraff sign-in (PKCE, `harness://callback`) and the durable command queue.
 4. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
 
-The streaming "veil" fade on live text is not ported; new text appears at once.
+## Responsiveness
+
+The same design the iOS app uses to stay smooth on long, streaming sessions:
+
+- **Narrow observation.** `AppModel` publishes the workspace (sessions, devices, pins, PRs) and each chat's
+  transcript as separate flows. A streamed token replaces only that chat's entry list, so Home, the
+  switcher and every other row do not recompose (`AppModelTest.aStreamedTokenNeverRepublishesTheWorkspace`).
+- **Row cache.** `TranscriptBuilderCache` parses each markdown part once; a token re-parses only the live
+  tail, and rows that did not change keep their identity so the lazy list skips them (`ResponsivenessTest`).
+- **Stable model types** (`compose-stability.conf`) so Compose skips by equality, plus `remember`ed
+  filtering, grouping, counting and syntax highlighting, and `contentType` on every list.
+- **Streaming veil.** Appended text fades in through a paint-only alpha (`ui/session/Veil.kt`, a port of
+  `Veil.swift`); a frame loop runs only while a chunk is fading.
+- The reply list is reversed, so the bottom stays anchored with no per-token scroll call, and a slow
+  15 s clock (not every write) moves relative times forward.
+
+Measure on the `perf` build, on a device. A debug build is several times slower in Compose, and an
+emulator on a busy host says little.
 
 ## Design language
 
@@ -64,7 +81,7 @@ the SDK with `local.properties` (`sdk.dir=/path/to/Android/sdk`) or `ANDROID_HOM
 
 ```sh
 cd apps/android
-./gradlew :app:testDebugUnitTest          # 49 unit tests
+./gradlew :app:testDebugUnitTest          # 61 unit tests
 ANDROID_SERIAL=<device> ./gradlew :app:connectedDebugAndroidTest   # 6 UI tests on one device
 ./gradlew :app:assembleDebug              # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assemblePerf               # minified, debug-signed: measure performance with this
