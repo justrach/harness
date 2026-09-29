@@ -310,6 +310,21 @@ mod pinned_session_tests {
         });
     }
 
+    /// The next request the engine received, skipping the desktop's
+    /// appearance publish: a synced workspace announces its theme when an
+    /// engine attaches, which is not a pin write.
+    fn next_pin_request(
+        requests: &mut tokio::sync::mpsc::Receiver<String>,
+    ) -> Option<serde_json::Value> {
+        while let Ok(raw) = requests.try_recv() {
+            let request: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if request["params"]["op"] != "setAppearance" {
+                return Some(request);
+            }
+        }
+        None
+    }
+
     #[gpui::test]
     fn sidebar_rpc_replies_dispatch_each_queued_drop_once_and_recover_rejection(
         cx: &mut gpui::TestAppContext,
@@ -334,12 +349,12 @@ mod pinned_session_tests {
             })
             .unwrap();
         cx.run_until_parked();
-        let first: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let first: serde_json::Value = next_pin_request(&mut requests).unwrap();
         assert_eq!(
             first["params"]["change"],
             serde_json::to_value(pin_change("first")).unwrap()
         );
-        assert!(requests.try_recv().is_err());
+        assert!(next_pin_request(&mut requests).is_none());
         deliver_pin_rpc_reply(
             &runtime,
             &replies,
@@ -347,12 +362,12 @@ mod pinned_session_tests {
         );
         cx.run_until_parked();
         let second: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+            next_pin_request(&mut requests).unwrap();
         assert_eq!(
             second["params"]["change"],
             serde_json::to_value(pin_change("second")).unwrap()
         );
-        assert!(requests.try_recv().is_err());
+        assert!(next_pin_request(&mut requests).is_none());
         window
             .update(cx, |shell, _, cx| {
                 assert_eq!(shell.active_sidebar_pins(cx), ids(&["first", "second"]));
@@ -384,7 +399,7 @@ mod pinned_session_tests {
                 );
             })
             .unwrap();
-        assert!(requests.try_recv().is_err());
+        assert!(next_pin_request(&mut requests).is_none());
     }
 
     #[gpui::test]
@@ -413,7 +428,7 @@ mod pinned_session_tests {
             .unwrap();
         cx.run_until_parked();
         let request: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+            next_pin_request(&mut requests).unwrap();
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(21));
         cx.run_until_parked();
@@ -426,7 +441,7 @@ mod pinned_session_tests {
             })
             .unwrap();
         assert!(
-            requests.try_recv().is_err(),
+            next_pin_request(&mut requests).is_none(),
             "queued and fresh drops must not overtake the slow write"
         );
         deliver_pin_rpc_reply(
@@ -448,12 +463,12 @@ mod pinned_session_tests {
             })
             .unwrap();
         cx.run_until_parked();
-        let next: serde_json::Value = serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+        let next: serde_json::Value = next_pin_request(&mut requests).unwrap();
         assert_eq!(
             next["params"]["change"],
             serde_json::to_value(pin_change("after-confirmation")).unwrap()
         );
-        assert!(requests.try_recv().is_err());
+        assert!(next_pin_request(&mut requests).is_none());
     }
 
     #[gpui::test]
@@ -534,13 +549,13 @@ mod pinned_session_tests {
             .unwrap();
         cx.run_until_parked();
         let request: serde_json::Value =
-            serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+            next_pin_request(&mut requests).unwrap();
         assert_eq!(
             request["params"]["change"],
             serde_json::to_value(pin_change("first")).unwrap()
         );
         assert!(
-            requests.try_recv().is_err(),
+            next_pin_request(&mut requests).is_none(),
             "only one write may be in flight"
         );
         window
