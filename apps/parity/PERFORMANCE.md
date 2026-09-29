@@ -37,3 +37,22 @@ A person who has turned it off stays off: only a never-chosen setting reads as o
 - **Store listings and disclosure:** collecting on by default means declaring diagnostics (performance data, not linked
   to the user) in the App Store privacy answers and the Play data safety form, and saying so in the privacy policy
   before an endpoint is switched on.
+
+## What the server answers
+
+Reports go to `POST /v1/telemetry/perf` as `application/json`, unauthenticated (the report carries no account and an
+app-embedded key would only look like protection). The server validates strictly and stores no address.
+
+| Status | Meaning | The app |
+| --- | --- | --- |
+| 204 | stored, or accepted and dropped by a daily cap | counts as sent |
+| 429 | rate limited | starts the 10 minute wait |
+| other 4xx | for example a route not deployed yet | starts the wait |
+| 400, 413, 415 | the report is invalid, over 4 KB, or not JSON | stops sending for the rest of the launch |
+| 5xx, no connection | server or network trouble | no wait; tried again at the next chance |
+
+To stay inside what the server accepts, the report builder makes values fit rather than sending something that would
+be refused for good: milliseconds are capped at 60000, frame totals stay under 10 million with slow and frozen no larger
+than the total, the refresh rate stays within 24 to 240 Hz, and the device model keeps only letters, digits and
+` ,._()-`. `vectors/perf-report.json` pins all of it. Raw reports are kept for 90 days, with daily roll-ups after that.
+Nothing identifies a person, so there is no per-person deletion; the privacy text should say so.

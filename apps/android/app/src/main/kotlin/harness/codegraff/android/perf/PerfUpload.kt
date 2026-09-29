@@ -23,21 +23,31 @@ class PerfUploader(
     private val minFrames: Long = MIN_FRAMES,
     private val minIntervalMs: Long = MIN_INTERVAL_MS,
     private val now: () -> Long = System::currentTimeMillis,
-    private val post: (endpoint: String, body: String) -> Boolean,
+    /** Posts the body and returns the HTTP status, or 0 when the connection failed. */
+    private val post: (endpoint: String, body: String) -> Int,
 ) {
-    private var lastSentAt: Long? = null
+    private var lastAttemptAt: Long? = null
+    private var stopped = false
 
-    /** True when a report was sent. */
+    /**
+     * True when a report was sent. A 2xx is sent. 429 and other 4xx start the wait. 400, 413 and 415 mean the
+     * report itself is wrong, so sending stops for the rest of the launch. 5xx and a failed connection start
+     * no wait: they are tried again at the next chance.
+     */
     @Synchronized
     fun flush(report: PerfReport): Boolean {
         val url = endpoint ?: return false
-        if (!enabled()) return false
+        if (!enabled() || stopped) return false
         if (report.frames.total < minFrames) return false
         val t = now()
-        lastSentAt?.let { if (t - it < minIntervalMs) return false }
-        val ok = post(url, report.toJson().toString())
-        if (ok) lastSentAt = t
-        return ok
+        lastAttemptAt?.let { if (t - it < minIntervalMs) return false }
+        val status = post(url, report.toJson().toString())
+        return when (status) {
+            in 200..299 -> { lastAttemptAt = t; true }
+            400, 413, 415 -> { stopped = true; false }
+            in 400..499 -> { lastAttemptAt = t; false }
+            else -> false
+        }
     }
 
     companion object {
@@ -53,8 +63,9 @@ object PerfTransport {
         return url.protocol == "https" || (url.protocol == "http" && url.host in setOf("localhost", "127.0.0.1"))
     }
 
-    fun post(endpoint: String, body: String): Boolean {
-        if (!isAllowed(endpoint)) return false
+    /** The HTTP status, or 0 when nothing was sent or the connection failed. */
+    fun post(endpoint: String, body: String): Int {
+        if (!isAllowed(endpoint)) return 0
         return runCatching {
             val c = URL(endpoint).openConnection() as HttpURLConnection
             try {
@@ -66,11 +77,11 @@ object PerfTransport {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
                 c.outputStream.use { it.write(body.toByteArray()) }
-                c.responseCode in 200..299
+                c.responseCode
             } finally {
                 c.disconnect()
             }
-        }.getOrDefault(false)
+        }.getOrDefault(0)
     }
 
     private const val TIMEOUT_MS = 10_000

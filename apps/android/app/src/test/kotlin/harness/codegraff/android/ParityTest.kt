@@ -349,23 +349,30 @@ class ParityTest {
         assertEquals(vectors.getLong("minFrames"), PerfUploader.MIN_FRAMES)
         assertEquals(vectors.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
         assertEquals(vectors.getInt("maxDeviceLength"), PerfReport.MAX_DEVICE_LENGTH)
+        assertEquals(vectors.getDouble("maxMs"), PerfReport.MAX_MS, 0.0)
+        assertEquals(vectors.getLong("maxFrames"), PerfReport.MAX_FRAMES)
+        assertEquals(vectors.getJSONObject("refreshHz").getInt("min"), PerfReport.MIN_REFRESH_HZ)
+        assertEquals(vectors.getJSONObject("refreshHz").getInt("max"), PerfReport.MAX_REFRESH_HZ)
         assertEquals(vectors.getBoolean("sharingDefault"), PerfSharing.DEFAULT_ENABLED)
         for (case in vectors.rows("uploader")) {
             val config = case.getJSONObject("config")
             var clock = 0L
-            var postOk = true
+            var status = 204
             var posts = 0
             val uploader = PerfUploader(
                 endpoint = if (config.isNull("endpoint")) null else config.getString("endpoint"),
                 enabled = { config.getBoolean("enabled") },
                 now = { clock },
-                post = { _, _ -> posts++; postOk },
+                post = { _, _ -> posts++; status },
             )
             for (step in case.rows("steps")) {
                 clock = step.getLong("atMs")
-                postOk = step.getBoolean("postOk")
+                status = step.getInt("status")
+                val before = posts
                 val report = sampleReport(frames = step.getLong("frames"))
-                assertEquals("${case.getString("name")} at ${clock}ms", step.getBoolean("expectSent"), uploader.flush(report))
+                val label = "${case.getString("name")} at ${clock}ms"
+                assertEquals(label, step.getBoolean("expectSent"), uploader.flush(report))
+                assertEquals("$label: posted", step.getBoolean("expectPosted"), posts > before)
             }
         }
     }
@@ -416,7 +423,7 @@ class ParityTest {
             }
         }.also { it.start() }
         val body = sampleReport(frames = 100).toJson().toString()
-        assertTrue(PerfTransport.post("http://127.0.0.1:$port/perf", body))
+        assertEquals(204, PerfTransport.post("http://127.0.0.1:$port/perf", body))
         serving.join(5_000)
         server.close()
         assertEquals("POST /perf HTTP/1.1", requestLine)
@@ -424,7 +431,7 @@ class ParityTest {
         assertEquals("application/json", headers["content-type"])
         for (name in listOf("authorization", "cookie")) assertFalse("$name was sent", name in headers)
         // Nothing listening any more: a failed post is reported, not thrown.
-        assertFalse(PerfTransport.post("http://127.0.0.1:$port/perf", "{}"))
+        assertEquals(0, PerfTransport.post("http://127.0.0.1:$port/perf", "{}"))
     }
 
     @Test

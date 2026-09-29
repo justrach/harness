@@ -1,5 +1,5 @@
 {
-  "comment": "What a performance report looks like on the wire and when it is sent. Both apps build the report from `input` and must produce `expect` exactly (numbers rounded to one decimal, unknown operation names dropped, device capped at 40 characters). The uploader rules: sent only when an endpoint exists, sharing is on and the session drew at least 60 frames; at most one report per 10 minutes; a failed post does not start the wait.",
+  "comment": "What a performance report looks like on the wire and when it is sent. Both apps build the report from `input` and must produce `expect` exactly: numbers rounded to one decimal, unknown operation names dropped, device reduced to letters, digits and ` ,._()-` and capped at 40 characters, milliseconds capped at 60000, frame totals under 10 million with slow and frozen no larger than the total, refresh rate kept within 24 to 240 Hz. Uploader rules: sent only when an endpoint exists, sharing is on and the session drew at least 60 frames; at most one attempt per 10 minutes. The server answers with a status: 2xx is sent; 429 and any other 4xx except 400, 413 and 415 start the wait; 400, 413 and 415 mean the report is wrong, so sending stops for the rest of the launch; 5xx and a failed connection start no wait and are tried again at the next chance (status 0 is a failed connection).",
   "minFrames": 60,
   "minIntervalMs": 600000,
   "maxDeviceLength": 40,
@@ -133,6 +133,76 @@
         "memoryMb": 142,
         "spans": []
       }
+    },
+    {
+      "name": "unusual values are made to fit what the server accepts",
+      "input": {
+        "launchId": "cccccccc-dddd-eeee-ffff-000000000000",
+        "platform": "android",
+        "appVersion": "0.1.0",
+        "osVersion": "36",
+        "device": "Pixel 9 Pro XL\u2122 <b>",
+        "build": "debug",
+        "refreshHz": 500,
+        "startupMs": 120,
+        "frameKind": "frame",
+        "frames": {
+          "total": 20000000,
+          "slow": 30000000,
+          "frozen": 25000000,
+          "p50": 90000.0,
+          "p95": 90000.04,
+          "worst": 123456.7
+        },
+        "thermal": "Severe",
+        "lowPower": false,
+        "memoryMb": 64,
+        "spans": [
+          {
+            "name": "main.stall",
+            "count": 3,
+            "p50": 80.0,
+            "p95": 95000.0,
+            "max": 95000.0,
+            "totalMs": 95160.0,
+            "overBudget": 3
+          }
+        ]
+      },
+      "expect": {
+        "schema": 1,
+        "launchId": "cccccccc-dddd-eeee-ffff-000000000000",
+        "platform": "android",
+        "appVersion": "0.1.0",
+        "osVersion": "36",
+        "device": "Pixel 9 Pro XL b",
+        "build": "debug",
+        "refreshHz": 240,
+        "startupMs": 120,
+        "frameKind": "frame",
+        "frames": {
+          "total": 9999999,
+          "slow": 9999999,
+          "frozen": 9999999,
+          "p50": 60000.0,
+          "p95": 60000.0,
+          "worst": 60000.0
+        },
+        "thermal": "Severe",
+        "lowPower": false,
+        "memoryMb": 64,
+        "spans": [
+          {
+            "name": "main.stall",
+            "count": 3,
+            "p50": 80.0,
+            "p95": 60000.0,
+            "max": 60000.0,
+            "totalMs": 95160.0,
+            "overBudget": 3
+          }
+        ]
+      }
     }
   ],
   "uploader": [
@@ -146,8 +216,9 @@
         {
           "atMs": 0,
           "frames": 100,
-          "postOk": true,
-          "expectSent": true
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
         }
       ]
     },
@@ -161,8 +232,9 @@
         {
           "atMs": 0,
           "frames": 100,
-          "postOk": true,
-          "expectSent": false
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
         }
       ]
     },
@@ -176,8 +248,9 @@
         {
           "atMs": 0,
           "frames": 100,
-          "postOk": true,
-          "expectSent": false
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
         }
       ]
     },
@@ -191,14 +264,16 @@
         {
           "atMs": 0,
           "frames": 59,
-          "postOk": true,
-          "expectSent": false
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
         },
         {
           "atMs": 1,
           "frames": 60,
-          "postOk": true,
-          "expectSent": true
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
         }
       ]
     },
@@ -212,25 +287,28 @@
         {
           "atMs": 0,
           "frames": 100,
-          "postOk": true,
-          "expectSent": true
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
         },
         {
           "atMs": 599999,
           "frames": 100,
-          "postOk": true,
-          "expectSent": false
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
         },
         {
           "atMs": 600000,
           "frames": 100,
-          "postOk": true,
-          "expectSent": true
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
         }
       ]
     },
     {
-      "name": "a failed post does not start the wait",
+      "name": "a server error does not start the wait",
       "config": {
         "endpoint": "https://example.invalid/perf",
         "enabled": true
@@ -239,16 +317,184 @@
         {
           "atMs": 0,
           "frames": 100,
-          "postOk": false,
-          "expectSent": false
+          "status": 503,
+          "expectSent": false,
+          "expectPosted": true
         },
         {
           "atMs": 1,
           "frames": 100,
-          "postOk": true,
-          "expectSent": true
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
+        }
+      ]
+    },
+    {
+      "name": "a failed connection does not start the wait",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 0,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 1,
+          "frames": 100,
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
+        }
+      ]
+    },
+    {
+      "name": "a rate limit starts the wait",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 429,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 1,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
+        }
+      ]
+    },
+    {
+      "name": "a route that is not there yet starts the wait",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 404,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 1,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": true,
+          "expectPosted": true
+        }
+      ]
+    },
+    {
+      "name": "a rejected report stops sending for the launch",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 400,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
+        },
+        {
+          "atMs": 1200000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
+        }
+      ]
+    },
+    {
+      "name": "an oversized report stops sending for the launch",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 413,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
+        }
+      ]
+    },
+    {
+      "name": "a wrong content type stops sending for the launch",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "status": 415,
+          "expectSent": false,
+          "expectPosted": true
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "status": 204,
+          "expectSent": false,
+          "expectPosted": false
         }
       ]
     }
-  ]
+  ],
+  "maxMs": 60000,
+  "maxFrames": 9999999,
+  "refreshHz": {
+    "min": 24,
+    "max": 240
+  },
+  "path": "/v1/telemetry/perf"
 }

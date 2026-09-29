@@ -341,22 +341,30 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(vectors["minFrames"] as? Int, PerfUploader.minFrames)
         XCTAssertEqual(vectors["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
         XCTAssertEqual(vectors["maxDeviceLength"] as? Int, PerfReport.maxDeviceLength)
+        XCTAssertEqual(vectors["maxMs"] as? Double, PerfReport.maxMs)
+        XCTAssertEqual(vectors["maxFrames"] as? Int, PerfReport.maxFrames)
+        let hz = try XCTUnwrap(vectors["refreshHz"] as? [String: Int])
+        XCTAssertEqual(hz["min"], PerfReport.refreshHzRange.lowerBound)
+        XCTAssertEqual(hz["max"], PerfReport.refreshHzRange.upperBound)
         XCTAssertEqual(vectors["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
         for c in try rows(vectors, "uploader") {
             let config = try XCTUnwrap(c["config"] as? [String: Any])
-            let clock = Box(0), postOk = Box(true)
+            let clock = Box(0), status = Box(204), posts = Box(0)
             let enabled = config["enabled"] as! Bool
             let uploader = PerfUploader(endpoint: config["endpoint"] as? String, enabled: { enabled },
-                                        now: { clock.value }, post: { _, _ in postOk.value })
+                                        now: { clock.value }, post: { _, _ in posts.value += 1; return status.value })
             for step in try rows(c, "steps") {
                 clock.value = step["atMs"] as! Int
-                postOk.value = step["postOk"] as! Bool
+                status.value = step["status"] as! Int
+                let before = posts.value
                 let report = PerfReport(launchId: "id", platform: "ios", appVersion: "1", osVersion: "27", device: "iPhone", build: "release",
                                         refreshHz: 120, startupMs: 77, frameKind: "turn",
                                         frames: .init(total: step["frames"] as! Int, slow: 0, frozen: 0, p50: 1, p95: 2, worst: 3),
                                         thermal: "Nominal", lowPower: false, memoryMb: 10, spans: [])
                 let sent = await uploader.flush(report)
-                XCTAssertEqual(sent, step["expectSent"] as? Bool, "\(c["name"] ?? "") at \(clock.value)ms")
+                let label = "\(c["name"] ?? "") at \(clock.value)ms"
+                XCTAssertEqual(sent, step["expectSent"] as? Bool, label)
+                XCTAssertEqual(posts.value > before, step["expectPosted"] as? Bool, "\(label): posted")
             }
         }
     }

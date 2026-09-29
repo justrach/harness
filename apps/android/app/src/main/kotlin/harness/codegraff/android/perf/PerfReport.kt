@@ -35,18 +35,21 @@ data class PerfReport(
         put("platform", platform)
         put("appVersion", appVersion)
         put("osVersion", osVersion)
-        put("device", device.take(MAX_DEVICE_LENGTH))
+        put("device", device.filter { it in ALLOWED_DEVICE_CHARS }.take(MAX_DEVICE_LENGTH))
         put("build", build)
-        put("refreshHz", refreshHz)
+        put("refreshHz", refreshHz.coerceIn(MIN_REFRESH_HZ, MAX_REFRESH_HZ))
         put("startupMs", startupMs ?: JSONObject.NULL)
         put("frameKind", frameKind)
+        // Values the server would refuse are made to fit instead: one 90 second stall must not get a launch's
+        // reports rejected for good.
+        val total = frames.total.coerceIn(0, MAX_FRAMES)
         put("frames", JSONObject().apply {
-            put("total", frames.total)
-            put("slow", frames.slow)
-            put("frozen", frames.frozen)
-            put("p50", round1(frames.p50))
-            put("p95", round1(frames.p95))
-            put("worst", round1(frames.worst))
+            put("total", total)
+            put("slow", frames.slow.coerceIn(0, total))
+            put("frozen", frames.frozen.coerceIn(0, total))
+            put("p50", ms(frames.p50))
+            put("p95", ms(frames.p95))
+            put("worst", ms(frames.worst))
         })
         put("thermal", thermal)
         put("lowPower", lowPower)
@@ -56,9 +59,9 @@ data class PerfReport(
             for (s in spans) if (s.name in PerfSpan.budgetsMs) put(JSONObject().apply {
                 put("name", s.name)
                 put("count", s.count)
-                put("p50", round1(s.p50))
-                put("p95", round1(s.p95))
-                put("max", round1(s.max))
+                put("p50", ms(s.p50))
+                put("p95", ms(s.p95))
+                put("max", ms(s.max))
                 put("totalMs", round1(s.totalMs))
                 put("overBudget", s.overBudget)
             })
@@ -68,6 +71,15 @@ data class PerfReport(
     companion object {
         const val SCHEMA = 1
         const val MAX_DEVICE_LENGTH = 40
+        const val MAX_MS = 60_000.0
+        const val MAX_FRAMES = 9_999_999L
+        const val MIN_REFRESH_HZ = 24
+        const val MAX_REFRESH_HZ = 240
+
+        /** What the server accepts in a device model: letters, digits and ` ,._()-`. */
+        private val ALLOWED_DEVICE_CHARS: Set<Char> = (('a'..'z') + ('A'..'Z') + ('0'..'9') + " ,._()-".toList()).toSet()
+
+        private fun ms(x: Double) = round1(minOf(x, MAX_MS))
 
         private fun round1(x: Double) = floor(x * 10 + 0.5) / 10
     }

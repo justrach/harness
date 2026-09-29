@@ -14,6 +14,12 @@ struct PerfReport {
 
     static let schema = 1
     static let maxDeviceLength = 40
+    static let maxMs = 60_000.0
+    static let maxFrames = 9_999_999
+    static let refreshHzRange = 24...240
+
+    /// What the server accepts in a device model: letters, digits and ` ,._()-`.
+    private static let allowedDeviceCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,._()-")
 
     let launchId: String
     let platform: String
@@ -32,22 +38,26 @@ struct PerfReport {
     let spans: [SpanStat]
 
     private static func round1(_ x: Double) -> Double { (x * 10 + 0.5).rounded(.down) / 10 }
+    private static func ms(_ x: Double) -> Double { round1(min(x, maxMs)) }
 
     func json() -> [String: Any] {
-        [
+        // Values the server would refuse are made to fit instead: one 90 second stall must not get a launch's
+        // reports rejected for good.
+        let total = min(max(frames.total, 0), Self.maxFrames)
+        return [
             "schema": Self.schema,
             "launchId": launchId,
             "platform": platform,
             "appVersion": appVersion,
             "osVersion": osVersion,
-            "device": String(device.prefix(Self.maxDeviceLength)),
+            "device": String(String(device.filter { Self.allowedDeviceCharacters.contains($0) }).prefix(Self.maxDeviceLength)),
             "build": build,
-            "refreshHz": refreshHz,
+            "refreshHz": min(max(refreshHz, Self.refreshHzRange.lowerBound), Self.refreshHzRange.upperBound),
             "startupMs": startupMs.map { $0 as Any } ?? NSNull(),
             "frameKind": frameKind,
             "frames": [
-                "total": frames.total, "slow": frames.slow, "frozen": frames.frozen,
-                "p50": Self.round1(frames.p50), "p95": Self.round1(frames.p95), "worst": Self.round1(frames.worst),
+                "total": total, "slow": min(max(frames.slow, 0), total), "frozen": min(max(frames.frozen, 0), total),
+                "p50": Self.ms(frames.p50), "p95": Self.ms(frames.p95), "worst": Self.ms(frames.worst),
             ] as [String: Any],
             "thermal": thermal,
             "lowPower": lowPower,
@@ -56,7 +66,7 @@ struct PerfReport {
             "spans": spans.filter { PerfSpan.budgetsMs[$0.name] != nil }.map { s -> [String: Any] in
                 [
                     "name": s.name, "count": s.count,
-                    "p50": Self.round1(s.p50), "p95": Self.round1(s.p95), "max": Self.round1(s.max),
+                    "p50": Self.ms(s.p50), "p95": Self.ms(s.p95), "max": Self.ms(s.max),
                     "totalMs": Self.round1(s.totalMs), "overBudget": s.overBudget,
                 ]
             },
@@ -79,27 +89,42 @@ actor PerfUploader {
     private let endpoint: String?
     private let enabled: @Sendable () -> Bool
     private let now: @Sendable () -> Int
-    private let post: @Sendable (String, String) async -> Bool
-    private var lastSentAt: Int?
+    /// Posts the body and returns the HTTP status, or 0 when the connection failed.
+    private let post: @Sendable (String, String) async -> Int
+    private var lastAttemptAt: Int?
+    private var stopped = false
 
     init(endpoint: String?, enabled: @escaping @Sendable () -> Bool,
          now: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970 * 1000) },
-         post: @escaping @Sendable (String, String) async -> Bool) {
+         post: @escaping @Sendable (String, String) async -> Int) {
         self.endpoint = endpoint
         self.enabled = enabled
         self.now = now
         self.post = post
     }
 
-    /// True when a report was sent.
+    /// True when a report was sent. A 2xx is sent. 429 and other 4xx start the wait. 400, 413 and 415 mean the
+    /// report itself is wrong, so sending stops for the rest of the launch. 5xx and a failed connection start
+    /// no wait: they are tried again at the next chance.
     func flush(_ report: PerfReport) async -> Bool {
-        guard let endpoint, enabled() else { return false }
+        guard let endpoint, enabled(), !stopped else { return false }
         guard report.frames.total >= Self.minFrames else { return false }
         let t = now()
-        if let last = lastSentAt, t - last < Self.minIntervalMs { return false }
-        let ok = await post(endpoint, report.body())
-        if ok { lastSentAt = t }
-        return ok
+        if let last = lastAttemptAt, t - last < Self.minIntervalMs { return false }
+        let status = await post(endpoint, report.body())
+        switch status {
+        case 200..<300:
+            lastAttemptAt = t
+            return true
+        case 400, 413, 415:
+            stopped = true
+            return false
+        case 400..<500:
+            lastAttemptAt = t
+            return false
+        default:
+            return false
+        }
     }
 }
 
@@ -118,10 +143,11 @@ enum PerfTransport {
         }
     }
 
-    /// `configure` lets a test add a stub protocol; the app passes nothing.
+    /// The HTTP status, or 0 when nothing was sent or the connection failed. `configure` lets a test add a stub
+    /// protocol; the app passes nothing.
     static func post(_ endpoint: String, _ body: String,
-                     configure: (URLSessionConfiguration) -> Void = { _ in }) async -> Bool {
-        guard isAllowed(endpoint), let url = URL(string: endpoint) else { return false }
+                     configure: (URLSessionConfiguration) -> Void = { _ in }) async -> Int {
+        guard isAllowed(endpoint), let url = URL(string: endpoint) else { return 0 }
         let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
@@ -135,8 +161,8 @@ enum PerfTransport {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(body.utf8)
-        guard let (_, response) = try? await session.data(for: request), let http = response as? HTTPURLResponse else { return false }
-        return (200..<300).contains(http.statusCode)
+        guard let (_, response) = try? await session.data(for: request), let http = response as? HTTPURLResponse else { return 0 }
+        return http.statusCode
     }
 }
 

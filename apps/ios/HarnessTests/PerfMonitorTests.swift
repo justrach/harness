@@ -91,7 +91,7 @@ final class PerfMonitorTests: XCTestCase {
         StubProtocol.status = 204
         StubProtocol.seen = nil
         let ok = await PerfTransport.post("https://example.invalid/perf", "{\"schema\":1}") { $0.protocolClasses = [StubProtocol.self] }
-        XCTAssertTrue(ok)
+        XCTAssertEqual(ok, 204)
         XCTAssertEqual(StubProtocol.seen?.method, "POST")
         XCTAssertEqual(StubProtocol.seen?.body, "{\"schema\":1}")
         XCTAssertEqual(StubProtocol.seen?.headers["Content-Type"], "application/json")
@@ -100,9 +100,9 @@ final class PerfMonitorTests: XCTestCase {
         }
         StubProtocol.status = 500
         let failed = await PerfTransport.post("https://example.invalid/perf", "{}") { $0.protocolClasses = [StubProtocol.self] }
-        XCTAssertFalse(failed)
+        XCTAssertEqual(failed, 500)
         let refused = await PerfTransport.post("http://example.invalid/perf", "{}") { $0.protocolClasses = [StubProtocol.self] }
-        XCTAssertFalse(refused, "plain http to a real host must not be sent")
+        XCTAssertEqual(refused, 0, "plain http to a real host must not be sent")
     }
 
     func testSharingIsOnUntilThePersonTurnsItOffAndStaysOff() {
