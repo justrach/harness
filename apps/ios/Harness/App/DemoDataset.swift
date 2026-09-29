@@ -35,7 +35,7 @@ final class DemoDataset {
         let now = nowMs()
         let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos",
                             lastSeenAt: now, createdAt: now - 86_400_000 * 30)
-        let vps = DeviceRow(id: "dev-vps", name: "hetzner-01", platform: "linux",
+        let vps = DeviceRow(id: "dev-vps", name: "Codegraff Cloud", platform: "linux",
                             lastSeenAt: now - 600_000, createdAt: now - 86_400_000 * 12)
         let harness = Space(id: "space-harness", deviceId: "dev-mac",
                           path: "/Users/dev/harness", name: nil, gitDetected: true,
