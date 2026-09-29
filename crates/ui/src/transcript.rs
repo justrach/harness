@@ -11519,6 +11519,116 @@ mod tests {
     }
 
     #[gpui::test]
+    fn list_items_in_a_finished_answer_are_selectable(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let (host, cx) =
+            cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        let transcript = host.read_with(cx, |host, _| host.0.clone());
+        let mut user = assistant(
+            "u1",
+            MessageStatus::Complete,
+            vec![text_part("t", "any open issues?")],
+        );
+        user.role = MessageRole::User;
+        let body = "**Open PRs:**\n\n- #62: desktop themes on iOS.\n- #22: letting agents use browse with the user's sign-ins.\n\n**Open issues:**\n\n- #88: Claude sessions can't use the Chrome extension.\n- #71: new project — remove the back button that jumps to the ⌘K menu.\n- #23: chat sometimes renders doubled or blurred text after scrolling to the bottom.\n\n1. Merge the release workflow fix.\n2. Hold the iPhone build.\n\nShould I merge #89 and wait on the rest? Or are those `crates/ui` changes yours to include?";
+        state.update(cx, |state, _| {
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = vec![
+                user,
+                assistant("a1", MessageStatus::Complete, vec![text_part("t", body)]),
+            ];
+            state.transcript_revision += 1;
+        });
+        for _ in 0..3 {
+            transcript.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        for needle in [
+            "Open issues",
+            "Claude sessions can't use",
+            "desktop themes on iOS",
+            "Hold the iPhone build",
+            "wait on the rest",
+        ] {
+            let selected = drag_select_in_transcript(cx, needle);
+            assert!(
+                selected.as_deref().is_some_and(|s| !s.trim().is_empty()),
+                "dragging across {needle:?} selected {selected:?}"
+            );
+        }
+
+        // A drag from one bullet down through the next ones.
+        let entries = crate::markdown::render::selection_test_entries();
+        let find = |needle: &str| {
+            entries
+                .iter()
+                .find(|(_, t, _)| t.contains(needle))
+                .unwrap()
+                .clone()
+        };
+        let (first_key, _, first) = find("Claude sessions can't use");
+        let (_, _, last) = find("doubled or blurred");
+        let start = gpui::point(first.left() + px(2.0), first.top() + px(8.0));
+        let end = gpui::point(last.left() + px(80.0), last.top() + px(8.0));
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: gpui::MouseButton::Left,
+            position: start,
+            click_count: 1,
+            ..Default::default()
+        });
+        for step in 1..=6 {
+            let t = step as f32 / 6.0;
+            let position = gpui::point(
+                start.x + (end.x - start.x) * t,
+                start.y + (end.y - start.y) * t,
+            );
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position,
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        let selected = crate::markdown::selection::selected_text();
+        cx.simulate_event(gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            position: end,
+            ..Default::default()
+        });
+        crate::markdown::selection::clear_if_owner(&first_key);
+        let selected = selected.unwrap_or_default();
+        assert!(
+            selected.contains("Claude sessions can't use")
+                && selected.contains("remove the back button")
+                && selected.contains("#23"),
+            "a drag down the bullet list selected {selected:?}"
+        );
+    }
+
+    #[gpui::test]
     fn text_in_a_finished_answer_is_selectable(cx: &mut gpui::TestAppContext) {
         let _selection = crate::markdown::selection::test_state_lock();
         struct Host(Entity<Transcript>);

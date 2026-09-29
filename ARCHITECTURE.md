@@ -21,4 +21,4 @@ A synced device can request files and commands from another device through the r
 
 ## Distribution
 
-`scripts/package-macos.sh`, `scripts/package-linux.sh`, and `scripts/package-windows.ps1` produce platform archives with the Harness icon and license notices. The root `LICENSE` covers original Harness contributions under AGPLv3 from this change onward. Upstream and bundled material retain their own notices in `THIRD_PARTY_NOTICES.md`.
+`scripts/package-macos.sh`, `scripts/package-linux.sh`, and `scripts/package-windows.ps1` produce platform archives with the Harness icon and license notices. The root `LICENSE` covers original Harness contributions under a modified AGPLv3 (AGPL-3.0 plus reserved commercial and cloud rights for the licensors it names) from this change onward. Upstream and bundled material retain their own notices in `THIRD_PARTY_NOTICES.md`.

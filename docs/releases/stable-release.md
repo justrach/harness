@@ -1,5 +1,13 @@
 # Stable release
 
+With the macOS signing secrets set on the repository (`MACOS_CERT_P12`,
+`MACOS_CERT_PASSWORD`, `AC_API_KEY_P8`, `AC_API_KEY_ID`, `AC_API_ISSUER_ID`),
+pushing the tag is the whole release: the workflow builds, signs, notarizes
+and staples the macOS app, then publishes every asset, both stable aliases and
+`manifest.json` under the notes in `docs/releases/v<version>.md`. It also fills
+the `curl | sh` installer's bucket when `CODEGRAFF_CLOUDFLARE_API_TOKEN` is
+set. The steps below are the path from a signing Mac, for when CI can't sign.
+
 How a stable Harness release ships. The macOS app is built, Developer ID
 signed and notarized on the signing Mac; the tag workflow builds the Linux and
 Windows companions. `scripts/stable_macos_release.py` verifies all of it,

@@ -175,6 +175,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CODEGRAFF_CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: d87222df6f3f663e802014f8eb5a274e
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/releases
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -195,6 +198,10 @@ jobs:
           # This is a byte-for-byte alias of the notarized, stapled DMG from
           # the macOS job. The stable download link does not change per tag.
           cp "dist/harness-$ver-macos-arm64.dmg" dist/Harness-macos-arm64.dmg
+          # The stable Windows link the site and the Windows updater use.
+          cp "dist/harness-$ver-windows-x86_64.zip" dist/Harness-windows-x86_64.zip
+          test -f "docs/releases/v$ver.md" \
+            || { echo "missing docs/releases/v$ver.md (the release notes)"; exit 1; }
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         run: |
@@ -207,10 +214,11 @@ jobs:
           printf '%s' "$manifest" > manifest.json
       - uses: softprops/action-gh-release@v2
         with:
+          name: Harness v${{ env.VERSION }}
+          body_path: docs/releases/v${{ env.VERSION }}.md
           files: |
             dist/*
             manifest.json
-          generate_release_notes: true
       - name: upload to R2 (edge.codegraff.com/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
