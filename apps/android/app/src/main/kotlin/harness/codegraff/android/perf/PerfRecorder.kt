@@ -101,6 +101,10 @@ class FrameTally {
         }
     }
 
+    /** Frames counted so far; cheap, so a timer can tell whether the screen is drawing. */
+    @Synchronized
+    fun frameCount(): Long = frames
+
     @Synchronized
     fun snapshot(): FrameSummary {
         val frame = totals.stats().firstOrNull()
@@ -135,4 +139,12 @@ data class FrameSummary(
     val meanStageMs: List<Pair<FrameStage, Double>>,
 ) {
     val slowPercent: Double get() = if (frames == 0L) 0.0 else 100.0 * slow / frames
+}
+
+/** When the monitor's own background work (stall timer, uploads) should hold back. Pinned in `apps/parity/vectors/perf-report.json`. */
+object PerfPolicy {
+    /** Thermal labels from either platform that mean the device is already working hard. */
+    val hotThermal = setOf("Moderate", "Severe", "Critical", "Serious")
+
+    fun deviceIsCalm(lowPower: Boolean, thermal: String): Boolean = !lowPower && thermal !in hotThermal
 }

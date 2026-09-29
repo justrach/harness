@@ -3,7 +3,11 @@ package harness.codegraff.android.perf
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -93,6 +97,7 @@ object PerfSharing {
 
     /** Pinned in `apps/parity/vectors/perf-report.json`. */
     const val DEFAULT_ENABLED = true
+
     private var prefs: SharedPreferences? = null
 
     /** Where reports go. Unset until the backend is agreed; with no endpoint nothing is offered and nothing is sent. */
@@ -100,28 +105,52 @@ object PerfSharing {
 
     val available: Boolean get() = endpoint != null
 
+    /** What the Settings switch shows. Uploads read the stored value themselves, on their own thread. */
     var enabled by mutableStateOf(DEFAULT_ENABLED)
         private set
 
+    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "harness-perf-upload").apply { isDaemon = true } }
+    private val uploader by lazy { PerfUploader(endpoint, enabled = ::storedEnabled, post = PerfTransport::post) }
+
+    private fun storedEnabled(): Boolean = prefs?.getBoolean(KEY, DEFAULT_ENABLED) ?: DEFAULT_ENABLED
+
+    /** Does no file reading on the caller's thread: launch must not wait on a preferences file for this. */
     fun init(context: Context) {
-        val p = context.getSharedPreferences("harness-ui", Context.MODE_PRIVATE)
-        prefs = p
-        enabled = p.getBoolean(KEY, DEFAULT_ENABLED)
+        val app = context.applicationContext
+        worker.execute {
+            val p = app.getSharedPreferences("harness-ui", Context.MODE_PRIVATE)
+            prefs = p
+            val stored = p.getBoolean(KEY, DEFAULT_ENABLED)
+            Handler(Looper.getMainLooper()).post { enabled = stored }
+        }
     }
 
     fun set(on: Boolean) {
         enabled = on
-        prefs?.edit()?.putBoolean(KEY, on)?.apply()
+        worker.execute { prefs?.edit()?.putBoolean(KEY, on)?.apply() }
     }
 
-    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "harness-perf-upload").apply { isDaemon = true } }
-    private val uploader by lazy { PerfUploader(endpoint, enabled = { enabled }, post = PerfTransport::post) }
-
-    /** Called when the app goes to the background. Cheap when sharing is off: nothing is built. */
+    /**
+     * Called when the app goes to the background. Nothing runs on the caller's thread but queuing the work. The report
+     * is only built, and only sent, when sharing is on, the device is neither hot nor saving power, and the network
+     * is not metered: a radio waking on mobile data costs more battery than the two kilobytes are worth.
+     */
     fun flush(context: Context) {
-        if (!available || !enabled) return
-        val report = Perf.buildReport(context)
-        worker.execute { uploader.flush(report) }
+        if (!available) return
+        val app = context.applicationContext
+        worker.execute {
+            if (!storedEnabled()) return@execute
+            if (!PerfPolicy.deviceIsCalm(Perf.batterySaver(app), Perf.thermalLabel(app))) return@execute
+            if (isMetered(app)) return@execute
+            uploader.flush(Perf.buildReport(app))
+        }
+    }
+
+    /** Unknown counts as metered: when in doubt, do not wake the radio. */
+    private fun isMetered(context: Context): Boolean {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return true
+        val caps = runCatching { cm.getNetworkCapabilities(cm.activeNetwork) }.getOrNull() ?: return true
+        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 }
 

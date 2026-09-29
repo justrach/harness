@@ -79,6 +79,16 @@ struct PerfReport {
     }
 }
 
+/// When the monitor's own background work (uploads) should hold back. Pinned in `apps/parity/vectors/perf-report.json`.
+enum PerfPolicy {
+    /// Thermal labels from either platform that mean the device is already working hard.
+    static let hotThermal: Set<String> = ["Moderate", "Severe", "Critical", "Serious"]
+
+    static func deviceIsCalm(lowPower: Bool, thermal: String) -> Bool {
+        !lowPower && !hotThermal.contains(thermal)
+    }
+}
+
 /// Decides when a report may go out. An endpoint must exist, sharing must be on, the session must have run
 /// enough turns to mean something, at most one report goes out per interval, and a failed post does not start
 /// the wait.
@@ -154,6 +164,12 @@ enum PerfTransport {
         config.urlCache = nil
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 10
+        // Never wake the cellular radio or spend Low Data Mode's allowance on a two kilobyte report: on mobile data
+        // the request fails at once and is tried again at the next chance.
+        config.allowsExpensiveNetworkAccess = false
+        config.allowsConstrainedNetworkAccess = false
+        config.waitsForConnectivity = false
+        config.networkServiceType = .background
         configure(config)
         let session = URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
@@ -183,10 +199,13 @@ enum PerfSharing {
     private static let launchId = UUID().uuidString.lowercased()
     private static let uploader = PerfUploader(endpoint: endpoint, enabled: { enabled }, post: { await PerfTransport.post($0, $1) })
 
-    /// Called when the app goes to the background. Cheap when sharing is off: nothing is built.
+    /// Called when the app goes to the background. Nothing is built unless sharing is on and the phone is neither hot
+    /// nor in Low Power Mode; the post itself runs at utility priority off the main thread.
     @MainActor
     static func flush() {
-        guard available, enabled else { return }
+        guard available, enabled,
+              PerfPolicy.deviceIsCalm(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, thermal: Perf.thermalLabel)
+        else { return }
         let report = buildReport()
         Task.detached(priority: .utility) { _ = await uploader.flush(report) }
     }

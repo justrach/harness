@@ -1,5 +1,5 @@
 {
-  "comment": "What a performance report looks like on the wire and when it is sent. Both apps build the report from `input` and must produce `expect` exactly: numbers rounded to one decimal, unknown operation names dropped, device reduced to letters, digits and ` ,._()-` and capped at 40 characters, milliseconds capped at 60000, frame totals under 10 million with slow and frozen no larger than the total, refresh rate kept within 24 to 240 Hz. Uploader rules: sent only when an endpoint exists, sharing is on and the session drew at least 60 frames; at most one attempt per 10 minutes. The server answers with a status: 2xx is sent; 429 and any other 4xx except 400, 413 and 415 start the wait; 400, 413 and 415 mean the report is wrong, so sending stops for the rest of the launch; 5xx and a failed connection start no wait and are tried again at the next chance (status 0 is a failed connection).",
+  "comment": "What a performance report looks like on the wire and when it is sent. Both apps build the report from `input` and must produce `expect` exactly: numbers rounded to one decimal, unknown operation names dropped, device reduced to letters, digits and ` ,._()-` and capped at 40 characters, milliseconds capped at 60000, frame totals under 10 million with slow and frozen no larger than the total, refresh rate kept within 24 to 240 Hz. Uploader rules: sent only when an endpoint exists, sharing is on and the session drew at least 60 frames; at most one attempt per 10 minutes. The server answers with a status: 2xx is sent; 429 and any other 4xx except 400, 413 and 415 start the wait; 400, 413 and 415 mean the report is wrong, so sending stops for the rest of the launch; 5xx and a failed connection start no wait and are tried again at the next chance (status 0 is a failed connection). Background work (the stall timer on Android, uploads on both) holds back while the device is in low power mode or its thermal state is Moderate, Serious, Severe or Critical; on Android uploads also wait for an unmetered network and on iOS the post refuses expensive and constrained networks.",
   "minFrames": 60,
   "minIntervalMs": 600000,
   "maxDeviceLength": 40,
@@ -496,5 +496,62 @@
     "min": 24,
     "max": 240
   },
-  "path": "/v1/telemetry/perf"
+  "path": "/v1/telemetry/perf",
+  "deviceCalm": [
+    {
+      "lowPower": false,
+      "thermal": "None",
+      "expect": true
+    },
+    {
+      "lowPower": false,
+      "thermal": "Nominal",
+      "expect": true
+    },
+    {
+      "lowPower": false,
+      "thermal": "Light",
+      "expect": true
+    },
+    {
+      "lowPower": false,
+      "thermal": "Fair",
+      "expect": true
+    },
+    {
+      "lowPower": false,
+      "thermal": "Unknown",
+      "expect": true
+    },
+    {
+      "lowPower": false,
+      "thermal": "Moderate",
+      "expect": false
+    },
+    {
+      "lowPower": false,
+      "thermal": "Serious",
+      "expect": false
+    },
+    {
+      "lowPower": false,
+      "thermal": "Severe",
+      "expect": false
+    },
+    {
+      "lowPower": false,
+      "thermal": "Critical",
+      "expect": false
+    },
+    {
+      "lowPower": true,
+      "thermal": "None",
+      "expect": false
+    },
+    {
+      "lowPower": true,
+      "thermal": "Nominal",
+      "expect": false
+    }
+  ]
 }

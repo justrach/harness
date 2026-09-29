@@ -56,3 +56,24 @@ be refused for good: milliseconds are capped at 60000, frame totals stay under 1
 than the total, the refresh rate stays within 24 to 240 Hz, and the device model keeps only letters, digits and
 ` ,._()-`. `vectors/perf-report.json` pins all of it. Raw reports are kept for 90 days, with daily roll-ups after that.
 Nothing identifies a person, so there is no per-person deletion; the privacy text should say so.
+
+## What it costs the device
+
+The monitor must not be what slows the app or drains the phone, so its cost is bounded and was measured.
+
+- **Per call:** recording an operation takes about 0.05 µs on Android and tallying a frame about 0.03 µs (a unit test
+  fails above 5 µs; the iOS test fails above 25 µs in a debug build, to catch a hundredfold regression).
+- **Frames:** the frame listener runs on its own thread and only while the app is in front. A scripted scroll on the
+  emulator, three runs each with and without the monitor, showed no difference beyond run-to-run noise.
+- **Idle:** on a still screen the monitor added at most about 0.6 ms of CPU per second (0.06% of one core), which is
+  at the limit of what the 10 ms CPU clock can resolve. The stall timer checks every 100 ms only while frames are being
+  drawn and about once a second when nothing is, and stops while the phone is hot or saving power.
+- **Launch:** cold start was indistinguishable (about 180 ms both ways) when the emulator was quiet.
+- **Logging:** an operation over budget logs at most one line a second.
+- **Uploads:** built and sent off the main thread, at most one report of about 2 KB per 10 minutes. Nothing is built or
+  sent while sharing is off, while Battery Saver or Low Power Mode is on, or while the device is at a moderate or higher
+  thermal state. Android also waits for an unmetered network; iOS refuses expensive and constrained networks. Waking a
+  mobile radio costs more battery than the report is worth, so a report is simply tried again at the next chance.
+- **Startup:** the sharing setting is read on a background thread, so launch never waits on a preferences file for it.
+
+Not measured: a physical device (all numbers are from the emulator and simulator), and battery drain over hours.

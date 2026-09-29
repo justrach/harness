@@ -369,6 +369,13 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testBackgroundWorkHoldsBackWhenTheDeviceIsHotOrSavingPower() throws {
+        for c in try rows(try load("vectors/perf-report.json"), "deviceCalm") {
+            XCTAssertEqual(PerfPolicy.deviceIsCalm(lowPower: c["lowPower"] as! Bool, thermal: c["thermal"] as! String),
+                           c["expect"] as? Bool, "\(c)")
+        }
+    }
+
     /// Test double for a value the uploader's `@Sendable` closures read while the test moves it on.
     private final class Box<T>: @unchecked Sendable {
         var value: T

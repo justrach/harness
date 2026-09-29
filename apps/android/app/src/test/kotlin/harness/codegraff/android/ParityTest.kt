@@ -18,6 +18,8 @@ import harness.codegraff.android.model.QueueDeliveryGate
 import harness.codegraff.android.model.QueueEditFinishResult
 import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfPolicy
 import harness.codegraff.android.perf.PerfReport
 import harness.codegraff.android.perf.PerfSharing
 import harness.codegraff.android.perf.PerfSpan
@@ -375,6 +377,35 @@ class ParityTest {
                 assertEquals("$label: posted", step.getBoolean("expectPosted"), posts > before)
             }
         }
+    }
+
+    @Test
+    fun backgroundWorkHoldsBackWhenTheDeviceIsHotOrSavingPower() {
+        for (c in load("vectors/perf-report.json").rows("deviceCalm")) {
+            assertEquals("$c", c.getBoolean("expect"), PerfPolicy.deviceIsCalm(c.getBoolean("lowPower"), c.getString("thermal")))
+        }
+    }
+
+    /** The monitor sits on hot paths (every frame, every parse), so its per-call cost has a ceiling. */
+    @Test
+    fun recordingAnOperationCostsMicroseconds() {
+        val n = 200_000
+        // Warm up so the JIT has compiled the path being timed.
+        repeat(20_000) { Perf.measure(PerfSpan.HomeGroup) { it } }
+        val start = System.nanoTime()
+        repeat(n) { Perf.measure(PerfSpan.HomeGroup) { it } }
+        val perCallUs = (System.nanoTime() - start) / 1e3 / n
+        println("monitor cost: measure() %.3f µs a call".format(perCallUs))
+        assertTrue("measure() took $perCallUs µs a call", perCallUs < 5.0)
+
+        val tally = harness.codegraff.android.perf.FrameTally()
+        val stages = DoubleArray(harness.codegraff.android.perf.FrameStage.entries.size)
+        repeat(20_000) { tally.add(8.0, stages, 16.7) }
+        val frameStart = System.nanoTime()
+        repeat(n) { tally.add(8.0, stages, 16.7) }
+        val perFrameUs = (System.nanoTime() - frameStart) / 1e3 / n
+        println("monitor cost: tallying a frame %.3f µs".format(perFrameUs))
+        assertTrue("a frame took $perFrameUs µs to tally", perFrameUs < 5.0)
     }
 
     private fun sampleReport(frames: Long) = PerfReport(

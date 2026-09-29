@@ -117,6 +117,24 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertTrue(PerfSharing.enabled)
     }
 
+    /// The monitor sits on hot paths (every run loop turn, every parse), so its per-call cost has a ceiling.
+    /// Generous for a debug build; it exists to catch a hundredfold regression, not to benchmark.
+    func testRecordingCostsMicroseconds() {
+        let n = 100_000
+        for _ in 0..<10_000 { _ = Perf.measure(PerfSpan.homeGroup) { 1 } }
+        var start = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<n { _ = Perf.measure(PerfSpan.homeGroup) { 1 } }
+        let perCallUs = (CFAbsoluteTimeGetCurrent() - start) * 1e6 / Double(n)
+        XCTAssertLessThan(perCallUs, 25, "measure() took \(perCallUs) µs a call")
+
+        let tally = MainThreadTally()
+        for _ in 0..<10_000 { tally.add(ms: 3) }
+        start = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<n { tally.add(ms: 3) }
+        let perTurnUs = (CFAbsoluteTimeGetCurrent() - start) * 1e6 / Double(n)
+        XCTAssertLessThan(perTurnUs, 25, "a turn took \(perTurnUs) µs to tally")
+    }
+
     func testTheProcessStartTimeIsKnownAndInThePast() throws {
         let start = try XCTUnwrap(Perf.processStart())
         let age = Date().timeIntervalSince(start)

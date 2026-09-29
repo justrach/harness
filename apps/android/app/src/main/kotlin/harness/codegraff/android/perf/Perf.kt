@@ -53,8 +53,12 @@ data class MemorySnapshot(val javaUsedMb: Long, val javaMaxMb: Long, val nativeM
  */
 object Perf {
     private const val TAG = "HarnessPerf"
-    private const val STALL_PERIOD_MS = 100L
+    /** How often the main thread is checked while frames are being drawn, and while nothing is (one wake a second). */
+    private const val STALL_ACTIVE_MS = 100L
+    private const val STALL_IDLE_MS = 1000L
     private const val STALL_MIN_MS = 50L
+    private const val STRESS_RECHECK_MS = 30_000L
+    private const val LOG_EVERY_MS = 1000L
     private const val STALE_INTERACTION_MS = 5000.0
 
     val recorder = PerfRecorder()
@@ -65,10 +69,20 @@ object Perf {
     @Volatile var refreshHz: Float = 60f
         private set
 
+    private val lastLogged = ConcurrentHashMap<String, Long>()
+
     fun record(name: String, ms: Double) {
         val budget = PerfSpan.budgetsMs[name] ?: Double.MAX_VALUE
         recorder.record(name, ms, budget)
-        if (ms > budget) Log.w(TAG, "$name took ${"%.1f".format(ms)} ms (budget ${budget.toLong()} ms)")
+        if (ms > budget) {
+            // One line a second per operation: a persistent overrun must not turn into constant logging.
+            val now = SystemClock.elapsedRealtime()
+            val previous = lastLogged[name]
+            if (previous == null || now - previous >= LOG_EVERY_MS) {
+                lastLogged[name] = now
+                Log.w(TAG, "$name took ${"%.1f".format(ms)} ms (budget ${budget.toLong()} ms)")
+            }
+        }
     }
 
     inline fun <T> measure(name: String, block: () -> T): T {
@@ -130,18 +144,36 @@ object Perf {
     private var listener: Window.OnFrameMetricsAvailableListener? = null
     private var watching = false
     private var expectedAt = 0L
+    private var appContext: Context? = null
+    private var stressCheckedAt = 0L
+    private var lastFrameCount = -1L
+
+    /** The device is hot or saving power: the monitor's own background work should stay out of the way. */
+    private fun stressed(): Boolean = appContext?.let { !PerfPolicy.deviceIsCalm(batterySaver(it), thermalLabel(it)) } ?: false
 
     private val stallTick = object : Runnable {
         override fun run() {
-            val late = SystemClock.uptimeMillis() - expectedAt
+            val now = SystemClock.uptimeMillis()
+            val late = now - expectedAt
             if (late >= STALL_MIN_MS) record(PerfSpan.MainStall, late.toDouble())
-            if (watching) schedule()
+            if (!watching) return
+            if (now - stressCheckedAt >= STRESS_RECHECK_MS) {
+                stressCheckedAt = now
+                // Stop the timer altogether; the next resume looks again.
+                if (stressed()) { watching = false; return }
+            }
+            // Check often while the screen is animating (it is waking anyway), about once a second when it is still,
+            // so an idle app is not woken ten times a second for the monitor.
+            val drawn = frames.frameCount()
+            val active = drawn != lastFrameCount
+            lastFrameCount = drawn
+            schedule(if (active) STALL_ACTIVE_MS else STALL_IDLE_MS)
         }
     }
 
-    private fun schedule() {
-        expectedAt = SystemClock.uptimeMillis() + STALL_PERIOD_MS
-        mainHandler.postDelayed(stallTick, STALL_PERIOD_MS)
+    private fun schedule(periodMs: Long) {
+        expectedAt = SystemClock.uptimeMillis() + periodMs
+        mainHandler.postDelayed(stallTick, periodMs)
     }
 
     @Suppress("DEPRECATION")
@@ -167,8 +199,11 @@ object Perf {
         }
         listener = l
         activity.window.addOnFrameMetricsAvailableListener(l, Handler(frameThread.looper))
-        watching = true
-        schedule()
+        appContext = activity.applicationContext
+        stressCheckedAt = SystemClock.uptimeMillis()
+        lastFrameCount = -1
+        watching = !stressed()
+        if (watching) schedule(STALL_ACTIVE_MS)
     }
 
     fun pause(activity: Activity) {
