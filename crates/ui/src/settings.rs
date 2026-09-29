@@ -759,6 +759,12 @@ pub struct UiSettings {
     /// default). Quitting or closing the window never does.
     #[serde(alias = "archiveSessionsOnTabClose")]
     pub archive_sessions_on_close: bool,
+    /// The Settings section last viewed — reopened by the generic entry points
+    /// (⌘, the account menu, the palette). Kept as a string so an unknown or
+    /// malformed value falls back to the default section instead of costing
+    /// the rest of the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_section: Option<String>,
     /// The chat tabs at quit (two or more), in order; launch restores them.
     /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -902,6 +908,7 @@ impl Default for UiSettings {
             last_chat_id: None,
             chat_layout: None,
             archive_sessions_on_close: false,
+            settings_section: None,
             chat_tabs: Vec::new(),
             chat_tab: 0,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
@@ -1646,6 +1653,13 @@ impl UiSettings {
                             }
                         }
                     }
+                    // A malformed `settingsSection` must not cost the rest of
+                    // the file: drop it and the default section applies.
+                    if let Some(map) = value.as_object_mut()
+                        && map.get("settingsSection").is_some_and(|v| !v.is_string())
+                    {
+                        map.remove("settingsSection");
+                    }
                     serde_json::from_value::<UiSettings>(value)
                 }) {
                     Ok(settings) => settings.migrated().clamped(),
@@ -1746,6 +1760,39 @@ mod tests {
                 .separate_from_slash
         );
         assert!(legacy.skill_completion(HarnessId::Codex).dollar);
+    }
+
+    #[test]
+    fn settings_section_persists_and_a_bad_value_costs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(UiSettings::default().settings_section, None);
+        let mut settings = UiSettings::default();
+        settings.settings_section = Some("appearance".into());
+        settings.save(dir.path()).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).settings_section.as_deref(),
+            Some("appearance")
+        );
+
+        // A value of the wrong type is dropped; the rest of the file survives.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth":300,"settingsSection":5}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.settings_section, None);
+        assert_eq!(loaded.sidebar_width, 300.0);
+
+        // An unknown name loads as-is (the shell falls back when it reads it).
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth":300,"settingsSection":"nope"}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.settings_section.as_deref(), Some("nope"));
+        assert_eq!(loaded.sidebar_width, 300.0);
     }
 
     #[test]
@@ -2299,6 +2346,7 @@ mod tests {
                 projects: vec![Some("space-1".into()), None],
             }),
             archive_sessions_on_close: true,
+            settings_section: Some("appearance".into()),
             chat_tabs: vec![
                 SavedChatTab {
                     selected: Some("a".into()),

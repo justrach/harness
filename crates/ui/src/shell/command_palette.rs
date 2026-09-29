@@ -222,7 +222,10 @@ impl Shell {
         match entry {
             Entry::NewChat => self.open_new_session(cx),
             Entry::NewProject => self.open_add_space(cx),
-            Entry::Settings => self.open_settings(SettingsSection::Devices, cx),
+            Entry::Settings => {
+                let section = self.remembered_settings_section();
+                self.open_settings(section, cx)
+            }
             Entry::Theme(_) => unreachable!(),
             Entry::Pane(ix) => self.focus_chat_pane(ix, window, cx),
             Entry::Chat(id) => {
