@@ -3,10 +3,12 @@ package harness.codegraff.android
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import harness.codegraff.android.demo.DemoDataset
+import harness.codegraff.android.model.Attention
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.SessionRow
 import harness.codegraff.android.model.SessionStatus
 import harness.codegraff.android.model.TranscriptRow
+import harness.codegraff.android.model.attention
 import harness.codegraff.android.model.sortedByCalledAt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -20,19 +22,26 @@ data class AppState(
     val chats: List<Chat>,
     val sessions: Map<String, SessionRow>,
     val transcripts: Map<String, List<TranscriptRow>>,
-    val openChatId: String? = null,
     val now: Long,
 ) {
     val active: List<Chat> get() = chats.filter { !it.archived }.sortedByCalledAt()
     val archived: List<Chat> get() = chats.filter { it.archived }.sortedByCalledAt()
-    val openChat: Chat? get() = chats.firstOrNull { it.id == openChatId }
+
+    fun chat(id: String): Chat? = chats.firstOrNull { it.id == id }
+
     fun transcript(chatId: String): List<TranscriptRow> = transcripts[chatId].orEmpty()
+
+    fun attention(chat: Chat): Attention = chat.attention(sessions[chat.id]?.status)
+
+    val needsYouCount: Int get() = active.count { attention(it) == Attention.NeedsYou }
+    val runningCount: Int get() = active.count { attention(it) == Attention.Running }
 }
 
 /**
  * Screen state for the app. Today it drives the offline demo dataset, the same
  * starting point as the iOS `-demo` mode; the live sync client will replace
- * `DemoDataset` behind the same `AppState`.
+ * `DemoDataset` behind the same `AppState`. Which session is open is UI state
+ * (the adaptive list-detail navigator), not model state.
  */
 class AppModel(
     private val clock: () -> Long = System::currentTimeMillis,
@@ -57,18 +66,14 @@ class AppModel(
         )
     }
 
-    fun open(chatId: String) {
+    /** Opening a session marks it seen, which clears its "needs you" state. */
+    fun markSeen(chatId: String) {
         _state.update { s ->
             s.copy(
-                openChatId = chatId,
                 chats = s.chats.map { if (it.id == chatId) it.copy(lastSeenAt = clock()) else it },
                 now = clock(),
             )
         }
-    }
-
-    fun back() {
-        _state.update { it.copy(openChatId = null, now = clock()) }
     }
 
     /** Appends the user's message, then streams the scripted reply into a live row. */
@@ -85,17 +90,20 @@ class AppModel(
                     TranscriptRow.User(userId, trimmed) +
                     TranscriptRow.Assistant(replyId, "", live = true)),
                 chats = s.chats.map {
-                    if (it.id == chatId) it.copy(lastPromptAt = at, lastMessageAt = at, lastMessagePreview = trimmed) else it
+                    if (it.id == chatId) {
+                        it.copy(lastPromptAt = at, lastMessageAt = at, lastSeenAt = at, lastMessagePreview = trimmed)
+                    } else {
+                        it
+                    }
                 },
                 sessions = s.sessions + (chatId to SessionRow(chatId, s.chats.first { it.id == chatId }.deviceId, SessionStatus.Working, at)),
                 now = at,
             )
         }
         streamJob = viewModelScope.launch {
-            val words = DemoDataset.STREAM_REPLY.split(' ')
             var shown = ""
-            for (word in words) {
-                shown = if (shown.isEmpty()) word else "$shown $word"
+            for (token in Regex("""\S+\s*""").findAll(DemoDataset.STREAM_REPLY).map { it.value }) {
+                shown += token
                 delay(tickMs)
                 setReply(chatId, replyId, shown, live = true)
             }

@@ -1,6 +1,9 @@
 package harness.codegraff.android
 
+import harness.codegraff.android.model.Attention
 import harness.codegraff.android.model.Chat
+import harness.codegraff.android.model.SessionStatus
+import harness.codegraff.android.model.attention
 import harness.codegraff.android.model.Space
 import harness.codegraff.android.model.compactAge
 import harness.codegraff.android.model.sortedByCalledAt
@@ -46,6 +49,18 @@ class EntitiesTest {
         assertEquals("harness", Space("s", "d", "/Users/dev/harness").displayName)
         assertEquals("harness", Space("s", "d", "/Users/dev/harness/").displayName)
         assertEquals("Mine", Space("s", "d", "/x/y", name = "Mine").displayName)
+    }
+
+    @Test
+    fun attentionRanksRunningWaitingErroredAndUnread() {
+        val read = chat("r", message = 5, seen = 5)
+        val unread = chat("u", message = 10, seen = 5)
+        assertEquals(Attention.Running, read.attention(SessionStatus.Working))
+        assertEquals(Attention.NeedsYou, read.attention(SessionStatus.AwaitingInput))
+        assertEquals(Attention.NeedsYou, read.attention(SessionStatus.Errored))
+        assertEquals(Attention.NeedsYou, unread.attention(null))
+        assertEquals(Attention.None, read.attention(null))
+        assertEquals(Attention.None, unread.copy(archived = true).attention(null))
     }
 
     @Test

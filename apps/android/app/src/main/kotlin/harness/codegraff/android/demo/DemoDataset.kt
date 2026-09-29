@@ -82,7 +82,10 @@ class DemoDataset(
                     ),
                     TranscriptRow.Assistant(
                         "a1",
-                        "Done — the header keeps its muted color even on failure; only the chip label and the summary segment (“1 failed”) pick up the danger color.",
+                        "Done — the header keeps its muted color even on failure; only the chip label and the summary segment (“1 failed”) pick up the **danger** color.\n\n" +
+                            "- `tool_group.rs` no longer tints the header\n" +
+                            "- The failed chip keeps its label and count\n\n" +
+                            "The test that failed before the change now passes.",
                     ),
                 ),
                 "chat-veil" to listOf(
@@ -99,7 +102,11 @@ class DemoDataset(
 
         /** The scripted reply the demo streams when you send a message. */
         const val STREAM_REPLY =
-            "Here's how the streamed reply renders on this device: markdown re-parses only the tail, " +
-                "and new text fades in through the paint-only veil. The transcript stays put while you type."
+            "Here's how the streamed reply renders on this device:\n\n" +
+                "- Markdown re-parses only the **tail** of the message\n" +
+                "- New text fades in through the paint-only veil\n" +
+                "- The transcript stays put while you type\n\n" +
+                "```kotlin\nval rows = transcript.asReversed()\n```\n\n" +
+                "Ask for a diff to see it in `chat-veil`."
     }
 }

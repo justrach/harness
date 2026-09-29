@@ -1,6 +1,7 @@
 package harness.codegraff.android
 
 import harness.codegraff.android.demo.DemoDataset
+import harness.codegraff.android.model.Attention
 import harness.codegraff.android.model.SessionStatus
 import harness.codegraff.android.model.TranscriptRow
 import kotlinx.coroutines.Dispatchers
@@ -34,16 +35,25 @@ class AppModelTest {
     }
 
     @Test
-    fun openingMarksSeenAndBackCloses() {
+    fun openingASessionMarksItSeenAndClearsNeedsYou() {
         var now = 10_000_000_000L
         val model = AppModel(clock = { now })
-        assertTrue(model.state.value.chats.first { it.id == "chat-tabs" }.unseen)
+        val before = model.state.value
+        assertTrue(before.chat("chat-tabs")!!.unseen)
+        assertEquals(Attention.NeedsYou, before.attention(before.chat("chat-tabs")!!))
         now += 5
-        model.open("chat-tabs")
-        assertEquals("chat-tabs", model.state.value.openChat?.id)
-        assertFalse(model.state.value.chats.first { it.id == "chat-tabs" }.unseen)
-        model.back()
-        assertNull(model.state.value.openChat)
+        model.markSeen("chat-tabs")
+        val after = model.state.value
+        assertFalse(after.chat("chat-tabs")!!.unseen)
+        assertEquals(Attention.None, after.attention(after.chat("chat-tabs")!!))
+    }
+
+    @Test
+    fun homeCountsMatchTheSwitcher() {
+        val state = AppModel(clock = { 1_000_000L }).state.value
+        // Picker is waiting on you and Tabs is unread; Veil is running.
+        assertEquals(2, state.needsYouCount)
+        assertEquals(1, state.runningCount)
     }
 
     @Test

@@ -66,6 +66,16 @@ data class SessionRow(
     val updatedAt: Long,
 )
 
+/** What a session is asking of the person: the Home switcher's "needs you" and "running". */
+enum class Attention { Running, NeedsYou, None }
+
+fun Chat.attention(status: SessionStatus?): Attention = when {
+    status == SessionStatus.Working -> Attention.Running
+    status == SessionStatus.AwaitingInput || status == SessionStatus.Errored -> Attention.NeedsYou
+    !archived && unseen -> Attention.NeedsYou
+    else -> Attention.None
+}
+
 /** Newest-called first; the order Home lists active sessions in. */
 fun List<Chat>.sortedByCalledAt(): List<Chat> = sortedByDescending { it.calledAt }
 
