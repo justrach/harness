@@ -610,6 +610,15 @@ pub enum RightSurface {
     Subagent(u64),
 }
 
+/// What a new browser tab starts on.
+enum BrowserOpen {
+    /// Empty, with the address bar focused.
+    Blank,
+    Url(String),
+    /// A page a tool saved on this device (graff views, MCP Apps).
+    View(harness_proto::ToolView),
+}
+
 fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
     if tabs.contains(&surface) {
         false
@@ -1965,8 +1974,10 @@ impl Shell {
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let links = Self::session_links(None, cx);
+        let views = Self::view_opener(cx);
         transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(links)
+            transcript.set_workspace_link_handler(links);
+            transcript.set_view_opener(views);
         });
         // Every send glides the prompt to the viewport top and reserves the
         // reply's space below it (notes-app parity).
@@ -3259,10 +3270,68 @@ impl Shell {
         outcome
     }
 
+    /// Opens a transcript chip's saved view through the shell (the transcript
+    /// hosts no surfaces).
+    fn view_opener(cx: &Context<Self>) -> crate::transcript::ViewOpener {
+        let shell = cx.weak_entity();
+        std::rc::Rc::new(move |chat_id, view, window, cx| {
+            let _ = shell.update(cx, |shell, cx| shell.open_tool_view(chat_id, view, window, cx));
+        })
+    }
+
+    /// A tool chip's saved view: open it in a browser tab, but only for the
+    /// chat on screen, and only when that chat ran on this device — the page
+    /// is a file on its host.
+    fn open_tool_view(
+        &mut self,
+        source: &str,
+        view: &harness_proto::ToolView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Subagent transcripts are keyed `{chatId}--sub--{call}`.
+        let chat_id = source.split("--sub--").next().unwrap_or(source);
+        if self.active_chat.is_empty()
+            || chat_id != self.active_chat
+            || self.state.read(cx).selected_chat.as_deref() != Some(chat_id)
+        {
+            return;
+        }
+        let host = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat_row()
+                .filter(|chat| Some(chat.device_id.as_str()) != state.local_device_id.as_deref())
+                .map(|chat| state.device_name(&chat.device_id).unwrap_or("another computer").to_owned())
+        };
+        if let Some(host) = host {
+            self.sidebar_notice = Some(format!("This view is saved on {host}. Open it there.").into());
+            cx.notify();
+            return;
+        }
+        if !cfg!(target_os = "macos") {
+            self.sidebar_notice = Some("Saved views open in the browser pane on macOS for now.".into());
+            cx.notify();
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        self.open_browser_surface(BrowserOpen::View(view.clone()), window, cx);
+    }
+
     /// Browser tabs are independent instances owned by the current session.
     fn add_browser_surface(
         &mut self,
         url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = url.map_or(BrowserOpen::Blank, BrowserOpen::Url);
+        self.open_browser_surface(open, window, cx);
+    }
+
+    fn open_browser_surface(
+        &mut self,
+        open: BrowserOpen,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3281,7 +3350,10 @@ impl Shell {
         let browser = cx.new(|cx| {
             crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
         });
-        if let Some(handle) = self.state.read(cx).engine().cloned() {
+        // A saved view has no project to discover previews for.
+        if !matches!(open, BrowserOpen::View(_))
+            && let Some(handle) = self.state.read(cx).engine().cloned()
+        {
             let chat_id = self.active_chat.clone();
             browser.update(cx, |browser, cx| {
                 browser.watch_previews(handle, chat_id, cx)
@@ -3311,12 +3383,10 @@ impl Shell {
             .or_default()
             .push(RightSurface::Browser(id));
         self.set_right_active(RightSurface::Browser(id), cx);
-        browser.update(cx, |browser, cx| {
-            if let Some(url) = url {
-                browser.navigate(&url, window, cx);
-            } else {
-                browser.focus_address(window, cx);
-            }
+        browser.update(cx, |browser, cx| match open {
+            BrowserOpen::Url(url) => browser.navigate(&url, window, cx),
+            BrowserOpen::View(view) => browser.open_view(view, window, cx),
+            BrowserOpen::Blank => browser.focus_address(window, cx),
         });
     }
 
@@ -3630,8 +3700,10 @@ impl Shell {
         let transcript =
             cx.new(|cx| Transcript::for_doc(self.state.clone(), doc_id.clone(), !frozen, cx));
         let links = Self::session_links(Some(self.active_chat.clone()), cx);
+        let views = Self::view_opener(cx);
         transcript.update(cx, |transcript, _| {
-            transcript.set_workspace_link_handler(links)
+            transcript.set_workspace_link_handler(links);
+            transcript.set_view_opener(views);
         });
         let events = cx.subscribe(&transcript, Self::on_transcript_event);
         let fetch = if frozen {
@@ -14884,6 +14956,23 @@ impl Shell {
         }
         self.add_browser_surface(url, window, cx);
         (self.browser_seq, self.browsers[&self.browser_seq].clone())
+    }
+    /// Open a saved view through the same path a chip click takes; `None`
+    /// when the shell refused it (not this chat, or another device's).
+    pub fn fixture_open_view(
+        &mut self,
+        view: harness_proto::ToolView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(u64, Entity<crate::browser::BrowserSurface>)> {
+        if f32::from(window.viewport_size().width) < 1200.0 {
+            self.settings.sidebar_collapsed = true;
+        }
+        let before = self.browser_seq;
+        let chat = self.active_chat.clone();
+        self.open_tool_view(&chat, &view, window, cx);
+        (self.browser_seq != before)
+            .then(|| (self.browser_seq, self.browsers[&self.browser_seq].clone()))
     }
     pub fn fixture_select_browser(&mut self, id: u64, cx: &mut Context<Self>) {
         self.set_right_active(RightSurface::Browser(id), cx);

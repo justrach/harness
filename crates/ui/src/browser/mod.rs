@@ -10,6 +10,7 @@ use macos as native;
 #[cfg(target_os = "macos")]
 pub use macos::clear_browsing_data;
 pub mod model;
+pub mod saved_view;
 mod view;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
@@ -86,6 +87,8 @@ pub struct BrowserSurface {
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
+    /// Set when the tab shows a saved tool view instead of the web.
+    view: Option<harness_proto::ToolView>,
     previews: harness_proto::PreviewSnapshot,
     previews_loading: bool,
     previews_task: Option<gpui::Task<()>>,
@@ -164,6 +167,7 @@ impl BrowserSurface {
             address_edited: false,
             validation: None,
             remote,
+            view: None,
             previews: harness_proto::PreviewSnapshot::default(),
             previews_loading: true,
             previews_task: None,
@@ -189,6 +193,10 @@ impl BrowserSurface {
     }
 
     pub fn title(&self) -> gpui::SharedString {
+        // A view's URL host is its kind ("html"), not a site name.
+        if self.view.is_some() && self.page.title.trim().is_empty() {
+            return "Saved view".into();
+        }
         self.page.label().into()
     }
     pub fn set_remote(&mut self, remote: bool) {
@@ -365,7 +373,53 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    /// Show a page a tool saved on this device. The tab stays on it: typed
+    /// addresses are ignored and the page cannot navigate anywhere else.
+    pub fn open_view(
+        &mut self,
+        view: harness_proto::ToolView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = saved_view::view_url(&view);
+        self.view = Some(view);
+        self.validation = None;
+        self.address
+            .update(cx, |input, cx| input.set_text(url.clone(), cx));
+        self.address_edited = false;
+        self.page.url = Some(url.clone());
+        self.page.title.clear();
+        self.page.error = None;
+        #[cfg(target_os = "macos")]
+        {
+            let kind = self.view.as_ref().map(|view| view.kind).unwrap_or(harness_proto::ToolViewKind::Html);
+            let result = native::NativePage::new_view(window, kind, self.native_tx.clone()).and_then(
+                |mut native| {
+                    native.present(self.presentation);
+                    let loaded = native.load(&url);
+                    self.native = Some(native);
+                    loaded
+                },
+            );
+            self.page.loading = result.is_ok();
+            if let Err(error) = result {
+                self.page.error = Some(format!("Could not open this view: {error}"));
+            }
+            window.focus(&self.focus, cx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            self.page.error = Some("Saved views open in the browser pane on macOS for now.".into());
+        }
+        cx.emit(BrowserEvent::Changed);
+        cx.notify();
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view.is_some() {
+            return;
+        }
         let url = self.address.read(cx).text().to_owned();
         self.navigate(&url, window, cx);
     }
@@ -475,7 +529,8 @@ impl BrowserSurface {
                     self.address_edited = false;
                 }
                 native.present(self.presentation);
-                if finished && let Some(url) = &page.url {
+                // A saved view has no site to fetch an icon from.
+                if finished && self.view.is_none() && let Some(url) = &page.url {
                     native.discover_favicon(url.clone());
                 }
                 if page != self.page {

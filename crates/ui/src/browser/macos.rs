@@ -2,6 +2,10 @@
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
 use super::model::{PageState, Presentation, allowed_navigation};
+use super::saved_view::{
+    VIEW_CSP, VIEW_SCHEME, ViewReadError, allowed_view_navigation, read_view, view_csp, view_from_url,
+};
+use harness_proto::ToolViewKind;
 use gpui::{Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -177,6 +181,9 @@ struct ObserverState {
     pending: Cell<bool>,
     error: RefCell<Option<String>>,
     requested_url: RefCell<Option<String>>,
+    /// A saved-view page of this kind: it may load only its own
+    /// `graff-view:` frame and the inline frames its kind needs.
+    view: Option<ToolViewKind>,
 }
 
 define_class!(
@@ -196,10 +203,12 @@ define_class!(
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::Block<dyn Fn(WKNavigationActionPolicy)>) {
             let url = unsafe { action.request().URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default();
-            if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
+            let main_frame = unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() });
+            let allowed = match self.ivars().view { Some(kind) => allowed_view_navigation(kind, &url, main_frame), None => allowed_navigation(&url) };
+            if allowed && main_frame {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }
-            decision.call((if allowed_navigation(&url) { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
+            decision.call((if allowed { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
@@ -241,12 +250,13 @@ define_class!(
 );
 
 impl Observer {
-    fn new(tx: Sender, mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(tx: Sender, view: Option<ToolViewKind>, mtm: MainThreadMarker) -> Retained<Self> {
         let object = mtm.alloc().set_ivars(ObserverState {
             tx,
             pending: Cell::new(false),
             error: RefCell::new(None),
             requested_url: RefCell::new(None),
+            view,
         });
         unsafe { msg_send![super(object), init] }
     }
@@ -311,23 +321,79 @@ pub(super) struct Host {
     visibility_changes: Cell<u64>,
 }
 
+/// Serve a saved view: only from graff's directories, always under its CSP.
+fn view_response(address: &str) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let result = std::env::home_dir()
+        .ok_or(ViewReadError::NotFound)
+        .and_then(|home| read_view(&home, address));
+    let (status, body): (u16, Vec<u8>) = match result {
+        Ok(body) => (200, body),
+        Err(ViewReadError::NotFound) => (404, b"This view is no longer on this computer.".to_vec()),
+        Err(ViewReadError::TooLarge) => (413, b"This view is too large to open.".to_vec()),
+        Err(ViewReadError::Invalid) => (400, b"This view can't be opened.".to_vec()),
+    };
+    let content_type = if status == 200 { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" };
+    let csp = view_from_url(address).map_or(VIEW_CSP, |view| view_csp(view.kind));
+    wry::http::Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .header("Content-Security-Policy", csp)
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .body(std::borrow::Cow::Owned(body))
+        .unwrap_or_else(|_| {
+            let mut empty = wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]));
+            *empty.status_mut() = wry::http::StatusCode::INTERNAL_SERVER_ERROR;
+            empty
+        })
+}
+
 impl NativePage {
     pub fn new(window: &Window, data: &BrowserData, tx: Sender) -> Result<Self, String> {
         let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
+        Self::build(window, data, data.configuration(mtm), None, tx, mtm)
+    }
+
+    /// A saved tool view: its own throwaway website data, pages served only
+    /// on [`VIEW_SCHEME`] from graff's directories, and no way onto the web.
+    pub fn new_view(window: &Window, kind: ToolViewKind, tx: Sender) -> Result<Self, String> {
+        let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
+        let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+        unsafe {
+            configuration
+                .setWebsiteDataStore(&objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm));
+        }
+        Self::build(window, &BrowserData::default(), configuration, Some(kind), tx, mtm)
+    }
+
+    fn build(
+        window: &Window,
+        data: &BrowserData,
+        configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
+        view_page: Option<ToolViewKind>,
+        tx: Sender,
+        mtm: MainThreadMarker,
+    ) -> Result<Self, String> {
         let new_tab = tx.clone();
-        let web = wry::WebViewBuilder::new()
-            .with_webview_configuration(data.configuration(mtm))
+        let mut builder = wry::WebViewBuilder::new()
+            .with_webview_configuration(configuration)
             .with_visible(false)
             .with_focused(false)
             .with_new_window_req_handler(move |url, _| {
-                if allowed_navigation(&url) {
+                // A view page never opens anything else.
+                if view_page.is_none() && allowed_navigation(&url) {
                     let _ = new_tab.try_send(NativeEvent::NewTab(url));
                 }
                 wry::NewWindowResponse::Deny
             })
-            .with_download_started_handler(|_, _| false)
-            .build_as_child(window)
-            .map_err(|e| e.to_string())?;
+            .with_download_started_handler(|_, _| false);
+        if view_page.is_some() {
+            builder = builder.with_custom_protocol(VIEW_SCHEME.into(), |_, request| {
+                view_response(&request.uri().to_string())
+            });
+        }
+        let web = builder.build_as_child(window).map_err(|e| e.to_string())?;
         let view = Retained::into_super(web.webview());
         window
             .enable_scene_overlay()
@@ -366,7 +432,7 @@ impl NativePage {
         }
         clip.addSubview(&view);
 
-        let observer = Observer::new(tx.clone(), mtm);
+        let observer = Observer::new(tx.clone(), view_page, mtm);
         unsafe {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*observer)));
             for key in OBSERVED {

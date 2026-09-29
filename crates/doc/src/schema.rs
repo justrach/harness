@@ -120,6 +120,9 @@ struct DocPartJson {
     /// One-line live tail of the subagent's output (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subagent_tail: Option<String>,
+    /// A page the tool saved on the host: `{kind, id}` (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<serde_json::Value>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -164,6 +167,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             subagent_ref,
             subagent_status,
             subagent_tail,
+            view,
         } => DocPartJson {
             id: id.clone(),
             kind: "tool".into(),
@@ -189,6 +193,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
                 .to_owned()
             }),
             subagent_tail: subagent_tail.clone(),
+            view: view.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
         MessagePart::Input {
@@ -238,6 +243,11 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                     _ => None,
                 }),
                 subagent_tail: p.subagent_tail,
+                // A doc can come from any device: keep only a well-formed id.
+                view: p
+                    .view
+                    .and_then(|v| serde_json::from_value::<harness_proto::ToolView>(v).ok())
+                    .filter(harness_proto::ToolView::is_valid),
             },
             None => MessagePart::Text {
                 id: p.id,
@@ -903,6 +913,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(view) = &doc_part.view {
+        map.insert("view", loro_value_from_json(view))?;
+    }
     Ok(())
 }
 
@@ -1083,6 +1096,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
         });
     }
     if let Some(message) = obj.get("message").and_then(|x| x.as_str()) {
@@ -1369,6 +1383,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(view) = &doc_part.view {
+        map.insert("view", loro_value_from_json(view))?;
+    }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
         if let Some(loro::ValueOrContainer::Container(loro::Container::Text(t))) = map.get("text") {
@@ -1636,6 +1653,52 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_view_round_trips_and_a_malformed_one_is_dropped() {
+        use harness_proto::{ToolView, ToolViewKind};
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let tool = |id: &str, view: Option<ToolView>| MessagePart::Tool {
+            id: id.into(),
+            call: harness_proto::ToolCall::Unknown {
+                name: "render_html".into(),
+                input: None,
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            view,
+        };
+        let good = ToolView::new(ToolViewKind::McpApp, "0123456789abcdef0123456789abcdef").unwrap();
+        // Another device's doc could carry anything; only a valid id is kept.
+        let bad = ToolView {
+            kind: ToolViewKind::Html,
+            id: "../../.ssh/id_ed25519".into(),
+        };
+        // The view arrives after the chip first synced (the live-patch path).
+        let mut parts = vec![tool("a", None), tool("b", None)];
+        w.sync(&parts).unwrap();
+        parts = vec![tool("a", Some(good.clone())), tool("b", Some(bad))];
+        w.sync(&parts).unwrap();
+        let views: Vec<_> = doc.read_entries().unwrap()[0]
+            .parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { view, .. } => view.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(views, vec![Some(good), None]);
+    }
+
+    #[test]
     fn segment_sync_persists_subagent_chip_fields_on_live_parts() {
         // The eager-done world's OTHER path: the chip mutates while its
         // segment still streams (codex fan-outs) — update_part_fields must
@@ -1659,6 +1722,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
         };
         w.sync(std::slice::from_ref(&part)).unwrap();
         if let MessagePart::Tool {
@@ -1726,6 +1790,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
         };
         let parts = vec![
             tool(
@@ -2061,6 +2126,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
             }],
             created_at: 1,
             device_id: "dev-a".into(),

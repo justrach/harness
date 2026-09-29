@@ -1513,6 +1513,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                view,
             } => MessagePart::Tool {
                 id: id.clone(),
                 call: sanitize_tool_call(call),
@@ -1531,6 +1532,8 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 subagent_ref: subagent_ref.clone(),
                 subagent_status: *subagent_status,
                 subagent_tail: subagent_tail.clone(),
+                // Kind + id only: the host resolves them to its own files.
+                view: view.clone(),
             },
             other => other.clone(),
         })
