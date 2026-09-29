@@ -120,7 +120,7 @@ fun HomeScreen(
     val chats = remember(state, scoped, searchText, statusFilter) {
         HomeFilter.apply(scoped, searchText, statusFilter, state::indicator, state::filterNames)
     }
-    val groups = remember(chats, grouping) { HomeGrouping.groups(chats, grouping) }
+    val groups = remember(chats, grouping, state.pinnedSessionIds) { HomeGrouping.groups(chats, grouping, state.pinnedSessionIds.toSet()) }
     val counts = remember(state, scoped) { statusCounts(state, scoped) }
     val archived = remember(state, selectedSpace, searchText) { state.archivedMatches(selectedSpace?.id, searchText) }
     val topInset = statusBarHeight()
@@ -311,12 +311,16 @@ internal fun HarnessMenu(expanded: Boolean, onDismiss: () -> Unit, content: @Com
 }
 
 @Composable
-internal fun MenuRow(title: String, subtitle: String?, selected: Boolean, glyph: Glyph? = null, onClick: () -> Unit) {
+internal fun MenuRow(
+    title: String, subtitle: String?, selected: Boolean, glyph: Glyph? = null,
+    enabled: Boolean = true, destructive: Boolean = false, onClick: () -> Unit,
+) {
     val p = Theme.palette
     DropdownMenuItem(
+        enabled = enabled,
         text = {
             Column {
-                Text(title, style = sans(15f), color = p.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(title, style = sans(15f), color = if (destructive) p.danger else p.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (subtitle != null) Text(subtitle, style = sans(12f), color = p.textMuted)
             }
         },
@@ -443,6 +447,7 @@ private fun HomeGroupHeader(group: HomeGroup, state: WorkspaceState, collapsed: 
     val p = Theme.palette
     val title = when (val kind = group.kind) {
         HomeGroup.Kind.All -> "All"
+        HomeGroup.Kind.Pinned -> "Pinned"
         is HomeGroup.Kind.Project -> kind.spaceId?.let { id -> state.spaces.firstOrNull { it.id == id }?.displayName }
             ?: if (kind.spaceId == null) "No project" else (group.chats.firstOrNull()?.cwd?.trimEnd('/')?.substringAfterLast('/') ?: "Project")
         is HomeGroup.Kind.Device -> state.deviceName(kind.deviceId)
@@ -457,6 +462,7 @@ private fun HomeGroupHeader(group: HomeGroup, state: WorkspaceState, collapsed: 
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         when (val kind = group.kind) {
+            HomeGroup.Kind.Pinned -> GlyphView(Glyph.Pin, 12.dp, p.textMuted, strokeWidth = 2f)
             is HomeGroup.Kind.Project ->
                 if (kind.spaceId != null) Box(Modifier.size(8.dp).background(p.projectTint(kind.spaceId), CircleShape))
                 else Box(Modifier.size(8.dp).border(1.5.dp, p.textFaint, CircleShape))

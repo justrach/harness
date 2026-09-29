@@ -30,6 +30,8 @@ enum class Glyph(
     val rects: List<List<Float>> = emptyList(),
 ) {
     ArrowUp(listOf("M12 19V5", "M5 12l7-7 7 7")),
+    ArrowRight(listOf("M5 12h14", "m12 5 7 7-7 7")),
+    Ellipsis(listOf("M12 12h.01", "M19 12h.01", "M5 12h.01")),
     ChevronDown(listOf("m6 9 6 6 6-6")),
     ChevronUp(listOf("m18 15-6-6-6 6")),
     ChevronRight(listOf("m9 18 6-6-6-6")),

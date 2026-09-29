@@ -106,6 +106,8 @@ fun ComposerShell(
     attachments: List<StagedAttachment> = emptyList(),
     onAttach: (() -> Unit)? = null,
     onRemoveAttachment: (String) -> Unit = {},
+    /** Saving an emptied queued row discards it, so the button stays live with no text (ComposerShell.allowEmptySend). */
+    allowEmptySend: Boolean = false,
     chips: @Composable RowScope.() -> Unit,
 ) {
     val p = Theme.palette
@@ -116,7 +118,7 @@ fun ComposerShell(
     val margin by animateDpAsState(if (focused) 10.dp else 16.dp, Motion.resize(), label = "margin")
     val shape = RoundedCornerShape(radius)
     val focus = remember { FocusRequester() }
-    val hasContent = draft.trim().isNotEmpty() || attachments.isNotEmpty()
+    val hasContent = draft.trim().isNotEmpty() || attachments.isNotEmpty() || allowEmptySend
     val buttonActive = if (showStop && !hasContent) true else sendEnabled && hasContent && !busy
 
     val haptics = rememberHaptics()

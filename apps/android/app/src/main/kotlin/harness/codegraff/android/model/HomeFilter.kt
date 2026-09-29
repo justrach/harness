@@ -56,6 +56,8 @@ enum class HomeGroupBy(val label: String) {
 data class HomeGroup(val id: String, val kind: Kind, val chats: List<Chat>) {
     sealed interface Kind {
         data object All : Kind
+        /** Pinned sessions, gathered above every project or device section. */
+        data object Pinned : Kind
         /** null: sessions without a project. */
         data class Project(val spaceId: String?) : Kind
         data class Device(val deviceId: String) : Kind
@@ -63,7 +65,18 @@ data class HomeGroup(val id: String, val kind: Kind, val chats: List<Chat>) {
 }
 
 object HomeGrouping {
-    fun groups(chats: List<Chat>, by: HomeGroupBy): List<HomeGroup> = when (by) {
+    /**
+     * The list split into sections. When grouped, pinned sessions leave their sections and gather in a "Pinned"
+     * section above them all, so a pin is never buried inside a group (HomeGrouping.swift).
+     */
+    fun groups(chats: List<Chat>, by: HomeGroupBy, pinned: Set<String> = emptySet()): List<HomeGroup> {
+        if (by == HomeGroupBy.None) return listOf(HomeGroup("all", HomeGroup.Kind.All, chats))
+        val pins = chats.filter { it.id in pinned }
+        if (pins.isEmpty()) return sections(chats, by)
+        return listOf(HomeGroup("pinned", HomeGroup.Kind.Pinned, pins)) + sections(chats.filter { it.id !in pinned }, by)
+    }
+
+    private fun sections(chats: List<Chat>, by: HomeGroupBy): List<HomeGroup> = when (by) {
         HomeGroupBy.None -> listOf(HomeGroup("all", HomeGroup.Kind.All, chats))
         HomeGroupBy.Project -> {
             val buckets = ordered(chats) { it.spaceId ?: "" }

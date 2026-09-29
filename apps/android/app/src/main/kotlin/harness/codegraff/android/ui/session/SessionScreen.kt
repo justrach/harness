@@ -1,5 +1,16 @@
 package harness.codegraff.android.ui.session
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import harness.codegraff.android.model.MessageQueue
+import harness.codegraff.android.model.QueueComposerEdit
+import harness.codegraff.android.model.QueueEditFinishResult
+import harness.codegraff.android.model.QueueEditStartResult
+import harness.codegraff.android.model.QueuedMessage
+import java.util.UUID
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -221,6 +232,7 @@ private fun StatusStrip(chat: Chat, status: SessionStatus?, state: WorkspaceStat
 /** The live-chat composer: input, the photo attach button, the model and trait chips (harness stays locked mid-chat), and the morphing action button. */
 @Composable
 private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, runLive: Boolean) {
+    val clipboard = LocalClipboardManager.current
     var draft by rememberSaveable(chat.id) { mutableStateOf("") }
     var attachments by remember(chat.id) { mutableStateOf(listOf<StagedAttachment>()) }
     var showModelPicker by remember { mutableStateOf(false) }
@@ -233,31 +245,155 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
     val currentReasoning = if (currentModel.reasoningLevels.isEmpty()) null
     else chat.config?.reasoning?.takeIf { it in currentModel.reasoningLevels } ?: HarnessCatalog.defaultReasoning(currentModel)
 
+    // The chat's queue: what was typed mid-turn waits here, and a row can be retyped in this composer.
+    val queue by remember(chat.id) { model.queueFlow(chat.id) }.collectAsState(initial = model.queue(chat.id))
+    val scope = rememberCoroutineScope()
+    var edit by remember(chat.id) { mutableStateOf<QueueComposerEdit?>(null) }
+    var editBusy by remember(chat.id) { mutableStateOf(false) }
+    var notice by remember(chat.id) { mutableStateOf<String?>(null) }
+    val instanceId = remember(chat.id) { UUID.randomUUID().toString().lowercase() }
+    val editingId = edit?.lease?.rowId
+
+    fun finishLocalEdit(result: QueueEditFinishResult, failure: String) {
+        edit = edit?.receive(result)
+        when (result) {
+            QueueEditFinishResult.Finished -> { draft = edit?.originalDraft ?: ""; edit = null; notice = null }
+            QueueEditFinishResult.Conflict -> notice = "This message changed on another device; your edit is still here."
+            QueueEditFinishResult.Missing -> notice = "Message removed. Stop editing to copy your text and restore your draft."
+            QueueEditFinishResult.Lost -> notice = "Edit protection changed. Stop editing to copy your text and restore your draft."
+            QueueEditFinishResult.Unavailable -> notice = failure
+        }
+    }
+
+    /** Retype a queued message in the composer. Whatever was already in the box steps aside rather than being lost. */
+    fun beginEdit(item: QueuedMessage) {
+        if (edit != null || editBusy) return
+        scope.launch {
+            editBusy = true
+            val result = model.beginQueuedEdit(chat.id, item.id, instanceId)
+            editBusy = false
+            when (result) {
+                is QueueEditStartResult.Acquired -> {
+                    edit = QueueComposerEdit(result.lease, originalDraft = draft, hasAttachments = item.attachments.isNotEmpty())
+                    draft = MessageQueue.visibleText(result.lease.text, item.attachments)
+                    notice = null
+                }
+                QueueEditStartResult.Locked -> notice = "That queued message is being edited on another device."
+                QueueEditStartResult.Missing -> notice = "That queued message is no longer available."
+                QueueEditStartResult.Unavailable -> notice = "Connect to the chat host to edit this message."
+            }
+        }
+    }
+
+    fun cancelEdit() {
+        val lease = edit?.lease ?: return
+        if (editBusy) return
+        scope.launch {
+            editBusy = true
+            val result = model.finishQueuedEdit(chat.id, lease, "cancel")
+            editBusy = false
+            finishLocalEdit(result, "Couldn't cancel the protected edit.")
+        }
+    }
+
+    fun commitEdit() {
+        val lease = edit?.lease ?: return
+        if (editBusy) return
+        val edited = edit?.textToCommit(draft)
+        scope.launch {
+            editBusy = true
+            val result = if (edited != null) model.finishQueuedEdit(chat.id, lease, "commit", edited)
+            else model.finishQueuedEdit(chat.id, lease, "discard")
+            editBusy = false
+            finishLocalEdit(result, "Couldn't save the protected edit.")
+        }
+    }
+
+    // The host holds the row for a minute at a time, so a long edit renews its lease.
+    LaunchedEffect(edit?.lease?.leaseId, edit?.terminal) {
+        val lease = edit?.lease ?: return@LaunchedEffect
+        if (edit?.terminal == true) return@LaunchedEffect
+        while (edit?.lease?.leaseId == lease.leaseId) {
+            delay(20_000)
+            if (!model.renewQueuedEdit(chat.id, lease)) notice = "Edit protection may have expired — review before sending."
+        }
+    }
+    // Leaving the screen mid-edit puts the original draft back and releases the row.
+    DisposableEffect(chat.id) {
+        onDispose {
+            val current = edit ?: return@onDispose
+            draft = current.originalDraft
+            model.cancelQueuedEditInBackground(chat.id, current.lease)
+        }
+    }
+
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(8)) { uris: List<Uri> ->
         attachments = attachments + uris.map { StagedAttachment(it.toString(), it.lastPathSegment ?: "Photo", it) }
     }
 
-    ComposerShell(
-        draft = draft, onDraftChange = { draft = it },
-        sendEnabled = true, showStop = runLive,
-        sendLabel = if (runLive) "Queue message" else "Send message",
-        keepExpanded = showModelPicker || showTraitPicker || optionPicker != null,
-        onSend = {
-            model.send(chat.id, draft.ifBlank { "Look at the attached photos." })
-            draft = ""
-            attachments = emptyList()
-        },
-        onStop = { model.interrupt(chat.id) },
-        attachments = attachments,
-        onAttach = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-        onRemoveAttachment = { id -> attachments = attachments.filterNot { it.id == id } },
-    ) {
-        state.changeRequest(chat)?.let { PullRequestBadge(it, surface = PullRequestBadgeSurface.Composer) }
-        chat.branch?.trim()?.takeIf { it.isNotEmpty() }?.let { BranchContextChip(it) }
-        ComposerChip(currentModel.label, badgeHarness = harness) { showModelPicker = true }
-        currentReasoning?.let { ComposerChip(HarnessCatalog.reasoningLabel(it)) { showTraitPicker = true } }
-        currentModel.options.forEach { option ->
-            ComposerChip(HarnessCatalog.selectedChoice(option, chat.config?.modelOptions?.get(option.id)).label) { optionPicker = option }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        (notice ?: queue.error)?.let { message ->
+            Text(
+                message, style = sans(12f), color = Theme.palette.danger, maxLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+            )
+        }
+        // What is waiting to be sent, stacked directly above the box it was typed in.
+        if (queue.rows.isNotEmpty()) {
+            QueuePanel(
+                queue, editingId, supportsActions = true,
+                onEdit = ::beginEdit, onCancelEdit = ::cancelEdit,
+                onAction = { item, action -> scope.launch { model.performQueueAction(chat.id, item.id, action) } },
+                onMove = { id, to -> model.moveQueued(chat.id, id, to) },
+                onMoveBy = { id, direction -> model.moveQueuedBy(chat.id, id, direction) },
+            )
+        }
+        if (editingId != null) {
+            val dead = edit?.terminal == true
+            Box(
+                Modifier.padding(horizontal = 24.dp).heightIn(min = 44.dp)
+                    .clickable(enabled = !editBusy, role = Role.Button) {
+                        if (dead) {
+                            clipboard.setText(AnnotatedString(draft))
+                            finishLocalEdit(QueueEditFinishResult.Finished, "")
+                        } else cancelEdit()
+                    },
+                contentAlignment = Alignment.CenterStart,
+            ) { Text(if (dead) "Copy edit and stop editing" else "Stop editing", style = sans(12f), color = Theme.palette.textMuted) }
+        }
+        ComposerShell(
+            draft = draft, onDraftChange = { draft = it },
+            sendEnabled = true, showStop = runLive,
+            placeholder = if (editingId == null) "Message" else "Edit queued message",
+            sendLabel = when {
+                editingId != null -> "Save queued message"
+                runLive -> "Queue message"
+                else -> "Send message"
+            },
+            allowEmptySend = editingId != null,
+            busy = editBusy,
+            keepExpanded = showModelPicker || showTraitPicker || optionPicker != null,
+            onSend = {
+                if (editingId != null) {
+                    commitEdit()
+                } else {
+                    model.send(chat.id, draft, attachments.map { it.uri.toString() })
+                    draft = ""
+                    attachments = emptyList()
+                }
+            },
+            onStop = { model.interrupt(chat.id) },
+            attachments = if (editingId == null) attachments else emptyList(),
+            onAttach = if (editingId == null) ({ picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) else null,
+            onRemoveAttachment = { id -> attachments = attachments.filterNot { it.id == id } },
+        ) {
+            state.changeRequest(chat)?.let { PullRequestBadge(it, surface = PullRequestBadgeSurface.Composer) }
+            chat.branch?.trim()?.takeIf { it.isNotEmpty() }?.let { BranchContextChip(it) }
+            ComposerChip(currentModel.label, badgeHarness = harness) { showModelPicker = true }
+            currentReasoning?.let { ComposerChip(HarnessCatalog.reasoningLabel(it)) { showTraitPicker = true } }
+            currentModel.options.forEach { option ->
+                ComposerChip(HarnessCatalog.selectedChoice(option, chat.config?.modelOptions?.get(option.id)).label) { optionPicker = option }
+            }
         }
     }
 

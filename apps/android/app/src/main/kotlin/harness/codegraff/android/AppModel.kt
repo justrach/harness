@@ -14,6 +14,17 @@ import harness.codegraff.android.model.MessagePart
 import harness.codegraff.android.model.MessageRole
 import harness.codegraff.android.model.MessageStatus
 import harness.codegraff.android.model.PRESENCE_FRESH_MS
+import harness.codegraff.android.model.ATTACHMENT_ONLY_TEXT
+import harness.codegraff.android.model.AccountApi
+import harness.codegraff.android.model.AccountDeletion
+import harness.codegraff.android.model.QueueAction
+import harness.codegraff.android.model.QueueActionReply
+import harness.codegraff.android.model.QueueDeliveryGate
+import harness.codegraff.android.model.QueueEditFinishResult
+import harness.codegraff.android.model.QueueEditLease
+import harness.codegraff.android.model.QueueEditStartResult
+import harness.codegraff.android.model.QueuedMessage
+import harness.codegraff.android.model.MessageQueue
 import harness.codegraff.android.model.SessionRow
 import harness.codegraff.android.model.SessionStatus
 import harness.codegraff.android.model.Space
@@ -31,7 +42,16 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import java.security.MessageDigest
+import java.util.UUID
 import kotlin.random.Random
+
+/** The device id this phone's own writes carry, matching the demo transcript's local messages. */
+private const val LOCAL_DEVICE_ID = "ios-demo"
+
+/** How long the host holds a queued row for an edit before another device may take it. */
+private const val EDIT_LEASE_MS = 60_000L
 
 /**
  * Everything Home, the switcher and the session header read: the workspace minus transcripts.
@@ -94,6 +114,20 @@ data class WorkspaceState(
 
     fun filterNames(chat: Chat): HomeFilterNames = HomeFilterNames(space(chat)?.displayName, deviceName(chat.deviceId))
 }
+
+/**
+ * One chat's pending-message queue (SessionStore.queue / queueActionsPending / queueActionError). Kept out of the
+ * workspace and the transcript so queueing a message recomposes only the panel above the composer.
+ */
+data class QueueState(
+    val rows: List<QueuedMessage> = emptyList(),
+    /** Rows with a host action in flight; they cannot be moved, edited or sent again. */
+    val pending: Set<String> = emptySet(),
+    val error: String? = null,
+)
+
+/** Account deletion progress for Settings (AppModel.accountDeletionBusy / accountDeletionError). */
+data class AccountDeletionState(val busy: Boolean = false, val error: String? = null)
 
 /** A snapshot of the workspace and every transcript, for tests and one-shot reads. */
 data class AppState(val workspace: WorkspaceState, val entries: Map<String, List<MessageEntry>>) {
@@ -203,8 +237,23 @@ class AppModel(
             chat.copy(config = current.copy(model = model, reasoning = reasoning, modelOptions = modelOptions ?: current.modelOptions))
         }
 
+    /**
+     * Sends the message, or parks it on the chat's queue while a reply is still streaming, like the composer does
+     * (ComposerView.send: `runLive` queues, otherwise it delivers).
+     */
+    fun send(chatId: String, text: String, attachments: List<String> = emptyList()) {
+        if (text.isBlank() && attachments.isEmpty()) return
+        val body = text.ifBlank { ATTACHMENT_ONLY_TEXT }
+        if (isRunLive(chatId)) enqueueMessage(chatId, body, attachments) else deliver(chatId, body)
+    }
+
+    fun isRunLive(chatId: String): Boolean {
+        val state = _workspace.value
+        return state.chat(chatId)?.let(state::liveStatus) == SessionStatus.Working
+    }
+
     /** Appends the user's message and streams the scripted reply into a live entry (simulateTurn). */
-    fun send(chatId: String, text: String) {
+    private fun deliver(chatId: String, text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         streamJob?.cancel()
@@ -248,6 +297,8 @@ class AppModel(
                     },
                 )
             }
+            // The host takes the front of the queue once the turn settles.
+            deliverNextQueued(chatId)
         }
     }
 
@@ -271,6 +322,204 @@ class AppModel(
             }
         }
         update { s -> s.copy(sessions = s.sessions - chatId) }
+    }
+
+    // MARK: queue (SessionQueue.swift). The demo stands in for the chat host: it acknowledges actions, takes the
+    // front of the queue when a turn settles, and hands out edit leases. Live sync will replace it behind the same calls.
+
+    private val _queues = MutableStateFlow<Map<String, QueueState>>(emptyMap())
+    private val editLeases = HashMap<String, String>()
+
+    /** One chat's queue. Emits only when that chat's queue changes. */
+    fun queueFlow(chatId: String): Flow<QueueState> = _queues.map { it[chatId] ?: QueueState() }.distinctUntilChanged()
+
+    fun queue(chatId: String): QueueState = _queues.value[chatId] ?: QueueState()
+
+    private fun setQueue(chatId: String, block: (QueueState) -> QueueState) =
+        _queues.update { it + (chatId to block(it[chatId] ?: QueueState())) }
+
+    private fun mapRow(chatId: String, id: String, block: (QueuedMessage) -> QueuedMessage) =
+        setQueue(chatId) { s -> s.copy(rows = s.rows.map { if (it.id == id) block(it) else it }) }
+
+    /** Stand in for a host stamping a delivery gate on a row, which tests need and the demo never does. */
+    internal fun setDeliveryGateForTesting(chatId: String, id: String, gate: QueueDeliveryGate?) =
+        mapRow(chatId, id) { it.copy(deliveryGate = gate) }
+
+    private fun dropRow(chatId: String, id: String) = setQueue(chatId) { s -> s.copy(rows = s.rows.filterNot { it.id == id }) }
+
+    /** Park a message on the queue. The host decides where it goes: the front of the next turn. */
+    fun enqueueMessage(chatId: String, text: String, attachments: List<String> = emptyList(), holdForTurnEnd: Boolean = true): String? {
+        if (text.trim().isEmpty()) return null
+        val id = UUID.randomUUID().toString().lowercase()
+        val row = QueuedMessage(id, text, attachments, issuedBy = LOCAL_DEVICE_ID, issuedAt = clock(), holdForTurnEnd = holdForTurnEnd)
+        setQueue(chatId) { it.copy(rows = it.rows + row) }
+        return id
+    }
+
+    /** Move a row to [to], clamped to the queue. The same slot is a no-op. */
+    fun moveQueued(chatId: String, id: String, to: Int) {
+        val q = queue(chatId)
+        if (id in q.pending) return
+        val from = q.rows.indexOfFirst { it.id == id }
+        if (from < 0 || q.rows[from].deliveryGate != null) return
+        val target = to.coerceIn(0, q.rows.size - 1)
+        if (from == target) return
+        setQueue(chatId) { s ->
+            val rows = s.rows.toMutableList()
+            rows.add(target, rows.removeAt(from))
+            s.copy(rows = rows)
+        }
+    }
+
+    /** Nudge a row one slot up (-1) or down (+1). */
+    fun moveQueuedBy(chatId: String, id: String, direction: Int) {
+        val q = queue(chatId)
+        val from = q.rows.indexOfFirst { it.id == id }
+        val to = MessageQueue.neighbour(from, direction, q.rows.size) ?: return
+        moveQueued(chatId, id, to)
+    }
+
+    /**
+     * The host serializes these actions with delivery. A removal is applied only after its acknowledgement; a lost
+     * reply is uncertain and leaves sync to reconcile. Protected rows can only be removed.
+     */
+    suspend fun performQueueAction(
+        chatId: String,
+        id: String,
+        action: QueueAction,
+        call: (suspend (method: String, params: Map<String, String>) -> QueueActionReply)? = null,
+    ): Boolean {
+        val q = queue(chatId)
+        val row = q.rows.firstOrNull { it.id == id } ?: return false
+        if (id in q.pending) return false
+        if (action != QueueAction.Remove && row.deliveryGate != null) return false
+        setQueue(chatId) { it.copy(pending = it.pending + id, error = null) }
+        try {
+            val reply = call?.invoke(action.method, mapOf("chatId" to chatId, "id" to id)) ?: demoHost(chatId, row, action)
+            if (!reply.acknowledged(action)) {
+                setQueue(chatId) { it.copy(error = "The host did not confirm the action. The message may have already left the queue.") }
+                return false
+            }
+            if (action == QueueAction.Remove) dropRow(chatId, id)
+            return true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            setQueue(chatId) {
+                it.copy(error = "Couldn't complete ${action.label.lowercase()}. Check the connection to the chat host and the queue before retrying.")
+            }
+            return false
+        } finally {
+            setQueue(chatId) { it.copy(pending = it.pending - id) }
+        }
+    }
+
+    private fun demoHost(chatId: String, row: QueuedMessage, action: QueueAction): QueueActionReply = when (action) {
+        QueueAction.Remove -> QueueActionReply(removed = true)
+        QueueAction.SendNow -> {
+            // Sending now stops the turn to do it; the row leaves the queue with the next sync.
+            if (isRunLive(chatId)) interrupt(chatId)
+            dropRow(chatId, row.id)
+            deliver(chatId, MessageQueue.visibleText(row.text, row.attachments))
+            QueueActionReply(sent = true)
+        }
+    }
+
+    /** When a turn settles the host takes the front of the queue, skipping rows that are protected or in flight. */
+    private fun deliverNextQueued(chatId: String) {
+        val q = queue(chatId)
+        val next = q.rows.firstOrNull { it.deliveryGate == null && it.id !in q.pending } ?: return
+        dropRow(chatId, next.id)
+        deliver(chatId, MessageQueue.visibleText(next.text, next.attachments))
+    }
+
+    // Protected editing: the host hands out a lease, the row is gated while it is retyped, and a changed row conflicts.
+
+    suspend fun beginQueuedEdit(chatId: String, id: String, instanceId: String): QueueEditStartResult {
+        val q = queue(chatId)
+        if (id in q.pending) return QueueEditStartResult.Unavailable
+        val row = q.rows.firstOrNull { it.id == id } ?: return QueueEditStartResult.Unavailable
+        val gate = row.deliveryGate
+        if (gate is QueueDeliveryGate.Editing && gate.expiresAtMs > clock() && editLeases[id]?.substringBefore('|') != instanceId) {
+            return QueueEditStartResult.Locked
+        }
+        val leaseId = UUID.randomUUID().toString().lowercase()
+        val expires = clock() + EDIT_LEASE_MS
+        editLeases[id] = "$instanceId|$leaseId"
+        mapRow(chatId, id) { it.copy(deliveryGate = QueueDeliveryGate.Editing(LOCAL_DEVICE_ID, expires)) }
+        return QueueEditStartResult.Acquired(QueueEditLease(id, leaseId, row.text, textHash(row.text), expires))
+    }
+
+    suspend fun renewQueuedEdit(chatId: String, lease: QueueEditLease): Boolean {
+        if (queue(chatId).rows.none { it.id == lease.rowId } || editLeases[lease.rowId]?.substringAfter('|') != lease.leaseId) return false
+        val expires = clock() + EDIT_LEASE_MS
+        mapRow(chatId, lease.rowId) { it.copy(deliveryGate = QueueDeliveryGate.Editing(LOCAL_DEVICE_ID, expires)) }
+        return true
+    }
+
+    suspend fun finishQueuedEdit(chatId: String, lease: QueueEditLease, action: String, text: String? = null): QueueEditFinishResult {
+        val row = queue(chatId).rows.firstOrNull { it.id == lease.rowId } ?: return QueueEditFinishResult.Missing
+        if (editLeases[lease.rowId]?.substringAfter('|') != lease.leaseId) return QueueEditFinishResult.Lost
+        if (textHash(row.text) != lease.baseTextHash) return QueueEditFinishResult.Conflict
+        when (action) {
+            "commit" -> {
+                val edited = text ?: return QueueEditFinishResult.Lost
+                mapRow(chatId, lease.rowId) { it.copy(text = edited, editedAt = clock(), deliveryGate = null) }
+            }
+            "cancel" -> mapRow(chatId, lease.rowId) { it.copy(deliveryGate = null) }
+            "discard" -> dropRow(chatId, lease.rowId)
+            else -> return QueueEditFinishResult.Lost
+        }
+        editLeases.remove(lease.rowId)
+        return QueueEditFinishResult.Finished
+    }
+
+    /** Release an edit lease when the screen goes away, where a suspending call cannot run. */
+    fun cancelQueuedEditInBackground(chatId: String, lease: QueueEditLease) {
+        viewModelScope.launch { finishQueuedEdit(chatId, lease, "cancel") }
+    }
+
+    private fun textHash(text: String): String =
+        MessageDigest.getInstance("SHA-256").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    // MARK: account deletion (AppModel.deleteAccount)
+
+    private val _accountDeletion = MutableStateFlow(AccountDeletionState())
+    val accountDeletion: StateFlow<AccountDeletionState> get() = _accountDeletion
+
+    /** Only a real CodeGraff sign-in has an account to delete; the offline demo has none, as on iOS. */
+    val canDeleteAccount: Boolean get() = false
+
+    /**
+     * Delete the signed-in account. Success signs out; a refusal keeps the session but stores the tokens the
+     * edge rotated.
+     */
+    suspend fun deleteAccount(api: AccountApi?, onSignedOut: () -> Unit = {}) {
+        if (_accountDeletion.value.busy) return
+        _accountDeletion.value = AccountDeletionState(busy = true)
+        var error: String? = null
+        try {
+            val tokens = api?.currentTokens()
+            if (api == null || tokens == null) {
+                error = "Sign in with CodeGraff to delete your account."
+            } else when (val result = api.delete(tokens)) {
+                AccountDeletion.Deleted -> onSignedOut()
+                is AccountDeletion.Refused -> {
+                    result.tokens?.let(api::storeTokens)
+                    error = result.message
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            error = "Couldn't reach Harness. Check your connection and try again."
+        } finally {
+            _accountDeletion.value = AccountDeletionState(busy = false, error = error)
+        }
+    }
+
+    fun dismissAccountDeletionError() {
+        _accountDeletion.update { it.copy(error = null) }
     }
 
     /** A streamed token: touches only this chat's transcript, never the workspace. */

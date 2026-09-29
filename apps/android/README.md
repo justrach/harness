@@ -30,6 +30,14 @@ Not built yet, in the order they are needed for a real connection:
 3. CodeGraff sign-in (PKCE, `harness://callback`) and the durable command queue.
 4. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
 
+## Staying in step with iOS
+
+`apps/parity` holds the rules and copy both apps must share as JSON, and each app tests against it (see
+`apps/parity/README.md`). `ParityTest` covers the message queue, account deletion, the Home grouping and the UX
+contract. CI (`.github/workflows/android.yml`) runs those with lint and the debug build, builds the minified release
+bundle and the perf APK, and runs the instrumented tests on an emulator. `android-release.yml` builds a bundle to
+download from a run; nothing publishes to the Play Store.
+
 ## Responsiveness
 
 The same design the iOS app uses to stay smooth on long, streaming sessions:
@@ -87,7 +95,7 @@ the SDK with `local.properties` (`sdk.dir=/path/to/Android/sdk`) or `ANDROID_HOM
 
 ```sh
 cd apps/android
-./gradlew :app:testDebugUnitTest          # 61 unit tests
+./gradlew :app:testDebugUnitTest          # unit tests, including the iOS/Android parity tests
 ANDROID_SERIAL=<device> ./gradlew :app:connectedDebugAndroidTest   # 6 UI tests on one device
 ./gradlew :app:assembleDebug              # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assemblePerf               # minified, debug-signed: measure performance with this

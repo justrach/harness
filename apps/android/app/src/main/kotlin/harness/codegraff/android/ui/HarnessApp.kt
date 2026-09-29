@@ -1,5 +1,7 @@
 package harness.codegraff.android.ui
 
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
@@ -143,7 +145,19 @@ fun HarnessApp(model: AppModel) {
         }
     }
 
-    if (showSettings) SettingsSheet(onDismiss = { showSettings = false }, onSignOut = { signedIn = false; path = emptyList() })
+    if (showSettings) {
+        val deletion by model.accountDeletion.collectAsState()
+        val scope = rememberCoroutineScope()
+        SettingsSheet(
+            onDismiss = { showSettings = false },
+            onSignOut = { signedIn = false; path = emptyList() },
+            canDeleteAccount = model.canDeleteAccount,
+            deletion = deletion,
+            // No live account backend yet: the row is hidden in the offline demo, so this is only the seam.
+            onDeleteAccount = { scope.launch { model.deleteAccount(api = null) } },
+            onDismissDeletionError = model::dismissAccountDeletionError,
+        )
+    }
     if (showNewSpace) {
         NewSpaceSheet(state, model, onCreated = { id -> path = listOf(Route.Space(id)) }, onDismiss = { showNewSpace = false })
     }

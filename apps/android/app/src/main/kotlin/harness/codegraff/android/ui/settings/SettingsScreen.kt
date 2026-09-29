@@ -11,7 +11,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.window.Dialog
+import harness.codegraff.android.AccountDeletionState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,14 +44,60 @@ import harness.codegraff.android.ui.components.pressWashClickable
  * quick menu: signing out is one tap away (SettingsView.swift).
  */
 @Composable
-fun SettingsSheet(onDismiss: () -> Unit, onSignOut: () -> Unit) {
+fun SettingsSheet(
+    onDismiss: () -> Unit,
+    onSignOut: () -> Unit,
+    /** Only a real CodeGraff sign-in has an account to delete; the offline demo shows no such row, as on iOS. */
+    canDeleteAccount: Boolean = false,
+    deletion: AccountDeletionState = AccountDeletionState(),
+    onDeleteAccount: () -> Unit = {},
+    onDismissDeletionError: () -> Unit = {},
+) {
     var showAppearance by rememberSaveable { mutableStateOf(false) }
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
     HarnessSheet(
         title = if (showAppearance) "Appearance" else "Settings",
-        onDismiss = onDismiss,
+        // The sheet stays put while the account is being deleted (interactiveDismissDisabled).
+        onDismiss = { if (!deletion.busy) onDismiss() },
         trailing = if (showAppearance) ({ BackButton { showAppearance = false } }) else null,
     ) {
-        if (showAppearance) AppearanceContent() else SettingsContent(onOpenAppearance = { showAppearance = true }, onSignOut = { onDismiss(); onSignOut() })
+        if (showAppearance) AppearanceContent() else SettingsContent(
+            onOpenAppearance = { showAppearance = true },
+            onSignOut = { onDismiss(); onSignOut() },
+            canDeleteAccount = canDeleteAccount,
+            deleting = deletion.busy,
+            onDeleteAccount = { confirmDelete = true },
+        )
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete your account?") },
+            text = {
+                Text("This permanently deletes your CodeGraff account and everything Harness keeps for it: chats, sessions, devices, and the agent rooms you made. Your posts in other people's rooms lose their text. This can't be undone.")
+            },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; onDeleteAccount() }) { Text("Delete", color = Theme.palette.danger) } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+        )
+    }
+    deletion.error?.let { message ->
+        AlertDialog(
+            onDismissRequest = onDismissDeletionError,
+            title = { Text("Account not deleted") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = onDismissDeletionError) { Text("OK") } },
+        )
+    }
+    if (deletion.busy) {
+        Dialog(onDismissRequest = {}) {
+            Row(
+                Modifier.clip(RoundedCornerShape(14.dp)).background(Theme.palette.surfaceDialog).padding(20.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = Theme.palette.text)
+                Text("Deleting account…", style = sans(15f), color = Theme.palette.text)
+            }
+        }
     }
 }
 
@@ -57,7 +109,13 @@ private fun BackButton(onClick: () -> Unit) {
 }
 
 @Composable
-private fun SettingsContent(onOpenAppearance: () -> Unit, onSignOut: () -> Unit) {
+private fun SettingsContent(
+    onOpenAppearance: () -> Unit,
+    onSignOut: () -> Unit,
+    canDeleteAccount: Boolean,
+    deleting: Boolean,
+    onDeleteAccount: () -> Unit,
+) {
     val p = Theme.palette
     val store = LocalThemeStore.current
     val version = LocalContext.current.let { c ->
@@ -72,7 +130,7 @@ private fun SettingsContent(onOpenAppearance: () -> Unit, onSignOut: () -> Unit)
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
         Section("Account") {
-            ValueRow("Signed in", "Demo mode")
+            if (canDeleteAccount) ValueRow("Signed in with", "CodeGraff") else ValueRow("Signed in", "Demo mode")
             Divider()
             ActionRow("Sign out", destructive = true, onClick = onSignOut)
         }
@@ -81,6 +139,18 @@ private fun SettingsContent(onOpenAppearance: () -> Unit, onSignOut: () -> Unit)
         }
         Section("About") {
             ValueRow("Version", version)
+        }
+        if (canDeleteAccount) {
+            // Deleting the account sits apart at the bottom behind its own confirmation.
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(p.ink(0.045f))) {
+                    ActionRow("Delete account…", destructive = true, enabled = !deleting, onClick = onDeleteAccount)
+                }
+                Text(
+                    "Permanently deletes your CodeGraff account and everything Harness keeps for it.",
+                    style = sans(12f), color = p.textMuted.opacity(0.7f), modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
         }
     }
 }
@@ -126,10 +196,10 @@ private fun LinkRow(title: String, value: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActionRow(title: String, destructive: Boolean, onClick: () -> Unit) {
+private fun ActionRow(title: String, destructive: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     val p = Theme.palette
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).pressWashClickable(onClick, cornerRadius = 0.dp).padding(horizontal = 16.dp),
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).pressWashClickable(onClick, cornerRadius = 0.dp, enabled = enabled).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
-    ) { Text(title, style = sans(16f), color = if (destructive) p.danger else p.text) }
+    ) { Text(title, style = sans(16f), color = (if (destructive) p.danger else p.text).opacity(if (enabled) 1f else 0.4f)) }
 }
