@@ -393,6 +393,44 @@ final class AppModel {
         phase = .signedOut
     }
 
+    // MARK: Account deletion
+
+    var accountDeletionBusy = false
+    var accountDeletionError: String?
+
+    /// Only a real CodeGraff sign-in has an account to delete.
+    var canDeleteAccount: Bool { demo == nil && config?.mode == .codegraff }
+
+    /// Delete the signed-in account. Success signs out and wipes local state;
+    /// a refusal keeps the session but stores the tokens the edge rotated.
+    func deleteAccount() async {
+        guard !accountDeletionBusy else { return }
+        accountDeletionBusy = true
+        accountDeletionError = nil
+        defer { accountDeletionBusy = false }
+        guard let config, let tokens = await config.currentTokens() else {
+            accountDeletionError = "Sign in with CodeGraff to delete your account."
+            return
+        }
+        do {
+            let client = AuthClient(baseURL: config.edgeURL)
+            switch try await client.deleteAccount(accessToken: tokens.accessToken,
+                                                  refreshToken: tokens.refreshToken) {
+            case .deleted:
+                signOut()
+            case .refused(let message, let rotated):
+                if let rotated {
+                    config.updateTokens(rotated)
+                    Keychain.save(rotated.accessToken, key: "codegraffAccessToken")
+                    Keychain.save(rotated.refreshToken, key: "codegraffRefreshToken")
+                }
+                accountDeletionError = message
+            }
+        } catch {
+            accountDeletionError = "Couldn't reach Harness. Check your connection and try again."
+        }
+    }
+
     private func devBearer(userId: String, orgId: String) -> String {
         orgId.isEmpty ? userId : "\(userId)@\(orgId)"
     }
