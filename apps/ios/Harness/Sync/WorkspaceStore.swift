@@ -407,6 +407,7 @@ final class WorkspaceStore {
             sidebarPreferencesInitialized = false
             pinnedSessionIds = []
         }
+        ThemeStore.shared.applyDesktop(doc.desktopAppearance)
         reconcileChangeRequestStreams()
     }
 

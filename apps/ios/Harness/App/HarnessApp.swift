@@ -15,14 +15,21 @@ struct HarnessApp: App {
                 .environment(model)
                 .harnessAppearance()
                 // Monochrome controls: glass buttons, toolbar icons, and
-                // toggles render white like the desktop — accent stays paint
-                // for status/markdown, never chrome.
+                // toggles render in text color like the desktop — accent
+                // stays paint for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
+                .onAppear {
+                    if let scene = UIApplication.shared.connectedScenes
+                        .compactMap({ $0 as? UIWindowScene }).first {
+                        ThemeStore.shared.attach(to: scene)
+                    }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
                         model.flushDocs()
                     } else if phase == .active {
+                        ThemeStore.shared.refreshSystemAppearance()
                         // Suspension kills sockets without running any
                         // failure path — without this kick the workspace
                         // room stays dead after foregrounding while chat

@@ -7,9 +7,9 @@ import SwiftUI
 
 enum SheetStyle {
     static let cardRadius: CGFloat = 20
-    static let cardFill = ink(0.045)
-    static let rowSeparator = ink(0.06)
-    static let panel = adaptive(dark: grey(0x14), light: grey(0xff))
+    static var cardFill: Color { ink(0.045) }
+    static var rowSeparator: Color { hairline(0.06) }
+    static var panel: Color { Theme.surfaceDialog }
 }
 
 /// Grouped card: rows separated by inset hairlines.
@@ -22,7 +22,7 @@ struct SheetCard<Content: View>: View {
         }
         .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: SheetStyle.cardRadius))
         .overlay(RoundedRectangle(cornerRadius: SheetStyle.cardRadius)
-            .strokeBorder(ink(0.06), lineWidth: 1))
+            .strokeBorder(hairline(0.06), lineWidth: 1))
     }
 }
 

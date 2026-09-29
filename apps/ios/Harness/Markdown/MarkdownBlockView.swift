@@ -221,7 +221,7 @@ struct CodeBlockView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.panelRadius)
-                .strokeBorder(ink(0.06), lineWidth: 1)
+                .strokeBorder(hairline(0.06), lineWidth: 1)
         )
         .contextMenu {
             Button {
@@ -378,7 +378,7 @@ struct TableBlockView: View {
     }
 
     private var divider: some View {
-        Rectangle().fill(ink(0.10)).frame(height: 1)
+        Rectangle().fill(hairline(0.10)).frame(height: 1)
             .gridCellUnsizedAxes(.horizontal)
     }
 

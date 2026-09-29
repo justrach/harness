@@ -537,6 +537,10 @@ enum MutateParams {
     ChangeSidebarPin {
         change: harness_proto::SidebarPinChange,
     },
+    /// The desktop's appearance mode and light/dark theme ids, published to
+    /// the registry so phones can match the desktop.
+    #[serde(rename_all = "camelCase")]
+    SetAppearance { mode: String, light: String, dark: String },
     /// Full-config replace on the chat row (harness `SetChatConfig`): the
     /// composer's mid-session model / reasoning / options changes, LWW-synced
     /// so they survive restarts and reach every device.
@@ -1001,6 +1005,10 @@ impl EngineRpc {
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }
+            MutateParams::SetAppearance { mode, light, dark } => self
+                .workspace
+                .set_appearance(&harness_doc::SyncedAppearance { mode, light, dark })
+                .map_err(failed),
             MutateParams::SetChatConfig { chat_id, config } => self
                 .workspace
                 .set_chat_config(&chat_id, &config)
@@ -3460,6 +3468,20 @@ mod tests {
             p,
             MutateParams::ChangeSidebarPin { change: harness_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
+        ));
+    }
+
+    #[test]
+    fn appearance_mutation_accepts_desktop_wire_shape() {
+        let p: MutateParams = parse_params(serde_json::json!({
+            "op": "setAppearance", "mode": "system",
+            "light": "codegraff-light", "dark": "codegraff-dark",
+        }))
+        .expect("appearance params");
+        assert!(matches!(
+            p,
+            MutateParams::SetAppearance { mode, light, dark }
+                if mode == "system" && light == "codegraff-light" && dark == "codegraff-dark"
         ));
     }
 

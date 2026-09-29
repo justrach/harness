@@ -137,7 +137,7 @@ struct ComposerShell<Chips: View>: View {
         .padding(.vertical, expanded ? 12 : 5)
         .background(ink(0.04), in: surfaceShape)
         .glassEffect(.regular.interactive(), in: surfaceShape)
-        .overlay(surfaceShape.strokeBorder(ink(0.05), lineWidth: 1))
+        .overlay(surfaceShape.strokeBorder(hairline(0.05), lineWidth: 1))
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -184,7 +184,7 @@ struct ComposerShell<Chips: View>: View {
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 44, height: 44)
                 .background(ink(0.06), in: Circle())
-                .overlay(Circle().strokeBorder(ink(0.08), lineWidth: 1))
+                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -794,7 +794,7 @@ struct QuestionPanel: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Rectangle().fill(ink(0.06)).frame(height: 1)
+                Rectangle().fill(hairline(0.06)).frame(height: 1)
                 TextField("Or type your own answer", text: Binding(
                     get: { typed[question.id] ?? "" },
                     set: { typed[question.id] = $0 }
@@ -827,7 +827,7 @@ struct QuestionPanel: View {
         }
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26))
-        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(ink(0.05), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(hairline(0.05), lineWidth: 1))
         .padding(.horizontal, 12)
         .transition(.opacity)
     }

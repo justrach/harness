@@ -1,67 +1,58 @@
-// Monochrome theme, dark and light — a direct port of crates/ui/src/theme.rs
-// (`Theme::dark` / `Theme::light`). Every paint token resolves per trait, so
-// the app follows the system appearance or the account menu's override.
-//
-// Colors are computed from the same oklch definitions the desktop app uses
-// (Björn Ottosson's OKLab matrices, the ones CSS Color 4 specifies), so every
-// surface and accent lands on identical sRGB values. **Numbers drive layout,
-// colors are paint**: layout constants are plain numbers and never depend on
-// which color is painted.
+// Harness's paint and layout tokens. Paint comes from the active desktop theme
+// variant (ThemeStore, fed by the desktop's own registry in themes.json), so
+// every surface and accent lands on the same sRGB values the desktop paints.
+// **Numbers drive layout, colors are paint**: layout constants are plain
+// numbers and never depend on which color is painted.
 
 import SwiftUI
 
 enum Theme {
-    // ---- paint: neutral surfaces (oklch chroma 0) ----
-    /// Main panel background — sampled #060606.
-    static let bg = adaptive(dark: grey(6), light: grey(0xff))
-    /// Shell / sidebar surface — sampled #0d0d0d.
-    static let surface = adaptive(dark: grey(13), light: neutral(0.968))
+    private static var palette: ThemePalette { ThemeStore.shared.palette }
+
+    // ---- paint: surfaces ----
+    /// Main panel background.
+    static var bg: Color { palette.bg }
+    /// Shell / sidebar surface.
+    static var surface: Color { palette.surface }
     /// Raised surface: popovers, dialogs, cards.
-    static let surfaceRaised = adaptive(dark: neutral(0.235), light: neutral(0.940))
-    /// Hover/pressed wash for interactive rows (ink, low alpha).
-    static let elementHover = ink(0.06)
+    static var surfaceRaised: Color { palette.surfaceRaised }
+    /// Sheet and dialog panel.
+    static var surfaceDialog: Color { palette.surfaceDialog }
+    /// Hover/pressed wash for interactive rows.
+    static var elementHover: Color { palette.elementHover }
     /// Active/selected wash.
-    static let elementActive = ink(0.10)
-    /// Hairline border — ink at low alpha so it reads on any surface.
-    static let border = adaptive(dark: Color.white.opacity(0.08), light: Color.black.opacity(0.10))
+    static var elementActive: Color { palette.elementActive }
+    /// Hairline border.
+    static var border: Color { palette.border }
     /// Stronger border for focused/raised edges.
-    static let borderStrong = adaptive(dark: Color.white.opacity(0.14), light: Color.black.opacity(0.17))
+    static var borderStrong: Color { palette.borderStrong }
 
     // ---- paint: text ----
-    static let text = adaptive(dark: neutral(0.922), light: neutral(0.25))           // ~neutral-200 / 850
-    static let textMuted = adaptive(dark: neutral(0.708), light: neutral(0.439))     // ~neutral-400 / 600
-    static let textFaint = adaptive(dark: neutral(0.556), light: neutral(0.535))     // ~neutral-500
+    static var text: Color { palette.text }
+    static var textMuted: Color { palette.textMuted }
+    static var textFaint: Color { palette.textFaint }
 
     // ---- paint: accents ----
-    static let accent = adaptive(dark: oklch(0.673, 0.182, 276.935),        // indigo-400
-                                 light: oklch(0.511, 0.262, 276.966))      // indigo-600
-    static let accentStrong = adaptive(dark: oklch(0.585, 0.233, 277.117),  // indigo-500
-                                       light: oklch(0.457, 0.240, 277.023)) // indigo-700
-    static let danger = adaptive(dark: oklch(0.704, 0.191, 22.216),         // red-400
-                                 light: oklch(0.577, 0.245, 27.325))       // red-600
-    static let dangerSoft = adaptive(dark: oklch(0.808, 0.114, 19.571),     // red-300
-                                     light: oklch(0.505, 0.213, 27.518))   // red-700
-    static let warning = adaptive(dark: oklch(0.828, 0.189, 84.429),        // amber-400
-                                  light: oklch(0.555, 0.163, 48.998))      // amber-700
+    static var accent: Color { palette.accent }
+    static var accentStrong: Color { palette.accentStrong }
+    static var danger: Color { palette.danger }
+    static var dangerSoft: Color { palette.dangerSoft }
+    static var warning: Color { palette.warning }
 
     // ---- paint: status dots (shell/spaces.rs status_dot_color) ----
-    static let statusWorking = adaptive(dark: oklch(0.718, 0.202, 349.761),   // pink-400
-                                        light: oklch(0.592, 0.249, 0.584))    // pink-600
-    static let statusCompleted = adaptive(dark: oklch(0.765, 0.177, 163.223), // emerald-400
-                                          light: oklch(0.596, 0.145, 163.225)) // emerald-600
-    /// Claude brand orange — kept even on the mono surface.
+    static var statusWorking: Color { palette.statusWorking }
+    static var statusCompleted: Color { palette.statusCompleted }
+    /// Claude brand orange — the same in every theme.
     static let claudeBrand = Color(red: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0)
 
-    // ---- paint: markdown inline code (violet family) ----
-    static let inlineCodeText = adaptive(dark: oklch(0.811, 0.111, 293.571),  // violet-300
-                                         light: oklch(0.491, 0.270, 292.581)) // violet-700
-    static let inlineCodeWash = adaptive(dark: oklch(0.702, 0.183, 293.541).opacity(0.12), // violet-400 @ 0.12
-                                         light: oklch(0.606, 0.250, 292.717).opacity(0.10)) // violet-500 @ 0.10
+    // ---- paint: markdown inline code ----
+    static var inlineCodeText: Color { palette.inlineCodeText }
+    static var inlineCodeWash: Color { palette.inlineCodeWash }
 
-    // ---- paint: syntax tokens (soft, paint-only) ----
-    static let tokenKeyword = adaptive(dark: oklch(0.709, 0.129, 20.0), light: oklch(0.520, 0.150, 20.0))   // soft rose
-    static let tokenString = adaptive(dark: oklch(0.770, 0.110, 168.0), light: oklch(0.520, 0.110, 168.0))  // soft green
-    static let tokenNumber = adaptive(dark: oklch(0.780, 0.120, 80.0), light: oklch(0.550, 0.130, 65.0))   // soft amber
+    // ---- paint: syntax tokens ----
+    static var tokenKeyword: Color { palette.tokenKeyword }
+    static var tokenString: Color { palette.tokenString }
+    static var tokenNumber: Color { palette.tokenNumber }
 
     // ---- numbers drive layout (pt) ----
     static let bubbleRadius: CGFloat = 22
@@ -114,6 +105,30 @@ extension Theme {
     }
 }
 
+// MARK: - Translucent ink (ported from crates/ui/src/theme.rs)
+//
+// Alphas are quoted in dark-mode terms at every call site — the dark theme is
+// the tuned one — and the light value is derived, exactly as on the desktop.
+
+/// Translucent **fill** ink for washes, chips and pressed states: white on
+/// dark themes, black on light ones.
+func ink(_ alpha: Double) -> Color {
+    ThemeStore.shared.palette.isDark
+        ? Color.white.opacity(alpha)
+        : Color.black.opacity(alpha * inkFillScale)
+}
+
+/// Translucent **hairline** ink for borders, dividers and rings. Separate from
+/// `ink` because a 1pt line needs *more* ink on a bright field, a plate less.
+func hairline(_ alpha: Double) -> Color {
+    ThemeStore.shared.palette.isDark
+        ? Color.white.opacity(alpha)
+        : Color.black.opacity(min(alpha * inkHairlineScale, 0.5))
+}
+
+private let inkFillScale = 1.0
+private let inkHairlineScale = 1.35
+
 // MARK: - Project tints
 
 extension Theme {
@@ -146,69 +161,11 @@ func fnv1a(_ text: String) -> UInt64 {
 
 // MARK: - Color primitives (ported from theme.rs)
 
-/// A neutral (chroma 0) oklch tone. Chroma 0 means r == g == b exactly.
-func neutral(_ lightness: Double) -> Color {
-    let v = Double(oklchToSrgb(l: lightness, c: 0, hDeg: 0)[0])
-    return Color(red: v, green: v, blue: v)
-}
-
-/// Ink at the given alpha — the hairline/wash primitive: white on the dark
-/// theme, near-black on the light one (theme.rs `ink`).
-func ink(_ alpha: Double) -> Color {
-    adaptive(dark: Color.white.opacity(alpha),
-             light: Color(red: 0.1, green: 0.1, blue: 0.1).opacity(alpha))
-}
-
 /// One token, two paints: resolves per trait collection, so SwiftUI and
 /// UIKit (`UIColor(Theme.x)`) both follow appearance changes live.
 func adaptive(dark: Color, light: Color) -> Color {
     let dark = UIColor(dark), light = UIColor(light)
     return Color(uiColor: UIColor { $0.userInterfaceStyle == .light ? light : dark })
-}
-
-/// The Appearance pick in Settings; `system` follows iOS.
-enum AppearancePreference: String, CaseIterable, Identifiable {
-    case system, light, dark
-
-    static let storageKey = "appearance"
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .system: return "System"
-        case .light: return "Light"
-        case .dark: return "Dark"
-        }
-    }
-
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .system: return nil
-        case .light: return .light
-        case .dark: return .dark
-        }
-    }
-}
-
-extension View {
-    /// Apply the Appearance pick. Sheets get it too so a presentation never
-    /// disagrees with the screen under it.
-    func harnessAppearance() -> some View { modifier(AppearanceModifier()) }
-}
-
-private struct AppearanceModifier: ViewModifier {
-    @AppStorage(AppearancePreference.storageKey) private var raw = AppearancePreference.system.rawValue
-
-    func body(content: Content) -> some View {
-        content.preferredColorScheme(AppearancePreference(rawValue: raw)?.colorScheme)
-    }
-}
-
-/// An exact achromatic tone from an 8-bit channel value (`grey(13)` ≡ #0d0d0d).
-func grey(_ value: UInt8) -> Color {
-    let v = Double(value) / 255.0
-    return Color(red: v, green: v, blue: v)
 }
 
 /// oklch (CSS notation: L 0..1, C, H degrees) → sRGB Color.
@@ -240,4 +197,16 @@ func oklchToSrgb(l: Double, c: Double, hDeg: Double) -> [Double] {
 private func gammaEncode(_ x: Double) -> Double {
     let x = min(max(x, 0), 1)
     return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055
+}
+
+// MARK: - Appearance
+
+extension View {
+    /// Apply the chosen appearance mode. Pinned Light/Dark force the scheme so
+    /// system chrome (keyboard, glass, menus) matches the palette; System
+    /// leaves it to the device. Sheets get it too so a presentation never
+    /// disagrees with the screen under it.
+    func harnessAppearance() -> some View {
+        preferredColorScheme(ThemeStore.shared.preferredScheme)
+    }
 }

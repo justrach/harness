@@ -34,7 +34,7 @@ struct TranscriptView: View {
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
-                    .environment(\.colorScheme, colorScheme))
+                    .environment(\.colorScheme, ThemeStore.shared.colorScheme))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)
@@ -614,6 +614,6 @@ struct InputChipView: View {
         .padding(.horizontal, 8)
         .frame(height: 34)
         .background(ink(0.045), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(ink(0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hairline(0.08), lineWidth: 1))
     }
 }

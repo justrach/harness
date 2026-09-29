@@ -614,6 +614,18 @@ final class RegistryDoc {
 
     var sidebarPinsInitialized: Bool { rowExists(kind: "preferences", id: "sidebarPins") }
 
+    /// The desktop's appearance choice (`preferences/appearance`, written by
+    /// crates/doc/src/registry/appearance.rs). Read-only here: phones follow
+    /// it, they never publish their own.
+    var desktopAppearance: DesktopAppearance? {
+        guard let fields = overlayRow(kind: "preferences", id: "appearance")?.fields,
+              let mode = fields["mode"]?.stringValue,
+              let light = fields["light"]?.stringValue,
+              let dark = fields["dark"]?.stringValue
+        else { return nil }
+        return DesktopAppearance(mode: mode, light: light, dark: dark)
+    }
+
     var orderedSidebarPins: [(id: String, key: String)] {
         overlayRows(kind: "sidebarPins").compactMap { row in
             guard row.fields["pinned"]?.boolValue == true,
