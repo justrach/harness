@@ -216,6 +216,10 @@ pub mod methods {
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
+    // graff's own provider sign-ins (xAI, Kimi, Z.AI; `StartAgentLogin` takes a
+    // `provider` for the sign-in itself). Same per-device forwarding.
+    pub const LIST_GRAFF_LOGINS: &str = "ListGraffLogins";
+    pub const SIGN_OUT_GRAFF_LOGIN: &str = "SignOutGraffLogin";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

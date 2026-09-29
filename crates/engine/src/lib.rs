@@ -23,6 +23,7 @@ pub mod codegraff_auth;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+mod graff_logins;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;

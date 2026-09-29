@@ -43,7 +43,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -54,9 +54,11 @@ use sha2::{Digest, Sha256};
 
 use harness_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
-    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, HarnessId,
+    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, GraffLoginProvider,
+    HarnessId,
 };
 
+use crate::graff_logins;
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
@@ -108,6 +110,9 @@ pub struct AgentAccountsConfig {
     /// named, expiring API key minted by its browser login. SEPARATE from
     /// `cursor-agent login`'s session tokens — deliberately never read.
     pub cursor_sdk_auth_file: PathBuf,
+    /// The home dir graff's own sign-ins live under (`~/.xai`, `~/.kimi`,
+    /// `~/.zai`), and the home its login child runs with.
+    pub graff_home: PathBuf,
 }
 
 impl AgentAccountsConfig {
@@ -130,6 +135,7 @@ impl AgentAccountsConfig {
             claude_config_file,
             codex_home: env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
             cursor_sdk_auth_file: home_dir().join(".cursor").join("sdk").join("auth.json"),
+            graff_home: home_dir(),
         }
     }
 
@@ -223,6 +229,20 @@ enum LoginFlow {
         /// aborting drops the sign-in future, which kills its agent child.
         handle: tokio::task::JoinHandle<()>,
     },
+    /// `graff login <provider>` against the real home. graff writes the
+    /// credential itself, atomically and only on success, so cancelling or a
+    /// failed sign-in leaves the current login alone. Finished means the child
+    /// exited AND the credential changed (or graff printed its `✓` line):
+    /// graff exits 0 even when it refuses.
+    Graff {
+        provider: String,
+        child: Arc<Mutex<Option<harness_adapters::process::Child>>>,
+        started_at: Instant,
+        output: Arc<Mutex<String>>,
+        exit: Arc<Mutex<Option<Option<i32>>>>,
+        /// The credential's stamp when the login started.
+        before: Option<SystemTime>,
+    },
 }
 
 #[derive(Default)]
@@ -237,7 +257,8 @@ impl LoginFlow {
         match self {
             LoginFlow::Claude { started_at, .. }
             | LoginFlow::Spawned { started_at, .. }
-            | LoginFlow::Task { started_at, .. } => *started_at,
+            | LoginFlow::Task { started_at, .. }
+            | LoginFlow::Graff { started_at, .. } => *started_at,
         }
     }
 }
@@ -577,6 +598,7 @@ impl AgentAccounts {
             login_id,
             url,
             mode: AgentLoginMode::PasteCode,
+            code: None,
         }
     }
 
@@ -678,6 +700,7 @@ impl AgentAccounts {
             login_id,
             url,
             mode: AgentLoginMode::Browser,
+            code: None,
         })
     }
 
@@ -727,6 +750,7 @@ impl AgentAccounts {
             login_id,
             url: String::new(),
             mode: AgentLoginMode::Browser,
+            code: None,
         }
     }
 
@@ -778,6 +802,173 @@ impl AgentAccounts {
             login_id,
             url,
             mode: AgentLoginMode::Browser,
+            code: None,
+        })
+    }
+
+    // ── graff's own provider sign-ins (xAI, Kimi, Z.AI) ─────────────────────
+
+    /// graff's sign-in providers on this device, and whether each has a login.
+    pub fn list_graff_logins(&self) -> Vec<GraffLoginProvider> {
+        graff_logins::list(&self.inner.config.graff_home)
+    }
+
+    /// Sign out of one graff provider by removing its credential file. A
+    /// sign-in still waiting on that provider is dropped first, so it can't
+    /// write the credential back after the user asked for it gone.
+    pub fn sign_out_graff_login(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<GraffLoginProvider>, EngineError> {
+        self.reap_graff_flows(provider);
+        graff_logins::sign_out(&self.inner.config.graff_home, provider).map_err(|err| {
+            EngineError::Other(format!("Could not sign out of {provider}: {err}"))
+        })?;
+        Ok(self.list_graff_logins())
+    }
+
+    /// Drop a pending sign-in for one graff provider: two children racing to
+    /// write the same credential would confuse both.
+    fn reap_graff_flows(&self, provider: &str) {
+        let stale: Vec<String> = lock(&self.inner.flows)
+            .iter()
+            .filter(|(_, f)| matches!(f, LoginFlow::Graff { provider: p, .. } if p == provider))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            self.cancel_login(&id);
+        }
+    }
+
+    /// `graff login <provider>`: graff prints the sign-in link (and, for xAI
+    /// and Kimi, a code to confirm), the app shows them, and the flow finishes
+    /// when graff writes its credential. graff runs against the real home, so
+    /// nothing is imported afterwards, and this service never reads the token.
+    pub async fn start_graff_login(&self, provider: &str) -> Result<AgentLoginStart, EngineError> {
+        self.sweep_flows();
+        let home = self.inner.config.graff_home.clone();
+        if graff_logins::credential_path(&home, provider).is_none() {
+            return Err(EngineError::Other(format!(
+                "graff can't sign in to {provider} from here"
+            )));
+        }
+        self.reap_graff_flows(provider);
+        let root = self.inner.config.root_dir();
+        let no_open = std::fs::create_dir_all(&root)
+            .ok()
+            .and_then(|()| graff_logins::no_open_dir(&root));
+        let mut command = harness_adapters::graff_login_command(provider, no_open.as_deref())
+            .await
+            .map_err(|err| {
+                EngineError::Other(match err {
+                    harness_adapters::HarnessError::NotInstalled(hint) => format!(
+                        "The `graff` CLI was not found on this device — install it first. ({hint})"
+                    ),
+                    other => format!("Could not resolve the graff CLI for sign-in: {other}"),
+                })
+            })?;
+        command
+            .stdin(harness_adapters::process::Stdio::null())
+            .stdout(harness_adapters::process::Stdio::piped())
+            .stderr(harness_adapters::process::Stdio::piped());
+        // graff finds its credential dir from HOME: pin it to the home this
+        // service lists and signs out of.
+        #[cfg(unix)]
+        command.env("HOME", &home);
+        let before = graff_logins::credential_stamp(&home, provider);
+        let child = command.spawn().map_err(|err| {
+            EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
+                "The `graff` CLI was not found on this device — install it first.".into()
+            } else {
+                format!("Could not start graff login: {err}")
+            })
+        })?;
+        let (child, output, exit) = wire_login_child(child);
+        let login_id = new_id();
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Graff {
+                provider: provider.to_string(),
+                child,
+                started_at: Instant::now(),
+                output: output.clone(),
+                exit: exit.clone(),
+                before,
+            },
+        );
+        // graff asks the provider for the link first, which takes longer than
+        // a local spawn, and a sign-in without a link can't proceed.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let url = loop {
+            if let Some(url) = graff_logins::scan_login_url(&lock(&output)) {
+                break Some(url);
+            }
+            if lock(&exit).is_some() || Instant::now() > deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let Some(url) = url else {
+            let message = {
+                let output = lock(&output);
+                if output.trim().is_empty() && lock(&exit).is_none() {
+                    "graff did not offer a sign-in link in time — check the connection and try again."
+                        .to_string()
+                } else {
+                    graff_logins::failure_message(&output)
+                }
+            };
+            self.cancel_login(&login_id);
+            return Err(EngineError::Other(message));
+        };
+        let code = graff_logins::scan_device_code(&lock(&output));
+        Ok(AgentLoginStart {
+            login_id,
+            url,
+            mode: AgentLoginMode::Browser,
+            code,
+        })
+    }
+
+    /// poll a graff sign-in; `None` when `login_id` isn't one.
+    fn poll_graff_login(&self, login_id: &str) -> Option<AgentLoginPoll> {
+        let (provider, exit, output, before) = match lock(&self.inner.flows).get(login_id) {
+            Some(LoginFlow::Graff {
+                provider,
+                exit,
+                output,
+                before,
+                ..
+            }) => (provider.clone(), exit.clone(), output.clone(), *before),
+            _ => return None,
+        };
+        let exited = *lock(&exit);
+        let Some(code) = exited else {
+            return Some(AgentLoginPoll {
+                status: AgentLoginStatus::Pending,
+                message: None,
+                url: None,
+            });
+        };
+        let output = lock(&output).clone();
+        // graff exits 0 even when it refuses, so a sign-in only counts when
+        // the credential changed (or graff said so).
+        let stamp = graff_logins::credential_stamp(&self.inner.config.graff_home, &provider);
+        let landed = code == Some(0)
+            && ((stamp.is_some() && stamp != before) || graff_logins::saw_success(&output));
+        self.cancel_login(login_id);
+        Some(if landed {
+            AgentLoginPoll {
+                status: AgentLoginStatus::Done,
+                message: None,
+                url: None,
+            }
+        } else {
+            AgentLoginPoll {
+                status: AgentLoginStatus::Error,
+                message: Some(graff_logins::failure_message(&output)),
+                url: None,
+            }
         })
     }
 
@@ -947,6 +1138,9 @@ impl AgentAccounts {
         if let Some(poll) = self.poll_task_login(login_id) {
             return Ok(poll);
         }
+        if let Some(poll) = self.poll_graff_login(login_id) {
+            return Ok(poll);
+        }
         let (harness, home, exit, output) = match lock(&self.inner.flows).get(login_id) {
             None => {
                 return Err(EngineError::Other(
@@ -961,6 +1155,7 @@ impl AgentAccounts {
                 });
             }
             Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
+            Some(LoginFlow::Graff { .. }) => unreachable!("graff logins poll above"),
             Some(LoginFlow::Spawned {
                 harness,
                 home,
@@ -1069,6 +1264,13 @@ impl AgentAccounts {
                 let _ = std::fs::remove_dir_all(&home);
             }
             Some(LoginFlow::Task { handle, .. }) => handle.abort(),
+            // graff's credential is written atomically and only on success:
+            // killing the child leaves the current login as it was.
+            Some(LoginFlow::Graff { child, .. }) => {
+                if let Some(c) = lock(&child).as_mut() {
+                    let _ = c.start_kill();
+                }
+            }
             _ => {}
         }
     }

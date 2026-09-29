@@ -943,6 +943,10 @@ pub struct AgentLoginStart {
     pub login_id: String,
     pub url: String,
     pub mode: AgentLoginMode,
+    /// Device-code sign-ins (graff's xAI and Kimi) also give the user a short
+    /// code to confirm on the page; the app shows it beside the link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -972,6 +976,20 @@ pub enum AgentLoginStatus {
     Pending,
     Done,
     Error,
+}
+
+/// The providers `graff login <id>` signs into itself, as `(id, display name)`.
+/// CodeGraff's own account and the Codex (ChatGPT) login are managed elsewhere.
+pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] =
+    &[("xai", "xAI"), ("kimi", "Kimi"), ("zai", "Z.AI")];
+
+/// One graff sign-in provider on a device (`ListGraffLogins` row).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraffLoginProvider {
+    pub id: String,
+    pub name: String,
+    pub signed_in: bool,
 }
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.

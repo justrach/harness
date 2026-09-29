@@ -37,6 +37,7 @@ mod elicitation;
 pub mod exo_bridge;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
+pub mod graff_login;
 pub mod graff_worktree;
 mod normalize;
 mod prompt_images;

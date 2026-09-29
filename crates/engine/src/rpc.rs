@@ -396,6 +396,15 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    /// Which sign-in, for harnesses that have several (graff: `xai`, `kimi`, `zai`).
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignOutGraffLoginParams {
+    provider: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1220,6 +1229,8 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            | methods::LIST_GRAFF_LOGINS
+            | methods::SIGN_OUT_GRAFF_LOGIN
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -2947,12 +2958,26 @@ impl RpcService for EngineRpc {
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
-                let start = self
-                    .agent_accounts
-                    .start_login(p.harness)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let start = match (p.harness, p.provider.as_deref()) {
+                    (HarnessId::Graff, Some(provider)) => {
+                        self.agent_accounts.start_graff_login(provider).await
+                    }
+                    (HarnessId::Graff, None) => Err(crate::EngineError::Other(
+                        "Say which graff provider to sign in to.".into(),
+                    )),
+                    (harness, _) => self.agent_accounts.start_login(harness).await,
+                }
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
+            }
+            methods::LIST_GRAFF_LOGINS => RpcReply::value(&self.agent_accounts.list_graff_logins()),
+            methods::SIGN_OUT_GRAFF_LOGIN => {
+                let p: SignOutGraffLoginParams = parse_params(params)?;
+                let rows = self
+                    .agent_accounts
+                    .sign_out_graff_login(&p.provider)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&rows)
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;
