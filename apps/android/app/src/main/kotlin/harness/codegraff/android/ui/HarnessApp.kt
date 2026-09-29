@@ -1,61 +1,164 @@
 package harness.codegraff.android.ui
 
-import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
-import androidx.compose.material3.adaptive.layout.AnimatedPane
-import androidx.compose.material3.adaptive.layout.ListDetailPaneScaffoldRole
-import androidx.compose.material3.adaptive.layout.PaneAdaptedValue
-import androidx.compose.material3.adaptive.navigation.NavigableListDetailPaneScaffold
-import androidx.compose.material3.adaptive.navigation.rememberListDetailPaneScaffoldNavigator
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import harness.codegraff.android.AppModel
-import kotlinx.coroutines.launch
+import harness.codegraff.android.model.NewSessionDestination
+import harness.codegraff.android.theme.Glyph
+import harness.codegraff.android.theme.GlyphView
+import harness.codegraff.android.theme.Theme
+import harness.codegraff.android.theme.sans
+import harness.codegraff.android.ui.home.HomeScreen
+import harness.codegraff.android.ui.home.SpaceScreen
+import harness.codegraff.android.ui.newsession.NewSessionScreen
+import harness.codegraff.android.ui.session.SessionScreen
+import harness.codegraff.android.ui.settings.SettingsSheet
+import harness.codegraff.android.ui.sheets.NewSpaceSheet
+import harness.codegraff.android.ui.sheets.SessionHostPickerSheet
+import harness.codegraff.android.ui.signin.SignInScreen
+
+/** iPad-style regular width: the session list becomes a sidebar next to the open session, like the desktop. */
+private val SplitBreakpoint = 600.dp
+private val SidebarWidth = 380.dp
 
 /**
- * The canonical Material 3 list-detail layout. On a phone or a folded cover
- * screen it is one pane with a back stack; on a tablet or an unfolded foldable
- * the sessions list and the open session sit side by side, and the scaffold
- * keeps both panes clear of the hinge. Back is predictive on Android 14+.
+ * The app shell (HomeView.swift): a phone keeps one stack (Home, then a session, space or new-session
+ * page pushed over it); a tablet or unfolded foldable puts Home beside the open page, and picking a row
+ * replaces the detail instead of stacking behind it. When a hinge splits the screen, the sidebar ends at the fold.
  */
-@OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
 fun HarnessApp(model: AppModel) {
     val state by model.state.collectAsState()
-    val navigator = rememberListDetailPaneScaffoldNavigator<String>()
-    val scope = rememberCoroutineScope()
+    var signedIn by rememberSaveable { mutableStateOf(true) }
+    if (!signedIn) {
+        SignInScreen(onDemo = { signedIn = true })
+        return
+    }
 
-    NavigableListDetailPaneScaffold(
-        navigator = navigator,
-        listPane = {
-            AnimatedPane {
-                HomePane(
-                    state = state,
-                    selectedId = navigator.currentDestination?.contentKey,
-                    onOpen = { id ->
-                        model.markSeen(id)
-                        scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, id) }
-                    },
+    var path by rememberSaveable(stateSaver = Route.PathSaver) { mutableStateOf(listOf<Route>()) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showNewSpace by rememberSaveable { mutableStateOf(false) }
+    var showHostPicker by rememberSaveable { mutableStateOf(false) }
+    val homeListState = rememberLazyListState()
+    val p = Theme.palette
+
+    BackHandler(enabled = path.isNotEmpty()) { path = path.dropLast(1) }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(p.bg)) {
+        val split = maxWidth >= SplitBreakpoint
+        val density = LocalDensity.current
+        val hingeLeft: Dp? = currentWindowAdaptiveInfo().windowPosture.hingeList
+            .firstOrNull { it.isSeparating && it.isVertical }?.bounds?.left?.let { with(density) { it.toDp() } }
+        val sidebar = hingeLeft?.takeIf { it in 240.dp..(maxWidth - 240.dp) } ?: SidebarWidth
+
+        /** Open a route from the list. In the split layout the sidebar replaces what the detail shows instead of stacking behind it. */
+        fun open(route: Route) { path = if (split) listOf(route) else path + route }
+
+        /** The session switcher's jump: from inside a session, swap that session out instead of stacking another. */
+        fun switchTo(chatId: String) {
+            if (!split && path.lastOrNull() is Route.Chat) path = path.dropLast(1) + Route.Chat(chatId) else open(Route.Chat(chatId))
+        }
+
+        val selectedChatId = if (split) (path.firstOrNull() as? Route.Chat)?.id else null
+
+        @Composable
+        fun Home(modifier: Modifier) = HomeScreen(
+            state, model, selectedChatId, homeListState,
+            onOpen = ::open,
+            onShowSettings = { showSettings = true },
+            onShowNewSpace = { showNewSpace = true },
+            onShowHostPicker = { showHostPicker = true },
+            modifier = modifier,
+        )
+
+        @Composable
+        fun Page(route: Route, modifier: Modifier) {
+            val back = { path = path.dropLast(1) }
+            when (route) {
+                is Route.Chat -> SessionScreen(route.id, state, model, showBack = !split, onBack = back, modifier = modifier)
+                is Route.Space -> SpaceScreen(route.id, state, model, showBack = !split, onBack = back, onOpen = ::open, modifier = modifier)
+                is Route.NewSession -> NewSessionScreen(
+                    route.destination, state, model, showBack = !split, onBack = back,
+                    // Replace the canvas with the live session (in-place swap, no back-through-canvas).
+                    onCreated = { chatId -> path = if (split) listOf(Route.Chat(chatId)) else path.dropLast(1) + Route.Chat(chatId) },
+                    modifier = modifier,
                 )
             }
-        },
-        detailPane = {
-            AnimatedPane {
-                val chat = navigator.currentDestination?.contentKey?.let(state::chat)
-                if (chat == null) {
-                    EmptySessionPane()
-                } else {
-                    SessionPane(
-                        chat = chat,
-                        state = state,
-                        // The list is hidden only in single-pane mode, the one case that needs a way back.
-                        showBack = navigator.scaffoldValue[ListDetailPaneScaffoldRole.List] == PaneAdaptedValue.Hidden,
-                        onBack = { scope.launch { navigator.navigateBack() } },
-                        onSend = { model.send(chat.id, it) },
-                    )
+        }
+
+        CompositionLocalProvider(LocalSwitchToSession provides ::switchTo) {
+            if (split) {
+                Row(Modifier.fillMaxSize()) {
+                    Home(Modifier.width(sidebar).fillMaxHeight())
+                    val current = path.lastOrNull()
+                    if (current == null) SplitDetailPlaceholder(Modifier.weight(1f).fillMaxHeight())
+                    else Page(current, Modifier.weight(1f).fillMaxHeight())
+                }
+            } else {
+                AnimatedContent(
+                    targetState = path,
+                    transitionSpec = {
+                        val forward = targetState.size > initialState.size
+                        val spec = tween<androidx.compose.ui.unit.IntOffset>(260)
+                        (slideInHorizontally(spec) { if (forward) it else -it / 3 } togetherWith
+                            slideOutHorizontally(spec) { if (forward) -it / 3 else it }).using(SizeTransform(clip = false))
+                    },
+                    label = "stack",
+                ) { stack ->
+                    val current = stack.lastOrNull()
+                    if (current == null) Home(Modifier.fillMaxSize()) else Page(current, Modifier.fillMaxSize())
                 }
             }
-        },
-    )
+        }
+    }
+
+    if (showSettings) SettingsSheet(onDismiss = { showSettings = false }, onSignOut = { signedIn = false; path = emptyList() })
+    if (showNewSpace) {
+        NewSpaceSheet(state, model, onCreated = { id -> path = listOf(Route.Space(id)) }, onDismiss = { showNewSpace = false })
+    }
+    if (showHostPicker) {
+        SessionHostPickerSheet(
+            state, selectedDeviceId = null,
+            onSelected = { deviceId -> path = listOf(Route.NewSession(NewSessionDestination.Projectless(deviceId))) },
+            onDismiss = { showHostPicker = false },
+        )
+    }
+}
+
+/** The split layout's detail column before a session is picked. */
+@Composable
+private fun SplitDetailPlaceholder(modifier: Modifier = Modifier) {
+    val p = Theme.palette
+    Column(modifier.background(p.bg), verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically), horizontalAlignment = Alignment.CenterHorizontally) {
+        GlyphView(Glyph.Chat, 32.dp, p.textFaint, strokeWidth = 1.1f)
+        Text("Pick a session, or start one with +", style = sans(15f), color = p.textMuted)
+    }
 }

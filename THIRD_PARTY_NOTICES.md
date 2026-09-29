@@ -165,3 +165,13 @@ Harness code.
 The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
+
+## Fonts
+
+The mobile apps bundle [Geist](https://github.com/vercel/geist-font) (sans),
+Copyright 2024 The Geist Project Authors, and the Android app bundles
+[Google Sans Code](https://github.com/googlefonts/googlesans-code) (code),
+Copyright 2025 The Google Sans Code Project Authors. Both are licensed under the
+SIL Open Font License 1.1; the notices are retained in
+[`third_party/licenses/Geist-OFL.txt`](third_party/licenses/Geist-OFL.txt) and
+[`third_party/licenses/GoogleSansCode-OFL.txt`](third_party/licenses/GoogleSansCode-OFL.txt).

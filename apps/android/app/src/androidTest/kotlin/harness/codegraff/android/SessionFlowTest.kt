@@ -28,15 +28,15 @@ class SessionFlowTest {
     @Test
     fun openingASessionShowsItsTranscript() {
         openToolGroupSession()
-        rule.onNodeWithText("The test that failed before the change now passes.", substring = true).assertExists()
+        rule.onNodeWithText("Matches the desktop fix in", substring = true).assertExists()
     }
 
     @Test
     fun sendIsDisabledUntilThereIsADraft() {
         openToolGroupSession()
-        rule.onNodeWithContentDescription("Send").assertIsNotEnabled()
+        rule.onNodeWithContentDescription("Send message").assertIsNotEnabled()
         rule.onNode(hasSetTextAction()).performTextInput("hello")
-        rule.onNodeWithContentDescription("Send").assertIsEnabled()
+        rule.onNodeWithContentDescription("Send message").assertIsEnabled()
     }
 
     @Test
@@ -45,7 +45,7 @@ class SessionFlowTest {
         rule.onNode(hasSetTextAction()).performTextInput("keep me")
         rule.activityRule.scenario.recreate()
         rule.waitForIdle()
-        rule.onNodeWithText("The test that failed before the change now passes.", substring = true).assertExists()
+        rule.onNodeWithText("Matches the desktop fix in", substring = true).assertExists()
         rule.onNode(hasSetTextAction()).assertTextContains("keep me")
     }
 

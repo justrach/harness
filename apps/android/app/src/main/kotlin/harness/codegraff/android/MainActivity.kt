@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.viewmodel.compose.viewModel
 import harness.codegraff.android.theme.HarnessTheme
+import harness.codegraff.android.theme.rememberThemeStore
 import harness.codegraff.android.ui.HarnessApp
 
 class MainActivity : ComponentActivity() {
@@ -13,7 +14,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            HarnessTheme {
+            val themeStore = rememberThemeStore()
+            HarnessTheme(themeStore) {
                 HarnessApp(model = viewModel())
             }
         }

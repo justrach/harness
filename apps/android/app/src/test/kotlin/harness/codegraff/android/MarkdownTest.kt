@@ -3,6 +3,7 @@ package harness.codegraff.android
 import harness.codegraff.android.demo.DemoDataset
 import harness.codegraff.android.model.MdBlock
 import harness.codegraff.android.model.MdSpan
+import harness.codegraff.android.model.TableAlign
 import harness.codegraff.android.model.parseInline
 import harness.codegraff.android.model.parseMarkdown
 import org.junit.Assert.assertEquals
@@ -13,9 +14,14 @@ class MarkdownTest {
     @Test
     fun inlineMarks() {
         assertEquals(
-            listOf(MdSpan("a "), MdSpan("b", bold = true), MdSpan(" "), MdSpan("c", code = true), MdSpan(" "), MdSpan("d", italic = true)),
-            parseInline("a **b** `c` *d*"),
+            listOf(MdSpan("a "), MdSpan("b", bold = true), MdSpan(" "), MdSpan("c", code = true), MdSpan(" "), MdSpan("d", italic = true), MdSpan(" "), MdSpan("e", strike = true)),
+            parseInline("a **b** `c` *d* ~~e~~"),
         )
+    }
+
+    @Test
+    fun linksKeepTheirTarget() {
+        assertEquals(listOf(MdSpan("see "), MdSpan("docs", link = "https://x.dev")), parseInline("see [docs](https://x.dev)"))
     }
 
     @Test
@@ -31,14 +37,27 @@ class MarkdownTest {
 
     @Test
     fun paragraphsListsHeadingsAndFences() {
-        val blocks = parseMarkdown("# Title\n\nFirst line\ncontinues.\n\n- one\n- two\n\n1. a\n2. b\n\n```kotlin\nval x = 1\n```\n")
+        val blocks = parseMarkdown("# Title\n\nFirst line\ncontinues.\n\n- one\n- two\n\n3. a\n4. b\n\n```kotlin\nval x = 1\n```\n")
         assertEquals(5, blocks.size)
         assertTrue(blocks[0] is MdBlock.Heading)
         assertEquals("First line continues.", (blocks[1] as MdBlock.Paragraph).spans.single().text)
         assertEquals(false, (blocks[2] as MdBlock.ListBlock).ordered)
         assertEquals(2, (blocks[2] as MdBlock.ListBlock).items.size)
-        assertEquals(true, (blocks[3] as MdBlock.ListBlock).ordered)
+        val ordered = blocks[3] as MdBlock.ListBlock
+        assertEquals(true, ordered.ordered)
+        assertEquals(3, ordered.start)
         assertEquals(MdBlock.Code("kotlin", "val x = 1"), blocks[4])
+    }
+
+    @Test
+    fun quotesRulesAndTables() {
+        val blocks = parseMarkdown("> quoted *text*\n\n---\n\n| A | B |\n| :-- | --: |\n| 1 | 2 |\n")
+        assertTrue(blocks[0] is MdBlock.Blockquote)
+        assertEquals(MdBlock.Rule, blocks[1])
+        val table = blocks[2] as MdBlock.Table
+        assertEquals(listOf(TableAlign.Left, TableAlign.Right), table.align)
+        assertEquals(1, table.rows.size)
+        assertEquals("1", table.rows[0][0].single().text)
     }
 
     @Test
