@@ -36,4 +36,39 @@ final class HomeGroupingTests: XCTestCase {
         XCTAssertEqual(groups.map { $0.chats.map(\.id) }, [["a", "c", "e"], ["b", "d"]])
         XCTAssertEqual(Set(groups.map(\.id)).count, groups.count, "section ids are unique")
     }
+
+    // MARK: pinned
+
+    func testPinnedSessionsGatherAboveTheProjectSections() {
+        let groups = HomeGrouping.groups(chats, by: .project, pinned: ["d", "c"])
+        XCTAssertEqual(groups.map(\.id), ["pinned", "project:harness", "project:"])
+        XCTAssertEqual(groups[0].kind, .pinned)
+        // Pins keep the order the list handed over; they no longer sit in their project.
+        XCTAssertEqual(groups.map { $0.chats.map(\.id) }, [["c", "d"], ["a"], ["b", "e"]])
+    }
+
+    func testPinnedSessionsGatherAboveTheDeviceSections() {
+        let groups = HomeGrouping.groups(chats, by: .device, pinned: ["b"])
+        XCTAssertEqual(groups.map(\.id), ["pinned", "device:studio", "device:laptop"])
+        XCTAssertEqual(groups.map { $0.chats.map(\.id) }, [["b"], ["a", "c", "e"], ["d"]])
+    }
+
+    func testASectionWhoseOnlySessionIsPinnedDisappears() {
+        let groups = HomeGrouping.groups(chats, by: .project, pinned: ["c"])
+        XCTAssertEqual(groups.map(\.id), ["pinned", "project:harness", "project:"])
+        XCTAssertFalse(groups.contains { $0.kind == .project(spaceId: "browse") })
+    }
+
+    func testNoPinsMeansNoPinnedSection() {
+        XCTAssertEqual(HomeGrouping.groups(chats, by: .project).map(\.id),
+                       HomeGrouping.groups(chats, by: .project, pinned: []).map(\.id))
+        XCTAssertFalse(HomeGrouping.groups(chats, by: .device, pinned: ["not-a-session"])
+            .contains { $0.kind == .pinned })
+    }
+
+    func testUngroupedListKeepsPinsInline() {
+        let groups = HomeGrouping.groups(chats, by: .none, pinned: ["d"])
+        XCTAssertEqual(groups.map(\.id), ["all"])
+        XCTAssertEqual(groups[0].chats.map(\.id), ["a", "b", "c", "d", "e"])
+    }
 }

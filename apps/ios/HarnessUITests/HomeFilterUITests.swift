@@ -35,6 +35,30 @@ final class HomeFilterUITests: XCTestCase {
         XCTAssertEqual(app.cells.count, before)
     }
 
+    /// Opening a session and coming back must not lose what was typed: the query is
+    /// the whole reason someone went looking, and they usually return to refine it.
+    func testSearchTextSurvivesOpeningASessionAndComingBack() {
+        XCTAssertTrue(rows("OKLCH conversion drift").firstMatch.waitForExistence(timeout: 10))
+        let other = rows("Tool group header colors")
+        XCTAssertTrue(other.firstMatch.exists)
+        let search = app.searchFields.firstMatch
+        if !search.waitForExistence(timeout: 3) { app.swipeDown() }
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("OKLCH")
+        XCTAssertFalse(other.firstMatch.waitForExistence(timeout: 2), "the query should narrow the list")
+
+        rows("OKLCH conversion drift").firstMatch.tap()
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        back.tap()
+
+        let returned = app.searchFields.firstMatch
+        XCTAssertTrue(returned.waitForExistence(timeout: 10))
+        XCTAssertEqual(returned.value as? String, "OKLCH", "the search text was forgotten")
+        XCTAssertFalse(other.firstMatch.exists, "the list should still be narrowed")
+    }
+
     /// "OKLCH conversion drift" is archived in the demo: search covers the
     /// archived shelf too.
     func testSearchFindsSessionsAndShowsEmptyState() {
