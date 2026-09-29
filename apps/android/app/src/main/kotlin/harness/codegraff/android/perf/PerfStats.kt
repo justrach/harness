@@ -76,8 +76,9 @@ class PerfHistograms(private val now: () -> Long = System::currentTimeMillis) {
     /** Empties the window; null when nothing was sampled. */
     @Synchronized
     fun take(): PerfWindow? {
-        val start = windowStartMs
         val end = now()
+        // The server refuses a window over seven days, and an app can stay alive that long without a flush.
+        val start = max(windowStartMs, end - MAX_WINDOW_MS)
         windowStartMs = end
         val taken = HashMap(metrics)
         metrics.clear()
@@ -109,6 +110,8 @@ class PerfHistograms(private val now: () -> Long = System::currentTimeMillis) {
         )
         val BUCKET_COUNT = BUCKETS_MS.size + 1
         const val MAX_SAMPLE_MS = 60_000.0
+        /** Six days: inside the server's seven-day limit on how long a window may be. */
+        const val MAX_WINDOW_MS = 6L * 24 * 60 * 60 * 1000
 
         fun bucketIndex(ms: Double): Int {
             for (i in BUCKETS_MS.indices) if (ms <= BUCKETS_MS[i]) return i
@@ -133,7 +136,7 @@ class PerfStatsBatch(val meta: PerfBatchMeta, val window: PerfWindow) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("schema", SCHEMA)
         put("install_id", meta.installId)
-        put("app_version", meta.appVersion)
+        put("app_version", versionString(meta.appVersion))
         put("os", meta.os)
         put("arch", meta.arch)
         put("os_version", meta.osVersion)
@@ -155,11 +158,18 @@ class PerfStatsBatch(val meta: PerfBatchMeta, val window: PerfWindow) {
     companion object {
         const val SCHEMA = "harness.mobile.stats.v1"
         const val MAX_DEVICE_LENGTH = 40
+        const val MAX_VERSION_LENGTH = 32
         const val MIN_REFRESH_HZ = 24
         const val MAX_REFRESH_HZ = 240
 
         /** What the server accepts in a device model: letters, digits and ` ,._()-`. */
         private val ALLOWED_DEVICE_CHARS: Set<Char> = (('a'..'z') + ('A'..'Z') + ('0'..'9') + " ,._()-".toList()).toSet()
+
+        private val ALLOWED_VERSION_CHARS: Set<Char> = (('a'..'z') + ('A'..'Z') + ('0'..'9') + ".+-".toList()).toSet()
+
+        /** What the server accepts in a version: letters, digits and `.+-`, up to 32 characters; anything else becomes `-`. */
+        internal fun versionString(raw: String): String =
+            raw.map { if (it in ALLOWED_VERSION_CHARS) it else '-' }.joinToString("").take(MAX_VERSION_LENGTH).ifEmpty { "0" }
 
         private fun round2(x: Double) = floor(x * 100 + 0.5) / 100
     }

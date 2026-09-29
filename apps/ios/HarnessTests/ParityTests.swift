@@ -325,6 +325,8 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(v["schema"] as? String, PerfStatsBatch.schema)
         XCTAssertEqual(v["maxSampleMs"] as? Double, PerfHistograms.maxSampleMs)
         XCTAssertEqual(v["maxDeviceLength"] as? Int, PerfStatsBatch.maxDeviceLength)
+        XCTAssertEqual(v["maxVersionLength"] as? Int, PerfStatsBatch.maxVersionLength)
+        XCTAssertEqual(v["maxWindowMs"] as? Int, PerfHistograms.maxWindowMs)
         let hz = try XCTUnwrap(v["refreshHz"] as? [String: Int])
         XCTAssertEqual(hz["min"], PerfStatsBatch.refreshHzRange.lowerBound)
         XCTAssertEqual(hz["max"], PerfStatsBatch.refreshHzRange.upperBound)

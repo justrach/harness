@@ -58,6 +58,8 @@ final class PerfHistograms: @unchecked Sendable {
     ]
     static let bucketCount = bucketsMs.count + 1
     static let maxSampleMs = 60_000.0
+    /// Six days: inside the server's seven-day limit on how long a window may be.
+    static let maxWindowMs = 6 * 24 * 60 * 60 * 1000
 
     static func bucketIndex(_ ms: Double) -> Int {
         bucketsMs.firstIndex { ms <= $0 } ?? bucketsMs.count
@@ -101,8 +103,9 @@ final class PerfHistograms: @unchecked Sendable {
     /// Empties the window; nil when nothing was sampled.
     func take() -> PerfWindow? {
         lock.lock(); defer { lock.unlock() }
-        let start = windowStartMs
         let end = now()
+        // The server refuses a window over seven days, and an app can stay alive that long without a flush.
+        let start = max(windowStartMs, end - Self.maxWindowMs)
         windowStartMs = end
         let taken = metrics
         metrics.removeAll()
@@ -143,7 +146,16 @@ struct PerfBatchMeta {
 struct PerfStatsBatch {
     static let schema = "harness.mobile.stats.v1"
     static let maxDeviceLength = 40
+    static let maxVersionLength = 32
     static let refreshHzRange = 24...240
+
+    private static let allowedVersionCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.+-")
+
+    /// What the server accepts in a version: letters, digits and `.+-`, up to 32 characters; anything else becomes `-`.
+    static func versionString(_ raw: String) -> String {
+        let cleaned = String(String(raw.map { allowedVersionCharacters.contains($0) ? $0 : "-" }).prefix(maxVersionLength))
+        return cleaned.isEmpty ? "0" : cleaned
+    }
 
     /// What the server accepts in a device model: letters, digits and ` ,._()-`.
     private static let allowedDeviceCharacters = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,._()-")
@@ -157,7 +169,7 @@ struct PerfStatsBatch {
         [
             "schema": Self.schema,
             "install_id": meta.installId,
-            "app_version": meta.appVersion,
+            "app_version": Self.versionString(meta.appVersion),
             "os": meta.os,
             "arch": meta.arch,
             "os_version": meta.osVersion,
@@ -340,7 +352,7 @@ enum PerfSharing {
         #else
         let arch = "other"
         #endif
-        return PerfBatchMeta(installId: installId, os: "ios", arch: arch, appVersion: "\(short) (\(build))",
+        return PerfBatchMeta(installId: installId, os: "ios", arch: arch, appVersion: "\(short)+\(build)",
                              osVersion: UIDevice.current.systemVersion, device: modelIdentifier(),
                              refreshHz: screen?.maximumFramesPerSecond ?? 60)
     }

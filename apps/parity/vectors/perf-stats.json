@@ -1,5 +1,5 @@
 {
-  "comment": "What a performance batch looks like on the wire and when it is sent. Both mobile apps build the batch from `input` (raw samples in ms, by metric) and must produce `expect` exactly: samples are clamped to 0..60000 ms and counted into the fixed bucket bounds shared with the desktop app (the first bound a sample is at or under, else the overflow bucket), sum and max are rounded to two decimals, metrics with no samples are left out and the rest come in the fixed order below, names outside the list are dropped, the device is reduced to letters, digits and ` ,._()-` and capped at 40 characters, the refresh rate is kept within 24 to 240, and the window end is never before its start. install_id is a random v4 UUID made fresh for every launch. Uploader rules: sent only when an endpoint exists, sharing is on and the window has samples; at most one attempt per 10 minutes; samples recorded while sharing is off are dropped and never sent later. The server answers with a status: 2xx is sent; 429 and any other 4xx except 400, 413 and 415 keep the samples and start the wait; 400, 413 and 415 mean the batch is wrong, so it is dropped and sending stops for the rest of the launch; 5xx and a failed connection (status 0) keep the samples, start no wait, and try again at the next chance, when the kept samples are merged into the new window. Background work (the stall timer on Android, uploads on both) holds back while the device is in low power mode or its thermal state is Moderate, Serious, Severe or Critical; on Android uploads also wait for an unmetered network and on iOS the post refuses expensive and constrained networks. Debug builds never upload.",
+  "comment": "What a performance batch looks like on the wire and when it is sent. Both mobile apps build the batch from `input` (raw samples in ms, by metric) and must produce `expect` exactly: samples are clamped to 0..60000 ms and counted into the fixed bucket bounds shared with the desktop app (the first bound a sample is at or under, else the overflow bucket), sum and max are rounded to two decimals, metrics with no samples are left out and the rest come in the fixed order below, names outside the list are dropped, the device is reduced to letters, digits and ` ,._()-` and capped at 40 characters, the refresh rate is kept within 24 to 240, the app version has anything outside letters, digits and `.+-` replaced by `-` and is capped at 32 characters (an empty one becomes `0`), a window never reaches back more than six days (the server refuses more than seven), and the window end is never before its start. install_id is a random v4 UUID made fresh for every launch. Uploader rules: sent only when an endpoint exists, sharing is on and the window has samples; at most one attempt per 10 minutes; samples recorded while sharing is off are dropped and never sent later. The server answers with a status: 2xx is sent; 429 and any other 4xx except 400, 413 and 415 keep the samples and start the wait; 400, 413 and 415 mean the batch is wrong, so it is dropped and sending stops for the rest of the launch; 5xx and a failed connection (status 0) keep the samples, start no wait, and try again at the next chance, when the kept samples are merged into the new window. Background work (the stall timer on Android, uploads on both) holds back while the device is in low power mode or its thermal state is Moderate, Serious, Severe or Critical; on Android uploads also wait for an unmetered network and on iOS the post refuses expensive and constrained networks. Debug builds never upload.",
   "schema": "harness.mobile.stats.v1",
   "bucketsMs": [
     1.0,
@@ -257,7 +257,7 @@
       "expect": {
         "schema": "harness.mobile.stats.v1",
         "install_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        "app_version": "1.4 (212)",
+        "app_version": "1.4--212-",
         "os": "ios",
         "arch": "aarch64",
         "os_version": "27.0",
@@ -388,6 +388,70 @@
         "window_start_ms": 1790001000000,
         "window_end_ms": 1790001000000,
         "metrics": []
+      }
+    },
+    {
+      "name": "a window over six days is cut to six days, and an odd version string is made to fit",
+      "input": {
+        "installId": "dddddddd-eeee-4fff-8000-111111111111",
+        "os": "android",
+        "arch": "other",
+        "appVersion": "0.1.0-beta 2 (rc)",
+        "osVersion": "35",
+        "device": "Pixel 9",
+        "refreshHz": 120,
+        "windowStartMs": 1789000000000,
+        "windowEndMs": 1790000000000,
+        "samples": {
+          "main_stall_ms": [
+            120.0
+          ]
+        }
+      },
+      "expect": {
+        "schema": "harness.mobile.stats.v1",
+        "install_id": "dddddddd-eeee-4fff-8000-111111111111",
+        "app_version": "0.1.0-beta-2--rc-",
+        "os": "android",
+        "arch": "other",
+        "os_version": "35",
+        "device": "Pixel 9",
+        "refresh_hz": 120,
+        "window_start_ms": 1789481600000,
+        "window_end_ms": 1790000000000,
+        "metrics": [
+          {
+            "name": "main_stall_ms",
+            "count": 1,
+            "sum_ms": 120.0,
+            "max_ms": 120.0,
+            "buckets": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        ]
       }
     }
   ],
@@ -757,5 +821,7 @@
       "thermal": "Nominal",
       "expect": false
     }
-  ]
+  ],
+  "maxWindowMs": 518400000,
+  "maxVersionLength": 32
 }

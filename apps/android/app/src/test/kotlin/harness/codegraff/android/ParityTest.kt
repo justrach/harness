@@ -338,6 +338,8 @@ class ParityTest {
         assertEquals(v.getString("schema"), PerfStatsBatch.SCHEMA)
         assertEquals(v.getDouble("maxSampleMs"), PerfHistograms.MAX_SAMPLE_MS, 0.0)
         assertEquals(v.getInt("maxDeviceLength"), PerfStatsBatch.MAX_DEVICE_LENGTH)
+        assertEquals(v.getInt("maxVersionLength"), PerfStatsBatch.MAX_VERSION_LENGTH)
+        assertEquals(v.getLong("maxWindowMs"), PerfHistograms.MAX_WINDOW_MS)
         assertEquals(v.getJSONObject("refreshHz").getInt("min"), PerfStatsBatch.MIN_REFRESH_HZ)
         assertEquals(v.getJSONObject("refreshHz").getInt("max"), PerfStatsBatch.MAX_REFRESH_HZ)
         assertEquals(v.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)

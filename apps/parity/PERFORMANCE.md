@@ -34,7 +34,10 @@ it off stays off: only a never-chosen setting reads as on.
 - **Content:** `vectors/perf-stats.json` pins the JSON both apps produce (`schema` `harness.mobile.stats.v1`): `os`,
   `arch`, app and OS version, the hardware model (never the name the owner gave it, capped at 40 characters), the
   refresh rate, the time window, and per metric a count, sum, max and the range counts. Metric names outside the list
-  are dropped before sending, and each sample is clamped to 0..60000 ms.
+  are dropped before sending, each sample is clamped to 0..60000 ms, and values are made to fit what the server
+  accepts (the version is limited to letters, digits and `.+-`, and a window never reaches back more than six days),
+  so one odd value cannot get every batch of a launch refused. The server's own validator is tested against these
+  exact bodies.
 - **Identity:** `install_id` is a random v4 UUID made fresh for every launch, so one launch's batches can be joined but
   never linked to a person or to the next launch. The desktop app keeps one per install instead, in its own file. No
   account, device or session identifier, and no chat content.
