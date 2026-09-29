@@ -35,10 +35,21 @@ pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Background check cadence.
-const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
-/// Retry sooner after a failed check (offline boot, transient edge error).
-const CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Background check cadence: how long after a successful check the next one is
+/// due.
+const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// Retry sooner after failed checks (offline boot, transient edge error):
+/// 1m, 5m, 15m, then 30m for as long as they keep failing.
+const CHECK_BACKOFF: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(60),
+    std::time::Duration::from_secs(5 * 60),
+    std::time::Duration::from_secs(15 * 60),
+    std::time::Duration::from_secs(30 * 60),
+];
+/// How often the wall clock is compared with the next due time. A monotonic
+/// `sleep` stops while the machine sleeps, so a single long sleep pushes the
+/// next check out by the whole night; a short tick notices on wake instead.
+const CHECK_TICK: std::time::Duration = std::time::Duration::from_secs(60);
 /// First check waits out engine boot (room joins, doc re-sync).
 const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
 /// While an auto-apply is deferred behind active sessions, re-probe idleness
@@ -668,8 +679,26 @@ fn auto_update_enabled() -> bool {
 /// to its live-run and open-terminal registries. `None` = no gate.
 pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Background release checker: polls `{edge}/releases` on a 6h cadence and
-/// publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
+/// Delay before the next check: the full interval after a success, otherwise
+/// the backoff step for `failures` in a row (1 = first failure).
+fn next_check_delay(ok: bool, failures: u32) -> std::time::Duration {
+    if ok {
+        return CHECK_INTERVAL;
+    }
+    let step = (failures.max(1) as usize - 1).min(CHECK_BACKOFF.len() - 1);
+    CHECK_BACKOFF[step]
+}
+
+/// Is a check due? Judged on the WALL clock, so time spent asleep counts. A due
+/// time further ahead than a full interval can only mean the clock was set
+/// back; that counts as due, or a wrong clock could silence checks for as long
+/// as it was off.
+fn check_due(now_ms: i64, due_ms: i64) -> bool {
+    now_ms >= due_ms || due_ms - now_ms > CHECK_INTERVAL.as_millis() as i64
+}
+
+/// Background release checker: polls `{edge}/releases` hourly, on the wall
+/// clock, and publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
 /// stream). Managed installs with `HARNESS_AUTO_UPDATE` set stage + apply + service
 /// restart on their own — but only in a quiet window: while `quiescent` reports
 /// activity, the apply defers and re-probes every [`IDLE_RECHECK`].
@@ -753,8 +782,10 @@ impl Updater {
                     _ = tokio::time::sleep(CHECK_INITIAL_DELAY) => {}
                     _ = checks.changed() => {}
                 }
+                let mut failures = 0u32;
                 loop {
                     let ok = self.check_once().await;
+                    failures = if ok { 0 } else { failures.saturating_add(1) };
                     if ok
                         && self.status_tx.borrow().update_available
                         && auto_update_enabled()
@@ -762,9 +793,19 @@ impl Updater {
                     {
                         self.auto_apply_when_idle().await;
                     }
-                    tokio::select! {
-                        _ = tokio::time::sleep(if ok { CHECK_INTERVAL } else { CHECK_RETRY }) => {}
-                        _ = checks.changed() => {}
+                    let due = now_ms()
+                        .saturating_add(next_check_delay(ok, failures).as_millis() as i64);
+                    // Short ticks against the wall clock, not one long sleep:
+                    // waking from sleep checks within a tick.
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(CHECK_TICK) => {
+                                if check_due(now_ms(), due) {
+                                    break;
+                                }
+                            }
+                            _ = checks.changed() => break,
+                        }
                     }
                 }
             } => {}
@@ -874,6 +915,45 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_success_waits_the_full_interval() {
+        assert_eq!(next_check_delay(true, 0), CHECK_INTERVAL);
+        assert_eq!(next_check_delay(true, 7), CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn failures_back_off_one_five_fifteen_then_thirty_minutes() {
+        let minutes = |failures| next_check_delay(false, failures).as_secs() / 60;
+        assert_eq!(
+            (1..=6).map(minutes).collect::<Vec<_>>(),
+            [1, 5, 15, 30, 30, 30]
+        );
+        assert_eq!(minutes(0), 1, "never below the first step");
+        assert_eq!(minutes(u32::MAX), 30);
+    }
+
+    #[test]
+    fn due_time_is_judged_on_the_wall_clock() {
+        let hour = CHECK_INTERVAL.as_millis() as i64;
+        let due = 10_000_000 + hour;
+        assert!(!check_due(due - 1, due), "not due while the clock is short");
+        assert!(check_due(due, due));
+        // A night asleep: the clock jumped past the due time. One long
+        // monotonic sleep would not have noticed; a tick against the wall
+        // clock does.
+        assert!(check_due(due + 8 * hour, due));
+    }
+
+    #[test]
+    fn a_clock_set_back_does_not_silence_checks() {
+        let hour = CHECK_INTERVAL.as_millis() as i64;
+        let now = 10_000_000;
+        // Just scheduled, a full interval ahead: not due.
+        assert!(!check_due(now, now + hour));
+        // The clock moved back a day, so the due time looks a day ahead: due.
+        assert!(check_due(now - 24 * hour, now + hour));
+    }
 
     #[tokio::test]
     async fn stalled_update_headers_and_body_time_out_but_progressing_body_survives() {
