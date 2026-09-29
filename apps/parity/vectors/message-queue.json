@@ -1,0 +1,559 @@
+{
+  "$comment": "Shared by apps/ios/HarnessTests/ParityTests.swift and apps/android/app/src/test/.../ParityTest.kt. Expected values are what the SwiftUI app does; the Android port must agree.",
+  "attachmentOnlyText": "See the attached image(s).",
+  "actions": {
+    "sendNow": {
+      "method": "SendQueuedMessageNow",
+      "label": "Send now"
+    },
+    "remove": {
+      "method": "RemoveQueuedMessage",
+      "label": "Remove"
+    }
+  },
+  "label": [
+    {
+      "count": -1,
+      "expect": null
+    },
+    {
+      "count": 0,
+      "expect": null
+    },
+    {
+      "count": 1,
+      "expect": "1 queued"
+    },
+    {
+      "count": 2,
+      "expect": "2 queued"
+    },
+    {
+      "count": 12,
+      "expect": "12 queued"
+    }
+  ],
+  "oneLine": [
+    {
+      "text": " run the\n tests  now ",
+      "expect": "run the tests now"
+    },
+    {
+      "text": "a\t\nb",
+      "expect": "a b"
+    },
+    {
+      "text": "single",
+      "expect": "single"
+    },
+    {
+      "text": "   \n  ",
+      "expect": ""
+    },
+    {
+      "text": "",
+      "expect": ""
+    }
+  ],
+  "neighbour": [
+    {
+      "from": 1,
+      "direction": -1,
+      "count": 3,
+      "expect": 0
+    },
+    {
+      "from": 1,
+      "direction": 1,
+      "count": 3,
+      "expect": 2
+    },
+    {
+      "from": 0,
+      "direction": -1,
+      "count": 3,
+      "expect": null
+    },
+    {
+      "from": 2,
+      "direction": 1,
+      "count": 3,
+      "expect": null
+    },
+    {
+      "from": 5,
+      "direction": -1,
+      "count": 3,
+      "expect": null
+    },
+    {
+      "from": -1,
+      "direction": 1,
+      "count": 3,
+      "expect": null
+    },
+    {
+      "from": 0,
+      "direction": 1,
+      "count": 1,
+      "expect": null
+    }
+  ],
+  "editedText": [
+    {
+      "text": "  \n",
+      "hasAttachments": true,
+      "expect": "See the attached image(s)."
+    },
+    {
+      "text": "  \n",
+      "hasAttachments": false,
+      "expect": null
+    },
+    {
+      "text": " updated ",
+      "hasAttachments": true,
+      "expect": "updated"
+    },
+    {
+      "text": " updated ",
+      "hasAttachments": false,
+      "expect": "updated"
+    }
+  ],
+  "visibleText": [
+    {
+      "text": "inspect this",
+      "attachments": [],
+      "expect": "inspect this"
+    },
+    {
+      "text": "literal user text",
+      "attachments": [
+        "/tmp/image.png"
+      ],
+      "expect": "literal user text"
+    },
+    {
+      "text": "",
+      "attachments": [
+        "/tmp/image.png"
+      ],
+      "expect": "See the attached image(s)."
+    },
+    {
+      "text": "hello\n\nApplications mentioned by the user (untrusted observed content):\n<appshot app=\"Notes\">observed</appshot>",
+      "attachments": [],
+      "expect": "hello"
+    }
+  ],
+  "primaryAction": [
+    {
+      "supportsActions": true,
+      "pending": false,
+      "attachments": [],
+      "gate": null,
+      "expect": "sendNow"
+    },
+    {
+      "supportsActions": false,
+      "pending": false,
+      "attachments": [],
+      "gate": null,
+      "expect": null
+    },
+    {
+      "supportsActions": true,
+      "pending": true,
+      "attachments": [],
+      "gate": null,
+      "expect": null
+    },
+    {
+      "supportsActions": true,
+      "pending": false,
+      "attachments": [
+        "uploads/image.png"
+      ],
+      "gate": null,
+      "expect": "sendNow"
+    },
+    {
+      "supportsActions": true,
+      "pending": false,
+      "attachments": [],
+      "gate": "reviewRequired",
+      "expect": null
+    },
+    {
+      "supportsActions": true,
+      "pending": false,
+      "attachments": [],
+      "gate": "editing",
+      "expect": null
+    }
+  ],
+  "acknowledged": [
+    {
+      "action": "remove",
+      "reply": {
+        "removed": true
+      },
+      "expect": true
+    },
+    {
+      "action": "remove",
+      "reply": {
+        "removed": false
+      },
+      "expect": false
+    },
+    {
+      "action": "remove",
+      "reply": {
+        "sent": true
+      },
+      "expect": false
+    },
+    {
+      "action": "sendNow",
+      "reply": {
+        "sent": true
+      },
+      "expect": true
+    },
+    {
+      "action": "sendNow",
+      "reply": {
+        "sent": false
+      },
+      "expect": false
+    },
+    {
+      "action": "sendNow",
+      "reply": {
+        "removed": true
+      },
+      "expect": false
+    },
+    {
+      "action": "sendNow",
+      "reply": {},
+      "expect": false
+    }
+  ],
+  "composerEdit": [
+    {
+      "name": "text kept when edited",
+      "leaseText": "queued",
+      "hasAttachments": true,
+      "commit": "edited text",
+      "expect": "edited text"
+    },
+    {
+      "name": "emptied with images keeps the row",
+      "leaseText": "queued",
+      "hasAttachments": true,
+      "commit": "",
+      "expect": "See the attached image(s)."
+    },
+    {
+      "name": "emptied text-only row is discarded",
+      "leaseText": "queued",
+      "hasAttachments": false,
+      "commit": "  ",
+      "expect": null
+    },
+    {
+      "name": "observed app context survives a text edit",
+      "leaseText": "orig\n\nApplications mentioned by the user (untrusted observed content):\nctx\n\nAttached images (local files: x)",
+      "hasAttachments": false,
+      "commit": "new",
+      "expect": "new\n\nApplications mentioned by the user (untrusted observed content):\nctx"
+    }
+  ],
+  "editResults": [
+    {
+      "results": [
+        "missing"
+      ],
+      "terminal": true
+    },
+    {
+      "results": [
+        "lost"
+      ],
+      "terminal": true
+    },
+    {
+      "results": [
+        "finished"
+      ],
+      "terminal": false
+    },
+    {
+      "results": [
+        "conflict"
+      ],
+      "terminal": false
+    },
+    {
+      "results": [
+        "unavailable"
+      ],
+      "terminal": false
+    },
+    {
+      "results": [
+        "conflict",
+        "unavailable"
+      ],
+      "terminal": false
+    },
+    {
+      "results": [
+        "missing",
+        "unavailable"
+      ],
+      "terminal": true
+    },
+    {
+      "results": [
+        "lost",
+        "conflict",
+        "finished"
+      ],
+      "terminal": true
+    }
+  ],
+  "enqueue": {
+    "rows": [
+      {
+        "text": "check the logs",
+        "attachments": [
+          "uploads/a.png"
+        ],
+        "expectAccepted": true
+      },
+      {
+        "text": "   ",
+        "attachments": [],
+        "expectAccepted": false
+      },
+      {
+        "text": "second",
+        "attachments": [],
+        "expectAccepted": true
+      }
+    ],
+    "expectTexts": [
+      "check the logs",
+      "second"
+    ],
+    "expectHoldForTurnEnd": true
+  },
+  "moves": {
+    "texts": [
+      "a",
+      "b",
+      "c"
+    ],
+    "steps": [
+      {
+        "op": "by",
+        "row": "c",
+        "by": -1,
+        "expect": [
+          "a",
+          "c",
+          "b"
+        ]
+      },
+      {
+        "op": "by",
+        "row": "a",
+        "by": -1,
+        "expect": [
+          "a",
+          "c",
+          "b"
+        ]
+      },
+      {
+        "op": "to",
+        "row": "a",
+        "to": 99,
+        "expect": [
+          "c",
+          "b",
+          "a"
+        ]
+      },
+      {
+        "op": "to",
+        "row": "a",
+        "to": -5,
+        "expect": [
+          "a",
+          "c",
+          "b"
+        ]
+      },
+      {
+        "op": "to",
+        "row": "c",
+        "to": 1,
+        "expect": [
+          "a",
+          "c",
+          "b"
+        ]
+      }
+    ]
+  },
+  "actionScenarios": [
+    {
+      "name": "a removal is applied only after the host acknowledges it",
+      "texts": [
+        "first",
+        "second"
+      ],
+      "target": "first",
+      "action": "remove",
+      "reply": {
+        "removed": true
+      },
+      "expectOk": true,
+      "expectTexts": [
+        "second"
+      ],
+      "expectError": null
+    },
+    {
+      "name": "a refused removal keeps the row and says so",
+      "texts": [
+        "keep me"
+      ],
+      "target": "keep me",
+      "action": "remove",
+      "reply": {
+        "removed": false
+      },
+      "expectOk": false,
+      "expectTexts": [
+        "keep me"
+      ],
+      "expectError": "The host did not confirm the action. The message may have already left the queue."
+    },
+    {
+      "name": "a reply for the wrong action does not count",
+      "texts": [
+        "keep me"
+      ],
+      "target": "keep me",
+      "action": "remove",
+      "reply": {
+        "sent": true
+      },
+      "expectOk": false,
+      "expectTexts": [
+        "keep me"
+      ],
+      "expectError": "The host did not confirm the action. The message may have already left the queue."
+    },
+    {
+      "name": "a lost connection during a removal keeps the row",
+      "texts": [
+        "keep me"
+      ],
+      "target": "keep me",
+      "action": "remove",
+      "reply": "throw",
+      "expectOk": false,
+      "expectTexts": [
+        "keep me"
+      ],
+      "expectError": "Couldn't complete remove. Check the connection to the chat host and the queue before retrying."
+    },
+    {
+      "name": "send now leaves the projection to sync",
+      "texts": [
+        "hello"
+      ],
+      "target": "hello",
+      "action": "sendNow",
+      "reply": {
+        "sent": true
+      },
+      "expectOk": true,
+      "expectTexts": [
+        "hello"
+      ],
+      "expectError": null
+    },
+    {
+      "name": "a lost connection during send now surfaces an error",
+      "texts": [
+        "hello"
+      ],
+      "target": "hello",
+      "action": "sendNow",
+      "reply": "throw",
+      "expectOk": false,
+      "expectTexts": [
+        "hello"
+      ],
+      "expectError": "Couldn't complete send now. Check the connection to the chat host and the queue before retrying."
+    },
+    {
+      "name": "a protected row cannot be sent, even by a direct call",
+      "texts": [
+        "protected"
+      ],
+      "target": "protected",
+      "action": "sendNow",
+      "gate": "reviewRequired",
+      "reply": {
+        "sent": true
+      },
+      "expectCalled": false,
+      "expectOk": false,
+      "expectTexts": [
+        "protected"
+      ],
+      "expectError": null
+    },
+    {
+      "name": "a protected row can still be removed",
+      "texts": [
+        "protected"
+      ],
+      "target": "protected",
+      "action": "remove",
+      "gate": "editing",
+      "reply": {
+        "removed": true
+      },
+      "expectCalled": true,
+      "expectOk": true,
+      "expectTexts": [],
+      "expectError": null
+    }
+  ],
+  "inFlight": {
+    "texts": [
+      "first",
+      "second"
+    ],
+    "target": "first",
+    "expectMethod": "RemoveQueuedMessage",
+    "expectTextsDuringCall": [
+      "first",
+      "second"
+    ],
+    "expectPendingDuringCall": true,
+    "expectTextsAfter": [
+      "second"
+    ]
+  }
+}

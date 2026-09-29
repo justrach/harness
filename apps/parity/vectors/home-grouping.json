@@ -1,0 +1,247 @@
+{
+  "$comment": "Shared by apps/ios/HarnessTests/ParityTests.swift and apps/android/app/src/test/.../ParityTest.kt. Expected values are what the SwiftUI app does; the Android port must agree.",
+  "chats": [
+    {
+      "id": "a",
+      "spaceId": "harness",
+      "deviceId": "studio"
+    },
+    {
+      "id": "b",
+      "spaceId": null,
+      "deviceId": "laptop"
+    },
+    {
+      "id": "c",
+      "spaceId": "browse",
+      "deviceId": "studio"
+    },
+    {
+      "id": "d",
+      "spaceId": "harness",
+      "deviceId": "laptop"
+    },
+    {
+      "id": "e",
+      "spaceId": null,
+      "deviceId": "studio"
+    }
+  ],
+  "cases": [
+    {
+      "name": "no grouping keeps one section in list order",
+      "by": "none",
+      "pinned": [],
+      "expect": [
+        {
+          "id": "all",
+          "kind": "all",
+          "chats": [
+            "a",
+            "b",
+            "c",
+            "d",
+            "e"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "projects in order of newest session, projectless last",
+      "by": "project",
+      "pinned": [],
+      "expect": [
+        {
+          "id": "project:harness",
+          "kind": "project",
+          "chats": [
+            "a",
+            "d"
+          ]
+        },
+        {
+          "id": "project:browse",
+          "kind": "project",
+          "chats": [
+            "c"
+          ]
+        },
+        {
+          "id": "project:",
+          "kind": "project",
+          "chats": [
+            "b",
+            "e"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "devices in order of newest session",
+      "by": "device",
+      "pinned": [],
+      "expect": [
+        {
+          "id": "device:studio",
+          "kind": "device",
+          "chats": [
+            "a",
+            "c",
+            "e"
+          ]
+        },
+        {
+          "id": "device:laptop",
+          "kind": "device",
+          "chats": [
+            "b",
+            "d"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "pinned sessions gather above the project sections",
+      "by": "project",
+      "pinned": [
+        "d",
+        "c"
+      ],
+      "expect": [
+        {
+          "id": "pinned",
+          "kind": "pinned",
+          "chats": [
+            "c",
+            "d"
+          ]
+        },
+        {
+          "id": "project:harness",
+          "kind": "project",
+          "chats": [
+            "a"
+          ]
+        },
+        {
+          "id": "project:",
+          "kind": "project",
+          "chats": [
+            "b",
+            "e"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "pinned sessions gather above the device sections",
+      "by": "device",
+      "pinned": [
+        "b"
+      ],
+      "expect": [
+        {
+          "id": "pinned",
+          "kind": "pinned",
+          "chats": [
+            "b"
+          ]
+        },
+        {
+          "id": "device:studio",
+          "kind": "device",
+          "chats": [
+            "a",
+            "c",
+            "e"
+          ]
+        },
+        {
+          "id": "device:laptop",
+          "kind": "device",
+          "chats": [
+            "d"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a section whose only session is pinned disappears",
+      "by": "project",
+      "pinned": [
+        "c"
+      ],
+      "expect": [
+        {
+          "id": "pinned",
+          "kind": "pinned",
+          "chats": [
+            "c"
+          ]
+        },
+        {
+          "id": "project:harness",
+          "kind": "project",
+          "chats": [
+            "a",
+            "d"
+          ]
+        },
+        {
+          "id": "project:",
+          "kind": "project",
+          "chats": [
+            "b",
+            "e"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an unknown pin makes no Pinned section",
+      "by": "device",
+      "pinned": [
+        "not-a-session"
+      ],
+      "expect": [
+        {
+          "id": "device:studio",
+          "kind": "device",
+          "chats": [
+            "a",
+            "c",
+            "e"
+          ]
+        },
+        {
+          "id": "device:laptop",
+          "kind": "device",
+          "chats": [
+            "b",
+            "d"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the ungrouped list keeps pins inline",
+      "by": "none",
+      "pinned": [
+        "d"
+      ],
+      "expect": [
+        {
+          "id": "all",
+          "kind": "all",
+          "chats": [
+            "a",
+            "b",
+            "c",
+            "d",
+            "e"
+          ]
+        }
+      ]
+    }
+  ]
+}
