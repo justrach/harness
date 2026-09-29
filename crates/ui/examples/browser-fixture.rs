@@ -1,5 +1,8 @@
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/saved_views.rs"]
+mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
@@ -200,6 +203,10 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 1200).await;
                 if std::env::var_os("HARNESS_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
                     return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
+                }
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("HARNESS_VIEW_FIXTURE_HTML").is_some() {
+                    return saved_views::exercise(window, &output, cx).await;
                 }
                 state.update(cx, |s, cx| {
                     let entries = serde_json::from_value(serde_json::json!([

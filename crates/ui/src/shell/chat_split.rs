@@ -548,7 +548,11 @@ impl Shell {
             }
             let transcript = cx.new(|cx| Transcript::for_doc(self.state.clone(), id.clone(), true, cx));
             let links = Self::session_links(Some(id.clone()), cx);
-            transcript.update(cx, |transcript, _| transcript.set_workspace_link_handler(links));
+            let views = Self::view_opener(cx);
+            transcript.update(cx, |transcript, _| {
+                transcript.set_workspace_link_handler(links);
+                transcript.set_view_opener(views);
+            });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             self.state
                 .update(cx, |s, cx| s.watch_peer_chat(id.clone(), cx));

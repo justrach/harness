@@ -170,6 +170,43 @@ pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 /// `compaction_update`). Its result output is the agent's summary.
 pub const COMPACTION_TOOL_NAME: &str = "Compact context";
 
+/// What a saved view page is (graff ADR 0107 / 0103).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolViewKind {
+    /// A page the model rendered (`~/.graff/views/<id>.html`).
+    Html,
+    /// An MCP App host page (`~/.graff/mcp-apps/<id>.html`).
+    McpApp,
+}
+
+/// A page a tool saved on the host device (graff's `_meta["graff/view"]`).
+/// Only the kind and id travel: the host resolves them against its own fixed
+/// directories and never opens a path taken from agent output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolView {
+    pub kind: ToolViewKind,
+    /// 32 lowercase hex characters: the page's file name without `.html`.
+    pub id: String,
+}
+
+impl ToolView {
+    /// `None` unless `id` has graff's snapshot-name shape, so an id can never
+    /// carry a path separator or anything else into a file lookup.
+    pub fn new(kind: ToolViewKind, id: &str) -> Option<Self> {
+        (id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))).then(|| Self {
+            kind,
+            id: id.to_owned(),
+        })
+    }
+
+    /// Whether a deserialized view still has a valid id.
+    pub fn is_valid(&self) -> bool {
+        Self::new(self.kind, &self.id).is_some()
+    }
+}
+
 /// A decoded tool invocation, reduced to the fields each kind renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -415,6 +452,12 @@ pub enum AgentEvent {
         /// (`running`/`completed`/`failed`/`cancelled`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         state: Option<String>,
+    },
+    /// The finished tool `id` saved a view page (graff's `_meta["graff/view"]`
+    /// on its completed `tool_call_update`). Folds onto the tool's chip.
+    ToolView {
+        id: String,
+        view: ToolView,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.

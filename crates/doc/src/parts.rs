@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use harness_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
+use harness_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, ToolView, UserInputQuestion};
 
 use crate::constants::MSG_INLINE_MAX;
 
@@ -221,6 +221,10 @@ pub enum MessagePart {
         /// its tagged text deltas (capped; display-only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_tail: Option<String>,
+        /// A page this tool saved on the host (graff views, MCP Apps). The
+        /// chip offers to open it; only kind + id travel (additive).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ToolView>,
     },
     #[serde(rename_all = "camelCase")]
     Input {
@@ -386,6 +390,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
             });
         }
         AgentEvent::ToolCall { id, call } => {
@@ -411,6 +416,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     subagent_ref: None,
                     subagent_status: None,
                     subagent_tail: None,
+                    view: None,
                 });
             }
         }
@@ -447,6 +453,19 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     *output_bytes = None;
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
+                }
+            }
+        }
+        AgentEvent::ToolView { id, view } => {
+            for p in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: pid,
+                    view: slot,
+                    ..
+                } = p
+                    && pid == id
+                {
+                    *slot = Some(view.clone());
                 }
             }
         }
@@ -1050,6 +1069,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
             },
         ];
         let chunks = split_parts(&parts);
@@ -1133,6 +1153,42 @@ mod tests {
             new_text: "one\ntwo\n".into(),
         });
         assert_eq!((stat.additions, stat.deletions), (2, 0));
+    }
+
+    #[test]
+    fn a_tool_view_lands_on_its_own_chip_only() {
+        let view = harness_proto::ToolView::new(
+            harness_proto::ToolViewKind::Html,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let mut parts = Vec::new();
+        for id in ["render", "other"] {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: id.into(),
+                    call: ToolCall::Unknown { name: "render_html".into(), input: None },
+                },
+            );
+        }
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolView { id: "render".into(), view: view.clone() },
+        );
+        // A view for a chip this turn never had changes nothing.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolView { id: "missing".into(), view: view.clone() },
+        );
+        let views: Vec<_> = parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { view, .. } => view.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(views, vec![Some(view), None]);
     }
 
     #[test]

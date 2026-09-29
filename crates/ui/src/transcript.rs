@@ -414,6 +414,9 @@ pub struct ToolItem {
     /// per-delta header rewrites read as noise). Never rendered; still
     /// fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
+    /// A page the tool saved on its host (graff views, MCP Apps); the chip
+    /// then offers "Open view".
+    pub view: Option<harness_proto::ToolView>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
@@ -453,6 +456,12 @@ fn is_agent_wait(call: &ToolCall) -> bool {
 /// when an agent call has actually been bound to its doc.
 fn is_spawn_link(item: &ToolItem) -> bool {
     is_agent_tool(item) && item.subagent_ref.is_some()
+}
+
+/// Chips that open something instead of expanding: a bound spawn (its
+/// subagent's transcript) or a tool that saved a view (the page itself).
+fn is_link_chip(item: &ToolItem) -> bool {
+    is_spawn_link(item) || item.view.is_some()
 }
 
 /// `[agent 3 started: Audit frontend login] …` — graff's spawn result names
@@ -866,6 +875,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         subagent_tail: None,
+        view: None,
         kind: ToolItemKind::Thought,
     }
 }
@@ -1399,6 +1409,10 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         if let Some(tail) = &t.subagent_tail {
             acc.extend_from_slice(tail.as_bytes());
         }
+        // A saved view lands after the result: re-splice to show "Open view".
+        if let Some(view) = &t.view {
+            acc.extend_from_slice(view.id.as_bytes());
+        }
     }
     acc.push(auto_open as u8);
     fnv1a(&acc)
@@ -1597,6 +1611,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                view,
                 ..
             } => {
                 let mut item = ToolItem {
@@ -1613,6 +1628,7 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
+                    view: view.clone(),
                     kind: ToolItemKind::Call,
                 };
                 bind_agent_wait(&spawns, &mut item);
@@ -3361,6 +3377,9 @@ pub struct Transcript {
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
     workspace_link: Option<render::LinkUi>,
+    /// Opens a tool's saved view (`chat id`, view) in the shell's browser
+    /// pane; set by the shell with the link handler.
+    view_opener: Option<ViewOpener>,
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -3520,9 +3539,17 @@ pub enum TranscriptEvent {
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
+/// Opens a saved tool view for the chat whose transcript shows the chip.
+pub(crate) type ViewOpener =
+    Rc<dyn Fn(&str, &harness_proto::ToolView, &mut Window, &mut gpui::App)>;
+
 impl Transcript {
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
+    }
+
+    pub(crate) fn set_view_opener(&mut self, opener: ViewOpener) {
+        self.view_opener = Some(opener);
     }
 
     pub(crate) fn link_ui(&self) -> Option<render::LinkUi> {
@@ -3646,6 +3673,7 @@ impl Transcript {
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
+            view_opener: None,
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
@@ -7466,7 +7494,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if is_spawn_link(tool) {
+                if is_link_chip(tool) {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -7488,7 +7516,7 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
+            .map(|tool| tool.invocation.clone().filter(|_| !is_link_chip(tool)))
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -7813,7 +7841,7 @@ impl Transcript {
                                 | SubagentStatus::Disconnected
                         )
                     );
-                    return subagent_chip(
+                    return link_chip(
                         tool,
                         SharedString::from(format!("{row_id}#s{ix}")),
                         cx.listener(move |_, _, _, cx| {
@@ -7824,6 +7852,25 @@ impl Transcript {
                                 frozen,
                             });
                         }),
+                        collapses,
+                        theme,
+                        cx.entity_id(),
+                        cx,
+                    );
+                }
+                // A tool that saved a view opens that page in the browser
+                // pane (the shell checks it lives on this device).
+                if let Some(view) = tool.view.clone() {
+                    let chat_id = self.chat_id.clone().unwrap_or_default();
+                    let opener = self.view_opener.clone();
+                    return link_chip(
+                        tool,
+                        SharedString::from(format!("{row_id}#v{ix}")),
+                        move |_, window, cx| {
+                            if let Some(open) = &opener {
+                                open(&chat_id, &view, window, cx);
+                            }
+                        },
                         collapses,
                         theme,
                         cx.entity_id(),
@@ -9038,12 +9085,12 @@ fn tool_chip(
         .into_any_element()
 }
 
-/// A spawn chip: same card as [`tool_chip`], but the WHOLE card is the
-/// "open the subagent tab" click (open-arrow tile in the trailing slot).
-/// No accordion — an inline body would only repeat the subagent's own
-/// transcript. The group guide rail is omitted for agent-only rows (no
-/// collapse header for it to hang from).
-fn subagent_chip(
+/// A spawn or view chip: same card as [`tool_chip`], but the WHOLE card is
+/// the "open the subagent tab" / "open the saved view" click (open-arrow tile
+/// in the trailing slot). No accordion — an inline body would only repeat
+/// what the tab shows. The group guide rail is omitted for agent-only rows
+/// (no collapse header for it to hang from).
+fn link_chip(
     tool: &ToolItem,
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -12797,6 +12844,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
         }
     }
 
@@ -12919,6 +12967,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            view: None,
         }
     }
 
@@ -13017,6 +13066,38 @@ mod tests {
         assert!(tool_group_collapses(tools));
         assert!(tools.iter().all(|t| !is_agent_tool(t)));
         assert!(tools.iter().all(|t| !is_spawn_link(t)));
+    }
+
+    #[test]
+    fn a_tool_that_saved_a_view_is_a_link_chip_with_no_body() {
+        let view = harness_proto::ToolView::new(
+            harness_proto::ToolViewKind::Html,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let mut render = tool_part("r", "render_html");
+        if let MessagePart::Tool { view: slot, .. } = &mut render {
+            *slot = Some(view.clone());
+        }
+        let entry = assistant(
+            "m-view",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), render],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("tool group expected")
+        };
+        let chips: Vec<_> = tools.iter().map(|t| (is_link_chip(t), t.view.clone())).collect();
+        assert_eq!(chips, vec![(false, None), (true, Some(view))]);
+        // The row re-splices when the view lands after the result.
+        let before = assistant(
+            "m-view",
+            MessageStatus::Complete,
+            vec![tool_part("a", "ls"), tool_part("r", "render_html")],
+        );
+        let before = rows_for_entry(&before, false, false, &mut parse);
+        assert_ne!(before[0].version, rows[0].version);
     }
 
     #[test]
@@ -15078,6 +15159,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
             kind: ToolItemKind::Call,
         };
         let edit = |p: &str| ToolItem {
@@ -15097,6 +15179,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
             kind: ToolItemKind::Call,
         };
         let tools = vec![
@@ -15132,6 +15215,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -15149,6 +15233,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
                 kind: ToolItemKind::Call,
             },
             ToolItem {
@@ -15164,6 +15249,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                view: None,
                 kind: ToolItemKind::Call,
             },
         ];
@@ -15241,6 +15327,7 @@ mod tests {
             subagent_ref: Some("c--sub--spawn".into()),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            view: None,
         }];
         let spawns = agent_spawns(&parts);
         let mut wait = ToolItem {
@@ -15259,6 +15346,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            view: None,
             kind: ToolItemKind::Call,
         };
         bind_agent_wait(&spawns, &mut wait);

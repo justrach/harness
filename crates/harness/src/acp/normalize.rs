@@ -8,7 +8,7 @@
 //! tagged `sessionUpdate`/snake_case; structs are camelCase; tool kinds and
 //! statuses are snake_case).
 
-use harness_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
+use harness_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff, ToolView, ToolViewKind};
 use serde_json::Value;
 
 /// Byte cap applied to tool output text at the harness boundary. The doc-side
@@ -416,8 +416,9 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             }];
             // Some agents send a single terminal-status `tool_call` with the
             // result inline instead of a follow-up update.
-            if let Some(resolved) = resolved_result(update, id) {
+            if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
+                events.extend(tool_view(update, id));
             }
             events
         }
@@ -440,6 +441,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             }
             if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
+                events.extend(tool_view(update, id));
             } else if let Some(output) = tool_output(update) {
                 // Content with no terminal status: the tool is still running
                 // and this is its live output (graff streams a subagent's
@@ -541,6 +543,20 @@ fn resolved_result(update: &Value, id: String) -> Option<AgentEvent> {
         output: tool_output(update),
         diff: tool_diff(update),
     })
+}
+
+/// graff's `_meta["graff/view"]` on a finished tool: the page it saved, as
+/// `{kind: "html" | "mcp_app", id, path}`. The path is informational and never
+/// used; an unknown kind or a malformed id yields nothing.
+fn tool_view(update: &Value, id: String) -> Option<AgentEvent> {
+    let meta = update.pointer("/_meta/graff~1view")?;
+    let kind = match meta.get("kind").and_then(Value::as_str)? {
+        "html" => ToolViewKind::Html,
+        "mcp_app" => ToolViewKind::McpApp,
+        _ => return None,
+    };
+    let view = ToolView::new(kind, meta.get("id").and_then(Value::as_str)?)?;
+    Some(AgentEvent::ToolView { id, view })
 }
 
 /// Decode an `availableCommands` array (`{name, description, input: {hint}}`).
@@ -687,6 +703,43 @@ mod tests {
         ));
         // A bare status-less update with no content stays silent.
         assert!(map_update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "spawn-1"})).is_empty());
+    }
+
+    #[test]
+    fn graff_view_meta_on_a_finished_tool_becomes_a_tool_view() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let update = |status: &str, meta: Value| {
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t9",
+                "status": status,
+                "content": [{"type": "content", "content": {"type": "text", "text": "[Rendered view](/h/.graff/views/x.html)"}}],
+                "_meta": {"graff/view": meta},
+            })
+        };
+        let events = map_update(&update("completed", json!({"kind": "html", "id": id, "path": "/elsewhere"})));
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::ToolView {
+                id: "t9".into(),
+                view: ToolView::new(ToolViewKind::Html, id).unwrap(),
+            })
+        );
+        let app = map_update(&update("failed", json!({"kind": "mcp_app", "id": id})));
+        assert!(matches!(app.last(), Some(AgentEvent::ToolView { view, .. }) if view.kind == ToolViewKind::McpApp));
+        // Nothing for a running tool, an unknown kind, or an id that isn't
+        // 32 lowercase hex (it becomes a file name on the host).
+        for (status, meta) in [
+            ("in_progress", json!({"kind": "html", "id": id})),
+            ("completed", json!({"kind": "pdf", "id": id})),
+            ("completed", json!({"kind": "html", "id": "../../etc/passwd"})),
+            ("completed", json!({"kind": "html", "id": id.to_uppercase()})),
+        ] {
+            assert!(
+                !map_update(&update(status, meta.clone())).iter().any(|e| matches!(e, AgentEvent::ToolView { .. })),
+                "{status} {meta}"
+            );
+        }
     }
 
     #[test]
