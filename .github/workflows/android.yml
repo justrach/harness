@@ -1,26 +1,41 @@
 name: android
 
+# Build and test the Android app. Nothing here publishes: the release workflow builds a bundle to download,
+# and uploading to the Play Store stays a manual step.
+
 on:
   pull_request:
     paths:
       - "apps/android/**"
+      # The shared parity vectors and the bundled theme catalog the Android tests read.
+      - "apps/parity/**"
+      - "apps/ios/Harness/Theme/themes.json"
       - ".github/workflows/android.yml"
   push:
     branches: [main]
     paths:
       - "apps/android/**"
+      - "apps/parity/**"
+      - "apps/ios/Harness/Theme/themes.json"
       - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: android-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: apps/android
+
 jobs:
-  build:
+  test:
+    name: unit tests, lint and debug build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/android
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -29,9 +44,92 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@v3
         with:
-          # The action's default `tools` package no longer exists in the SDK repository, which
-          # made sdkmanager exit 1. Gradle fetches the platform it needs once licenses are accepted.
+          # The action's default `tools` package no longer exists in the SDK repository, which made
+          # sdkmanager exit 1. Gradle fetches the platform it needs once licenses are accepted.
           packages: ""
       - uses: gradle/actions/setup-gradle@v4
-      - name: unit tests and debug build
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      # The unit tests include the parity tests: the shared vectors, the UX contract and the bundled theme catalog.
+      - name: Unit tests, lint and debug build
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-reports
+          path: |
+            apps/android/app/build/reports/tests
+            apps/android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Keep the debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+
+  release-build:
+    name: release-like build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+      - uses: gradle/actions/setup-gradle@v4
+      # Minified with R8, like a store build. `perf` is the same code signed with the debug key so it installs.
+      - name: Perf APK and release bundle
+        run: ./gradlew --no-daemon :app:assemblePerf :app:bundleRelease
+      - name: The baseline profile ships in the APK
+        run: unzip -l app/build/outputs/apk/perf/app-perf.apk | grep -q 'assets/dexopt/baseline.prof'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release-build
+          path: |
+            apps/android/app/build/outputs/apk/perf/app-perf.apk
+            apps/android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 7
+
+  emulator:
+    name: instrumented tests (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ""
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable KVM for the emulator
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          working-directory: apps/android
+          script: ./gradlew --no-daemon :app:connectedDebugAndroidTest
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumented-reports
+          path: apps/android/app/build/reports/androidTests
+          if-no-files-found: ignore
+          retention-days: 7

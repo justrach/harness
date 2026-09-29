@@ -16,9 +16,23 @@ android {
         applicationId = "harness.codegraff.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
+        // CI numbers release builds; a local build is 1.
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        // Release signing comes from the environment (repository secrets in CI). Without it the release
+        // bundle is built unsigned, which is what a pull request or a fork produces.
+        System.getenv("ANDROID_KEYSTORE_FILE")?.let { keystore ->
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -26,6 +40,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            signingConfig = signingConfigs.findByName("release")
         }
         // Release-like build signed with the debug key, for measuring performance
         // on a device or emulator (a debug build is several times slower in Compose).
