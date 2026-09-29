@@ -5,6 +5,10 @@ import androidx.lifecycle.viewModelScope
 import harness.codegraff.android.demo.DemoDataset
 import harness.codegraff.android.model.AgentDescriptor
 import harness.codegraff.android.model.AgentReadiness
+import harness.codegraff.android.model.AgentStatus
+import harness.codegraff.android.model.ChatGPTComputer
+import harness.codegraff.android.model.ChatGPTSignInClient
+import harness.codegraff.android.model.DemoChatGPTSignIn
 import harness.codegraff.android.model.DeviceAgents
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
@@ -102,6 +106,13 @@ data class WorkspaceState(
         AgentReadiness.evaluate(devices.map { DeviceAgents(it.id, it.name, deviceOnline(it.id), agents[it.id].orEmpty()) })
     }
 
+    /** The online computers that have Graff, which is where the ChatGPT sign-in can run. */
+    fun chatGPTComputers(): List<ChatGPTComputer> {
+        val graff = agentReadiness.rows.firstOrNull { it.agent.id == "graff" } ?: return emptyList()
+        if (graff.status < AgentStatus.Off) return emptyList()
+        return graff.deviceIds.map { ChatGPTComputer(it, deviceName(it)) }
+    }
+
     fun chatsIn(spaceId: String): List<Chat> =
         sortPinnedFirst(chats.filter { !it.archived && it.spaceId == spaceId }, pinnedSessionIds)
 
@@ -164,10 +175,17 @@ class AppModel(
 
     val workspace: StateFlow<WorkspaceState> get() = _workspace
 
+    /** Runs the "Use your ChatGPT plan" sign-in on a computer. Demo only until the engine ships the call; null offers nothing. */
+    val chatGPTSignIn: ChatGPTSignInClient? = chatGptResult?.let { DemoChatGPTSignIn(it) }
+
     companion object {
         /** Demo rig: which dataset a new model starts with (`onboarding-*`; anything else is the standard demo). Set from an intent extra. */
         @Volatile
         var scenario: String? = null
+
+        /** Demo rig: with a value (a phase's wire name), the ChatGPT sign-in is offered and ends that way. Set from an intent extra. */
+        @Volatile
+        var chatGptResult: String? = null
     }
 
     /** The workspace and all transcripts as one value. */

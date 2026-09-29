@@ -57,6 +57,13 @@ final class AppModel {
     var phase: Phase = .signedOut
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
+
+    /// Runs the "Use your ChatGPT plan" sign-in on a computer. Demo only until the engine ships the call; with none set
+    /// the phone offers no sign-in.
+    private(set) var chatGPTSignIn: (any ChatGPTSignInClient)?
+    /// Set to open the sign-in sheet on these computers. Home presents it, so an agent turning on mid-sign-in cannot
+    /// take the sheet away with the onboarding card that asked for it.
+    var chatGPTSheetComputers: [ChatGPTComputer]?
     var demoPinnedSessionIds: [String] = []
     /// Graced connectivity truth — one stream every consumer inherits calm
     /// from (home pill, composer notice, Queued/Failed badges).
@@ -382,6 +389,11 @@ final class AppModel {
             demo = DemoDataset.standard()
         }
         demoPinnedSessionIds = []
+        if let i = args.firstIndex(of: "-chatgpt-result"), i + 1 < args.count {
+            chatGPTSignIn = DemoChatGPTSignIn(outcome: args[i + 1])
+        } else if args.contains("-chatgpt-signin") {
+            chatGPTSignIn = DemoChatGPTSignIn(outcome: "connected")
+        }
         DraftStore.persistsToDisk = false
         phase = .ready
     }
@@ -394,6 +406,7 @@ final class AppModel {
         storeLastUsed.removeAll()
         config = nil
         demo = nil
+        chatGPTSignIn = nil
         demoPinnedSessionIds = []
         DraftStore.wipeAll()
         DraftStore.persistsToDisk = true
@@ -622,6 +635,14 @@ final class AppModel {
             devicesAgents.append(DeviceAgents(id: device.id, name: device.name, online: online, agents: agents))
         }
         return AgentReadiness.evaluate(devicesAgents)
+    }
+
+    /// The online computers that have Graff, which is where the ChatGPT sign-in can run.
+    func chatGPTComputers() async -> [ChatGPTComputer] {
+        guard chatGPTSignIn != nil else { return [] }
+        let readiness = await agentReadiness()
+        guard let graff = readiness.rows.first(where: { $0.agent.id == "graff" }), graff.status >= .off else { return [] }
+        return graff.deviceIds.map { ChatGPTComputer(id: $0, name: deviceName($0)) }
     }
 
     /// Live model catalog from the selected execution device (the desktop's

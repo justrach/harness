@@ -1,7 +1,9 @@
 package harness.codegraff.android.ui.home
 
 import androidx.compose.animation.core.animateFloatAsState
+import harness.codegraff.android.model.ChatGPTComputer
 import harness.codegraff.android.model.OnboardingState
+import harness.codegraff.android.ui.signin.ChatGPTSignInSheet
 import androidx.compose.ui.platform.testTag
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
@@ -114,6 +116,8 @@ fun HomeScreen(
     // Not persisted: a filter left on across launches reads as lost sessions.
     var searchText by rememberSaveable { mutableStateOf("") }
     var statusFilter by rememberSaveable { mutableStateOf(HomeStatusFilter.All) }
+    // Lives here, not in the empty state: an agent turning on mid-sign-in swaps that state out from under the sheet.
+    var chatGPTComputers by remember { mutableStateOf<List<ChatGPTComputer>?>(null) }
 
     val selectedSpace = state.spaces.firstOrNull { it.id == spaceFilter.value }
     val grouping = HomeGroupBy.fromKey(groupByPref.value)
@@ -130,6 +134,11 @@ fun HomeScreen(
     val counts = remember(state, scoped) { statusCounts(state, scoped) }
     val archived = remember(state, selectedSpace, searchText) { state.archivedMatches(selectedSpace?.id, searchText) }
     val topInset = statusBarHeight()
+
+    val chatGPT = model.chatGPTSignIn
+    if (chatGPT != null) {
+        chatGPTComputers?.let { ChatGPTSignInSheet(it, chatGPT, onDismiss = { chatGPTComputers = null }) }
+    }
 
     Box(modifier.fillMaxSize().background(p.surface)) {
         LazyColumn(
@@ -160,7 +169,7 @@ fun HomeScreen(
                         val readiness = state.agentReadiness
                         if (scoped.isEmpty() && readiness.state != OnboardingState.Ready) {
                             // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
-                            BringYourAgent(readiness, state::deviceName)
+                            BringYourAgent(readiness, state::deviceName, chatGPT = model.chatGPTSignIn != null) { chatGPTComputers = it }
                         } else {
                             Text(
                                 if (scoped.isEmpty()) "No sessions yet — start one with +" else "No matching sessions",

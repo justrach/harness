@@ -7,6 +7,9 @@ package harness.codegraff.android
 import harness.codegraff.android.model.ATTACHMENT_ONLY_TEXT
 import harness.codegraff.android.model.AgentDescriptor
 import harness.codegraff.android.model.AgentReadiness
+import harness.codegraff.android.model.ChatGPTPhase
+import harness.codegraff.android.model.ChatGPTPoll
+import harness.codegraff.android.model.ChatGPTSignIn
 import harness.codegraff.android.model.DeviceAgents
 import harness.codegraff.android.model.OnboardingAgent
 import harness.codegraff.android.model.AccountDeletion
@@ -343,6 +346,21 @@ class ParityTest {
             assertEquals(name, rows.map { it.getString("id") }, report.rows.map { it.agent.id })
             assertEquals(name, rows.map { it.getString("status") }, report.rows.map { it.status.wireName })
             assertEquals(name, rows.map { it.getJSONArray("devices").strings() }, report.rows.map { it.deviceIds })
+        }
+    }
+
+    @Test
+    fun theChatGPTSignInRulesMatch() {
+        val v = load("vectors/chatgpt-sign-in.json")
+        assertEquals(v.getString("manageUsageUrl"), ChatGPTSignIn.MANAGE_USAGE_URL)
+        assertEquals(v.getJSONArray("phases").strings(), ChatGPTPhase.entries.map { it.wireName })
+        val actions = v.getJSONObject("actions")
+        for (phase in ChatGPTPhase.entries) {
+            assertEquals(phase.wireName, actions.getString(phase.wireName), ChatGPTSignIn.action(phase).wireName)
+        }
+        for (c in v.rows("polls")) {
+            val poll = ChatGPTPoll(c.getString("status"), if (c.has("planUsage")) c.getBoolean("planUsage") else null)
+            assertEquals(c.getString("name"), c.getString("phase"), ChatGPTSignIn.phase(poll).wireName)
         }
     }
 

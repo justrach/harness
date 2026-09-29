@@ -124,6 +124,18 @@ struct BringYourAgentView: View {
                         .foregroundStyle(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // Graff can also run on a ChatGPT plan; the sign-in happens on the computer that has it.
+                if row.agent.id == "graff", model.chatGPTSignIn != nil, row.status >= .off {
+                    Button {
+                        model.chatGPTSheetComputers = row.deviceIds.map { ChatGPTComputer(id: $0, name: model.deviceName($0)) }
+                    } label: {
+                        Text("Continue with ChatGPT")
+                            .font(Theme.sans(14, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .frame(minHeight: 44, alignment: .leading)
+                    }
+                    .accessibilityIdentifier("onboarding-chatgpt")
+                }
             }
             Spacer(minLength: 0)
         }

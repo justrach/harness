@@ -39,6 +39,9 @@ import harness.codegraff.android.theme.GlyphView
 import harness.codegraff.android.theme.LocalThemeStore
 import harness.codegraff.android.theme.Theme
 import harness.codegraff.android.theme.sans
+import harness.codegraff.android.model.ChatGPTComputer
+import harness.codegraff.android.model.ChatGPTSignInClient
+import harness.codegraff.android.ui.signin.ChatGPTSignInContent
 import harness.codegraff.android.ui.components.HarnessSheet
 import harness.codegraff.android.ui.components.pressWashClickable
 
@@ -55,7 +58,11 @@ fun SettingsSheet(
     deletion: AccountDeletionState = AccountDeletionState(),
     onDeleteAccount: () -> Unit = {},
     onDismissDeletionError: () -> Unit = {},
+    /** Signing in to ChatGPT for Graff: offered only with a client (demo for now) and a computer that has Graff. */
+    chatGPT: ChatGPTSignInClient? = null,
+    chatGPTComputers: List<ChatGPTComputer> = emptyList(),
 ) {
+    var showChatGPT by rememberSaveable { mutableStateOf(false) }
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var showPerformance by rememberSaveable { mutableStateOf(false) }
@@ -63,12 +70,15 @@ fun SettingsSheet(
         runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() ?: "?"
     }
     HarnessSheet(
-        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else "Settings",
+        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else if (showChatGPT) "Use your ChatGPT plan" else "Settings",
         // The sheet stays put while the account is being deleted (interactiveDismissDisabled).
         onDismiss = { if (!deletion.busy) onDismiss() },
-        trailing = if (showAppearance || showPerformance) ({ BackButton { showAppearance = false; showPerformance = false } }) else null,
+        trailing = if (showAppearance || showPerformance || showChatGPT) ({ BackButton { showAppearance = false; showPerformance = false; showChatGPT = false } }) else null,
     ) {
-        if (showAppearance) AppearanceContent() else if (showPerformance) PerformanceContent(version) else SettingsContent(
+        if (showAppearance) AppearanceContent() else if (showPerformance) PerformanceContent(version)
+        else if (showChatGPT && chatGPT != null) ChatGPTSignInContent(chatGPTComputers, chatGPT, onDone = { showChatGPT = false })
+        else SettingsContent(
+            onOpenChatGPT = if (chatGPT != null && chatGPTComputers.isNotEmpty()) ({ showChatGPT = true }) else null,
             onOpenAppearance = { showAppearance = true },
             onOpenPerformance = { showPerformance = true },
             onSignOut = { onDismiss(); onSignOut() },
@@ -118,6 +128,7 @@ private fun BackButton(onClick: () -> Unit) {
 
 @Composable
 private fun SettingsContent(
+    onOpenChatGPT: (() -> Unit)?,
     onOpenAppearance: () -> Unit,
     onOpenPerformance: () -> Unit,
     onSignOut: () -> Unit,
@@ -143,6 +154,17 @@ private fun SettingsContent(
             if (canDeleteAccount) ValueRow("Signed in with", "CodeGraff") else ValueRow("Signed in", "Demo mode")
             Divider()
             ActionRow("Sign out", destructive = true, onClick = onSignOut)
+        }
+        if (onOpenChatGPT != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(p.ink(0.045f))) {
+                    LinkRow("Use your ChatGPT plan", "", onOpenChatGPT)
+                }
+                Text(
+                    "Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.",
+                    style = sans(12f), color = p.textMuted.opacity(0.7f), modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
         }
         Section("Appearance") {
             LinkRow("Theme", themeSummary, onOpenAppearance)

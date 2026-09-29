@@ -164,6 +164,8 @@ fun HarnessApp(model: AppModel) {
             // No live account backend yet: the row is hidden in the offline demo, so this is only the seam.
             onDeleteAccount = { scope.launch { model.deleteAccount(api = null) } },
             onDismissDeletionError = model::dismissAccountDeletionError,
+            chatGPT = model.chatGPTSignIn,
+            chatGPTComputers = state.chatGPTComputers(),
         )
     }
     if (showNewSpace) {

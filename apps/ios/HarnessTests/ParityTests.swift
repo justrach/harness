@@ -417,6 +417,20 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testTheChatGPTSignInRulesMatch() throws {
+        let v = try load("vectors/chatgpt-sign-in.json")
+        XCTAssertEqual(v["manageUsageUrl"] as? String, ChatGPTSignIn.manageUsageURL)
+        XCTAssertEqual(v["phases"] as? [String], ChatGPTPhase.allCases.map(\.rawValue))
+        let actions = try XCTUnwrap(v["actions"] as? [String: String])
+        for phase in ChatGPTPhase.allCases {
+            XCTAssertEqual(ChatGPTSignIn.action(in: phase).rawValue, actions[phase.rawValue], phase.rawValue)
+        }
+        for c in try rows(v, "polls") {
+            let poll = ChatGPTPoll(status: c["status"] as! String, planUsage: c["planUsage"] as? Bool)
+            XCTAssertEqual(ChatGPTSignIn.phase(for: poll).rawValue, c["phase"] as? String, "\(c["name"] ?? "")")
+        }
+    }
+
     /// Test double for a value the uploader's `@Sendable` closures read while the test moves it on.
     private final class Box<T>: @unchecked Sendable {
         var value: T

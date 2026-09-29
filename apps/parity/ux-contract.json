@@ -78,6 +78,30 @@
       "Send the link to your computer",
       "Copy link",
       "Get Harness for your computer"
+    ],
+    "chatgptSignIn": [
+      "Use your ChatGPT plan",
+      "Continue with ChatGPT",
+      "Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.",
+      "Choose the computer",
+      "A browser window opens on that computer. Approve it there.",
+      "Waiting for approval on",
+      "Keep this open until it finishes.",
+      "Cancel",
+      "You're using your ChatGPT plan",
+      "Got it",
+      "Manage usage",
+      "Signed in, but plan usage is off",
+      "Graff can't use your ChatGPT plan yet. Sign in again and allow plan usage, or use an API key.",
+      "Sign in again",
+      "You didn't approve the sign-in",
+      "Nothing was changed. Try again when you're ready.",
+      "Try again",
+      "Sign-in didn't finish",
+      "Something went wrong on your computer. Try again.",
+      "Prefer the terminal? Run",
+      "graff login chatgpt",
+      "Copy"
     ]
   },
   "queuePanelLayout": {

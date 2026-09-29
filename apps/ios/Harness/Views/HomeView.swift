@@ -198,6 +198,9 @@ struct HomeView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .sheet(isPresented: Binding(get: { model.chatGPTSheetComputers != nil }, set: { if !$0 { model.chatGPTSheetComputers = nil } })) {
+            if let client = model.chatGPTSignIn { ChatGPTSignInSheet(computers: model.chatGPTSheetComputers ?? [], client: client) }
+        }
         .sheet(isPresented: $showNewSpace) {
             NewSpaceSheet { spaceId in
                 open(.space(spaceId))

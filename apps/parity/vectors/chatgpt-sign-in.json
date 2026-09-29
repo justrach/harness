@@ -1,0 +1,70 @@
+{
+  "$comment": "Sign in with ChatGPT (plan usage) as driven from the phone. The browser step runs on the computer; the phone starts it, shows the wait and the outcome. `polls` maps the computer's poll answer to the screen the phone shows, `actions` says what the one main button does on each screen. An account that cannot use plan usage is only found when a request runs, not at sign-in, so it is not a screen here. Poll status names follow the engine's agent-login shape and change here first if it differs.",
+  "manageUsageUrl": "https://chatgpt.com/settings/usage",
+  "phases": [
+    "idle",
+    "waiting",
+    "connected",
+    "planUsageOff",
+    "declined",
+    "failed"
+  ],
+  "actions": {
+    "idle": "start",
+    "waiting": "cancel",
+    "connected": "done",
+    "planUsageOff": "retry",
+    "declined": "retry",
+    "failed": "retry"
+  },
+  "polls": [
+    {
+      "name": "still waiting for approval",
+      "status": "pending",
+      "phase": "waiting"
+    },
+    {
+      "name": "a stray plan flag while pending is ignored",
+      "status": "pending",
+      "planUsage": true,
+      "phase": "waiting"
+    },
+    {
+      "name": "signed in with plan usage granted",
+      "status": "succeeded",
+      "planUsage": true,
+      "phase": "connected"
+    },
+    {
+      "name": "signed in without plan usage",
+      "status": "succeeded",
+      "planUsage": false,
+      "phase": "planUsageOff"
+    },
+    {
+      "name": "signed in, plan usage not reported: not counted as granted",
+      "status": "succeeded",
+      "phase": "planUsageOff"
+    },
+    {
+      "name": "declined on the computer",
+      "status": "declined",
+      "phase": "declined"
+    },
+    {
+      "name": "the computer reports plan usage was not allowed",
+      "status": "plan-not-allowed",
+      "phase": "planUsageOff"
+    },
+    {
+      "name": "the computer reports an error",
+      "status": "error",
+      "phase": "failed"
+    },
+    {
+      "name": "a status this app does not know",
+      "status": "something-new",
+      "phase": "failed"
+    }
+  ]
+}

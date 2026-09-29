@@ -8,6 +8,9 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAccount = false
+    /// Computers that can sign in to ChatGPT for Graff; empty hides the row.
+    @State private var chatGPTComputers: [ChatGPTComputer] = []
+    @State private var showChatGPT = false
 
     /// "Codegraff · System", or the two variant names when light and dark
     /// come from different families.
@@ -45,6 +48,15 @@ struct SettingsView: View {
                     }
                 }
 
+                if !chatGPTComputers.isEmpty {
+                    Section {
+                        Button("Use your ChatGPT plan") { showChatGPT = true }
+                            .accessibilityIdentifier("settings-chatgpt")
+                    } footer: {
+                        Text("Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.")
+                    }
+                }
+
                 Section("Appearance") {
                     NavigationLink {
                         AppearanceView()
@@ -78,6 +90,10 @@ struct SettingsView: View {
                         Text("Permanently deletes your CodeGraff account and everything Harness keeps for it.")
                     }
                 }
+            }
+            .task { chatGPTComputers = await model.chatGPTComputers() }
+            .sheet(isPresented: $showChatGPT) {
+                if let client = model.chatGPTSignIn { ChatGPTSignInSheet(computers: chatGPTComputers, client: client) }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

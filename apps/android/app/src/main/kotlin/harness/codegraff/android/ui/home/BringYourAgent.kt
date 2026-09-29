@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import harness.codegraff.android.model.AgentReadiness
 import harness.codegraff.android.model.AgentStatus
+import harness.codegraff.android.model.ChatGPTComputer
 import harness.codegraff.android.model.OnboardingState
 import harness.codegraff.android.theme.Glyph
 import harness.codegraff.android.theme.GlyphView
@@ -43,7 +44,14 @@ import harness.codegraff.android.ui.components.pressWashClickable
  * download link onto one. The rules are in [AgentReadiness]; the copy is pinned in apps/parity/ux-contract.json.
  */
 @Composable
-fun BringYourAgent(readiness: AgentReadiness, deviceName: (String) -> String, modifier: Modifier = Modifier) {
+fun BringYourAgent(
+    readiness: AgentReadiness,
+    deviceName: (String) -> String,
+    modifier: Modifier = Modifier,
+    /** The "Continue with ChatGPT" sign-in is available (demo only for now). */
+    chatGPT: Boolean = false,
+    onChatGPT: (List<ChatGPTComputer>) -> Unit = {},
+) {
     val p = Theme.palette
     Column(modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp).testTag("onboarding-agents"), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -57,7 +65,11 @@ fun BringYourAgent(readiness: AgentReadiness, deviceName: (String) -> String, mo
         Card {
             readiness.rows.forEachIndexed { index, row ->
                 if (index > 0) Box(Modifier.fillMaxWidth().padding(start = 16.dp).heightIn(min = 1.dp).background(p.hairline(0.06f)).padding(top = 1.dp))
-                AgentRow(row, readiness.state == OnboardingState.NoComputer, deviceName)
+                AgentRow(
+                    row, readiness.state == OnboardingState.NoComputer, deviceName,
+                    // Graff can also run on a ChatGPT plan; the sign-in happens on the computer that has it.
+                    showChatGPT = chatGPT && row.agent.id == "graff" && row.status >= AgentStatus.Off,
+                ) { onChatGPT(row.deviceIds.map { ChatGPTComputer(it, deviceName(it)) }) }
             }
         }
     }
@@ -111,7 +123,7 @@ private fun GetHarness() {
 }
 
 @Composable
-private fun AgentRow(row: AgentReadiness.Row, noComputer: Boolean, deviceName: (String) -> String) {
+private fun AgentRow(row: AgentReadiness.Row, noComputer: Boolean, deviceName: (String) -> String, showChatGPT: Boolean, onChatGPT: () -> Unit) {
     val p = Theme.palette
     val ready = row.status == AgentStatus.Ready
     val names = row.deviceIds.joinToString(", ", transform = deviceName)
@@ -136,6 +148,12 @@ private fun AgentRow(row: AgentReadiness.Row, noComputer: Boolean, deviceName: (
             Text(row.agent.blurb, style = sans(13f), color = p.textMuted)
             Text(headline, style = sans(12.5f, FontWeight.Medium), color = if (ready) p.text else p.textMuted, modifier = Modifier.padding(top = 2.dp))
             hint?.let { Text(it, style = sans(12f), color = p.textFaint.opacity(1f)) }
+            if (showChatGPT) {
+                Box(
+                    Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).pressWashClickable(onChatGPT, cornerRadius = 24.dp).testTag("onboarding-chatgpt"),
+                    contentAlignment = Alignment.CenterStart,
+                ) { Text("Continue with ChatGPT", style = sans(14f, FontWeight.SemiBold), color = p.text) }
+            }
         }
     }
 }
