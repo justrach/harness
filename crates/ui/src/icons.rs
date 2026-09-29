@@ -224,6 +224,17 @@ icon_assets![
     (ANTIGRAVITY_MARK, "antigravity-mark"),
     // Exo's four-facet mark (exoharness/exo docs/images/exo_logo.svg, MIT).
     (EXO_MARK, "exo-mark"),
+    // Model maker marks for the picker (LobeHub Icons, MIT; see
+    // THIRD_PARTY_NOTICES.md). Anthropic, OpenAI and xAI reuse the marks above.
+    (MAKER_DEEPSEEK, "maker-deepseek"),
+    (MAKER_MIMO, "maker-mimo"),
+    (MAKER_KIMI, "maker-kimi"),
+    (MAKER_ZAI, "maker-zai"),
+    (MAKER_QWEN, "maker-qwen"),
+    (MAKER_GEMINI, "maker-gemini"),
+    (MAKER_MINIMAX, "maker-minimax"),
+    (MAKER_MISTRAL, "maker-mistral"),
+    (MAKER_META, "maker-meta"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

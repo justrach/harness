@@ -79,6 +79,16 @@ pub struct Model {
     pub reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     pub options: Vec<ModelOption>,
+    /// Who makes the model, as a lab slug (`anthropic`, `openai`, `xai`, …),
+    /// for a harness that routes one list across many labs (graff, opencode).
+    /// Draws the row's logo; `None` falls back to matching the model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maker: Option<String>,
+    /// How a run on this model is paid for, where the harness reports it:
+    /// `plan` (the user's own subscription login), `local`, `credits`
+    /// (CodeGraff hosted) or `api` (the user's own metered key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

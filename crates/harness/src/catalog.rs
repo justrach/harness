@@ -194,6 +194,8 @@ mod tests {
             description: None,
             reasoning_levels: vec![],
             options: vec![],
+            maker: None,
+            billing: None,
         }]
     }
     async fn expire(catalog: &Catalog) {

@@ -50,6 +50,15 @@ Harness bundles the SVG icon set and filename/folder associations from
 Symbols is MIT licensed. The complete upstream license and copyright notice is
 retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
+## Model maker marks
+
+The model picker's maker marks (`crates/ui/assets/icons/maker-*.svg`) are the
+monochrome SVGs from [LobeHub Icons](https://github.com/lobehub/lobe-icons)
+(`@lobehub/icons-static-svg` 1.95.1), reduced to a fixed 24px frame. LobeHub
+Icons is MIT licensed, Copyright (c) 2023 LobeHub; the complete license is
+retained at `crates/ui/assets/icons/LICENSE.lobehub`. The marks identify each
+model's maker and imply no affiliation or endorsement.
+
 ## Bundled theme palette adaptations
 
 Harness includes manually curated palette adaptations derived from the projects

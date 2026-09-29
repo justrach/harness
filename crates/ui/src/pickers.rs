@@ -1989,6 +1989,8 @@ impl Pickers {
                             ),
                             reasoning_levels: vec![],
                             options: vec![],
+                            maker: None,
+                            billing: None,
                         },
                     },
                 );
@@ -4230,6 +4232,24 @@ impl Pickers {
         // identically-named models under 64 providers; it must stay
         // visible). The favorites tab mixes harnesses and keeps the
         // two-line layout with the brand subline.
+        // A list spanning many labs marks each row with its maker; a row
+        // with no known maker keeps the slot so names stay aligned.
+        let maker_mark = shows_model_makers(row.harness).then(|| {
+            let slot = div()
+                .flex_none()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center();
+            match model_maker(&row.model).and_then(maker_icon) {
+                Some(path) => slot.child(
+                    crate::icons::icon(path)
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
+                ),
+                None => slot,
+            }
+        });
         let body: AnyElement = if compact {
             div()
                 .flex_1()
@@ -4238,6 +4258,7 @@ impl Pickers {
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
+                .children(maker_mark)
                 .child(
                     div()
                         .flex_none()
@@ -4884,7 +4905,12 @@ fn scoped_model_rows<'a>(
             let (starred, rest): (Vec<&Model>, Vec<&Model>) = models
                 .iter()
                 .partition(|m| is_favorite(descriptor.id, &m.id));
-            let sections = provider_sections(&rest);
+            let mut sections = provider_sections(&rest);
+            // The user's own plan logins lead; stable, so sections of one
+            // kind keep their first-appearance order.
+            sections.sort_by_key(|(_, models)| {
+                billing_rank(models.first().and_then(|m| m.billing.as_deref()))
+            });
             if sections.len() < 2 {
                 return starred
                     .into_iter()
@@ -4902,6 +4928,8 @@ fn scoped_model_rows<'a>(
                         description: None,
                         reasoning_levels: Vec::new(),
                         options: Vec::new(),
+                        maker: None,
+                        billing: None,
                     },
                 )
             };
@@ -4911,9 +4939,12 @@ fn scoped_model_rows<'a>(
                 rows.extend(starred.into_iter().map(|model| row(descriptor, model)));
             }
             for (provider, models) in sections {
-                rows.push(header(
-                    provider.map_or_else(|| "Other".into(), provider_display_name),
-                ));
+                let name = provider.map_or_else(|| "Other".into(), provider_display_name);
+                let note = billing_note(models.first().and_then(|m| m.billing.as_deref()));
+                rows.push(header(match note {
+                    Some(note) => format!("{name} · {note}"),
+                    None => name,
+                }));
                 rows.extend(models.into_iter().map(|model| {
                     let mut data = row(descriptor, model);
                     // The header names the provider; the row keeps the rest
@@ -4989,6 +5020,100 @@ fn provider_display_name(provider: &str) -> String {
         other => other,
     }
     .to_owned()
+}
+
+/// Who makes a model, as a lab slug: the harness's own report when it sends
+/// one, otherwise read from the name (the last path segment, so routed ids
+/// like `accounts/fireworks/models/glm-5p2` and `anthropic/claude-…` work),
+/// then from a provider that is itself a lab.
+fn model_maker(model: &Model) -> Option<&str> {
+    if let Some(maker) = model.maker.as_deref().filter(|m| !m.is_empty()) {
+        return Some(maker);
+    }
+    let (provider, rest) = model.id.split_once('/').unwrap_or(("", &model.id));
+    let name = rest.rsplit('/').next().unwrap_or(rest).to_ascii_lowercase();
+    let by_name = [
+        ("claude", "anthropic"),
+        ("gpt", "openai"),
+        ("codex", "openai"),
+        ("o3", "openai"),
+        ("o4", "openai"),
+        ("grok", "xai"),
+        ("gemini", "google"),
+        ("gemma", "google"),
+        ("deepseek", "deepseek"),
+        ("mimo", "xiaomi"),
+        ("kimi", "moonshot"),
+        ("k2", "moonshot"),
+        ("k3", "moonshot"),
+        ("glm", "zai"),
+        ("qwen", "alibaba"),
+        ("minimax", "minimax"),
+        ("mistral", "mistral"),
+        ("codestral", "mistral"),
+        ("devstral", "mistral"),
+        ("muse-spark", "meta"),
+        ("llama", "meta"),
+    ];
+    if let Some((_, maker)) = by_name.iter().find(|(prefix, _)| name.starts_with(prefix)) {
+        return Some(maker);
+    }
+    match provider {
+        "anthropic" | "openai" | "xai" | "google" | "deepseek" | "xiaomi" | "zai" | "alibaba"
+        | "minimax" | "mistral" | "meta" => Some(provider),
+        "codex" => Some("openai"),
+        "kimi" | "moonshot" => Some("moonshot"),
+        _ => None,
+    }
+}
+
+/// The maker's mark, drawn in the row's muted text color.
+fn maker_icon(maker: &str) -> Option<&'static str> {
+    use crate::icons::*;
+    Some(match maker {
+        "anthropic" => CLAUDE_MARK,
+        "openai" => OPENAI_MARK,
+        "xai" => GROK_MARK,
+        "google" => MAKER_GEMINI,
+        "deepseek" => MAKER_DEEPSEEK,
+        "xiaomi" => MAKER_MIMO,
+        "moonshot" => MAKER_KIMI,
+        "zai" => MAKER_ZAI,
+        "alibaba" => MAKER_QWEN,
+        "minimax" => MAKER_MINIMAX,
+        "mistral" => MAKER_MISTRAL,
+        "meta" => MAKER_META,
+        _ => return None,
+    })
+}
+
+/// Harnesses whose one list spans many labs, so each row carries its maker.
+fn shows_model_makers(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::Graff | HarnessId::Opencode)
+}
+
+/// Section order by how the section's models are paid for: the user's own
+/// plan logins first, then local models, CodeGraff credits, and the user's
+/// own metered keys (graff's own election order). Unreported sections keep
+/// their place among the credits.
+fn billing_rank(billing: Option<&str>) -> u8 {
+    match billing {
+        Some("plan") => 0,
+        Some("local") => 1,
+        Some("api") => 3,
+        _ => 2,
+    }
+}
+
+/// Why a section is there, after its name: "Codex · your plan".
+fn billing_note(billing: Option<&str>) -> Option<&'static str> {
+    match billing {
+        Some("plan") => Some("your plan"),
+        Some("local") => Some("local"),
+        Some("credits") => Some("credits"),
+        Some("api") => Some("your key"),
+        _ => None,
+    }
 }
 
 /// The row a ⌘N `slot` picks: section headers don't take a number.
@@ -6177,6 +6302,8 @@ mod tests {
             description: None,
             reasoning_levels: Vec::new(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         }
     }
 
@@ -6938,6 +7065,98 @@ mod tests {
     }
 
     #[test]
+    fn graff_sections_lead_with_the_users_own_plans() {
+        let descriptors = vec![descriptor(HarnessId::Graff, "Graff")];
+        let billed = |id: &str, billing: &str| Model {
+            billing: Some(billing.into()),
+            ..bare_model(id, id.split_once('/').unwrap().1)
+        };
+        // graff led with the current (hosted) model, then the rest.
+        let models = vec![
+            billed("codegraff/mimo-v2.6-flash", "credits"),
+            billed("xai/grok-4.7", "api"),
+            billed("codegraff/claude-opus-5", "credits"),
+            billed("codex/gpt-6-sol", "plan"),
+            billed("lmstudio/local", "local"),
+            billed("kimi/k3", "plan"),
+        ];
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Harness,
+            Some(HarnessId::Graff),
+            &descriptors,
+            |_| Some(models.as_slice()),
+            |_, _| false,
+        );
+        let headers: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.header.as_ref().map(|h| h.to_string()))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "Codex · your plan",
+                "Kimi · your plan",
+                "LM Studio · local",
+                "Codegraff · credits",
+                "xAI · your key",
+            ]
+        );
+    }
+
+    #[test]
+    fn model_makers_come_from_the_harness_or_the_name() {
+        let maker = |id: &str| model_maker(&bare_model(id, id)).map(str::to_owned);
+        assert_eq!(
+            maker("codegraff/mimo-v2.6-flash").as_deref(),
+            Some("xiaomi")
+        );
+        assert_eq!(
+            maker("codegraff/claude-opus-5").as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            maker("codegraff/deepseek-v4-pro").as_deref(),
+            Some("deepseek")
+        );
+        assert_eq!(maker("codegraff/muse-spark-1.3").as_deref(), Some("meta"));
+        assert_eq!(maker("kimi/k3").as_deref(), Some("moonshot"));
+        assert_eq!(maker("codex/gpt-6-sol").as_deref(), Some("openai"));
+        assert_eq!(
+            maker("fireworks/accounts/fireworks/models/glm-5p2").as_deref(),
+            Some("zai")
+        );
+        assert_eq!(
+            maker("openrouter/anthropic/claude-sonnet-4.6").as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(maker("codegraff/jev").as_deref(), None);
+        // The harness's own report wins over the name.
+        let reported = Model {
+            maker: Some("alibaba".into()),
+            ..bare_model("codegraff/ling-3.0-flash-fin", "ling-3.0-flash-fin")
+        };
+        assert_eq!(model_maker(&reported), Some("alibaba"));
+        // Every maker the name matching yields has a mark.
+        for maker in [
+            "anthropic",
+            "openai",
+            "xai",
+            "google",
+            "deepseek",
+            "xiaomi",
+            "moonshot",
+            "zai",
+            "alibaba",
+            "minimax",
+            "mistral",
+            "meta",
+        ] {
+            assert!(maker_icon(maker).is_some(), "{maker} has no mark");
+        }
+    }
+
+    #[test]
     fn normalize_drops_default_alias_and_folds_orphan_1m_rows() {
         // The shape an OLDER engine serves: a `default` alias row plus
         // 1M-pinned variants with no bare base. A non-claude harness keeps
@@ -7095,6 +7314,8 @@ mod tests {
                     default_choice: "normal".into(),
                 },
             ],
+            maker: None,
+            billing: None,
         };
         let mut selections = serde_json::Map::new();
         selections.insert("context".into(), serde_json::Value::String("1m".into()));
@@ -7297,6 +7518,8 @@ mod tests {
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],
+                maker: None,
+                billing: None,
             },
             Model {
                 id: "fast".into(),
@@ -7304,6 +7527,8 @@ mod tests {
                 description: None,
                 reasoning_levels: vec![],
                 options: vec![],
+                maker: None,
+                billing: None,
             },
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));

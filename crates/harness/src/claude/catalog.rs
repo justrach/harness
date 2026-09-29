@@ -145,6 +145,8 @@ fn model(
         description: (!description.is_empty()).then(|| description.into()),
         reasoning_levels: ladder.to_vec(),
         options,
+        maker: None,
+        billing: None,
     }
 }
 
@@ -195,6 +197,8 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
                 description: None,
                 reasoning_levels: FULL_LADDER.to_vec(),
                 options: vec![chrome()],
+                maker: None,
+                billing: None,
             });
         }
     }
@@ -296,6 +300,8 @@ pub(super) fn with_discovered_models(
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
             options: vec![chrome()],
+            maker: None,
+            billing: None,
         });
     }
     if !valid {
