@@ -24,6 +24,7 @@
 import type { PgRoomStore } from "./room-store-pg";
 import {
   ROOM_LIMITS,
+  redactMessage,
   type ClaimRow,
   type ExternalWakes,
   type InboxItem,
@@ -501,6 +502,27 @@ export class LedgerRoomStore implements RoomStore {
     for (const m of this.members().filter((x) => x.userId === userId)) {
       this.exec("DELETE FROM ledger_members WHERE member = ? AND device_id = ?", m.member, m.deviceId);
     }
+  }
+  /** Local rows are rewritten before the first await, so any write-behind
+   * that starts from here on carries the redacted text; PostgreSQL then
+   * redacts what was already written behind (older than the local window
+   * too). The actor waits out an in-flight flush before calling this. */
+  async redactPerson(roomId: string, userId: string, body: string, now: number): Promise<void> {
+    for (const r of this.rows("SELECT seq, row FROM ledger_messages WHERE sender_user_id = ?", userId)) {
+      const m = redactMessage(JSON.parse(r.row as string) as MessageRow, body);
+      this.exec("UPDATE ledger_messages SET row = ? WHERE seq = ?", JSON.stringify(m), r.seq);
+    }
+    for (const r of this.rows("SELECT claim_key, row FROM ledger_claims")) {
+      const claim = JSON.parse(r.row as string) as ClaimRow;
+      if (claim.userId !== userId || claim.state !== "held") continue;
+      this.exec(
+        "UPDATE ledger_claims SET row = ?, dirty = dirty + 1 WHERE claim_key = ?",
+        JSON.stringify({ ...claim, state: "released", updatedAt: now }),
+        r.claim_key
+      );
+      this.touched();
+    }
+    await this.pg.redactPerson(roomId, userId, body, now);
   }
   setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void> {
     return this.pg.setExternalWakes(roomId, userId, value);

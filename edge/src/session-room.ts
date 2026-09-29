@@ -51,6 +51,7 @@ import {
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { appendUpdateRow, ensureUpdateLog, readUpdateRows } from "./update-log";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETAIN_MS = RETAIN_DAYS * DAY_MS;
@@ -184,10 +185,7 @@ export class SessionRoom implements DurableObject {
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    ensureUpdateLog(ctx.storage.sql);
-    ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    );
+    this.schema();
     this.blobs = createBlobStore(ctx.storage.sql);
     // Protocol-designed hibernation keepalive: ping → pong without waking us.
     // NOTE (2026-07-30 incident): precisely BECAUSE the runtime answers these
@@ -197,6 +195,13 @@ export class SessionRoom implements DurableObject {
     // (crates/sync/src/room.rs), never from these pongs. Do not "upgrade" this
     // to an app-level handler: waking on every ping would abolish hibernation.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  private schema(): void {
+    const sql = this.ctx.storage.sql;
+    ensureUpdateLog(sql);
+    sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    createBlobStore(sql);
   }
 
   // ── meta helpers ──────────────────────────────────────────────────────────
@@ -247,6 +252,15 @@ export class SessionRoom implements DurableObject {
     }
 
     const owner = this.getMeta("owner");
+    // Account deletion (purge.ts): workspace rooms are named from the
+    // verified user; a chat room is wiped only for its owner.
+    if (isPurge(request, url)) {
+      if (!workspace && owner !== userId) return json({ purged: false });
+      const chatId = this.getMeta("chatId");
+      this.dropMemory();
+      await wipeObject(this.ctx, () => this.schema());
+      return json({ purged: true, ...(chatId ? { backup: `backup/${chatId}/latest.loro` } : {}) });
+    }
     if (url.pathname === "/stats" && request.method === "GET") {
       // Observability: what this room holds and who's on it. Owner-gated like
       // every other read (org-membership-gated for workspace rooms).
@@ -1026,6 +1040,23 @@ export class SessionRoom implements DurableObject {
     }
     this.doc.free();
     this.doc = undefined;
+  }
+
+  /** Forget everything held in memory (a purge wiped the storage under it):
+   * no timer may flush or back up a doc that no longer exists. */
+  private dropMemory(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    if (this.docIdleTimer) clearTimeout(this.docIdleTimer);
+    this.docIdleTimer = undefined;
+    this.doc?.free();
+    this.doc = undefined;
+    this.eph = undefined;
+    this.pending = [];
+    this.pendingBytes = 0;
+    this.fragments.clear();
+    this.importPenalty.clear();
+    this.pushOutcomes.clear();
   }
 
   /** Drop the persisted update log + snapshot (the /reset-log storage clear):

@@ -270,6 +270,9 @@ export interface RoomStore {
   respondInvite(roomId: string, userId: string, accept: boolean, now: number): Promise<boolean>;
   /** Drop a person from a room: their grant and every member they own. */
   removePerson(roomId: string, userId: string): Promise<void>;
+  /** Account deletion: every post the person made keeps its seq but gets
+   * `body` for text and no mentions, and their held claims are released. */
+  redactPerson(roomId: string, userId: string, body: string, now: number): Promise<void>;
   setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void>;
   invites(userId: string): Promise<Invite[]>;
   /** First writer wins; a released claim can be retaken. False: held or done. */
@@ -993,7 +996,29 @@ export class RoomCore {
       await this.store.destroy(this.room.id);
     });
   }
+
+  /** Account deletion (the actor's internal `/forget`, never routed from
+   * outside): the person leaves with every member they own, a pending invite
+   * included, and their posts lose their text. Redacting comes first: the
+   * ledger rewrites its rows before its first await, so a write-behind that
+   * starts afterwards can only carry the redacted text. */
+  forget(userId: string): Promise<MemberKey[]> {
+    return this.serial(async () => {
+      await this.store.redactPerson(this.room.id, userId, FORGOTTEN_BODY, this.clock());
+      await this.store.removePerson(this.room.id, userId);
+      this.recent = this.recent.map((m) => (m.senderUserId === userId ? redactMessage(m, FORGOTTEN_BODY) : m));
+      const gone = this.members.filter((m) => m.userId === userId);
+      this.members = this.members.filter((m) => m.userId !== userId);
+      this.access = this.access.filter((a) => a.userId !== userId);
+      return gone.map(({ member, deviceId }) => ({ member, deviceId }));
+    });
+  }
 }
+
+/** What a deleted account's posts say from then on. */
+export const FORGOTTEN_BODY = "[removed: the author deleted their account]";
+
+export const redactMessage = (m: MessageRow, body: string): MessageRow => ({ ...m, body, mentions: [] });
 
 // ── in-memory store (tests, and `wrangler dev` without Hyperdrive) ─────────
 
@@ -1124,6 +1149,15 @@ export class MemoryRoomStore implements RoomStore {
     if (!r) return;
     r.access = r.access.filter((a) => a.userId !== userId);
     r.members = r.members.filter((m) => m.userId !== userId);
+  }
+
+  async redactPerson(roomId: string, userId: string, body: string): Promise<void> {
+    const r = this.rooms.get(roomId);
+    if (!r) return;
+    r.messages = r.messages.map((m) => (m.senderUserId === userId ? redactMessage(m, body) : m));
+    for (const claim of r.claims.values()) {
+      if (claim.userId === userId && claim.state === "held") claim.state = "released";
+    }
   }
 
   async setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void> {

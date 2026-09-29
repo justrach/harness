@@ -10,6 +10,7 @@
  *   POST /auth/exchange               — CodeGraff code + PKCE → tokens
  *   POST /auth/refresh                — rotate CodeGraff refresh token
  *   GET  /auth/orgs                   — caller's personal workspace
+ *   POST /auth/account/delete         — delete the caller's account (account-delete.ts)
  *   GET  /auth/cli/callback           — headless sign-in paste-code page
  *   GET  /session/:chatId/ws          — loro-protocol room (wss upgrade)
  *   GET  /tail/:chatId                — L2 instant-open tail JSON (§5)
@@ -54,13 +55,14 @@ import { DeviceRoom } from "./device-room";
 import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import { VaultRoom } from "./vault-room";
+import { AccountPurge } from "./account-purge";
 import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
 import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
 import { sweepExpiredRooms } from "./room-store-pg";
 import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor, AccountPurge };
 
 const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 

@@ -25,6 +25,7 @@
  *   POST   /vault/items/{agent}/{slot}/hold     (signed)
  */
 import { AUTH_USER_HEADER, type Env } from "./env";
+import { isPurge, wipeObject } from "./purge";
 
 export const VAULT_LIMITS = {
   devices: 20,
@@ -103,6 +104,10 @@ export class VaultRoom implements DurableObject {
 
   constructor(private readonly ctx: DurableObjectState, _env: Env) {
     this.sql = ctx.storage.sql;
+    this.schema();
+  }
+
+  private schema(): void {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vault_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS vault_devices (
       device_id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL,
@@ -204,6 +209,12 @@ export class VaultRoom implements DurableObject {
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
     const url = new URL(request.url);
+    // Account deletion (purge.ts): the Worker names the vault from the
+    // verified user.
+    if (isPurge(request, url)) {
+      await wipeObject(this.ctx, () => this.schema());
+      return json({ purged: true });
+    }
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts[0] !== "vault") return json({ error: "not_found" }, 404);
 

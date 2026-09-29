@@ -63,6 +63,25 @@ export const exchange = async (
   };
 };
 
+/** CodeGraff's account deletion (the shared login's own endpoint). */
+export const ACCOUNT_DELETE_URL = `${ISSUER}/api/account/delete`;
+
+/** Swap a verified refresh credential for a CodeGraff access token. CodeGraff
+ * rotates its refresh token on every use, so the caller also gets the
+ * replacement Harness tokens: a request that stops before deleting anything
+ * must hand them back, or the device is left holding a dead credential. */
+export const codegraffAccess = async (env: Env, userId: string, codegraffRefreshToken: string) => {
+  const token = await tokenRequest(env, { grant_type: "refresh_token", refresh_token: codegraffRefreshToken });
+  if (!token.access_token || !token.refresh_token) throw new CodegraffAuthFailed("incomplete refresh response");
+  return {
+    codegraffAccessToken: token.access_token,
+    tokens: {
+      accessToken: await issueToken(env, userId),
+      refreshToken: await issueRefreshCredential(env, userId, token.refresh_token)
+    }
+  };
+};
+
 export const refresh = async (env: Env, refreshToken: string, organizationId?: string) => {
   const credential = await verifyRefreshCredential(env, refreshToken);
   if (!credential) throw new CodegraffAuthFailed("invalid refresh credential");

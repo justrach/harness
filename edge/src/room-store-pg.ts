@@ -530,6 +530,28 @@ export class PgRoomStore implements RoomStore {
     });
   }
 
+  redactPerson(roomId: string, userId: string, body: string, now: number): Promise<void> {
+    return this.run(async (pg) => {
+      await pg.query("BEGIN");
+      try {
+        await pg.query(
+          `UPDATE app.agent_room_messages SET body = $3, mentions = '{}'
+            WHERE room_id = $1 AND sender_user_id = $2`,
+          [roomId, userId, body]
+        );
+        await pg.query(
+          `UPDATE app.agent_room_claims SET state = 'released', updated_at = $3
+            WHERE room_id = $1 AND user_id = $2 AND state = 'held'`,
+          [roomId, userId, now]
+        );
+        await pg.query("COMMIT");
+      } catch (err) {
+        await pg.query("ROLLBACK").catch(() => {});
+        throw err;
+      }
+    });
+  }
+
   setExternalWakes(roomId: string, userId: string, value: ExternalWakes): Promise<void> {
     return this.run(async (pg) => {
       await pg.query("UPDATE app.agent_room_access SET external_wakes = $3 WHERE room_id = $1 AND user_id = $2", [
