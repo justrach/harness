@@ -1076,6 +1076,8 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                     description: Some(provider_name.to_owned()),
                     reasoning_levels: levels,
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 }
             })
             .collect();

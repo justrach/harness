@@ -229,6 +229,8 @@ fn grok_static_models() -> Vec<Model> {
             description: Some("SpaceXAI's latest frontier model — 500k context".into()),
             reasoning_levels: grok_effort(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         },
         Model {
             id: "grok-4.7-build-fast".into(),
@@ -236,6 +238,8 @@ fn grok_static_models() -> Vec<Model> {
             description: Some("Fast variant of Grok 4.7".into()),
             reasoning_levels: grok_effort(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         },
         Model {
             id: "grok-4.6".into(),
@@ -243,6 +247,8 @@ fn grok_static_models() -> Vec<Model> {
             description: Some("xAI's coding model — 500k context".into()),
             reasoning_levels: grok_effort(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         },
         Model {
             id: "grok-4.5".into(),
@@ -250,6 +256,8 @@ fn grok_static_models() -> Vec<Model> {
             description: Some("xAI's coding model — 500k context".into()),
             reasoning_levels: grok_effort(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         },
     ]
 }
@@ -368,6 +376,8 @@ fn devin_spec() -> AcpAgentSpec {
                     description: Some("Devin's default coding model".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
                 Model {
                     id: "claude-fable-5-1-high".into(),
@@ -375,6 +385,8 @@ fn devin_spec() -> AcpAgentSpec {
                     description: Some("Anthropic's frontier model through Devin".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
                 Model {
                     id: "adaptive".into(),
@@ -382,6 +394,8 @@ fn devin_spec() -> AcpAgentSpec {
                     description: Some("Devin picks the model per request".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
             ]
         },
@@ -444,6 +458,8 @@ fn hermes_spec() -> AcpAgentSpec {
                     description: Some("Nous Research's hybrid-reasoning flagship".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
                 Model {
                     id: "hermes-4-70b".into(),
@@ -451,6 +467,8 @@ fn hermes_spec() -> AcpAgentSpec {
                     description: Some("Faster Hermes 4 — same post-training, 70B".into()),
                     reasoning_levels: Vec::new(),
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
             ]
         },
@@ -602,6 +620,8 @@ fn exo_spec() -> AcpAgentSpec {
                 description: Some("Runs the model configured in Exo (`./exo.sh --model`)".into()),
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
+                maker: None,
+                billing: None,
             }]
         },
         // One reply per agent-cli exchange: steers queue for the next turn.
@@ -654,6 +674,8 @@ fn pi_spec() -> AcpAgentSpec {
                     ReasoningLevel::Max,
                 ],
                 options: Vec::new(),
+                maker: None,
+                billing: None,
             }]
         },
         // The adapter has no `_session/steering` extension: turn boundaries.
@@ -950,6 +972,8 @@ fn antigravity_spec() -> AcpAgentSpec {
                     description: None,
                     reasoning_levels: vec![Low, Medium, High],
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
                 Model {
                     id: "gemini-3.1-pro".into(),
@@ -957,6 +981,8 @@ fn antigravity_spec() -> AcpAgentSpec {
                     description: None,
                     reasoning_levels: vec![Low, High],
                     options: Vec::new(),
+                    maker: None,
+                    billing: None,
                 },
             ]
         },
@@ -1821,6 +1847,8 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
                 None => ladder.clone(),
             },
             options,
+            maker: None,
+            billing: None,
         }
     };
 
@@ -3229,6 +3257,8 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 description: None,
                 reasoning_levels: group.variants.iter().map(|(level, _)| *level).collect(),
                 options: first.options.clone(),
+                maker: None,
+                billing: None,
             })
         })
         .collect()

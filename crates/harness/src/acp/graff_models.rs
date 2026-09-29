@@ -292,12 +292,20 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
             Some(context) => format!("{provider} · {}k context", context / 1000),
             None => provider.to_owned(),
         };
+        let text = |key: &str| {
+            row.get(key)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        };
         let model = Model {
             id: format!("{provider}/{name}"),
             label: name.to_owned(),
             description: Some(description),
             reasoning_levels,
             options: Vec::new(),
+            maker: text("maker"),
+            billing: text("cost"),
         };
         if current.is_some_and(|c| {
             c.get("provider").and_then(Value::as_str) == Some(provider)
@@ -582,6 +590,8 @@ fn models_from_seats(
                 }),
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
+                maker: None,
+                billing: None,
             }
         })
         .collect()
@@ -640,6 +650,8 @@ fn models_from_schema(
             }),
             reasoning_levels: Vec::new(),
             options: Vec::new(),
+            maker: None,
+            billing: None,
         })
         .collect()
 }
@@ -860,5 +872,30 @@ openrouter:\n\
             ]
         );
         assert!(models[2].reasoning_levels.is_empty());
+    }
+
+    #[test]
+    fn acp_catalog_keeps_each_rows_billing_and_maker() {
+        let catalog = json!({"models": [
+            {"provider": "codex", "name": "gpt-6-sol", "authenticated": true,
+             "cost": "plan", "maker": "openai"},
+            {"provider": "codegraff", "name": "mimo-v2.6-flash", "authenticated": true,
+             "cost": "credits"},
+            {"provider": "lmstudio", "name": "local", "authenticated": true, "cost": ""}
+        ]});
+        let models = models_from_acp(&catalog).unwrap();
+        let meta: Vec<_> = models
+            .iter()
+            .map(|m| (m.billing.as_deref(), m.maker.as_deref()))
+            .collect();
+        // An older graff without `maker` (or an empty field) leaves it unset.
+        assert_eq!(
+            meta,
+            [
+                (Some("plan"), Some("openai")),
+                (Some("credits"), None),
+                (None, None)
+            ]
+        );
     }
 }

@@ -457,6 +457,8 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 description: str_of(item, "description"),
                 reasoning_levels: Vec::new(),
                 options,
+                maker: None,
+                billing: None,
             })
         })
         .collect()
