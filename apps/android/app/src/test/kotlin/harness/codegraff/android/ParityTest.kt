@@ -20,12 +20,15 @@ import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfPolicy
-import harness.codegraff.android.perf.PerfReport
+import harness.codegraff.android.perf.PerfBatchMeta
+import harness.codegraff.android.perf.PerfHistograms
+import harness.codegraff.android.perf.PerfMetric
+import harness.codegraff.android.perf.PerfStatsBatch
+import harness.codegraff.android.perf.PerfWindow
 import harness.codegraff.android.perf.PerfSharing
 import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.perf.PerfTransport
 import harness.codegraff.android.perf.PerfUploader
-import harness.codegraff.android.perf.SpanStat
 import harness.codegraff.android.ui.session.QueueUX
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -325,63 +328,80 @@ class ParityTest {
         else -> value
     }
 
+    private fun stats() = load("vectors/perf-stats.json")
+
     @Test
-    fun aReportIsBuiltTheSameWayOnBothApps() {
-        for (c in load("vectors/perf-report.json").rows("reports")) {
+    fun theBucketBoundsAndMetricNamesAreTheSharedOnes() {
+        val v = stats()
+        assertEquals(v.getJSONArray("bucketsMs").let { a -> (0 until a.length()).map { a.getDouble(it) } }, PerfHistograms.BUCKETS_MS.toList())
+        assertEquals(v.getJSONArray("metricOrder").strings(), PerfMetric.ORDER)
+        assertEquals(v.getString("schema"), PerfStatsBatch.SCHEMA)
+        assertEquals(v.getDouble("maxSampleMs"), PerfHistograms.MAX_SAMPLE_MS, 0.0)
+        assertEquals(v.getInt("maxDeviceLength"), PerfStatsBatch.MAX_DEVICE_LENGTH)
+        assertEquals(v.getJSONObject("refreshHz").getInt("min"), PerfStatsBatch.MIN_REFRESH_HZ)
+        assertEquals(v.getJSONObject("refreshHz").getInt("max"), PerfStatsBatch.MAX_REFRESH_HZ)
+        assertEquals(v.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
+        assertEquals(v.getBoolean("sharingDefault"), PerfSharing.DEFAULT_ENABLED)
+        val wire = load("perf-contract.json").getJSONObject("wire")
+        assertEquals(wire.keys().asSequence().associateWith { wire.getString(it) }, PerfMetric.forSpan)
+    }
+
+    private fun meta(i: JSONObject) = PerfBatchMeta(
+        i.getString("installId"), i.getString("os"), i.getString("arch"), i.getString("appVersion"), i.getString("osVersion"),
+        i.getString("device"), i.getInt("refreshHz"),
+    )
+
+    @Test
+    fun aBatchIsBuiltTheSameWayOnBothApps() {
+        for (c in stats().rows("batches")) {
             val i = c.getJSONObject("input")
-            val f = i.getJSONObject("frames")
-            val report = PerfReport(
-                launchId = i.getString("launchId"), platform = i.getString("platform"), appVersion = i.getString("appVersion"),
-                osVersion = i.getString("osVersion"), device = i.getString("device"), build = i.getString("build"),
-                refreshHz = i.getInt("refreshHz"), startupMs = if (i.isNull("startupMs")) null else i.getLong("startupMs"),
-                frameKind = i.getString("frameKind"),
-                frames = PerfReport.Frames(f.getLong("total"), f.getLong("slow"), f.getLong("frozen"), f.getDouble("p50"), f.getDouble("p95"), f.getDouble("worst")),
-                thermal = i.getString("thermal"), lowPower = i.getBoolean("lowPower"), memoryMb = i.getInt("memoryMb"),
-                spans = i.rows("spans").map {
-                    SpanStat(it.getString("name"), it.getLong("count"), it.getDouble("p50"), it.getDouble("p95"), it.getDouble("max"), it.getDouble("totalMs"), it.getLong("overBudget"))
-                },
-            )
-            assertEquals(c.getString("name"), canon(c.getJSONObject("expect")), canon(report.toJson()))
+            var clock = i.getLong("windowStartMs")
+            val histograms = PerfHistograms(now = { clock })
+            val samples = i.getJSONObject("samples")
+            for (name in samples.keys()) {
+                val xs = samples.getJSONArray(name)
+                for (k in 0 until xs.length()) histograms.add(name, xs.getDouble(k))
+            }
+            clock = i.getLong("windowEndMs")
+            val window = histograms.take()
+            val json = (window?.let { PerfStatsBatch(meta(i), it).toJson() }
+                ?: PerfStatsBatch(meta(i), PerfWindow(i.getLong("windowStartMs"), clock, emptyList())).toJson())
+            assertEquals(c.getString("name"), canon(c.getJSONObject("expect")), canon(json))
         }
     }
 
     @Test
     fun theUploaderSendsWhenTheSharedRulesSay() {
-        val vectors = load("vectors/perf-report.json")
-        assertEquals(vectors.getLong("minFrames"), PerfUploader.MIN_FRAMES)
-        assertEquals(vectors.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
-        assertEquals(vectors.getInt("maxDeviceLength"), PerfReport.MAX_DEVICE_LENGTH)
-        assertEquals(vectors.getDouble("maxMs"), PerfReport.MAX_MS, 0.0)
-        assertEquals(vectors.getLong("maxFrames"), PerfReport.MAX_FRAMES)
-        assertEquals(vectors.getJSONObject("refreshHz").getInt("min"), PerfReport.MIN_REFRESH_HZ)
-        assertEquals(vectors.getJSONObject("refreshHz").getInt("max"), PerfReport.MAX_REFRESH_HZ)
-        assertEquals(vectors.getBoolean("sharingDefault"), PerfSharing.DEFAULT_ENABLED)
-        for (case in vectors.rows("uploader")) {
+        for (case in stats().rows("uploader")) {
             val config = case.getJSONObject("config")
             var clock = 0L
             var status = 204
             var posts = 0
+            val histograms = PerfHistograms(now = { clock })
             val uploader = PerfUploader(
                 endpoint = if (config.isNull("endpoint")) null else config.getString("endpoint"),
                 enabled = { config.getBoolean("enabled") },
+                source = histograms,
+                meta = { PerfBatchMeta("id", "android", "aarch64", "0.1.0", "36", "Pixel", 60) },
                 now = { clock },
                 post = { _, _ -> posts++; status },
             )
             for (step in case.rows("steps")) {
                 clock = step.getLong("atMs")
                 status = step.getInt("status")
+                repeat(step.getInt("addSamples")) { histograms.add(PerfMetric.AppLaunch, 5.0) }
                 val before = posts
-                val report = sampleReport(frames = step.getLong("frames"))
                 val label = "${case.getString("name")} at ${clock}ms"
-                assertEquals(label, step.getBoolean("expectSent"), uploader.flush(report))
+                assertEquals(label, step.getBoolean("expectSent"), uploader.flush())
                 assertEquals("$label: posted", step.getBoolean("expectPosted"), posts > before)
+                assertEquals("$label: samples held", step.getLong("expectPending"), histograms.pendingSamples())
             }
         }
     }
 
     @Test
     fun backgroundWorkHoldsBackWhenTheDeviceIsHotOrSavingPower() {
-        for (c in load("vectors/perf-report.json").rows("deviceCalm")) {
+        for (c in stats().rows("deviceCalm")) {
             assertEquals("$c", c.getBoolean("expect"), PerfPolicy.deviceIsCalm(c.getBoolean("lowPower"), c.getString("thermal")))
         }
     }
@@ -399,19 +419,15 @@ class ParityTest {
         assertTrue("measure() took $perCallUs µs a call", perCallUs < 5.0)
 
         val tally = harness.codegraff.android.perf.FrameTally()
+        val histograms = PerfHistograms()
         val stages = DoubleArray(harness.codegraff.android.perf.FrameStage.entries.size)
-        repeat(20_000) { tally.add(8.0, stages, 16.7) }
+        repeat(20_000) { tally.add(8.0, stages, 16.7); histograms.add(PerfMetric.FrameCost, 8.0) }
         val frameStart = System.nanoTime()
-        repeat(n) { tally.add(8.0, stages, 16.7) }
+        repeat(n) { tally.add(8.0, stages, 16.7); histograms.add(PerfMetric.FrameCost, 8.0) }
         val perFrameUs = (System.nanoTime() - frameStart) / 1e3 / n
         println("monitor cost: tallying a frame %.3f µs".format(perFrameUs))
         assertTrue("a frame took $perFrameUs µs to tally", perFrameUs < 5.0)
     }
-
-    private fun sampleReport(frames: Long) = PerfReport(
-        "id", "android", "0.1.0", "36", "Pixel", "release", 60, 77, "frame",
-        PerfReport.Frames(frames, 0, 0, 1.0, 2.0, 3.0), "None", false, 10, emptyList(),
-    )
 
     @Test
     fun onlyHttpsOrLoopbackIsAnAllowedEndpoint() {
@@ -453,7 +469,7 @@ class ParityTest {
                 socket.getOutputStream().apply { write("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".toByteArray()); flush() }
             }
         }.also { it.start() }
-        val body = sampleReport(frames = 100).toJson().toString()
+        val body = PerfStatsBatch(PerfBatchMeta("id", "android", "aarch64", "0.1.0", "36", "Pixel", 60), PerfWindow(0, 1, emptyList())).toJson().toString()
         assertEquals(204, PerfTransport.post("http://127.0.0.1:$port/perf", body))
         serving.join(5_000)
         server.close()

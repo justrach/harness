@@ -164,6 +164,9 @@ final class Perf: @unchecked Sendable {
     let recorder = PerfRecorder()
     let turns = MainThreadTally()
 
+    /// Samples since the last upload, in the ranges the server merges. Fed by `record` and every run loop turn.
+    let histograms = PerfHistograms()
+
     private static let signposter = OSSignposter(subsystem: "harness.codegraff.ios", category: "perf")
     private static let log = Logger(subsystem: "harness.codegraff.ios", category: "perf")
 
@@ -179,6 +182,7 @@ final class Perf: @unchecked Sendable {
     func record(_ name: String, ms: Double) {
         let budget = PerfSpan.budgetsMs[name] ?? .greatestFiniteMagnitude
         recorder.record(name, ms: ms, budgetMs: budget)
+        if let metric = PerfMetric.forSpan[name] { histograms.add(metric, ms: ms) }
         if ms > budget {
             Self.log.warning("\(name, privacy: .public) took \(ms, format: .fixed(precision: 1)) ms (budget \(Int(budget)) ms)")
         }
@@ -256,6 +260,7 @@ final class Perf: @unchecked Sendable {
                 let ms = (now - turnStart) * 1000
                 turnStart = 0
                 turns.add(ms: ms)
+                histograms.add(PerfMetric.mainTurn, ms: ms)
                 if ms >= 50 { record(PerfSpan.mainStall, ms: ms) }
             }
         }

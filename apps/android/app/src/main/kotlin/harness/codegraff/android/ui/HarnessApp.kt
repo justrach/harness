@@ -88,7 +88,8 @@ fun HarnessApp(model: AppModel) {
 
         /** Open a route from the list. In the split layout the sidebar replaces what the detail shows instead of stacking behind it. */
         fun open(route: Route) {
-            Perf.startInteraction(PerfSpan.NavigationOpen)
+            // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
+            if (route is Route.Chat) Perf.startInteraction(PerfSpan.NavigationOpen)
             path = if (split) listOf(route) else path + route
         }
 

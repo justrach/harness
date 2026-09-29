@@ -109,7 +109,7 @@ internal fun PerformanceContent(version: String) {
                     ShareRow("Share anonymous performance data", PerfSharing.enabled, PerfSharing::set)
                 }
                 Text(
-                    "Sends numbers only: timings, frame counts, memory, thermal state, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time.",
+                    "Sends numbers only: how long things took, grouped into ranges, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time.",
                     style = sans(12f), color = p.textMuted.opacity(0.7f), modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }

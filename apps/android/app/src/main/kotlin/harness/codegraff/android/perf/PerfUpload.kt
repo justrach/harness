@@ -17,14 +17,15 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
- * Decides when a report may go out. The rules are pinned in `apps/parity/vectors/perf-report.json`: an
- * endpoint must exist, sharing must be on, the session must have drawn enough frames to mean something, at most
- * one report goes out per interval, and a failed post does not start the wait.
+ * Decides when a batch may go out. The rules are pinned in `apps/parity/vectors/perf-stats.json`: an endpoint must
+ * exist, sharing must be on, the window must have samples, at most one attempt goes out per interval, and samples
+ * recorded while nothing can be sent are dropped rather than held for later.
  */
 class PerfUploader(
     private val endpoint: String?,
     private val enabled: () -> Boolean,
-    private val minFrames: Long = MIN_FRAMES,
+    private val source: PerfHistograms,
+    private val meta: () -> PerfBatchMeta,
     private val minIntervalMs: Long = MIN_INTERVAL_MS,
     private val now: () -> Long = System::currentTimeMillis,
     /** Posts the body and returns the HTTP status, or 0 when the connection failed. */
@@ -34,28 +35,27 @@ class PerfUploader(
     private var stopped = false
 
     /**
-     * True when a report was sent. A 2xx is sent. 429 and other 4xx start the wait. 400, 413 and 415 mean the
-     * report itself is wrong, so sending stops for the rest of the launch. 5xx and a failed connection start
-     * no wait: they are tried again at the next chance.
+     * True when a batch was sent. A 2xx is sent. 429 and other 4xx keep the samples and start the wait. 400, 413 and
+     * 415 mean the batch itself is wrong, so it is dropped and sending stops for the rest of the launch. 5xx and a
+     * failed connection keep the samples and start no wait: they are tried again at the next chance.
      */
     @Synchronized
-    fun flush(report: PerfReport): Boolean {
-        val url = endpoint ?: return false
-        if (!enabled() || stopped) return false
-        if (report.frames.total < minFrames) return false
+    fun flush(): Boolean {
         val t = now()
         lastAttemptAt?.let { if (t - it < minIntervalMs) return false }
-        val status = post(url, report.toJson().toString())
+        val window = source.take() ?: return false
+        val url = endpoint
+        if (url == null || !enabled() || stopped) return false
+        val status = post(url, PerfStatsBatch(meta(), window).toJson().toString())
         return when (status) {
             in 200..299 -> { lastAttemptAt = t; true }
             400, 413, 415 -> { stopped = true; false }
-            in 400..499 -> { lastAttemptAt = t; false }
-            else -> false
+            in 400..499 -> { lastAttemptAt = t; source.restore(window); false }
+            else -> { source.restore(window); false }
         }
     }
 
     companion object {
-        const val MIN_FRAMES = 60L
         const val MIN_INTERVAL_MS = 10 * 60_000L
     }
 }
@@ -95,7 +95,7 @@ object PerfTransport {
 object PerfSharing {
     private const val KEY = "share-performance"
 
-    /** Pinned in `apps/parity/vectors/perf-report.json`. */
+    /** Pinned in `apps/parity/vectors/perf-stats.json`. */
     const val DEFAULT_ENABLED = true
 
     private var prefs: SharedPreferences? = null
@@ -110,13 +110,18 @@ object PerfSharing {
         private set
 
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "harness-perf-upload").apply { isDaemon = true } }
-    private val uploader by lazy { PerfUploader(endpoint, enabled = ::storedEnabled, post = PerfTransport::post) }
+    private val uploader by lazy {
+        PerfUploader(endpoint, enabled = ::storedEnabled, source = Perf.histograms, meta = { batchMeta() }, post = PerfTransport::post)
+    }
+    private var appContext: Context? = null
+    private val installId: String = UUID.randomUUID().toString()
 
     private fun storedEnabled(): Boolean = prefs?.getBoolean(KEY, DEFAULT_ENABLED) ?: DEFAULT_ENABLED
 
     /** Does no file reading on the caller's thread: launch must not wait on a preferences file for this. */
     fun init(context: Context) {
         val app = context.applicationContext
+        appContext = app
         worker.execute {
             val p = app.getSharedPreferences("harness-ui", Context.MODE_PRIVATE)
             prefs = p
@@ -131,19 +136,34 @@ object PerfSharing {
     }
 
     /**
-     * Called when the app goes to the background. Nothing runs on the caller's thread but queuing the work. The report
-     * is only built, and only sent, when sharing is on, the device is neither hot nor saving power, and the network
-     * is not metered: a radio waking on mobile data costs more battery than the two kilobytes are worth.
+     * Called when the app goes to the background. Nothing runs on the caller's thread but queuing the work. A batch is
+     * only built, and only sent, when sharing is on, this is not a debuggable build, the device is neither hot nor
+     * saving power, and the network is not metered: a radio waking on mobile data costs more battery than the batch
+     * is worth. Samples that could not go now stay for the next attempt; samples recorded while sharing is off are
+     * dropped and never sent later.
      */
     fun flush(context: Context) {
         if (!available) return
         val app = context.applicationContext
         worker.execute {
-            if (!storedEnabled()) return@execute
+            if (!storedEnabled() || isDebuggable(app)) { Perf.histograms.take(); return@execute }
             if (!PerfPolicy.deviceIsCalm(Perf.batterySaver(app), Perf.thermalLabel(app))) return@execute
             if (isMetered(app)) return@execute
-            uploader.flush(Perf.buildReport(app))
+            uploader.flush()
         }
+    }
+
+    private fun isDebuggable(context: Context) = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+    private fun batchMeta(): PerfBatchMeta {
+        val context = requireNotNull(appContext)
+        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?"
+        val arch = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+            "arm64-v8a" -> "aarch64"
+            "x86_64" -> "x86_64"
+            else -> "other"
+        }
+        return PerfBatchMeta(installId, "android", arch, version, Build.VERSION.SDK_INT.toString(), Build.MODEL, Perf.refreshHz.toInt())
     }
 
     /** Unknown counts as metered: when in doubt, do not wake the radio. */
@@ -152,29 +172,4 @@ object PerfSharing {
         val caps = runCatching { cm.getNetworkCapabilities(cm.activeNetwork) }.getOrNull() ?: return true
         return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
-}
-
-private val launchId: String = UUID.randomUUID().toString()
-
-internal fun Perf.buildReport(context: Context): PerfReport {
-    val f = frames.snapshot()
-    val m = memory()
-    val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?"
-    val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
-    return PerfReport(
-        launchId = launchId,
-        platform = "android",
-        appVersion = version,
-        osVersion = Build.VERSION.SDK_INT.toString(),
-        device = Build.MODEL,
-        build = if (debuggable) "debug" else "release",
-        refreshHz = refreshHz.toInt(),
-        startupMs = startupMs,
-        frameKind = "frame",
-        frames = PerfReport.Frames(f.frames, f.slow, f.frozen, f.p50, f.p95, f.worst),
-        thermal = thermalLabel(context),
-        lowPower = batterySaver(context),
-        memoryMb = (m.javaUsedMb + m.nativeMb).toInt(),
-        spans = recorder.stats(),
-    )
 }

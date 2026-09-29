@@ -141,7 +141,7 @@ data class FrameSummary(
     val slowPercent: Double get() = if (frames == 0L) 0.0 else 100.0 * slow / frames
 }
 
-/** When the monitor's own background work (stall timer, uploads) should hold back. Pinned in `apps/parity/vectors/perf-report.json`. */
+/** When the monitor's own background work (stall timer, uploads) should hold back. Pinned in `apps/parity/vectors/perf-stats.json`. */
 object PerfPolicy {
     /** Thermal labels from either platform that mean the device is already working hard. */
     val hotThermal = setOf("Moderate", "Severe", "Critical", "Serious")

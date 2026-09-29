@@ -316,61 +316,71 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(spans, PerfSpan.budgetsMs)
     }
 
-    func testAReportIsBuiltTheSameWayOnBothApps() throws {
-        for c in try rows(try load("vectors/perf-report.json"), "reports") {
+    private func stats() throws -> [String: Any] { try load("vectors/perf-stats.json") }
+
+    func testTheBucketBoundsAndMetricNamesAreTheSharedOnes() throws {
+        let v = try stats()
+        XCTAssertEqual(v["bucketsMs"] as? [Double], PerfHistograms.bucketsMs)
+        XCTAssertEqual(v["metricOrder"] as? [String], PerfMetric.order)
+        XCTAssertEqual(v["schema"] as? String, PerfStatsBatch.schema)
+        XCTAssertEqual(v["maxSampleMs"] as? Double, PerfHistograms.maxSampleMs)
+        XCTAssertEqual(v["maxDeviceLength"] as? Int, PerfStatsBatch.maxDeviceLength)
+        let hz = try XCTUnwrap(v["refreshHz"] as? [String: Int])
+        XCTAssertEqual(hz["min"], PerfStatsBatch.refreshHzRange.lowerBound)
+        XCTAssertEqual(hz["max"], PerfStatsBatch.refreshHzRange.upperBound)
+        XCTAssertEqual(v["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
+        XCTAssertEqual(v["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
+        let wire = try XCTUnwrap(try load("perf-contract.json")["wire"] as? [String: String])
+        XCTAssertEqual(wire, PerfMetric.forSpan)
+    }
+
+    private func meta(_ i: [String: Any]) -> PerfBatchMeta {
+        PerfBatchMeta(installId: i["installId"] as! String, os: i["os"] as! String, arch: i["arch"] as! String,
+                      appVersion: i["appVersion"] as! String, osVersion: i["osVersion"] as! String,
+                      device: i["device"] as! String, refreshHz: i["refreshHz"] as! Int)
+    }
+
+    func testABatchIsBuiltTheSameWayOnBothApps() throws {
+        for c in try rows(try stats(), "batches") {
             let i = try XCTUnwrap(c["input"] as? [String: Any])
-            let f = try XCTUnwrap(i["frames"] as? [String: Any])
-            let spans = try rows(i, "spans").map { s in
-                SpanStat(name: s["name"] as! String, count: s["count"] as! Int, p50: s["p50"] as! Double, p95: s["p95"] as! Double,
-                         max: s["max"] as! Double, totalMs: s["totalMs"] as! Double, overBudget: s["overBudget"] as! Int)
-            }
-            let report = PerfReport(
-                launchId: i["launchId"] as! String, platform: i["platform"] as! String, appVersion: i["appVersion"] as! String,
-                osVersion: i["osVersion"] as! String, device: i["device"] as! String, build: i["build"] as! String,
-                refreshHz: i["refreshHz"] as! Int, startupMs: i["startupMs"] as? Int, frameKind: i["frameKind"] as! String,
-                frames: .init(total: f["total"] as! Int, slow: f["slow"] as! Int, frozen: f["frozen"] as! Int,
-                              p50: f["p50"] as! Double, p95: f["p95"] as! Double, worst: f["worst"] as! Double),
-                thermal: i["thermal"] as! String, lowPower: i["lowPower"] as! Bool, memoryMb: i["memoryMb"] as! Int, spans: spans)
+            let clock = Box(i["windowStartMs"] as! Int)
+            let histograms = PerfHistograms(now: { clock.value })
+            let samples = try XCTUnwrap(i["samples"] as? [String: [Double]])
+            for (name, xs) in samples { for x in xs { histograms.add(name, ms: x) } }
+            clock.value = i["windowEndMs"] as! Int
+            let window = histograms.take() ?? PerfWindow(startMs: i["windowStartMs"] as! Int, endMs: clock.value, metrics: [])
+            let json = PerfStatsBatch(meta: meta(i), window: window).json()
             let expected = try XCTUnwrap(c["expect"] as? [String: Any])
-            XCTAssertTrue((expected as NSDictionary).isEqual(report.json()), "\(c["name"] ?? "")\nexpected \(expected)\ngot \(report.json())")
+            XCTAssertTrue((expected as NSDictionary).isEqual(json), "\(c["name"] ?? "")\nexpected \(expected)\ngot \(json)")
         }
     }
 
     func testTheUploaderSendsWhenTheSharedRulesSay() async throws {
-        let vectors = try load("vectors/perf-report.json")
-        XCTAssertEqual(vectors["minFrames"] as? Int, PerfUploader.minFrames)
-        XCTAssertEqual(vectors["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
-        XCTAssertEqual(vectors["maxDeviceLength"] as? Int, PerfReport.maxDeviceLength)
-        XCTAssertEqual(vectors["maxMs"] as? Double, PerfReport.maxMs)
-        XCTAssertEqual(vectors["maxFrames"] as? Int, PerfReport.maxFrames)
-        let hz = try XCTUnwrap(vectors["refreshHz"] as? [String: Int])
-        XCTAssertEqual(hz["min"], PerfReport.refreshHzRange.lowerBound)
-        XCTAssertEqual(hz["max"], PerfReport.refreshHzRange.upperBound)
-        XCTAssertEqual(vectors["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
-        for c in try rows(vectors, "uploader") {
+        for c in try rows(try stats(), "uploader") {
             let config = try XCTUnwrap(c["config"] as? [String: Any])
             let clock = Box(0), status = Box(204), posts = Box(0)
             let enabled = config["enabled"] as! Bool
-            let uploader = PerfUploader(endpoint: config["endpoint"] as? String, enabled: { enabled },
+            let histograms = PerfHistograms(now: { clock.value })
+            let uploader = PerfUploader(endpoint: config["endpoint"] as? String, enabled: { enabled }, source: histograms,
                                         now: { clock.value }, post: { _, _ in posts.value += 1; return status.value })
+            let meta = PerfBatchMeta(installId: "id", os: "ios", arch: "aarch64", appVersion: "1", osVersion: "27",
+                                     device: "iPhone", refreshHz: 120)
             for step in try rows(c, "steps") {
                 clock.value = step["atMs"] as! Int
                 status.value = step["status"] as! Int
+                for _ in 0..<(step["addSamples"] as! Int) { histograms.add(PerfMetric.appLaunch, ms: 5) }
                 let before = posts.value
-                let report = PerfReport(launchId: "id", platform: "ios", appVersion: "1", osVersion: "27", device: "iPhone", build: "release",
-                                        refreshHz: 120, startupMs: 77, frameKind: "turn",
-                                        frames: .init(total: step["frames"] as! Int, slow: 0, frozen: 0, p50: 1, p95: 2, worst: 3),
-                                        thermal: "Nominal", lowPower: false, memoryMb: 10, spans: [])
-                let sent = await uploader.flush(report)
+                let sent = await uploader.flush(meta: meta)
                 let label = "\(c["name"] ?? "") at \(clock.value)ms"
                 XCTAssertEqual(sent, step["expectSent"] as? Bool, label)
                 XCTAssertEqual(posts.value > before, step["expectPosted"] as? Bool, "\(label): posted")
+                XCTAssertEqual(histograms.pendingSamples, step["expectPending"] as? Int, "\(label): samples held")
             }
         }
     }
 
     func testBackgroundWorkHoldsBackWhenTheDeviceIsHotOrSavingPower() throws {
-        for c in try rows(try load("vectors/perf-report.json"), "deviceCalm") {
+        for c in try rows(try stats(), "deviceCalm") {
             XCTAssertEqual(PerfPolicy.deviceIsCalm(lowPower: c["lowPower"] as! Bool, thermal: c["thermal"] as! String),
                            c["expect"] as? Bool, "\(c)")
         }

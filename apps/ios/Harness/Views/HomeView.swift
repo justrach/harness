@@ -94,7 +94,8 @@ struct HomeView: View {
     /// Open a route from the list. In the split layout the sidebar replaces
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
-        Perf.shared.startInteraction(PerfSpan.navigationOpen)
+        // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
+        if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
         if splitLayout { path = [route] } else { path.append(route) }
     }
 

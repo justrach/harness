@@ -64,6 +64,9 @@ object Perf {
     val recorder = PerfRecorder()
     val frames = FrameTally()
 
+    /** Samples since the last upload, in the ranges the server merges. Fed by [record] and every frame. */
+    val histograms = PerfHistograms()
+
     @Volatile var startupMs: Long? = null
         private set
     @Volatile var refreshHz: Float = 60f
@@ -74,6 +77,7 @@ object Perf {
     fun record(name: String, ms: Double) {
         val budget = PerfSpan.budgetsMs[name] ?: Double.MAX_VALUE
         recorder.record(name, ms, budget)
+        PerfMetric.forSpan[name]?.let { histograms.add(it, ms) }
         if (ms > budget) {
             // One line a second per operation: a persistent overrun must not turn into constant logging.
             val now = SystemClock.elapsedRealtime()
@@ -195,7 +199,9 @@ object Perf {
             // From Android 12 the system says how long this frame had (a pipelined frame may have more than one
             // vsync); judging against one refresh period would call nearly every frame slow.
             val deadlineMs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) ms(FrameMetrics.DEADLINE) else 0.0
-            frames.add(ms(FrameMetrics.TOTAL_DURATION), stages, if (deadlineMs > 0) deadlineMs else budgetMs)
+            val totalMs = ms(FrameMetrics.TOTAL_DURATION)
+            frames.add(totalMs, stages, if (deadlineMs > 0) deadlineMs else budgetMs)
+            histograms.add(PerfMetric.FrameCost, totalMs)
         }
         listener = l
         activity.window.addOnFrameMetricsAvailableListener(l, Handler(frameThread.looper))

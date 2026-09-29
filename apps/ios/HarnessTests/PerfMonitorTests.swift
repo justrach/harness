@@ -128,9 +128,10 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertLessThan(perCallUs, 25, "measure() took \(perCallUs) µs a call")
 
         let tally = MainThreadTally()
-        for _ in 0..<10_000 { tally.add(ms: 3) }
+        let histograms = PerfHistograms()
+        for _ in 0..<10_000 { tally.add(ms: 3); histograms.add(PerfMetric.mainTurn, ms: 3) }
         start = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<n { tally.add(ms: 3) }
+        for _ in 0..<n { tally.add(ms: 3); histograms.add(PerfMetric.mainTurn, ms: 3) }
         let perTurnUs = (CFAbsoluteTimeGetCurrent() - start) * 1e6 / Double(n)
         XCTAssertLessThan(perTurnUs, 25, "a turn took \(perTurnUs) µs to tally")
     }
