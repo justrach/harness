@@ -67,8 +67,13 @@ kembali ke profil tersebut.
 
 ## Lesen
 
-Harness tersedia di bawah [GNU Affero General Public License versi 3](LICENSE)
-(`AGPL-3.0-only`), versi AGPL yang juga menjadi lesen awam CodeGraff.
-Standard Harness Pte. Ltd. mengekalkan hak ke atas sumbangan Harness miliknya
-sendiri; bahan lain kekal dengan hak cipta dan lesen asalnya. Lihat
-[notis pihak ketiga](THIRD_PARTY_NOTICES.md).
+Harness tersedia di bawah [GNU Affero General Public License versi 3 yang
+diubah suai](LICENSE) (AGPL-3.0 dengan terma tambahan), dibina dengan cara yang
+sama seperti lesen [CodeGraff](https://github.com/justrach/codegraff).
+Penggunaan melalui rangkaian mencetuskan Seksyen 13. Standard Harness Pte. Ltd.,
+Rach Pradhan (justrach) dan Yu Xi Lim (yxlyx) menyimpan hak untuk menawarkan
+versi proprietari atau dihoskan bagi sumbangan Harness asal yang mereka miliki.
+Lesen AGPL penerima kekal kecuali penerima sendiri melanggarnya. Kebenaran
+komersial tanpa copyleft hanya wujud jika ketiga-tiganya memberikannya bersama
+secara bertulis, dan boleh ditarik balik. Bahan lain kekal dengan hak cipta dan
+lesen asalnya. Lihat [notis pihak ketiga](THIRD_PARTY_NOTICES.md).

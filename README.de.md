@@ -66,8 +66,14 @@ lokalen Profil; mit `harness logout` und einem Neustart kehrst du dorthin zurüc
 
 ## Lizenz
 
-Harness steht unter der [GNU Affero General Public License, Version 3](LICENSE)
-(`AGPL-3.0-only`), derselben öffentlichen AGPL-Version wie CodeGraff.
-Standard Harness Pte. Ltd. behält die Rechte an den eigenen Harness-Beiträgen;
-frühere und fremde Beiträge behalten ihre jeweiligen Hinweise und Lizenzen.
-Siehe [Hinweise zu Drittanbietern](THIRD_PARTY_NOTICES.md).
+Harness steht unter der [modifizierten GNU Affero General Public License,
+Version 3](LICENSE) (AGPL-3.0 mit zusätzlichen Bedingungen), aufgebaut wie die
+Lizenz von [CodeGraff](https://github.com/justrach/codegraff). Die Nutzung über
+ein Netzwerk löst Abschnitt 13 aus. Standard Harness Pte. Ltd., Rach Pradhan
+(justrach) und Yu Xi Lim (yxlyx) behalten sich vor, proprietäre oder gehostete
+Versionen der eigenen Harness-Beiträge anzubieten. Die AGPL-Lizenz eines
+Empfängers gilt dauerhaft, solange er sie nicht verletzt. Eine kommerzielle
+Erlaubnis ohne Copyleft gibt es nur, wenn alle drei sie gemeinsam schriftlich
+erteilen; sie ist widerrufbar. Frühere und fremde Beiträge behalten ihre
+jeweiligen Hinweise und Lizenzen. Siehe
+[Hinweise zu Drittanbietern](THIRD_PARTY_NOTICES.md).

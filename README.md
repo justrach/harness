@@ -137,9 +137,12 @@ theme import, see [the theme guide](docs/theme-system.md).
 
 ## License
 
-Harness is available under the [GNU Affero General Public License, version 3](LICENSE)
-(`AGPL-3.0-only`), the same AGPL version used as the public license for
-[CodeGraff](https://github.com/justrach/codegraff). Standard Harness Pte. Ltd.
-reserves rights in the original Harness contributions it owns. Earlier and
+**Modified GNU AGPL-3.0** ([`LICENSE`](LICENSE)), built the same way as
+[CodeGraff](https://github.com/justrach/codegraff)'s. Network use triggers
+Section 13. Standard Harness Pte. Ltd., **Rach Pradhan (justrach)** and
+**Yu Xi Lim (yxlyx)** reserve the right to offer proprietary or hosted versions
+of the original Harness contributions they own. A recipient's AGPL license is
+perpetual unless they breach it. Commercial permission without copyleft exists
+only if **all three grant it jointly in writing**, and is revocable. Earlier and
 third-party material keeps its own copyright and license notices; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
