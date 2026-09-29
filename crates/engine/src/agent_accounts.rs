@@ -281,6 +281,11 @@ struct UsageSnapshot {
 struct Inner {
     config: AgentAccountsConfig,
     http: reqwest::Client,
+    /// Serializes operations that inspect and then mutate live credential
+    /// stores and slots. Without it a concurrent list can snapshot stale
+    /// credentials over a freshly signed-in slot, or a switch can race a
+    /// removal and sign the wrong live account out.
+    ops: tokio::sync::Mutex<()>,
     flows: Mutex<HashMap<String, LoginFlow>>,
     /// `"{harness}:{accountKey}"` → cached usage windows.
     usage_cache: Mutex<HashMap<String, CachedUsage>>,
@@ -320,6 +325,7 @@ impl AgentAccounts {
             inner: Arc::new(Inner {
                 config,
                 http,
+                ops: tokio::sync::Mutex::new(()),
                 flows: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
@@ -331,6 +337,12 @@ impl AgentAccounts {
 
     /// Detect both CLIs, auto-snapshot the live logins, and assemble the view.
     pub async fn list(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
+        let _ops = self.inner.ops.lock().await;
+        self.list_locked(force_usage).await
+    }
+
+    /// Caller holds [`Inner::ops`].
+    async fn list_locked(&self, force_usage: bool) -> Result<AgentAccountsSnapshot, EngineError> {
         if force_usage {
             lock(&self.inner.usage_cache).clear();
         }
@@ -433,7 +445,8 @@ impl AgentAccounts {
         harness: HarnessId,
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
-        self.list(false).await?;
+        let _ops = self.inner.ops.lock().await;
+        self.list_locked(false).await?;
         let slot = self
             .read_slots(harness)
             .into_iter()
@@ -453,7 +466,7 @@ impl AgentAccounts {
                 )));
             }
         }
-        self.list(false).await
+        self.list_locked(false).await
     }
 
     async fn activate_claude(&self, slot: &Slot) -> Result<(), EngineError> {
@@ -535,23 +548,124 @@ impl AgentAccounts {
         {
             return Err(EngineError::Other("Unknown account.".into()));
         }
-        let snapshot = self.list(false).await?;
+        let _ops = self.inner.ops.lock().await;
+        let snapshot = self.list_locked(false).await?;
         let active = snapshot
             .accounts
             .iter()
             .any(|a| a.harness == harness && a.id == account_id && a.active);
         if active {
-            return Err(EngineError::Other(
-                "That's the live login — switch to another account first (it would just be \
-                 re-detected)."
-                    .into(),
-            ));
+            // Removing the live login signs the CLI out: dropping only the
+            // slot would re-detect (and re-snapshot) it on the next list, and
+            // the only account must stay removable.
+            let changed = || {
+                EngineError::Other(
+                    "The live login changed while it was being removed — refresh and try again."
+                        .into(),
+                )
+            };
+            let expected = self.live_account_key(harness).ok_or_else(changed)?;
+            if slot_id_for(harness, &expected) != account_id {
+                return Err(changed());
+            }
+            self.sign_out(harness, &expected).await?;
         }
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
             std::fs::remove_file(&file)?;
         }
-        self.list(false).await
+        self.list_locked(false).await
+    }
+
+    /// The live login's account key, from the identity alone (no secret read).
+    fn live_account_key(&self, harness: HarnessId) -> Option<String> {
+        match harness {
+            HarnessId::ClaudeCode => {
+                let cfg = read_json(&self.inner.config.claude_config_file)?;
+                let oauth = cfg.get("oauthAccount")?;
+                str_field(oauth, "accountUuid").or_else(|| str_field(oauth, "emailAddress"))
+            }
+            HarnessId::Codex => self.detect_codex().map(|d| d.account_key),
+            HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
+            _ => None,
+        }
+    }
+
+    /// A fresh sign-in replaces the live login when it IS the live account (a
+    /// re-login — otherwise the next list would snapshot the old, possibly
+    /// revoked, live tokens straight back over the fresh slot) or when there
+    /// is no live login at all (nothing to strand; "add" must mean "works").
+    /// Any other live login stays untouched — switching remains explicit.
+    /// Caller holds [`Inner::ops`].
+    async fn adopt_if_live(&self, slot: &Slot) -> Result<(), EngineError> {
+        let live = self.live_account_key(slot.harness);
+        let usable = match slot.harness {
+            HarnessId::Cursor => self.cursor_live_usable(),
+            _ => live.is_some(),
+        };
+        if usable && live.as_deref() != Some(slot.account_key.as_str()) {
+            return Ok(());
+        }
+        match slot.harness {
+            HarnessId::ClaudeCode => self.activate_claude(slot).await?,
+            HarnessId::Codex => self.activate_codex(slot)?,
+            HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Sign the CLI's live login out, so removing its slot sticks. Refuses if
+    /// the live login is no longer the one being removed. Caller holds
+    /// [`Inner::ops`].
+    async fn sign_out(
+        &self,
+        harness: HarnessId,
+        expected_account_key: &str,
+    ) -> Result<(), EngineError> {
+        let changed = || {
+            EngineError::Other(
+                "The live login changed while it was being removed — refresh and try again.".into(),
+            )
+        };
+        if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+            return Err(changed());
+        }
+        match harness {
+            HarnessId::ClaudeCode => {
+                let (live, warning) = self.read_claude_credentials().await;
+                if self.live_account_key(harness).as_deref() != Some(expected_account_key) {
+                    return Err(changed());
+                }
+                if let Some(mut credentials) = live {
+                    // Only the account login goes — machine-shared MCP/plugin
+                    // OAuth in the same blob stays.
+                    if let Some(map) = credentials.as_object_mut() {
+                        map.remove("claudeAiOauth");
+                    }
+                    self.write_claude_credentials(&credentials).await?;
+                } else if let Some(warning) = warning {
+                    return Err(EngineError::Other(format!(
+                        "Couldn't sign Claude out: {warning}"
+                    )));
+                }
+                let file = &self.inner.config.claude_config_file;
+                if let Some(mut cfg) = read_json(file)
+                    && let Some(map) = cfg.as_object_mut()
+                    && map.remove("oauthAccount").is_some()
+                {
+                    write_file_atomic(file, cfg.to_string().as_bytes(), false)?;
+                }
+            }
+            HarnessId::Codex => remove_if_exists(&self.inner.config.codex_auth_file())?,
+            HarnessId::Cursor => remove_if_exists(&self.inner.config.cursor_sdk_auth_file)?,
+            _ => {
+                return Err(EngineError::Other(
+                    "That's the live login — it can't be removed here.".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     // ── add-account OAuth flows ─────────────────────────────────────────────
@@ -1113,7 +1227,7 @@ impl AgentAccounts {
             }
         }
 
-        self.write_slot(&Slot {
+        let slot = Slot {
             id: slot_id_for(HarnessId::ClaudeCode, &account_uuid),
             harness: HarnessId::ClaudeCode,
             account_key: account_uuid.clone(),
@@ -1128,9 +1242,12 @@ impl AgentAccounts {
             claude_config: Some(serde_json::json!({ "oauthAccount": oauth_account })),
             saved_at: now_ms(),
             created_at: None,
-        })?;
+        };
+        let _ops = self.inner.ops.lock().await;
+        self.write_slot(&slot)?;
+        self.adopt_if_live(&slot).await?;
         lock(&self.inner.flows).remove(login_id);
-        self.list(false).await
+        self.list_locked(false).await
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
@@ -1170,16 +1287,13 @@ impl AgentAccounts {
             _ => None,
         });
         if let Some(detected) = detected {
+            let _ops = self.inner.ops.lock().await;
             self.snapshot_detected(harness, &detected)?;
-            // Cursor "Connect" semantics: with no (usable) live login, the
-            // fresh key becomes the live one immediately — the page's CTA is
-            // "connect so runs work", not "add a spare". A live login stays
-            // untouched (switching remains explicit, codex parity).
-            if harness == HarnessId::Cursor
-                && !self.cursor_live_usable()
-                && let Some(credentials) = &detected.credentials
-            {
-                self.write_cursor_auth(credentials)?;
+            // "Connect" semantics: with no (usable) live login, or a re-login
+            // of the live account, the fresh login becomes the live one.
+            let id = slot_id_for(harness, &detected.account_key);
+            if let Some(slot) = self.read_slots(harness).into_iter().find(|s| s.id == id) {
+                self.adopt_if_live(&slot).await?;
             }
             self.cancel_login(login_id);
             return Ok(AgentLoginPoll {
@@ -2303,6 +2417,13 @@ fn urlencode(input: &str) -> String {
 }
 
 /// Atomic write via a same-dir temp file + rename; `secret` = 0600 from birth.
+fn remove_if_exists(file: &Path) -> Result<(), EngineError> {
+    match std::fs::remove_file(file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), EngineError> {
     let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
     {

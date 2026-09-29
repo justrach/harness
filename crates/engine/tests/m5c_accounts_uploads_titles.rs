@@ -458,13 +458,31 @@ async fn forget_guards_and_removes_slots() {
             .await
             .is_err()
     );
-    // The live login can't be forgotten (it would just be re-detected).
-    assert!(
-        accounts
-            .forget(HarnessId::ClaudeCode, &alice_id)
-            .await
-            .is_err()
-    );
+    // The live login CAN be forgotten: that signs the CLI out (dropping only
+    // the slot would just re-detect it), so the only account stays removable.
+    // Machine-shared MCP OAuth and the rest of ~/.claude.json survive.
+    let creds_file = config.claude_config_dir.join(".credentials.json");
+    let mut creds: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&creds_file).unwrap()).unwrap();
+    creds["mcpOAuth"] = serde_json::json!({ "server": "keep" });
+    std::fs::write(&creds_file, creds.to_string()).unwrap();
+    let snapshot = accounts
+        .forget(HarnessId::ClaudeCode, &alice_id)
+        .await
+        .expect("forget the live login");
+    assert!(account_emails(&snapshot, HarnessId::ClaudeCode).is_empty());
+    let creds: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&creds_file).unwrap()).unwrap();
+    assert!(creds.get("claudeAiOauth").is_none(), "signed out");
+    assert_eq!(creds["mcpOAuth"]["server"], "keep");
+    let cfg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config.claude_config_file).unwrap()).unwrap();
+    assert!(cfg.get("oauthAccount").is_none(), "identity removed");
+    assert!(cfg["projects"].get("/keep/me").is_some(), "config kept");
+
+    // Signed back in, alice is live again.
+    write_claude_login(&config, "alice@example.com", "uuid-alice", "token-alice");
+    accounts.list(false).await.expect("list alice again");
 
     // A non-active slot forgets cleanly.
     write_claude_login(&config, "bob@example.com", "uuid-bob", "token-bob");
@@ -477,6 +495,33 @@ async fn forget_guards_and_removes_slots() {
         account_emails(&snapshot, HarnessId::ClaudeCode),
         vec![("bob@example.com".to_string(), true)]
     );
+}
+
+#[tokio::test]
+async fn forgetting_the_live_codex_login_signs_it_out() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (accounts, config) = test_accounts(tmp.path());
+    write_codex_login(&config, "dana@example.com", "acct-dana");
+    let snapshot = accounts.list(false).await.expect("list");
+    let dana = snapshot
+        .accounts
+        .iter()
+        .find(|a| a.harness == HarnessId::Codex)
+        .expect("dana detected");
+    assert!(dana.active);
+
+    let snapshot = accounts
+        .forget(HarnessId::Codex, &dana.id.clone())
+        .await
+        .expect("forget the live codex login");
+    assert!(account_emails(&snapshot, HarnessId::Codex).is_empty());
+    assert!(
+        !config.codex_home.join("auth.json").exists(),
+        "the CLI is signed out, so the login is not re-detected"
+    );
+    // Still empty on the next list: nothing was left to re-snapshot.
+    let snapshot = accounts.list(false).await.expect("list again");
+    assert!(account_emails(&snapshot, HarnessId::Codex).is_empty());
 }
 
 #[test]
@@ -1050,9 +1095,10 @@ async fn cursor_login_flow_spawns_shim_and_auto_activates() {
         &shim,
         r#"#!/bin/sh
 [ "$1" = "login" ] || exit 1
+n=$(cat "$0.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$0.n"
 printf '%s\n' '{"ev":"auth-url","url":"https://cursor.com/loginDeepControl?challenge=fake"}'
 cat > "$2" <<JSON
-{"version":1,"backendUrl":"https://api2.cursor.sh","apiKey":"key-minted","apiKeyExpiresAtMs":99999999999999,"email":"grace@example.com","createdAtMs":1}
+{"version":1,"backendUrl":"https://api2.cursor.sh","apiKey":"key-minted-$n","apiKeyExpiresAtMs":99999999999999,"email":"grace@example.com","createdAtMs":1}
 JSON
 printf '%s\n' '{"ev":"logged-in","email":"grace@example.com"}'
 exit 0
@@ -1099,4 +1145,77 @@ exit 0
         account_emails(&snapshot, HarnessId::Cursor),
         vec![("grace@example.com".to_string(), true)]
     );
+
+    // Re-signing in to the LIVE account replaces its tokens. The live key here
+    // is unexpired but revoked: without adoption the next list would snapshot
+    // it straight back over the fresh slot and the CLI would keep the dead one.
+    let write_live = |email: &str, key: &str| {
+        std::fs::write(
+            &config.cursor_sdk_auth_file,
+            serde_json::json!({
+                "version": 1,
+                "backendUrl": "https://api2.cursor.sh",
+                "apiKey": key,
+                "apiKeyExpiresAtMs": 99999999999999i64,
+                "email": email,
+                "createdAtMs": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    let live_key = || -> String {
+        let live: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config.cursor_sdk_auth_file).unwrap())
+                .unwrap();
+        live["apiKey"].as_str().unwrap().to_string()
+    };
+    write_live("grace@example.com", "key-revoked");
+    let start = accounts
+        .start_login(HarnessId::Cursor)
+        .await
+        .expect("start");
+    settle_login(&accounts, &start.login_id).await;
+    assert_eq!(live_key(), "key-minted-2", "the fresh login is live");
+    let snapshot = accounts.list(false).await.expect("list");
+    assert_eq!(
+        account_emails(&snapshot, HarnessId::Cursor),
+        vec![("grace@example.com".to_string(), true)]
+    );
+
+    // Signing in as SOMEONE ELSE leaves the live login alone: switching stays
+    // an explicit act.
+    write_live("heidi@example.com", "key-heidi");
+    accounts.list(false).await.expect("snapshot heidi");
+    let start = accounts
+        .start_login(HarnessId::Cursor)
+        .await
+        .expect("start");
+    settle_login(&accounts, &start.login_id).await;
+    assert_eq!(live_key(), "key-heidi");
+    let snapshot = accounts.list(false).await.expect("list");
+    let emails = account_emails(&snapshot, HarnessId::Cursor);
+    assert!(
+        emails.contains(&("heidi@example.com".to_string(), true)),
+        "{emails:?}"
+    );
+    assert!(
+        emails.contains(&("grace@example.com".to_string(), false)),
+        "{emails:?}"
+    );
+}
+
+/// Poll a login until it lands (or fail the test).
+async fn settle_login(accounts: &AgentAccounts, login_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let poll = accounts.poll_login(login_id).await.expect("poll");
+        match poll.status {
+            AgentLoginStatus::Done => return,
+            AgentLoginStatus::Pending => {}
+            AgentLoginStatus::Error => panic!("login errored: {:?}", poll.message),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "login never landed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
