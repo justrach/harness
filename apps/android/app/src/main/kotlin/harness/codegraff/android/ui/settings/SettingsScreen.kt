@@ -16,6 +16,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.window.Dialog
 import harness.codegraff.android.AccountDeletionState
 import androidx.compose.runtime.Composable
@@ -30,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
 import harness.codegraff.android.theme.GlyphView
@@ -55,14 +58,19 @@ fun SettingsSheet(
 ) {
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    var showPerformance by rememberSaveable { mutableStateOf(false) }
+    val version = LocalContext.current.let { c ->
+        runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() ?: "?"
+    }
     HarnessSheet(
-        title = if (showAppearance) "Appearance" else "Settings",
+        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else "Settings",
         // The sheet stays put while the account is being deleted (interactiveDismissDisabled).
         onDismiss = { if (!deletion.busy) onDismiss() },
-        trailing = if (showAppearance) ({ BackButton { showAppearance = false } }) else null,
+        trailing = if (showAppearance || showPerformance) ({ BackButton { showAppearance = false; showPerformance = false } }) else null,
     ) {
-        if (showAppearance) AppearanceContent() else SettingsContent(
+        if (showAppearance) AppearanceContent() else if (showPerformance) PerformanceContent(version) else SettingsContent(
             onOpenAppearance = { showAppearance = true },
+            onOpenPerformance = { showPerformance = true },
             onSignOut = { onDismiss(); onSignOut() },
             canDeleteAccount = canDeleteAccount,
             deleting = deletion.busy,
@@ -111,6 +119,7 @@ private fun BackButton(onClick: () -> Unit) {
 @Composable
 private fun SettingsContent(
     onOpenAppearance: () -> Unit,
+    onOpenPerformance: () -> Unit,
     onSignOut: () -> Unit,
     canDeleteAccount: Boolean,
     deleting: Boolean,
@@ -128,7 +137,8 @@ private fun SettingsContent(
         val name = if (light == dark) (light ?: "Harness") else (family(store.active(true).id) ?: "Harness")
         if (store.isMatchingDesktop) "$name · Desktop" else "$name · ${store.mode.label}"
     }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+    // Scrolls: with Diagnostics and the delete row the list is taller than a phone's half-height sheet.
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
         Section("Account") {
             if (canDeleteAccount) ValueRow("Signed in with", "CodeGraff") else ValueRow("Signed in", "Demo mode")
             Divider()
@@ -136,6 +146,9 @@ private fun SettingsContent(
         }
         Section("Appearance") {
             LinkRow("Theme", themeSummary, onOpenAppearance)
+        }
+        Section("Diagnostics") {
+            LinkRow("Performance", Perf.startupMs?.let { "Started in $it ms" } ?: "", onOpenPerformance)
         }
         Section("About") {
             ValueRow("Version", version)
@@ -172,7 +185,7 @@ internal fun Divider() {
 }
 
 @Composable
-private fun ValueRow(title: String, value: String) {
+internal fun ValueRow(title: String, value: String) {
     val p = Theme.palette
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = sans(16f), color = p.text)
@@ -196,7 +209,7 @@ private fun LinkRow(title: String, value: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActionRow(title: String, destructive: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun ActionRow(title: String, destructive: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     val p = Theme.palette
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).pressWashClickable(onClick, cornerRadius = 0.dp, enabled = enabled).padding(horizontal = 16.dp),

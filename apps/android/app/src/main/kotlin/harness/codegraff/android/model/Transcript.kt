@@ -1,5 +1,8 @@
 package harness.codegraff.android.model
 
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfSpan
+
 // Session doc entries and the transcript row model: a port of
 // crates/ui/src/shell/transcript.rs rows_for_entry (TranscriptRows.swift). One row is
 // one markdown top-level block, tool group or chip, never one message: streamed tokens
@@ -156,6 +159,10 @@ class TranscriptBuilderCache {
 
     fun rows(entries: List<MessageEntry>, pendingSends: List<PendingSend> = emptyList()): List<TranscriptRow> {
         if (entries === lastEntries && pendingSends == lastPending) return lastRows
+        return Perf.measure(PerfSpan.TranscriptRows) { build(entries, pendingSends) }
+    }
+
+    private fun build(entries: List<MessageEntry>, pendingSends: List<PendingSend>): List<TranscriptRow> {
         val live = HashSet<String>()
         val built = TranscriptRowBuilder.rows(entries, pendingSends) { key, text ->
             live += key
@@ -164,7 +171,7 @@ class TranscriptBuilderCache {
                 hit.blocks
             } else {
                 parseCount++
-                parseMarkdown(text).also { parsed[key] = Parsed(text, it) }
+                Perf.measure(PerfSpan.MarkdownParse) { parseMarkdown(text) }.also { parsed[key] = Parsed(text, it) }
             }
         }
         // Drop memos for parts that no longer exist; the size guard keeps the append-only path allocation-free.

@@ -9,6 +9,9 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfSpan
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
@@ -48,6 +51,22 @@ class SessionFlowTest {
         rule.waitForIdle()
         rule.onNodeWithText("Matches the desktop fix in", substring = true).assertExists()
         rule.onNode(hasSetTextAction() and !hasContentDescription("Search sessions")).assertTextContains("keep me")
+    }
+
+    @Test
+    fun openingASessionIsTimed() {
+        Perf.reset()
+        openToolGroupSession()
+        rule.waitUntil(5_000) { Perf.recorder.stats().any { it.name == PerfSpan.NavigationOpen } }
+        rule.waitUntil(5_000) { Perf.recorder.stats().any { it.name == PerfSpan.TranscriptRows } }
+    }
+
+    @Test
+    fun settingsShowsThePerformancePage() {
+        rule.onNodeWithContentDescription("Settings").performClick()
+        rule.onNodeWithText("Performance").performScrollTo().performClick()
+        rule.onNodeWithText("FRAMES").performScrollTo().assertExists()
+        rule.onNodeWithText("Copy report").performScrollTo().assertExists()
     }
 
     @Test

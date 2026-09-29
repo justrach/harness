@@ -1,6 +1,8 @@
 package harness.codegraff.android.ui
 
 import kotlinx.coroutines.launch
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfSpan
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -85,7 +87,10 @@ fun HarnessApp(model: AppModel) {
         val sidebar = hingeLeft?.takeIf { it in 240.dp..(maxWidth - 240.dp) } ?: SidebarWidth
 
         /** Open a route from the list. In the split layout the sidebar replaces what the detail shows instead of stacking behind it. */
-        fun open(route: Route) { path = if (split) listOf(route) else path + route }
+        fun open(route: Route) {
+            Perf.startInteraction(PerfSpan.NavigationOpen)
+            path = if (split) listOf(route) else path + route
+        }
 
         /** The session switcher's jump: from inside a session, swap that session out instead of stacking another. */
         fun switchTo(chatId: String) {
@@ -107,6 +112,8 @@ fun HarnessApp(model: AppModel) {
         @Composable
         fun Page(route: Route, modifier: Modifier) {
             val back = { path = path.dropLast(1) }
+            // Tap to first frame of the page it opened.
+            LaunchedEffect(route) { Perf.finishInteraction(PerfSpan.NavigationOpen) }
             when (route) {
                 is Route.Chat -> SessionScreen(route.id, state, model, showBack = !split, onBack = back, modifier = modifier)
                 is Route.Space -> SpaceScreen(route.id, state, model, showBack = !split, onBack = back, onOpen = ::open, modifier = modifier)

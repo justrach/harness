@@ -61,6 +61,10 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        // The monitor calls Trace and Log, which do nothing on the JVM.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

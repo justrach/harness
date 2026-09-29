@@ -9,6 +9,10 @@ struct HarnessApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        Perf.shared.startWatching()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -20,6 +24,7 @@ struct HarnessApp: App {
                 .tint(Theme.text)
                 .background(Theme.bg)
                 .onAppear {
+                    Perf.shared.markFirstFrame()
                     if let scene = UIApplication.shared.connectedScenes
                         .compactMap({ $0 as? UIWindowScene }).first {
                         ThemeStore.shared.attach(to: scene)

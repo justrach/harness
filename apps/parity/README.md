@@ -9,6 +9,7 @@ each app runs its own test against the same files, so neither can drift without 
 | `vectors/account-deletion.json` | every answer the edge can give and the exact message shown | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/home-grouping.json` | project and device sections, the Pinned section | `ParityTests.swift` | `ParityTest.kt` |
 | `ux-contract.json` | user-visible strings and the queue panel's layout numbers | `ParityTests.swift` | `ParityTest.kt` |
+| `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 
 The expected values are what the SwiftUI app does. Change a rule on iOS and the vector must change with it, which

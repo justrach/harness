@@ -1,0 +1,17 @@
+{
+  "comment": "The operations both apps time, with the milliseconds each may take before it counts as slow. Android reports them from Perf.kt (PerfSpan), iOS from PerfMonitor.swift (PerfSpan); each app's parity test checks its own source against this file.",
+  "spans": {
+    "startup.firstFrame": 1000,
+    "nav.open": 100,
+    "transcript.rows": 8,
+    "markdown.parse": 4,
+    "home.group": 4,
+    "send.apply": 8,
+    "main.stall": 100
+  },
+  "strings": {
+    "settingsRow": "Performance",
+    "copyReport": "Copy report",
+    "reset": "Reset"
+  }
+}

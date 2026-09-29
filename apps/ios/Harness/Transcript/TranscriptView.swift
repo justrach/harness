@@ -171,8 +171,10 @@ final class TranscriptBuilderCache {
               entries: [MessageEntry],
               pendingSends: [PendingSend]) -> [TranscriptRow] {
         if cachedRevision == revision { return cachedRows }
-        cachedRows = TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
-                                               parsers: &parsers, completed: &completed)
+        cachedRows = Perf.measure(PerfSpan.transcriptRows) {
+            TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
+                                      parsers: &parsers, completed: &completed)
+        }
         cachedRevision = revision
         return cachedRows
     }

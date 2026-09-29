@@ -308,4 +308,19 @@ final class ParityTests: XCTestCase {
             XCTAssertTrue(source.contains(snippet), "QueuePanelView no longer contains `\(snippet)`")
         }
     }
+
+    // MARK: Performance monitor
+
+    func testTheMonitorTimesTheSameOperationsAgainstTheSameBudgets() throws {
+        let spans = try XCTUnwrap(try load("perf-contract.json")["spans"] as? [String: Double])
+        XCTAssertEqual(spans, PerfSpan.budgetsMs)
+    }
+
+    func testThePerformancePageUsesTheContractStrings() throws {
+        let strings = try XCTUnwrap(try load("perf-contract.json")["strings"] as? [String: String])
+        let source = try sources(under: "apps/ios/Harness", ext: "swift")
+        for value in strings.values {
+            XCTAssertTrue(source.contains("\"\(value)\""), "\(value) is missing from the SwiftUI app")
+        }
+    }
 }

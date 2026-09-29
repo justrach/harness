@@ -18,6 +18,7 @@ import harness.codegraff.android.model.QueueDeliveryGate
 import harness.codegraff.android.model.QueueEditFinishResult
 import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
+import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.ui.session.QueueUX
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -296,6 +297,24 @@ class ParityTest {
         for (count in 0..8) {
             val visible = minOf(count, most)
             assertEquals("count $count", visible * row + maxOf(0, visible - 1) * gap, QueueUX.listHeightDp(count))
+        }
+    }
+
+    // MARK: Performance monitor
+
+    @Test
+    fun theMonitorTimesTheSameOperationsAgainstTheSameBudgets() {
+        val contract = load("perf-contract.json").getJSONObject("spans")
+        val expected = contract.keys().asSequence().associateWith { contract.getDouble(it) }
+        assertEquals(expected, PerfSpan.budgetsMs)
+    }
+
+    @Test
+    fun thePerformancePageUsesTheContractStrings() {
+        val strings = load("perf-contract.json").getJSONObject("strings")
+        val source = kotlinSources()
+        for (key in strings.keys()) {
+            assertTrue("${strings.getString(key)} is missing from the Compose app", source.contains("\"${strings.getString(key)}\""))
         }
     }
 }

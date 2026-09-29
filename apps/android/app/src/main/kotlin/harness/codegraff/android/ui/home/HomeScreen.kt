@@ -1,6 +1,8 @@
 package harness.codegraff.android.ui.home
 
 import androidx.compose.animation.core.animateFloatAsState
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfSpan
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -120,7 +122,9 @@ fun HomeScreen(
     val chats = remember(state, scoped, searchText, statusFilter) {
         HomeFilter.apply(scoped, searchText, statusFilter, state::indicator, state::filterNames)
     }
-    val groups = remember(chats, grouping, state.pinnedSessionIds) { HomeGrouping.groups(chats, grouping, state.pinnedSessionIds.toSet()) }
+    val groups = remember(chats, grouping, state.pinnedSessionIds) {
+        Perf.measure(PerfSpan.HomeGroup) { HomeGrouping.groups(chats, grouping, state.pinnedSessionIds.toSet()) }
+    }
     val counts = remember(state, scoped) { statusCounts(state, scoped) }
     val archived = remember(state, selectedSpace, searchText) { state.archivedMatches(selectedSpace?.id, searchText) }
     val topInset = statusBarHeight()

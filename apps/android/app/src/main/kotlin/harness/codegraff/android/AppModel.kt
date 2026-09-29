@@ -3,6 +3,8 @@ package harness.codegraff.android
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import harness.codegraff.android.demo.DemoDataset
+import harness.codegraff.android.perf.Perf
+import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.model.ChangeRequestSummary
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.ChatConfig
@@ -244,7 +246,9 @@ class AppModel(
     fun send(chatId: String, text: String, attachments: List<String> = emptyList()) {
         if (text.isBlank() && attachments.isEmpty()) return
         val body = text.ifBlank { ATTACHMENT_ONLY_TEXT }
-        if (isRunLive(chatId)) enqueueMessage(chatId, body, attachments) else deliver(chatId, body)
+        Perf.measure(PerfSpan.SendApply) {
+            if (isRunLive(chatId)) enqueueMessage(chatId, body, attachments) else deliver(chatId, body)
+        }
     }
 
     fun isRunLive(chatId: String): Boolean {

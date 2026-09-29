@@ -217,7 +217,7 @@ enum TranscriptRowBuilder {
                               completed: inout [String: CompletedParse]) -> [TopBlock] {
         if streaming {
             let parser = parsers[key] ?? IncrementalMarkdownParser()
-            parser.setText(text)
+            Perf.measure(PerfSpan.markdownParse) { parser.setText(text) }
             parsers[key] = parser
             return parser.blocks
         }
@@ -230,9 +230,11 @@ enum TranscriptRowBuilder {
             return hit.blocks
         }
         // Adopt the live parser's tree on the live→complete flip, else parse.
-        let blocks = handoff?.source == text
-            ? (handoff?.blocks ?? MarkdownParser.parse(text))
-            : MarkdownParser.parse(text)
+        let blocks = Perf.measure(PerfSpan.markdownParse) {
+            handoff?.source == text
+                ? (handoff?.blocks ?? MarkdownParser.parse(text))
+                : MarkdownParser.parse(text)
+        }
         completed[key] = CompletedParse(source: text, blocks: blocks)
         return blocks
     }
