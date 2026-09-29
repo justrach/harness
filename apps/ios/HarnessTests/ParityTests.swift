@@ -341,6 +341,7 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(vectors["minFrames"] as? Int, PerfUploader.minFrames)
         XCTAssertEqual(vectors["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
         XCTAssertEqual(vectors["maxDeviceLength"] as? Int, PerfReport.maxDeviceLength)
+        XCTAssertEqual(vectors["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
         for c in try rows(vectors, "uploader") {
             let config = try XCTUnwrap(c["config"] as? [String: Any])
             let clock = Box(0), postOk = Box(true)

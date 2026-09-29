@@ -140,15 +140,19 @@ enum PerfTransport {
     }
 }
 
-/// Whether the person has agreed to share. Off until they turn it on, and only offered when there is somewhere to send.
+/// Whether anonymous reports are sent. On unless the person turns it off in Settings, and only when there is somewhere to send.
 enum PerfSharing {
     static let key = "share-performance"
+
+    /// Pinned in `apps/parity/vectors/perf-report.json`.
+    static let defaultEnabled = true
 
     /// Where reports go. Unset until the backend is agreed; with no endpoint nothing is offered and nothing is sent.
     static let endpoint: String? = nil
 
     static var available: Bool { endpoint != nil }
-    static var enabled: Bool { UserDefaults.standard.bool(forKey: key) }
+    /// `bool(forKey:)` reads an unset key as false, which would make "never chosen" mean off.
+    static var enabled: Bool { UserDefaults.standard.object(forKey: key) as? Bool ?? defaultEnabled }
 
     private static let launchId = UUID().uuidString.lowercased()
     private static let uploader = PerfUploader(endpoint: endpoint, enabled: { enabled }, post: { await PerfTransport.post($0, $1) })

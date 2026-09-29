@@ -21,9 +21,10 @@ monitor does not name yet, so add a span there.
 
 ## Sharing anonymous reports
 
-Off by default, and only offered once a destination is configured (`PerfSharing.endpoint` on each app, unset until the
-backend is agreed; with no endpoint the toggle is hidden and nothing is built or sent). When someone turns on
-"Share anonymous performance data", the app sends one report as the app goes to the background.
+On by default, with a "Share anonymous performance data" switch in Settings to turn it off, and only active once a
+destination is configured (`PerfSharing.endpoint` on each app, unset until the backend is agreed; with no endpoint the
+switch is hidden and nothing is built or sent). While it is on, the app sends one report as it goes to the background.
+A person who has turned it off stays off: only a never-chosen setting reads as on.
 
 - **Content:** `vectors/perf-report.json` pins the JSON both apps produce: app, OS and device model (the hardware
   identifier, never the name the owner gave it, capped at 40 characters), refresh rate, startup, frame or turn counts,
@@ -33,5 +34,6 @@ backend is agreed; with no endpoint the toggle is hidden and nothing is built or
 - **Rules:** an endpoint exists, sharing is on, the session drew at least 60 frames or turns, at most one report per
   10 minutes, and a failed post does not start the wait. Both apps test these against the same vectors.
 - **Transport:** a JSON POST over https (loopback http for tests), with no cookies, credentials, cache or redirects.
-- **Store listings:** turning this on means declaring diagnostics (performance data, not linked to the user) in the App
-  Store privacy answers and the Play data safety form.
+- **Store listings and disclosure:** collecting on by default means declaring diagnostics (performance data, not linked
+  to the user) in the App Store privacy answers and the Play data safety form, and saying so in the privacy policy
+  before an endpoint is switched on.

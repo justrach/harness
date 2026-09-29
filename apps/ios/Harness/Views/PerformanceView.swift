@@ -5,7 +5,7 @@
 import SwiftUI
 
 struct PerformanceView: View {
-    @AppStorage(PerfSharing.key) private var share = false
+    @AppStorage(PerfSharing.key) private var share = PerfSharing.defaultEnabled
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -58,7 +58,7 @@ struct PerformanceView: View {
                         Toggle("Share anonymous performance data", isOn: $share)
                             .accessibilityIdentifier("settings-share-performance")
                     } footer: {
-                        Text("Sends numbers only: timings, frame counts, memory, thermal state, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers.")
+                        Text("Sends numbers only: timings, frame counts, memory, thermal state, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time.")
                     }
                 }
                 Section {

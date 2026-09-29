@@ -105,6 +105,18 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertFalse(refused, "plain http to a real host must not be sent")
     }
 
+    func testSharingIsOnUntilThePersonTurnsItOffAndStaysOff() {
+        let key = PerfSharing.key
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertTrue(PerfSharing.enabled, "a never-chosen setting reads as on")
+        UserDefaults.standard.set(false, forKey: key)
+        XCTAssertFalse(PerfSharing.enabled, "an explicit off must stay off")
+        UserDefaults.standard.set(true, forKey: key)
+        XCTAssertTrue(PerfSharing.enabled)
+    }
+
     func testTheProcessStartTimeIsKnownAndInThePast() throws {
         let start = try XCTUnwrap(Perf.processStart())
         let age = Date().timeIntervalSince(start)

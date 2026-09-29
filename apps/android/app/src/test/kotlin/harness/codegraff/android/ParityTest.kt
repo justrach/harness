@@ -19,6 +19,7 @@ import harness.codegraff.android.model.QueueEditFinishResult
 import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
 import harness.codegraff.android.perf.PerfReport
+import harness.codegraff.android.perf.PerfSharing
 import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.perf.PerfTransport
 import harness.codegraff.android.perf.PerfUploader
@@ -348,6 +349,7 @@ class ParityTest {
         assertEquals(vectors.getLong("minFrames"), PerfUploader.MIN_FRAMES)
         assertEquals(vectors.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
         assertEquals(vectors.getInt("maxDeviceLength"), PerfReport.MAX_DEVICE_LENGTH)
+        assertEquals(vectors.getBoolean("sharingDefault"), PerfSharing.DEFAULT_ENABLED)
         for (case in vectors.rows("uploader")) {
             val config = case.getJSONObject("config")
             var clock = 0L

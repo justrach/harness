@@ -3,6 +3,7 @@
   "minFrames": 60,
   "minIntervalMs": 600000,
   "maxDeviceLength": 40,
+  "sharingDefault": true,
   "reports": [
     {
       "name": "android report drops an unknown operation and rounds",

@@ -76,9 +76,12 @@ object PerfTransport {
     private const val TIMEOUT_MS = 10_000
 }
 
-/** Whether the person has agreed to share. Off until they turn it on, and only offered when there is somewhere to send. */
+/** Whether anonymous reports are sent. On unless the person turns it off in Settings, and only when there is somewhere to send. */
 object PerfSharing {
     private const val KEY = "share-performance"
+
+    /** Pinned in `apps/parity/vectors/perf-report.json`. */
+    const val DEFAULT_ENABLED = true
     private var prefs: SharedPreferences? = null
 
     /** Where reports go. Unset until the backend is agreed; with no endpoint nothing is offered and nothing is sent. */
@@ -86,13 +89,13 @@ object PerfSharing {
 
     val available: Boolean get() = endpoint != null
 
-    var enabled by mutableStateOf(false)
+    var enabled by mutableStateOf(DEFAULT_ENABLED)
         private set
 
     fun init(context: Context) {
         val p = context.getSharedPreferences("harness-ui", Context.MODE_PRIVATE)
         prefs = p
-        enabled = p.getBoolean(KEY, false)
+        enabled = p.getBoolean(KEY, DEFAULT_ENABLED)
     }
 
     fun set(on: Boolean) {
