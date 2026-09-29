@@ -40,7 +40,7 @@ final class ProjectlessSessionUITests: XCTestCase {
         let offlineHost = app.buttons["session-host-dev-vps"]
         XCTAssertTrue(offlineHost.label.contains("Offline"))
         offlineHost.tap()
-        expectContext("No project · hetzner-01")
+        expectContext("No project · Codegraff Cloud")
         XCTAssertFalse(app.buttons["session-checkout"].exists)
         XCTAssertFalse(app.buttons["session-ref"].exists)
 

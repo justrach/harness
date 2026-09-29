@@ -4,3 +4,10 @@ architecture in this change were adapted from the Apache-2.0 GPUI crates in
 https://github.com/egoist/zed at 57bd4fe181639797d395978d5de17bc9e10a6219.
 The overlay input policy, Metal integration and lifecycle adaptations are Zeron
 changes.
+
+`crates/gpui/src/bounds_tree.rs` (a balanced tree, and last frame's orderings
+replayed while bounds repeat), the per-size native font in
+`crates/gpui_macos/src/text_system.rs`, and grouping sprites by texture in
+`crates/gpui/src/scene.rs` are adapted from the Apache-2.0 GPUI fork
+https://github.com/longbridge/gpui-fast at 8eed010 (bounds tree), a9a9533
+(fonts) and ceb4795 (sprites).
