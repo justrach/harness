@@ -202,6 +202,11 @@ impl ClaudeHarness {
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
         }
+        // The browser-extension tools only register when a session starts
+        // with Chrome on; `/chrome` isn't a command in stream-json mode.
+        if option_is_on(&request.model_options, "chrome") {
+            cmd.arg("--chrome");
+        }
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
             settings.insert("fastMode".into(), Value::Bool(true));
@@ -982,6 +987,31 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_option_starts_the_session_with_chrome() {
+        let args = |options: Value| -> Vec<String> {
+            let request: RunRequest = serde_json::from_value(json!({
+                "prompt": "hi",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": options,
+                "cwd": "",
+                "sandbox": "workspace-write",
+                "resume": null
+            }))
+            .unwrap();
+            let cmd = ClaudeHarness::new().build_command(&PathBuf::from("claude"), &request);
+            cmd.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(args(json!({ "chrome": "on" })).contains(&"--chrome".to_string()));
+        assert!(!args(json!({ "chrome": "off" })).contains(&"--chrome".to_string()));
+        assert!(!args(json!({})).contains(&"--chrome".to_string()));
+    }
 
     #[test]
     fn parses_questions_tolerantly() {
