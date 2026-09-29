@@ -13,7 +13,7 @@ use harness_ui::*;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct Frame {
     at: u64,
     frame: harness_doc::TranscriptFrame,
@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
         _ => Vec::new(),
     };
     let wide = std::env::var_os("HARNESS_PROFILE_SPLIT_PANES").is_some();
+    let peer_seed = peer_history.clone();
     anyhow::ensure!(!frames.is_empty(), "Empty replay");
     let output = std::path::PathBuf::from(&args[2]);
     std::fs::create_dir_all(&output)?;
@@ -166,6 +167,21 @@ fn main() -> anyhow::Result<()> {
         let selected = app.update(|cx| state.read(cx).selected_chat.clone());
         eprintln!("split restored: selected={selected:?}");
     }
+    // HARNESS_PROFILE_PEERS_STREAM: every peer pane streams the same replay
+    // too, each a few milliseconds behind the last, as several agents do.
+    let split_n = std::env::var("HARNESS_PROFILE_SPLIT_PANES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut peers: Vec<(String, Vec<harness_doc::SessionMessageEntry>, usize, u64)> =
+        if wide && std::env::var_os("HARNESS_PROFILE_PEERS_STREAM").is_some() {
+            (1..split_n)
+                .map(|i| (format!("peer-{i}"), peer_seed.clone(), 1, 7 * i as u64))
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let peer_frames = frames.clone();
     let start = Instant::now();
     let first_at = frames[0].at;
     let mut frames = frames.into_iter().peekable();
@@ -206,6 +222,25 @@ fn main() -> anyhow::Result<()> {
                         "text growth must not notify unrelated app-state observers");
                 }
             }
+            for (id, entries, next, offset) in peers.iter_mut() {
+                let mut changed = false;
+                while *next < peer_frames.len()
+                    && peer_frames[*next].at - first_at + *offset <= elapsed
+                {
+                    harness_doc::apply_transcript_frame(entries, peer_frames[*next].frame.clone())
+                        .unwrap();
+                    *next += 1;
+                    changed = true;
+                }
+                if changed {
+                    app.update(|cx| {
+                        state.update(cx, |state, cx| {
+                            state.set_subagent_snapshot(id.clone(), entries.clone());
+                            cx.notify();
+                        })
+                    });
+                }
+            }
             app.update(|cx| {
                 window
                     .update(cx, |_, window, cx| {
@@ -220,7 +255,10 @@ fn main() -> anyhow::Result<()> {
                     .unwrap()
             });
         });
-        if frames.peek().is_none() && completed_at.is_none() {
+        let peers_done = peers
+            .iter()
+            .all(|(_, _, next, _)| *next >= peer_frames.len());
+        if frames.peek().is_none() && peers_done && completed_at.is_none() {
             eprintln!("phase=settled elapsed={:?}", start.elapsed());
             completed_at = Some(Instant::now());
             app.update(|cx| {
