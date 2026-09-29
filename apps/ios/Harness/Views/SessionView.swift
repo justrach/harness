@@ -105,6 +105,11 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
+                // Bottom-right, clear of the centered jump-to-latest button.
+                .overlay(alignment: .bottomTrailing) {
+                    SessionSwitcherPill(excluding: chat.id, compact: true)
+                        .padding(12)
+                }
             VStack(spacing: 0) {
                 if verticalSizeClass != .compact || status == .working || status == .errored
                     || model.sendState(for: chat) != nil || model.connectivity.state != .connected {

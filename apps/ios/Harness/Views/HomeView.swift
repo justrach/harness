@@ -42,21 +42,40 @@ struct HomeView: View {
     private var splitLayout: Bool { horizontalSizeClass == .regular }
 
     var body: some View {
-        if splitLayout {
-            NavigationSplitView {
-                sidebar
-            } detail: {
+        Group {
+            if splitLayout {
+                NavigationSplitView {
+                    sidebar
+                } detail: {
+                    NavigationStack(path: $path) {
+                        SplitDetailPlaceholder()
+                            .navigationDestination(for: Route.self, destination: destination)
+                    }
+                }
+                .navigationSplitViewStyle(.balanced)
+            } else {
                 NavigationStack(path: $path) {
-                    SplitDetailPlaceholder()
+                    sidebar
+                        // An inset, not an overlay: the last row scrolls
+                        // clear of the pill, and it takes no room when hidden.
+                        .safeAreaInset(edge: .bottom) {
+                            SessionSwitcherPill()
+                                .padding(.bottom, 8)
+                        }
                         .navigationDestination(for: Route.self, destination: destination)
                 }
             }
-            .navigationSplitViewStyle(.balanced)
+        }
+        .environment(\.switchToSession, switchTo)
+    }
+
+    /// The session switcher's jump: from inside a session, swap that session
+    /// out instead of stacking another one behind it.
+    private func switchTo(_ chatId: String) {
+        if !splitLayout, case .chat = path.last {
+            path[path.count - 1] = .chat(chatId)
         } else {
-            NavigationStack(path: $path) {
-                sidebar
-                    .navigationDestination(for: Route.self, destination: destination)
-            }
+            open(.chat(chatId))
         }
     }
 
