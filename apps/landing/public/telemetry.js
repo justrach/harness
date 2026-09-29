@@ -1,7 +1,7 @@
 (() => {
   const optedOut = () => navigator.globalPrivacyControl === true || ["1", "yes"].includes(navigator.doNotTrack);
   if (
-    !["https://harness.codegraff.com", "https://harness.codegraff.com"].includes(location.origin) ||
+    location.origin !== "https://harness.codegraff.com" ||
     !["/", "/index.html"].includes(location.pathname) ||
     optedOut() || typeof fetch !== "function" ||
     typeof crypto === "undefined" || typeof crypto.randomUUID !== "function"
@@ -65,7 +65,7 @@
       let url;
       try { url = new URL(link.href); } catch { return; }
       const release = url.pathname.match(/^\/releases\/harness-(\d+\.\d+\.\d+)-(macos-arm64\.dmg|windows-x86_64\.zip|linux-(?:x86_64|aarch64)\.tar\.gz)$/);
-      if (url.origin !== "https://harness.codegraff.com" || !release) return;
+      if (url.origin !== "https://edge.codegraff.com" || !release) return;
       capture("download_clicked", {
         placement,
         version: release[1],

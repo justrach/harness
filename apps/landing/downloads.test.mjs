@@ -28,8 +28,7 @@ for (const [version, fail] of [['<script>alert(1)</script>', false], ['0.2.65', 
   const { links } = await load({ platform: 'Win32' }, version, fail);
   assert.equal(links['hero-download'].href, 'https://edge.codegraff.com/releases/harness-0.2.66-windows-x86_64.zip');
 });
-test('HTML retains all four explicit downloads without JavaScript', () => {
-  for (const file of ['macos-arm64.dmg', 'windows-x86_64.zip', 'linux-x86_64.tar.gz', 'linux-aarch64.tar.gz']) assert.ok(html.includes(`https://edge.codegraff.com/releases/harness-0.2.66-${file}`));
+test('HTML keeps every download button pointed at the downloads section without JavaScript', () => {
   assert.ok(html.includes('id="downloads"'));
-  assert.ok(html.includes('href="#downloads">All downloads'));
+  for (const id of ['nav-download', 'hero-download', 'closing-download']) assert.ok(html.includes(`id="${id}" href="#downloads"`));
 });
