@@ -3385,6 +3385,8 @@ pub struct Transcript {
     /// Running subagents' latest step lines ([`live_step_lines`]), shown
     /// under the working trailer. Live-only; never in the doc.
     live_steps: Vec<SharedString>,
+    /// [`Self::chrome_fingerprint`] at the last notify.
+    chrome_fingerprint: u64,
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
@@ -3592,7 +3594,10 @@ impl Transcript {
             })
             .ok();
         });
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let observe = cx.observe(&state, |this: &mut Self, _, cx| {
+            this.sync(cx);
+            this.notify_if_chrome_changed(cx);
+        });
         let text_changes = cx.subscribe(
             &state,
             |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
@@ -3662,6 +3667,7 @@ impl Transcript {
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
             live_steps: Vec::new(),
+            chrome_fingerprint: 0,
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
@@ -3879,6 +3885,47 @@ impl Transcript {
             anchor.held = false;
         }
         self.own_turn_last_tick = None;
+    }
+
+    /// What this transcript draws from app state besides its rows: the
+    /// working trailer's inputs, attachment transfer progress, the chat's
+    /// folder and the live subagent steps. Split panes and the focused
+    /// pane are cached views, redrawn only when notified; `sync` notifies
+    /// for row changes, and this for everything else.
+    fn chrome_fingerprint(&self, cx: &gpui::App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let state = self.state.read(cx);
+        let now = chrono::Utc::now();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        if let Some(chat) = self.chat_id.as_deref() {
+            (state.indicator_for(chat, now) == crate::state::Indicator::Working).hash(&mut hasher);
+            state
+                .session_for(chat)
+                .and_then(|s| s.started_at)
+                .hash(&mut hasher);
+            state.pending_send_started(chat, now).hash(&mut hasher);
+            state.chat_delivery_degraded(chat).hash(&mut hasher);
+            state.send_undelivered(chat, now).hash(&mut hasher);
+            state
+                .chats
+                .iter()
+                .find(|c| c.id == chat)
+                .and_then(|c| c.cwd.as_deref())
+                .hash(&mut hasher);
+        }
+        state.selected_chat.hash(&mut hasher);
+        state.upload_progress_percent().hash(&mut hasher);
+        state.transfer_percents().hash(&mut hasher);
+        self.live_steps.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn notify_if_chrome_changed(&mut self, cx: &mut Context<Self>) {
+        let fingerprint = self.chrome_fingerprint(cx);
+        if fingerprint != self.chrome_fingerprint {
+            self.chrome_fingerprint = fingerprint;
+            cx.notify();
+        }
     }
 
     fn remeasure_last_row(&mut self) {

@@ -1631,6 +1631,18 @@ impl AppState {
     /// commit, so "100% but still spinning" never shows. `None` when no
     /// bytes are moving for that upload (staged-but-waiting, retry backoff,
     /// or done) — the thumbnail falls back to its indeterminate spinner.
+    /// Every in-flight transfer's percent, sorted: a transcript drawn from a
+    /// cached frame redraws when any of them moves.
+    pub(crate) fn transfer_percents(&self) -> Vec<(&str, Option<u8>)> {
+        let mut percents: Vec<_> = self
+            .transfers
+            .keys()
+            .map(|id| (id.as_str(), self.transfer_percent(id)))
+            .collect();
+        percents.sort_unstable();
+        percents
+    }
+
     pub fn transfer_percent(&self, upload_id: &str) -> Option<u8> {
         let (done, total) = self.transfers.get(upload_id)?;
         if *total == 0 {
