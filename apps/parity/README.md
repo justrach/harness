@@ -20,6 +20,9 @@ then fails the Android test until the port follows, and the other way round.
 2. Add the check to `ParityTests.swift` and run it: `xcodebuild test -only-testing:HarnessTests/ParityTests`.
 3. Add the same check to `ParityTest.kt` and run it: `./gradlew :app:testDebugUnitTest --tests '*ParityTest'`.
 
+Both halves run in CI: `parity.yml` runs the Swift tests on a macOS runner (the full iOS unit suite is switched
+off in `ui-tests.yml`, so it gets its own job) and `android.yml` runs the Kotlin tests.
+
 A new piece of user-visible copy goes in `ux-contract.json`. Each test checks that the string appears as a quoted
 literal in its own source tree, which catches a reworded label or a copy that was never ported.
 
