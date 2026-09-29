@@ -828,7 +828,7 @@ impl Engine {
         let check_updates =
             edge_enabled || harness_update::detect_install().supports_desktop_update();
         if check_updates {
-            // Release checker: polls {edge}/releases on a 6h cadence; headless
+            // Release checker: polls {edge}/releases hourly on the wall clock; headless
             // installs with HARNESS_AUTO_UPDATE=1 apply + restart themselves — gated
             // on quiescence so a restart never lands under a live run or open PTY.
             let quiescent: harness_update::QuiescentCheck = {
