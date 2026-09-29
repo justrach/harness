@@ -721,6 +721,9 @@ pub struct AppState {
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
+    /// The selected chat when a chats frame arrived without it. A later frame
+    /// that lists it again re-selects it, unless something else was picked.
+    vanished_selection: Option<String>,
     /// A folder handed over by `harness <dir>`; the shell turns it into a
     /// project once spaces and the local device are known.
     pub pending_open_folder: Option<String>,
@@ -865,6 +868,7 @@ impl AppState {
             spaces_synced: false,
             pending_deep_link: None,
             deep_link_notice: None,
+            vanished_selection: None,
             pending_open_folder: None,
         }
     }
@@ -1048,10 +1052,13 @@ impl AppState {
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
-            // Selected chat vanished (deleted elsewhere): drop selection + transcript.
+            // Selected chat vanished (deleted elsewhere): drop selection +
+            // transcript, but remember it — a list can also lack a chat only
+            // briefly, and `restore_vanished_selection` brings it back then.
+            tracing::info!(chat = %selected, chats = self.chats.len(), "selected chat left the chats list");
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
-            self.selected_chat = None;
+            self.vanished_selection = self.selected_chat.take();
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -2006,6 +2013,7 @@ impl AppState {
         self.no_project = false;
         self.selected_device = None;
         self.selected_chat = None;
+        self.vanished_selection = None;
         self.auto_selected = false;
         self.chats_synced = false;
         self.spaces_synced = false;
@@ -2244,6 +2252,19 @@ impl AppState {
         }
     }
 
+    /// Re-select a chat that dropped out of an earlier chats frame once a
+    /// frame lists it again, so a brief gap doesn't leave the new-session
+    /// canvas where the conversation was. Any other pick since then wins.
+    fn restore_vanished_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.vanished_selection.clone() else {
+            return;
+        };
+        if self.chats.iter().any(|chat| chat.id == id) {
+            tracing::info!(chat = %id, "selected chat is back in the chats list; re-selecting it");
+            self.select_chat(Some(id), cx);
+        }
+    }
+
     pub fn take_deep_link_notice(&mut self) -> Option<String> {
         self.deep_link_notice.take()
     }
@@ -2253,6 +2274,8 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
+        // A pick (or the restore itself) ends the wait for a vanished chat.
+        self.vanished_selection = None;
         if let Some(id) = &chat_id {
             self.focus_chat_sync(id, cx);
         }
@@ -2570,6 +2593,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                 };
                 let alive = this.update(cx, |state, cx| {
                     state.apply_chats(parsed);
+                    state.restore_vanished_selection(cx);
                     state.apply_pending_deep_link(cx);
                     state.reconcile_change_request_watches(cx);
                     cx.notify();
@@ -3800,6 +3824,42 @@ mod tests {
                 "account replacement must clear cached content"
             );
             assert!(state.transcript_cache.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn a_selected_chat_that_leaves_the_list_briefly_is_selected_again(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let both = || vec![chat("kept", 0, None), chat("other", 1, None)];
+            state.apply_chats(both());
+            state.select_chat(Some("kept".into()), cx);
+            // One frame without it: the canvas shows, as for a deletion.
+            state.apply_chats(vec![chat("other", 1, None)]);
+            state.restore_vanished_selection(cx);
+            assert_eq!(state.selected_chat, None);
+            // It's back: the conversation returns instead of staying a
+            // new-session canvas that would start a new chat on send.
+            state.apply_chats(both());
+            state.restore_vanished_selection(cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("kept"));
+
+            // A pick made during the gap wins over the returning chat.
+            state.apply_chats(vec![chat("other", 1, None)]);
+            state.select_chat(Some("other".into()), cx);
+            state.apply_chats(both());
+            state.restore_vanished_selection(cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("other"));
+
+            // So does an account switch.
+            state.select_chat(Some("kept".into()), cx);
+            state.apply_chats(vec![chat("other", 1, None)]);
+            state.prepare_runtime_replacement(cx);
+            state.apply_chats(both());
+            state.restore_vanished_selection(cx);
+            assert_eq!(state.selected_chat, None);
         });
     }
 
