@@ -1247,13 +1247,14 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
     btn
 }
 
-/// Primary button (`btnPrimary`): white fill, near-black text.
+/// Primary button (`btnPrimary`): white fill, near-black text. The fill is
+/// `solid`, the plate `on_solid` is contrast-checked against in every theme.
 pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
     div()
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(8.0))
-        .bg(theme.text)
+        .bg(theme.solid)
         .text_size(crate::typography::ui_rems(13.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.on_solid)

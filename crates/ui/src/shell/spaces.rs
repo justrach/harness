@@ -6015,36 +6015,37 @@ impl Shell {
             .items_start()
             .gap(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
-            .child(
-                div()
-                    .id("project-crumb-back")
-                    .size(px(26.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_color(theme.text_muted)
-                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_space = None;
-                        this.toggle_command_palette(window, cx);
-                    }))
-                    .child(
-                        icon(icons::ARROW_LEFT)
-                            .size(px(16.0))
-                            .text_color(theme.text_muted),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(1.0))
-                    .h(px(16.0))
-                    .mt(px(5.0))
-                    .flex_none()
-                    .bg(theme.border),
-            )
+            // Back sits in the path, so it goes up one level (as ← does), not
+            // out of the popover; at the first step there's nowhere to go.
+            .when(step != ProjectStep::Devices, |el| {
+                el.child(
+                    div()
+                        .id("project-crumb-back")
+                        .size(px(26.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
+                        .on_click(cx.listener(|this, _, _, cx| this.add_space_go_up(cx)))
+                        .child(
+                            icon(icons::ARROW_LEFT)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(16.0))
+                        .mt(px(5.0))
+                        .flex_none()
+                        .bg(theme.border),
+                )
+            })
             .child(trail);
         let header = div()
             .h(px(58.0))
@@ -6083,27 +6084,27 @@ impl Shell {
             .child(popover::key_hint_text(&theme, "esc", "Close"))
             .child(div().flex_1())
             .when(step == ProjectStep::Folders, |el| {
+                // The popover's one goal, so the solid primary button.
                 el.child(
-                    popover::btn_ghost(
-                        &theme,
-                        if busy { "Adding…" } else { "Add project" },
-                        "project-add",
-                    )
-                    .id("project-add")
-                    .h(px(22.0))
-                    .py(px(0.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .when(busy || listing.is_none(), |el| el.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
-                    .child(
-                        popover::key_cap(&theme)
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .child(crate::settings::badge_combo("mod-enter")),
-                    ),
+                    popover::btn_primary(&theme, if busy { "Adding…" } else { "Add project" })
+                        .id("project-add")
+                        .h(px(28.0))
+                        .py(px(0.0))
+                        .pr(px(4.0))
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .when(busy || listing.is_none(), |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_add_space(cx)))
+                        .child(
+                            popover::key_cap(&theme)
+                                .h(px(20.0))
+                                .bg(theme.on_solid.opacity(0.1))
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .child(crate::settings::badge_combo("mod-enter")),
+                        ),
                 )
             });
         let card =
