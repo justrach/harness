@@ -11,8 +11,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, Context, Entity, Hsla, SharedString, Subscription, Task, Window, div, prelude::*,
-    px,
+    AnyElement, ClipboardItem, Context, Entity, Hsla, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -274,6 +274,9 @@ pub struct AccountsPage {
     /// Provider id with an in-flight sign-out.
     busy_graff: Option<String>,
     login: Option<LoginFlow>,
+    /// The sign-in link was just copied (the button reads "Copied").
+    login_url_copied: bool,
+    copy_task: Option<Task<()>>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     load_task: Option<Task<()>>,
@@ -309,6 +312,8 @@ impl AccountsPage {
             graff_task: None,
             busy_graff: None,
             login: None,
+            login_url_copied: false,
+            copy_task: None,
             error: None,
             code_input,
             load_task: None,
@@ -1666,6 +1671,23 @@ impl AccountsPage {
             .into_any_element()
     }
 
+    /// Copy the sign-in link for a browser other than the one that opened.
+    fn copy_login_url(&mut self, url: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.login_url_copied = true;
+        self.copy_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            this.update(cx, |page, cx| {
+                page.login_url_copied = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     fn render_login_dialog(
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
@@ -1693,6 +1715,60 @@ impl AccountsPage {
                     }))
                     .child(SharedString::from(label))
             };
+        let copied = self.login_url_copied;
+        // The link itself, for signing in from a browser other than the one
+        // that opened: dialog text isn't selectable, so it comes with Copy.
+        let url_field = |url: &str, cx: &mut Context<Self>| {
+            let copy_url = url.to_string();
+            div()
+                .mt(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("Or copy this link into any browser")),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .pl(px(10.0))
+                        .pr(px(4.0))
+                        .py(px(4.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(crate::theme::ink(0.03))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme.font_mono.clone())
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text)
+                                .child(SharedString::from(url.to_string())),
+                        )
+                        .child(
+                            popover::btn_ghost(
+                                &theme,
+                                if copied { "Copied" } else { "Copy" },
+                                "login-copy-url",
+                            )
+                            .id("login-copy-url")
+                            .flex_none()
+                            .py(px(3.0))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_login_url(copy_url.clone(), cx)
+                            })),
+                        ),
+                )
+        };
         let body: AnyElement = match login {
             LoginFlow::Starting { .. } => div()
                 .mt(px(8.0))
@@ -1726,6 +1802,7 @@ impl AccountsPage {
                         &start.url,
                         cx,
                     ))
+                    .child(url_field(&start.url, cx))
                     .child(
                         div().mt(px(12.0)).child(
                             popover::dialog_field(self.code_input.clone().into_any_element())
@@ -1837,6 +1914,7 @@ impl AccountsPage {
                         &start.url,
                         cx,
                     ))
+                    .child(url_field(&start.url, cx))
                     .when(!has_error, |el| {
                         el.child(
                             div()
