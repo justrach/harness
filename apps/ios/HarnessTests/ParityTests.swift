@@ -316,6 +316,64 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(spans, PerfSpan.budgetsMs)
     }
 
+    func testAReportIsBuiltTheSameWayOnBothApps() throws {
+        for c in try rows(try load("vectors/perf-report.json"), "reports") {
+            let i = try XCTUnwrap(c["input"] as? [String: Any])
+            let f = try XCTUnwrap(i["frames"] as? [String: Any])
+            let spans = try rows(i, "spans").map { s in
+                SpanStat(name: s["name"] as! String, count: s["count"] as! Int, p50: s["p50"] as! Double, p95: s["p95"] as! Double,
+                         max: s["max"] as! Double, totalMs: s["totalMs"] as! Double, overBudget: s["overBudget"] as! Int)
+            }
+            let report = PerfReport(
+                launchId: i["launchId"] as! String, platform: i["platform"] as! String, appVersion: i["appVersion"] as! String,
+                osVersion: i["osVersion"] as! String, device: i["device"] as! String, build: i["build"] as! String,
+                refreshHz: i["refreshHz"] as! Int, startupMs: i["startupMs"] as? Int, frameKind: i["frameKind"] as! String,
+                frames: .init(total: f["total"] as! Int, slow: f["slow"] as! Int, frozen: f["frozen"] as! Int,
+                              p50: f["p50"] as! Double, p95: f["p95"] as! Double, worst: f["worst"] as! Double),
+                thermal: i["thermal"] as! String, lowPower: i["lowPower"] as! Bool, memoryMb: i["memoryMb"] as! Int, spans: spans)
+            let expected = try XCTUnwrap(c["expect"] as? [String: Any])
+            XCTAssertTrue((expected as NSDictionary).isEqual(report.json()), "\(c["name"] ?? "")\nexpected \(expected)\ngot \(report.json())")
+        }
+    }
+
+    func testTheUploaderSendsWhenTheSharedRulesSay() async throws {
+        let vectors = try load("vectors/perf-report.json")
+        XCTAssertEqual(vectors["minFrames"] as? Int, PerfUploader.minFrames)
+        XCTAssertEqual(vectors["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
+        XCTAssertEqual(vectors["maxDeviceLength"] as? Int, PerfReport.maxDeviceLength)
+        for c in try rows(vectors, "uploader") {
+            let config = try XCTUnwrap(c["config"] as? [String: Any])
+            let clock = Box(0), postOk = Box(true)
+            let enabled = config["enabled"] as! Bool
+            let uploader = PerfUploader(endpoint: config["endpoint"] as? String, enabled: { enabled },
+                                        now: { clock.value }, post: { _, _ in postOk.value })
+            for step in try rows(c, "steps") {
+                clock.value = step["atMs"] as! Int
+                postOk.value = step["postOk"] as! Bool
+                let report = PerfReport(launchId: "id", platform: "ios", appVersion: "1", osVersion: "27", device: "iPhone", build: "release",
+                                        refreshHz: 120, startupMs: 77, frameKind: "turn",
+                                        frames: .init(total: step["frames"] as! Int, slow: 0, frozen: 0, p50: 1, p95: 2, worst: 3),
+                                        thermal: "Nominal", lowPower: false, memoryMb: 10, spans: [])
+                let sent = await uploader.flush(report)
+                XCTAssertEqual(sent, step["expectSent"] as? Bool, "\(c["name"] ?? "") at \(clock.value)ms")
+            }
+        }
+    }
+
+    /// Test double for a value the uploader's `@Sendable` closures read while the test moves it on.
+    private final class Box<T>: @unchecked Sendable {
+        var value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    func testOnlyHttpsOrLoopbackIsAnAllowedEndpoint() {
+        XCTAssertTrue(PerfTransport.isAllowed("https://example.invalid/perf"))
+        XCTAssertTrue(PerfTransport.isAllowed("http://127.0.0.1:8080/perf"))
+        XCTAssertFalse(PerfTransport.isAllowed("http://example.invalid/perf"))
+        XCTAssertFalse(PerfTransport.isAllowed("ftp://example.invalid/perf"))
+        XCTAssertFalse(PerfTransport.isAllowed("not a url"))
+    }
+
     func testThePerformancePageUsesTheContractStrings() throws {
         let strings = try XCTUnwrap(try load("perf-contract.json")["strings"] as? [String: String])
         let source = try sources(under: "apps/ios/Harness", ext: "swift")

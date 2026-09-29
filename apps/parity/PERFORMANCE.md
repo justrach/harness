@@ -18,3 +18,20 @@ shown in red and logged (`HarnessPerf` on Android, the `perf` category on iOS).
 Reading it: if slow frames blame layout, look at measure and layout work; if they blame the GPU or display, the cost
 is in what is drawn or the device, not in Kotlin or Swift code. A stall with no slow operation beside it is work the
 monitor does not name yet, so add a span there.
+
+## Sharing anonymous reports
+
+Off by default, and only offered once a destination is configured (`PerfSharing.endpoint` on each app, unset until the
+backend is agreed; with no endpoint the toggle is hidden and nothing is built or sent). When someone turns on
+"Share anonymous performance data", the app sends one report as the app goes to the background.
+
+- **Content:** `vectors/perf-report.json` pins the JSON both apps produce: app, OS and device model (the hardware
+  identifier, never the name the owner gave it, capped at 40 characters), refresh rate, startup, frame or turn counts,
+  memory, thermal state, and the fixed operation names above. Any other name is dropped before it is sent.
+- **Identity:** a random id per launch, so one launch's reports can be joined but never linked to a person or to the
+  next launch. No account, install, device or session identifier, and no chat content.
+- **Rules:** an endpoint exists, sharing is on, the session drew at least 60 frames or turns, at most one report per
+  10 minutes, and a failed post does not start the wait. Both apps test these against the same vectors.
+- **Transport:** a JSON POST over https (loopback http for tests), with no cookies, credentials, cache or redirects.
+- **Store listings:** turning this on means declaring diagnostics (performance data, not linked to the user) in the App
+  Store privacy answers and the Play data safety form.

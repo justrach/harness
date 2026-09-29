@@ -18,7 +18,11 @@ import harness.codegraff.android.model.QueueDeliveryGate
 import harness.codegraff.android.model.QueueEditFinishResult
 import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
+import harness.codegraff.android.perf.PerfReport
 import harness.codegraff.android.perf.PerfSpan
+import harness.codegraff.android.perf.PerfTransport
+import harness.codegraff.android.perf.PerfUploader
+import harness.codegraff.android.perf.SpanStat
 import harness.codegraff.android.ui.session.QueueUX
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -307,6 +311,118 @@ class ParityTest {
         val contract = load("perf-contract.json").getJSONObject("spans")
         val expected = contract.keys().asSequence().associateWith { contract.getDouble(it) }
         assertEquals(expected, PerfSpan.budgetsMs)
+    }
+
+    /** Numbers compared as doubles, so 5 and 5.0 from two JSON libraries are the same value. */
+    private fun canon(value: Any?): Any? = when (value) {
+        is JSONObject -> value.keys().asSequence().associateWith { canon(value.get(it)) }
+        is JSONArray -> (0 until value.length()).map { canon(value.get(it)) }
+        is Number -> value.toDouble()
+        JSONObject.NULL -> null
+        else -> value
+    }
+
+    @Test
+    fun aReportIsBuiltTheSameWayOnBothApps() {
+        for (c in load("vectors/perf-report.json").rows("reports")) {
+            val i = c.getJSONObject("input")
+            val f = i.getJSONObject("frames")
+            val report = PerfReport(
+                launchId = i.getString("launchId"), platform = i.getString("platform"), appVersion = i.getString("appVersion"),
+                osVersion = i.getString("osVersion"), device = i.getString("device"), build = i.getString("build"),
+                refreshHz = i.getInt("refreshHz"), startupMs = if (i.isNull("startupMs")) null else i.getLong("startupMs"),
+                frameKind = i.getString("frameKind"),
+                frames = PerfReport.Frames(f.getLong("total"), f.getLong("slow"), f.getLong("frozen"), f.getDouble("p50"), f.getDouble("p95"), f.getDouble("worst")),
+                thermal = i.getString("thermal"), lowPower = i.getBoolean("lowPower"), memoryMb = i.getInt("memoryMb"),
+                spans = i.rows("spans").map {
+                    SpanStat(it.getString("name"), it.getLong("count"), it.getDouble("p50"), it.getDouble("p95"), it.getDouble("max"), it.getDouble("totalMs"), it.getLong("overBudget"))
+                },
+            )
+            assertEquals(c.getString("name"), canon(c.getJSONObject("expect")), canon(report.toJson()))
+        }
+    }
+
+    @Test
+    fun theUploaderSendsWhenTheSharedRulesSay() {
+        val vectors = load("vectors/perf-report.json")
+        assertEquals(vectors.getLong("minFrames"), PerfUploader.MIN_FRAMES)
+        assertEquals(vectors.getLong("minIntervalMs"), PerfUploader.MIN_INTERVAL_MS)
+        assertEquals(vectors.getInt("maxDeviceLength"), PerfReport.MAX_DEVICE_LENGTH)
+        for (case in vectors.rows("uploader")) {
+            val config = case.getJSONObject("config")
+            var clock = 0L
+            var postOk = true
+            var posts = 0
+            val uploader = PerfUploader(
+                endpoint = if (config.isNull("endpoint")) null else config.getString("endpoint"),
+                enabled = { config.getBoolean("enabled") },
+                now = { clock },
+                post = { _, _ -> posts++; postOk },
+            )
+            for (step in case.rows("steps")) {
+                clock = step.getLong("atMs")
+                postOk = step.getBoolean("postOk")
+                val report = sampleReport(frames = step.getLong("frames"))
+                assertEquals("${case.getString("name")} at ${clock}ms", step.getBoolean("expectSent"), uploader.flush(report))
+            }
+        }
+    }
+
+    private fun sampleReport(frames: Long) = PerfReport(
+        "id", "android", "0.1.0", "36", "Pixel", "release", 60, 77, "frame",
+        PerfReport.Frames(frames, 0, 0, 1.0, 2.0, 3.0), "None", false, 10, emptyList(),
+    )
+
+    @Test
+    fun onlyHttpsOrLoopbackIsAnAllowedEndpoint() {
+        assertTrue(PerfTransport.isAllowed("https://example.invalid/perf"))
+        assertTrue(PerfTransport.isAllowed("http://127.0.0.1:8080/perf"))
+        assertFalse(PerfTransport.isAllowed("http://example.invalid/perf"))
+        assertFalse(PerfTransport.isAllowed("ftp://example.invalid/perf"))
+        assertFalse(PerfTransport.isAllowed("not a url"))
+    }
+
+    @Test
+    fun aReportIsPostedAsPlainJsonWithNoCredentials() {
+        // A one-shot HTTP server on a raw socket (the trimmed JDK here has no com.sun.net.httpserver).
+        val server = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+        val port = server.localPort
+        var requestLine = ""
+        val headers = mutableMapOf<String, String>()
+        var seenBody = ""
+        val serving = Thread {
+            server.accept().use { socket ->
+                val input = socket.getInputStream().buffered()
+                fun line(): String {
+                    val sb = StringBuilder()
+                    while (true) {
+                        val b = input.read()
+                        if (b < 0 || b == '\n'.code) break
+                        if (b != '\r'.code) sb.append(b.toChar())
+                    }
+                    return sb.toString()
+                }
+                requestLine = line()
+                while (true) {
+                    val l = line()
+                    if (l.isEmpty()) break
+                    headers[l.substringBefore(':').lowercase()] = l.substringAfter(':').trim()
+                }
+                val n = headers["content-length"]?.toInt() ?: 0
+                seenBody = String(input.readNBytes(n))
+                socket.getOutputStream().apply { write("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".toByteArray()); flush() }
+            }
+        }.also { it.start() }
+        val body = sampleReport(frames = 100).toJson().toString()
+        assertTrue(PerfTransport.post("http://127.0.0.1:$port/perf", body))
+        serving.join(5_000)
+        server.close()
+        assertEquals("POST /perf HTTP/1.1", requestLine)
+        assertEquals(body, seenBody)
+        assertEquals("application/json", headers["content-type"])
+        for (name in listOf("authorization", "cookie")) assertFalse("$name was sent", name in headers)
+        // Nothing listening any more: a failed post is reported, not thrown.
+        assertFalse(PerfTransport.post("http://127.0.0.1:$port/perf", "{}"))
     }
 
     @Test

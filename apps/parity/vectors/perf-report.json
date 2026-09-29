@@ -1,0 +1,253 @@
+{
+  "comment": "What a performance report looks like on the wire and when it is sent. Both apps build the report from `input` and must produce `expect` exactly (numbers rounded to one decimal, unknown operation names dropped, device capped at 40 characters). The uploader rules: sent only when an endpoint exists, sharing is on and the session drew at least 60 frames; at most one report per 10 minutes; a failed post does not start the wait.",
+  "minFrames": 60,
+  "minIntervalMs": 600000,
+  "maxDeviceLength": 40,
+  "reports": [
+    {
+      "name": "android report drops an unknown operation and rounds",
+      "input": {
+        "launchId": "11111111-2222-3333-4444-555555555555",
+        "platform": "android",
+        "appVersion": "0.1.0",
+        "osVersion": "36",
+        "device": "Pixel Fold",
+        "build": "release",
+        "refreshHz": 60,
+        "startupMs": 77,
+        "frameKind": "frame",
+        "frames": {
+          "total": 2257,
+          "slow": 2,
+          "frozen": 0,
+          "p50": 17.14,
+          "p95": 18.66,
+          "worst": 74.04
+        },
+        "thermal": "None",
+        "lowPower": false,
+        "memoryMb": 28,
+        "spans": [
+          {
+            "name": "nav.open",
+            "count": 5,
+            "p50": 33.04,
+            "p95": 34.46,
+            "max": 34.46,
+            "totalMs": 160.27,
+            "overBudget": 0
+          },
+          {
+            "name": "chat.secret-title",
+            "count": 1,
+            "p50": 1,
+            "p95": 1,
+            "max": 1,
+            "totalMs": 1,
+            "overBudget": 0
+          }
+        ]
+      },
+      "expect": {
+        "schema": 1,
+        "launchId": "11111111-2222-3333-4444-555555555555",
+        "platform": "android",
+        "appVersion": "0.1.0",
+        "osVersion": "36",
+        "device": "Pixel Fold",
+        "build": "release",
+        "refreshHz": 60,
+        "startupMs": 77,
+        "frameKind": "frame",
+        "frames": {
+          "total": 2257,
+          "slow": 2,
+          "frozen": 0,
+          "p50": 17.1,
+          "p95": 18.7,
+          "worst": 74.0
+        },
+        "thermal": "None",
+        "lowPower": false,
+        "memoryMb": 28,
+        "spans": [
+          {
+            "name": "nav.open",
+            "count": 5,
+            "p50": 33.0,
+            "p95": 34.5,
+            "max": 34.5,
+            "totalMs": 160.3,
+            "overBudget": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "ios report keeps a missing startup and caps a long device name",
+      "input": {
+        "launchId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "platform": "ios",
+        "appVersion": "1.4 (212)",
+        "osVersion": "27.0",
+        "device": "iPhone18,1 with a name that runs far past the forty character cap",
+        "build": "release",
+        "refreshHz": 120,
+        "startupMs": null,
+        "frameKind": "turn",
+        "frames": {
+          "total": 9000,
+          "slow": 31,
+          "frozen": 1,
+          "p50": 1.23,
+          "p95": 9.87,
+          "worst": 812.5
+        },
+        "thermal": "Fair",
+        "lowPower": true,
+        "memoryMb": 142,
+        "spans": []
+      },
+      "expect": {
+        "schema": 1,
+        "launchId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "platform": "ios",
+        "appVersion": "1.4 (212)",
+        "osVersion": "27.0",
+        "device": "iPhone18,1 with a name that runs far pas",
+        "build": "release",
+        "refreshHz": 120,
+        "startupMs": null,
+        "frameKind": "turn",
+        "frames": {
+          "total": 9000,
+          "slow": 31,
+          "frozen": 1,
+          "p50": 1.2,
+          "p95": 9.9,
+          "worst": 812.5
+        },
+        "thermal": "Fair",
+        "lowPower": true,
+        "memoryMb": 142,
+        "spans": []
+      }
+    }
+  ],
+  "uploader": [
+    {
+      "name": "sends once sharing is on and the session had enough frames",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": true
+        }
+      ]
+    },
+    {
+      "name": "nothing is sent without an endpoint",
+      "config": {
+        "endpoint": null,
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": false
+        }
+      ]
+    },
+    {
+      "name": "nothing is sent while sharing is off",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": false
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": false
+        }
+      ]
+    },
+    {
+      "name": "a session under the minimum is skipped",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 59,
+          "postOk": true,
+          "expectSent": false
+        },
+        {
+          "atMs": 1,
+          "frames": 60,
+          "postOk": true,
+          "expectSent": true
+        }
+      ]
+    },
+    {
+      "name": "at most one report per interval",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": true
+        },
+        {
+          "atMs": 599999,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": false
+        },
+        {
+          "atMs": 600000,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": true
+        }
+      ]
+    },
+    {
+      "name": "a failed post does not start the wait",
+      "config": {
+        "endpoint": "https://example.invalid/perf",
+        "enabled": true
+      },
+      "steps": [
+        {
+          "atMs": 0,
+          "frames": 100,
+          "postOk": false,
+          "expectSent": false
+        },
+        {
+          "atMs": 1,
+          "frames": 100,
+          "postOk": true,
+          "expectSent": true
+        }
+      ]
+    }
+  ]
+}

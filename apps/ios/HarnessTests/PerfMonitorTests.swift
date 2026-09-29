@@ -60,6 +60,51 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertEqual(s.slowPercent, 50)
     }
 
+    /// Answers every request with a fixed status and remembers what it was sent.
+    private final class StubProtocol: URLProtocol {
+        nonisolated(unsafe) static var status = 204
+        nonisolated(unsafe) static var seen: (method: String?, headers: [String: String], body: String)?
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            var data = Data()
+            if let stream = request.httpBodyStream {
+                stream.open()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let n = stream.read(&buffer, maxLength: buffer.count)
+                    if n <= 0 { break }
+                    data.append(buffer, count: n)
+                }
+                stream.close()
+            }
+            Self.seen = (request.httpMethod, request.allHTTPHeaderFields ?? [:], String(decoding: data, as: UTF8.self))
+            let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    func testAReportIsPostedAsPlainJsonWithNoCredentials() async {
+        StubProtocol.status = 204
+        StubProtocol.seen = nil
+        let ok = await PerfTransport.post("https://example.invalid/perf", "{\"schema\":1}") { $0.protocolClasses = [StubProtocol.self] }
+        XCTAssertTrue(ok)
+        XCTAssertEqual(StubProtocol.seen?.method, "POST")
+        XCTAssertEqual(StubProtocol.seen?.body, "{\"schema\":1}")
+        XCTAssertEqual(StubProtocol.seen?.headers["Content-Type"], "application/json")
+        for name in ["Authorization", "Cookie"] {
+            XCTAssertNil(StubProtocol.seen?.headers[name], "\(name) was sent")
+        }
+        StubProtocol.status = 500
+        let failed = await PerfTransport.post("https://example.invalid/perf", "{}") { $0.protocolClasses = [StubProtocol.self] }
+        XCTAssertFalse(failed)
+        let refused = await PerfTransport.post("http://example.invalid/perf", "{}") { $0.protocolClasses = [StubProtocol.self] }
+        XCTAssertFalse(refused, "plain http to a real host must not be sent")
+    }
+
     func testTheProcessStartTimeIsKnownAndInThePast() throws {
         let start = try XCTUnwrap(Perf.processStart())
         let age = Date().timeIntervalSince(start)

@@ -8,7 +8,14 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import harness.codegraff.android.perf.PerfSharing
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -96,10 +103,36 @@ internal fun PerformanceContent(version: String) {
             Divider()
             ActionRow("Reset", destructive = true) { Perf.reset(); tick++ }
         }
+        if (PerfSharing.available) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(p.ink(0.045f))) {
+                    ShareRow("Share anonymous performance data", PerfSharing.enabled, PerfSharing::set)
+                }
+                Text(
+                    "Sends numbers only: timings, frame counts, memory, thermal state, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers.",
+                    style = sans(12f), color = p.textMuted.opacity(0.7f), modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+        }
         Text(
-            "Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.",
+            if (PerfSharing.available) "Operation columns are median, 95th and worst."
+            else "Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.",
             style = sans(12f), color = p.textMuted.opacity(0.7f), modifier = Modifier.padding(horizontal = 16.dp),
         )
+    }
+}
+
+@Composable
+private fun ShareRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    val p = Theme.palette
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = sans(16f), color = p.text, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

@@ -5,6 +5,8 @@
 import SwiftUI
 
 struct PerformanceView: View {
+    @AppStorage(PerfSharing.key) private var share = false
+
     private var version: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
@@ -51,13 +53,23 @@ struct PerformanceView: View {
                     LabeledContent("Thermal state", value: Perf.thermalLabel)
                     LabeledContent("Low Power Mode", value: ProcessInfo.processInfo.isLowPowerModeEnabled ? "On" : "Off")
                 }
+                if PerfSharing.available {
+                    Section {
+                        Toggle("Share anonymous performance data", isOn: $share)
+                            .accessibilityIdentifier("settings-share-performance")
+                    } footer: {
+                        Text("Sends numbers only: timings, frame counts, memory, thermal state, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers.")
+                    }
+                }
                 Section {
                     Button("Copy report") { UIPasteboard.general.string = perf.report(version: version) }
                     Button("Reset", role: .destructive) { perf.reset() }
                 } header: {
                     Text("Report")
                 } footer: {
-                    Text("Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.")
+                    Text(PerfSharing.available
+                         ? "Operation columns are median, 95th and worst."
+                         : "Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.")
                 }
             }
         }
