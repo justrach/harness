@@ -346,6 +346,33 @@ async fn reported_auth_error_preserves_diagnostics_and_never_replays_the_turn() 
     }
 }
 
+/// The SDK loads no ambient settings unless asked: without `settingSources` the
+/// user's own MCP servers and plugins are invisible to a Cursor chat. "project"
+/// must never be listed — the SDK skips approvals, so a repo's
+/// `.cursor/mcp.json` would run its commands unprompted.
+#[tokio::test]
+async fn sdk_loads_the_users_settings_but_never_the_projects() {
+    let fixture = SessionFixture::new();
+    let recorded = fixture.dir.path().join("setting-sources.json");
+    // A new agent and a resumed one must pass the same list.
+    for resume in [false, true] {
+        let (mut child, stdin, mut lines) = fixture.start("hello", resume).await;
+        assert_eq!(frame(&mut lines).await["ev"], "ready");
+        while frame(&mut lines).await.get("status").is_none() {}
+        finish(&mut child, stdin).await;
+        let sources: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&recorded).expect("sdk saw the options"))
+                .unwrap();
+        assert_eq!(
+            sources,
+            serde_json::json!(["user", "team", "mdm", "plugins"]),
+            "resume={resume}"
+        );
+        // Gone, so the next run has to write it again.
+        std::fs::remove_file(&recorded).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn uncheckpointed_user_text_survives_resume_without_replaying_the_turn() {
     let fixture = SessionFixture::new();
