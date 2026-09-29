@@ -781,11 +781,15 @@ impl Shell {
                         .justify_center()
                         .child(self.jump_pill(anim, hover, transcript.clone(), cx))
                 });
+                // Cached: with several panes streaming, a frame redraws only
+                // the panes whose transcript changed; the rest replay their
+                // last frame (their text stays selectable, see
+                // `selection_owner_reset`).
                 div()
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(transcript)
+                    .child(transcript.cached(gpui::StyleRefinement::default().size_full()))
                     .children(pill)
                     .into_any_element()
             }

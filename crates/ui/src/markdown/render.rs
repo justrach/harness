@@ -1169,6 +1169,7 @@ pub(super) fn flat_text_presented_element(
                     text: flat_text.clone(),
                     layout: layout.clone(),
                     offsets: offsets.clone(),
+                    owner: PAINT_OWNER.get(),
                 })
             });
             register_selection_listeners(window, &sel_key, &flat_text, &layout, offsets.clone());
@@ -1264,6 +1265,7 @@ fn paint_text_selection_with_wash(
             text: text.clone(),
             layout: layout.clone(),
             offsets: None,
+            owner: PAINT_OWNER.get(),
         })
     });
     register_selection_listeners(window, key, text, layout, None);
@@ -1304,10 +1306,15 @@ struct RegEntry {
     text: SharedString,
     layout: gpui::TextLayout,
     offsets: Option<super::link_presentation::OffsetMap>,
+    /// The transcript that painted it ([`selection_owner_reset`]); 0 for
+    /// text painted outside one.
+    owner: u64,
 }
 
 thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
+    /// The transcript painting right now, so its entries carry it.
+    static PAINT_OWNER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Every text element registered this frame: `(key, text, bounds)`.
@@ -1362,15 +1369,60 @@ pub fn selection_frame_reset() -> impl IntoElement {
     canvas(
         |_, _, _| (),
         |_, _, _, _| {
+            // Transcripts clear their own entries (`selection_owner_reset`),
+            // so a cached one is not wiped by another surface's frame.
             REGISTRY.with(|r| {
                 r.borrow_mut()
-                    .retain(|e| !selection_scope(&e.key).is_empty())
+                    .retain(|e| !selection_scope(&e.key).is_empty() || e.owner != 0)
             })
         },
     )
     .absolute()
     .w(px(0.0))
     .h(px(0.0))
+}
+
+/// [`selection_frame_reset`] for one transcript that may be drawn from a
+/// cached frame: it drops only the entries that transcript (or no
+/// transcript) painted, so a split pane that was not repainted keeps its
+/// text selectable, and marks what paints next as that transcript's. Paint
+/// [`selection_owner_end`] after the transcript's content.
+pub fn selection_owner_reset(owner: u64) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, _, _, _| {
+            REGISTRY.with(|r| {
+                r.borrow_mut().retain(|e| {
+                    !selection_scope(&e.key).is_empty() || (e.owner != owner && e.owner != 0)
+                })
+            });
+            PAINT_OWNER.set(owner);
+        },
+    )
+    .absolute()
+    .w(px(0.0))
+    .h(px(0.0))
+}
+
+/// Ends the transcript [`selection_owner_reset`] started.
+pub fn selection_owner_end() -> impl IntoElement {
+    canvas(|_, _, _| (), |_, _, _, _| PAINT_OWNER.set(0))
+        .absolute()
+        .w(px(0.0))
+        .h(px(0.0))
+}
+
+/// Forget a transcript's entries once it is gone.
+pub(crate) fn release_selection_owner(owner: u64) {
+    REGISTRY.with(|r| r.borrow_mut().retain(|e| e.owner != owner));
+}
+
+/// The transcript the drag's anchor was painted by.
+fn anchor_owner(reg: &[RegEntry]) -> u64 {
+    let anchor = super::selection::anchor_key().unwrap_or_default();
+    reg.iter()
+        .find(|e| *e.key == *anchor)
+        .map_or(0, |e| e.owner)
 }
 
 fn selection_scope(key: &str) -> &str {
@@ -1408,9 +1460,11 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
+        let owner = anchor_owner(&reg);
         let mut best: Option<(usize, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
-            if selection_scope(&entry.key) != selection_scope(&anchor) {
+            // A drag stays in the pane it started in.
+            if selection_scope(&entry.key) != selection_scope(&anchor) || entry.owner != owner {
                 continue;
             }
             let b = entry.layout.bounds();
@@ -1449,10 +1503,11 @@ fn resolve_drag(head: (usize, usize)) -> bool {
             return false;
         };
         let scope = selection_scope(&entry.key);
+        let owner = entry.owner;
         let filtered: Vec<_> = reg
             .iter()
             .enumerate()
-            .filter(|(_, e)| selection_scope(&e.key) == scope)
+            .filter(|(_, e)| selection_scope(&e.key) == scope && e.owner == owner)
             .collect();
         let Some(index) = filtered.iter().position(|(ix, _)| *ix == head.0) else {
             return false;

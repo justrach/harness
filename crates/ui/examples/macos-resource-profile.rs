@@ -36,6 +36,11 @@ fn main() -> anyhow::Result<()> {
         "Usage: macos-resource-profile FRAMES_JSON OUTPUT_DIR"
     );
     let frames: Vec<Frame> = serde_json::from_slice(&std::fs::read(&args[1])?)?;
+    let peer_history = match &frames[0].frame {
+        harness_doc::TranscriptFrame::Reset { reset } => reset.clone(),
+        _ => Vec::new(),
+    };
+    let wide = std::env::var_os("HARNESS_PROFILE_SPLIT_PANES").is_some();
     anyhow::ensure!(!frames.is_empty(), "Empty replay");
     let output = std::path::PathBuf::from(&args[2]);
     std::fs::create_dir_all(&output)?;
@@ -51,23 +56,38 @@ fn main() -> anyhow::Result<()> {
     let app = gpui::Application::with_platform(platform).with_assets(icons::Assets)
         .run_embedded(move |cx| {
             gpui_tokio::init(cx);
-            let settings = settings::UiSettings::default();
+            let mut settings = settings::UiSettings::default();
+            // Benchmark: restore an N-pane side-by-side split, the focused pane
+            // streaming the replay and the others showing finished sessions.
+            let split_panes = std::env::var("HARNESS_PROFILE_SPLIT_PANES").ok()
+                .and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 1).unwrap_or(0);
+            if split_panes > 0 {
+                settings.last_chat_id = Some("profile".into());
+                let mut panes = vec![Some("profile".to_string())];
+                panes.extend((1..split_panes).map(|i| Some(format!("peer-{i}"))));
+                settings.chat_layout = Some(settings::SavedChatLayout {
+                    vertical: false, panes, focus: 0,
+                    shares: vec![1.0 / split_panes as f32; split_panes],
+                    projects: vec![None; split_panes],
+                });
+            }
             settings::init(settings.clone(), data.clone(), cx);
             let fonts = typography::register_fonts(cx);
             typography::init(settings.ui_font_family.clone(), settings.ui_font_size, settings.terminal_font_family.clone(), settings.terminal_font_size, settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
             theme_library::init(data.clone(), cx);
             appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
                 settings.accent, settings.surface, cx);
+            history::init(settings.git_history_columns, settings.git_history_column_widths,
+                settings.git_history_column_order, settings.git_history_author_display, cx);
             composer::init(cx, harness_ui::settings::ComposerSendBehavior::default());
             terminal::panel::init(cx);
-            app_menus::init(cx);
             let state = cx.new(|_| {
                 let mut state = state::AppState::new();
                 state.connection = harness_proto::view::ConnectionStatus::Ready;
                 state.workspace_scope = Some(harness_proto::WorkspaceScope::Local);
-                state.selected_chat = Some("profile".into());
+                state.selected_chat = (split_panes == 0).then(|| "profile".into());
                 state.selected_space = Some("project".into());
-                state.auto_selected = true;
+                state.auto_selected = split_panes == 0;
                 state.chats_synced = true;
                 state.spaces_synced = true;
                 state.spaces = vec![serde_json::from_value(serde_json::json!({
@@ -79,6 +99,13 @@ fn main() -> anyhow::Result<()> {
                     "archived":false, "createdAt":"2026-09-05T00:00:00Z",
                     "config":{"harness":"claude-code", "model":"claude-haiku-4-5", "reasoning":null, "sandbox":"workspace-write"}
                 })).unwrap()];
+                for i in 1..split_panes {
+                    let mut chat = state.chats[0].clone();
+                    chat.id = format!("peer-{i}");
+                    chat.title = Some(format!("Peer session {i}"));
+                    state.chats.push(chat);
+                    state.set_subagent_snapshot(format!("peer-{i}"), peer_history.clone());
+                }
                 let background_chats = std::env::var("HARNESS_PROFILE_BACKGROUND_CHATS")
                     .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
                 for index in 0..background_chats {
@@ -113,7 +140,7 @@ fn main() -> anyhow::Result<()> {
                 codegraff_client_id:None, default_harness:HarnessId::ClaudeCode };
             let window = cx.open_window(WindowOptions {
                 window_bounds:Some(WindowBounds::Windowed(Bounds::new(
-                    gpui::point(px(0.),px(0.)),size(px(1320.),px(880.))))),
+                    gpui::point(px(0.),px(0.)),if wide { size(px(1920.),px(1100.)) } else { size(px(1320.),px(880.)) }))),
                 ..Default::default()
             }, |_,cx| cx.new(|cx| shell::Shell::new(state.clone(),boot,cx))).unwrap();
             *captured.borrow_mut() = Some((state,window));
@@ -125,6 +152,20 @@ fn main() -> anyhow::Result<()> {
         observed.set(observed.get() + 1);
     }));
     let dispatcher = executor.dispatcher().as_bench().unwrap();
+    if wide {
+        // Let the boot restore reopen the saved split before replaying.
+        app.update(|cx| state.update(cx, |_, cx| cx.notify()));
+        for _ in 0..10 {
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                    .unwrap()
+            });
+            dispatcher.run_until_idle();
+        }
+        let selected = app.update(|cx| state.read(cx).selected_chat.clone());
+        eprintln!("split restored: selected={selected:?}");
+    }
     let start = Instant::now();
     let first_at = frames[0].at;
     let mut frames = frames.into_iter().peekable();
