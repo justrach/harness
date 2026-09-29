@@ -24,7 +24,7 @@
 //!   {repoPath, worktreePath}`; `WatchCheckoutDiffs` → stream of `CheckoutDiff[]`
 //! - Workspace files: lazy directory listing, recursive path search, bounded text
 //!   reads, hash-guarded writes, and a checkout-scoped filesystem change stream.
-//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows}` → `TerminalSession`,
+//! - Terminals (§3.4): `OpenTerminal {chatId, cols, rows, cwd?}` → `TerminalSession`,
 //!   `SubscribeTerminal {terminalId, afterSeq?}` → stream of `TerminalEvent`
 //!   (replay then live tail), `WriteTerminal {terminalId, data}`, `ResizeTerminal`,
 //!   `CloseTerminal`. M5 is single-user local: per-user owner checks land with
@@ -346,6 +346,46 @@ struct OpenTerminalParams {
     chat_id: String,
     cols: u16,
     rows: u16,
+    /// Explicit working directory (new-chat canvas: the selected project
+    /// folder, or `~`). When omitted, the chat row's cwd is used, then the
+    /// space named by a `space-canvas:{spaceId}` chat id.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// Matches the UI canvas panel key (`AppState::panel_session_key`).
+const CANVAS_TERMINAL_PREFIX: &str = "space-canvas:";
+
+/// A cwd the user (or a project-less chat) meant as "host home", not a folder.
+fn meaningful_cwd(cwd: Option<String>) -> Option<String> {
+    cwd.filter(|cwd| {
+        let trimmed = cwd.trim();
+        !trimmed.is_empty() && trimmed != "~"
+    })
+}
+
+/// Space id encoded in a new-chat canvas terminal key, if any.
+fn canvas_space_id(chat_id: &str) -> Option<&str> {
+    chat_id
+        .strip_prefix(CANVAS_TERMINAL_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// Resolve the PTY cwd: a real explicit path wins, then the chat row, then
+/// the project folder named by `space-canvas:{spaceId}`, then `~`.
+/// The portable `~` marker is a fallback, not an override — otherwise a
+/// canvas OpenTerminal that still says `~` (spaces watch not landed in the
+/// UI) would ignore the selected project encoded in `chatId`.
+fn resolve_open_terminal_cwd(
+    explicit: Option<String>,
+    chat_cwd: Option<String>,
+    space_cwd: Option<String>,
+) -> String {
+    let raw = meaningful_cwd(explicit)
+        .or_else(|| meaningful_cwd(chat_cwd))
+        .or_else(|| meaningful_cwd(space_cwd))
+        .unwrap_or_else(|| "~".to_string());
+    crate::repos::expand_home(&raw)
 }
 
 #[derive(Debug, Deserialize)]
@@ -719,7 +759,7 @@ impl EngineRpc {
             if chat.space_id.is_none() {
                 return Ok(chat
                     .cwd
-                    .map(|cwd| std::path::PathBuf::from(crate::sessions::expand_home(&cwd)))
+                    .map(|cwd| std::path::PathBuf::from(crate::repos::expand_home(&cwd)))
                     .unwrap_or_else(home_dir));
             }
         }
@@ -2880,15 +2920,23 @@ impl RpcService for EngineRpc {
             }
             methods::OPEN_TERMINAL => {
                 let p: OpenTerminalParams = parse_params(params)?;
-                // The terminal runs in the chat's checkout; a chat with no cwd (or
-                // no row yet) gets the home directory.
-                let cwd = self
+                // Prefer an explicit real path (new-chat canvas has no row
+                // yet). `space-canvas:{spaceId}` names the selected project
+                // so a missing/tilde cwd still lands in that folder.
+                let chat_cwd = self
                     .workspace
                     .chat(&p.chat_id)
                     .ok()
                     .flatten()
-                    .and_then(|chat| chat.cwd)
-                    .unwrap_or_else(|| home_dir().to_string_lossy().to_string());
+                    .and_then(|chat| chat.cwd);
+                let space_cwd = canvas_space_id(&p.chat_id).and_then(|space_id| {
+                    self.workspace
+                        .space(space_id)
+                        .ok()
+                        .flatten()
+                        .map(|space| space.path)
+                });
+                let cwd = resolve_open_terminal_cwd(p.cwd, chat_cwd, space_cwd);
                 let session = self
                     .terminals
                     .open(&cwd, p.cols, p.rows)
@@ -3519,6 +3567,44 @@ mod tests {
             forward_deadline(methods::QUEUE_COMMAND),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn open_terminal_cwd_prefers_explicit_then_chat_then_space_then_home() {
+        let home = crate::repos::home_dir().to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_open_terminal_cwd(
+                Some("/proj".into()),
+                Some("/chat".into()),
+                Some("/space".into())
+            ),
+            "/proj"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(None, Some("/chat".into()), Some("/space".into())),
+            "/chat"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("~".into()), None, Some("/space".into())),
+            "/space",
+            "tilde is a fallback, not an override of the selected project"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(None, None, Some("/space".into())),
+            "/space"
+        );
+        assert_eq!(resolve_open_terminal_cwd(None, None, None), home);
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("~".into()), Some("/chat".into()), None),
+            "/chat"
+        );
+        assert_eq!(
+            resolve_open_terminal_cwd(Some("  ".into()), Some("/chat".into()), None),
+            "/chat"
+        );
+        assert_eq!(canvas_space_id("space-canvas:s1"), Some("s1"));
+        assert_eq!(canvas_space_id("space-canvas:"), None);
+        assert_eq!(canvas_space_id("chat-1"), None);
     }
 
     #[test]
