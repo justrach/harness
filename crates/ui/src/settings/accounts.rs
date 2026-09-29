@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use harness_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, HarnessId,
+    AgentLoginStatus, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider, HarnessId,
 };
 use harness_rpc::methods;
 
@@ -174,13 +174,45 @@ pub fn provider_accounts(
         .collect()
 }
 
+/// graff's OpenAI (ChatGPT) sign-in is the Codex login: it reads the same
+/// `auth.json`. So that row follows the active Codex account — `(signed in,
+/// who)`. Pure.
+pub fn openai_login(snapshot: &AgentAccountsSnapshot) -> (bool, Option<String>) {
+    match provider_accounts(snapshot, HarnessId::Codex)
+        .into_iter()
+        .find(|account| account.active)
+    {
+        Some(account) => (
+            true,
+            account
+                .email
+                .clone()
+                .or_else(|| account.display_name.clone()),
+        ),
+        None => (false, None),
+    }
+}
+
+/// A graff provider's display name for the sign-in dialog title.
+fn graff_provider_name(id: Option<&str>) -> &'static str {
+    GRAFF_LOGIN_PROVIDERS
+        .iter()
+        .find(|(provider, _)| Some(*provider) == id)
+        .map(|(_, name)| *name)
+        .unwrap_or("graff")
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
 
 enum LoginFlow {
     /// StartAgentLogin in flight.
-    Starting { harness: HarnessId },
+    Starting {
+        harness: HarnessId,
+        /// graff's sign-ins say which provider (`xai`, `kimi`, `zai`).
+        provider: Option<String>,
+    },
     /// Claude-style: open the URL, paste the code back.
     PasteCode {
         harness: HarnessId,
@@ -191,6 +223,7 @@ enum LoginFlow {
     /// Codex-style: open the URL, poll until the browser flow lands.
     Browser {
         harness: HarnessId,
+        provider: Option<String>,
         start: AgentLoginStart,
         message: Option<SharedString>,
         error: Option<SharedString>,
@@ -199,16 +232,19 @@ enum LoginFlow {
 
 impl LoginFlow {
     /// Dialog title (harness: "Add Claude account" / "Add Codex account").
-    fn title(&self) -> &'static str {
-        let harness = match self {
-            LoginFlow::Starting { harness }
-            | LoginFlow::PasteCode { harness, .. }
-            | LoginFlow::Browser { harness, .. } => *harness,
+    fn title(&self) -> String {
+        let (harness, provider) = match self {
+            LoginFlow::Starting { harness, provider }
+            | LoginFlow::Browser {
+                harness, provider, ..
+            } => (*harness, provider.as_deref()),
+            LoginFlow::PasteCode { harness, .. } => (*harness, None),
         };
         match harness {
-            HarnessId::Codex => "Add Codex account",
-            HarnessId::Cursor => "Connect Cursor",
-            _ => "Add Claude account",
+            HarnessId::Codex => "Add Codex account".into(),
+            HarnessId::Cursor => "Connect Cursor".into(),
+            HarnessId::Graff => format!("Sign in to {}", graff_provider_name(provider)),
+            _ => "Add Claude account".into(),
         }
     }
 }
@@ -232,6 +268,11 @@ pub struct AccountsPage {
     cancelling_job: Option<String>,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
+    /// graff's own provider sign-ins (xAI, Kimi, Z.AI) on the shown device.
+    graff_logins: Loadable<Vec<GraffLoginProvider>>,
+    graff_task: Option<Task<()>>,
+    /// Provider id with an in-flight sign-out.
+    busy_graff: Option<String>,
     login: Option<LoginFlow>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
@@ -264,6 +305,9 @@ impl AccountsPage {
             jobs_poll_task: None,
             cancelling_job: None,
             busy_account: None,
+            graff_logins: Loadable::Idle,
+            graff_task: None,
+            busy_graff: None,
             login: None,
             error: None,
             code_input,
@@ -305,6 +349,9 @@ impl AccountsPage {
         // device's cache is cold).
         self.login = None;
         self.busy_account = None;
+        self.busy_graff = None;
+        // Another device's sign-ins: never show the last device's rows.
+        self.graff_logins = Loadable::Idle;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
@@ -495,6 +542,7 @@ impl AccountsPage {
         self.snapshot = Loadable::Loading;
         self.load_codegraff_usage(cx);
         self.load_codegraff_jobs(cx);
+        self.load_graff_logins(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -514,6 +562,36 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    fn load_graff_logins(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.graff_logins = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        // Rows stay on screen through a reload; only a first load shows the
+        // skeleton.
+        if !matches!(self.graff_logins, Loadable::Ready(_)) {
+            self.graff_logins = Loadable::Loading;
+        }
+        let params = self.params(serde_json::json!({}));
+        self.graff_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::LIST_GRAFF_LOGINS, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.graff_logins = match result {
+                    Ok(value) => match serde_json::from_value::<Vec<GraffLoginProvider>>(value) {
+                        Ok(rows) => Loadable::Ready(rows),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn load_codegraff_usage(&mut self, cx: &mut Context<Self>) {
@@ -722,12 +800,63 @@ impl AccountsPage {
     // ---- add-account flows ----
 
     fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.begin_login(harness, None, cx);
+    }
+
+    /// graff's own sign-in for one provider (`xai`, `kimi`, `zai`).
+    fn start_graff_login(&mut self, provider: &str, cx: &mut Context<Self>) {
+        self.begin_login(HarnessId::Graff, Some(provider.to_string()), cx);
+    }
+
+    /// Sign out of one graff provider (removes graff's credential on the shown
+    /// device); the reply is the refreshed list.
+    fn sign_out_graff(&mut self, provider: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.login = Some(LoginFlow::Starting { harness });
+        self.busy_graff = Some(provider.clone());
         self.error = None;
-        let params = self.params(serde_json::json!({ "harness": harness }));
+        let params = self.params(serde_json::json!({ "provider": provider }));
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SIGN_OUT_GRAFF_LOGIN, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.busy_graff = None;
+                match result.and_then(|value| {
+                    serde_json::from_value::<Vec<GraffLoginProvider>>(value)
+                        .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
+                }) {
+                    Ok(rows) => page.graff_logins = Loadable::Ready(rows),
+                    Err(err) => page.error = Some(format!("Sign out failed: {err}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn begin_login(
+        &mut self,
+        harness: HarnessId,
+        provider: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.login = Some(LoginFlow::Starting {
+            harness,
+            provider: provider.clone(),
+        });
+        self.error = None;
+        let mut params = serde_json::json!({ "harness": harness });
+        if let (Some(provider), Some(object)) = (&provider, params.as_object_mut()) {
+            object.insert("provider".into(), serde_json::json!(provider));
+        }
+        let params = self.params(params);
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -754,6 +883,7 @@ impl AccountsPage {
                             AgentLoginMode::Browser => {
                                 page.login = Some(LoginFlow::Browser {
                                     harness,
+                                    provider,
                                     start,
                                     message: None,
                                     error: None,
@@ -1156,6 +1286,226 @@ impl AccountsPage {
             .into_any_element()
     }
 
+    /// graff's own provider sign-ins: a row per provider with its state and
+    /// Sign in / Sign out. graff's OpenAI (ChatGPT) login IS the Codex login,
+    /// so that row follows the Codex account below and has no buttons of its
+    /// own — signing out there would sign the Codex agent out too.
+    fn render_graff_logins_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::icons::icon(crate::icons::GRAFF_MARK)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("graff providers"),
+            );
+
+        let body: AnyElement = match &self.graff_logins {
+            Loadable::Idle | Loadable::Loading => {
+                self.render_skeleton_row(("graff-logins", 0), false, true, theme, cx)
+            }
+            Loadable::Error(error) => div()
+                .px(px(20.0))
+                .py(px(24.0))
+                .text_size(crate::typography::ui_rems(12.0))
+                .text_color(theme.text_muted)
+                .child(format!("graff sign-ins unavailable: {error}"))
+                .into_any_element(),
+            Loadable::Ready(providers) => {
+                let openai = match self.snapshot.ready() {
+                    None => "Checking…".to_string(),
+                    Some(snapshot) => match openai_login(snapshot) {
+                        (true, Some(who)) => {
+                            format!("Signed in as {who} · shared with the Codex agent")
+                        }
+                        (true, None) => "Signed in · shared with the Codex agent".to_string(),
+                        (false, _) => "Not signed in — add a Codex account below".to_string(),
+                    },
+                };
+                let openai_signed_in = self
+                    .snapshot
+                    .ready()
+                    .is_some_and(|snapshot| openai_login(snapshot).0);
+                // (provider id — `None` for the shared Codex login —, name,
+                // status line, signed in)
+                let mut entries: Vec<(Option<&str>, &str, String, bool)> = providers
+                    .iter()
+                    .map(|p| {
+                        let status = if p.signed_in {
+                            "Signed in on this device"
+                        } else {
+                            "Not signed in"
+                        };
+                        (
+                            Some(p.id.as_str()),
+                            p.name.as_str(),
+                            status.to_string(),
+                            p.signed_in,
+                        )
+                    })
+                    .collect();
+                entries.insert(
+                    entries.len().min(1),
+                    (None, "OpenAI (ChatGPT)", openai, openai_signed_in),
+                );
+                div()
+                    .children(entries.into_iter().enumerate().map(
+                        |(ix, (provider, name, status, signed_in))| {
+                            self.render_graff_row(ix, provider, name, status, signed_in, theme, cx)
+                        },
+                    ))
+                    .into_any_element()
+            }
+        };
+        div()
+            .mt(px(24.0))
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(widgets::section_card(theme).mt(px(8.0)).child(body))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_graff_row(
+        &self,
+        ix: usize,
+        provider: Option<&str>,
+        name: &str,
+        status: String,
+        signed_in: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let initial: SharedString = name
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into())
+            .into();
+        let busy = provider.is_some() && self.busy_graff.as_deref() == provider;
+        let actions = provider.map(str::to_string).map(|id| {
+            let sign_out_id = id.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .when(signed_in, |el| {
+                    el.child(
+                        div()
+                            .id(("graff-signout", ix))
+                            .rounded(px(6.0))
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .when(busy, |el| el.opacity(0.5))
+                            .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.sign_out_graff(sign_out_id.clone(), cx);
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
+                                    .size(px(14.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                })
+                .child(
+                    crate::popover::btn_primary(
+                        theme,
+                        if signed_in {
+                            "Sign in again"
+                        } else {
+                            "Sign in"
+                        },
+                    )
+                    .id(("graff-signin", ix))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .when(busy, |el| el.opacity(0.5))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_graff_login(&id, cx);
+                    })),
+                )
+        });
+        div()
+            .px(px(20.0))
+            .py(px(14.0))
+            .when(ix > 0, |el| el.border_t_1().border_color(theme.border))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(crate::theme::ink(0.03))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text_muted)
+                    .child(initial),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::row_title(
+                        theme,
+                        SharedString::from(name.to_string()),
+                    ))
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child(SharedString::from(status)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when(signed_in, |el| {
+                        el.child(widgets::badge_active(theme, "Signed in"))
+                    })
+                    .children(actions),
+            )
+            .into_any_element()
+    }
+
     fn render_codegraff_section(
         &self,
         theme: &Theme,
@@ -1422,27 +1772,65 @@ impl AccountsPage {
             }
             LoginFlow::Browser {
                 harness,
+                provider,
                 start,
                 message,
                 error,
             } => {
                 let has_error = error.is_some();
-                let body = match harness {
+                let body: SharedString = match harness {
                     HarnessId::Cursor => {
                         "Finish signing in to Cursor in your browser. This mints a \
                          harness-named API key you can revoke any time from Cursor's \
                          dashboard — it is separate from `cursor-agent login`."
+                            .into()
                     }
-                    _ => {
-                        "Finish signing in to OpenAI in your browser. The new login is \
+                    HarnessId::Graff => format!(
+                        "Finish signing in to {} in your browser. graff saves the login \
+                         itself, so nothing is copied into Harness.",
+                        graff_provider_name(provider.as_deref())
+                    )
+                    .into(),
+                    _ => "Finish signing in to OpenAI in your browser. The new login is \
                          captured in an isolated profile — your current session is untouched \
                          until you switch."
-                    }
+                        .into(),
                 };
                 div()
                     .flex()
                     .flex_col()
                     .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
+                    // Device-code sign-ins (xAI, Kimi): the page asks for this.
+                    .when_some(start.code.clone(), |el, code| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from("Confirm this code on the page")),
+                                )
+                                .child(
+                                    div()
+                                        .self_start()
+                                        .px(px(12.0))
+                                        .py(px(8.0))
+                                        .rounded(px(8.0))
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(crate::theme::ink(0.03))
+                                        .font_family(theme.font_mono.clone())
+                                        .text_size(crate::typography::ui_rems(18.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(code)),
+                                ),
+                        )
+                    })
                     .child(url_link(
                         "login-open-url-browser",
                         "Reopen the sign-in page",
@@ -1498,7 +1886,7 @@ impl AccountsPage {
             }
         };
         let card = popover::dialog_card(&theme)
-            .child(popover::dialog_title(&theme, title))
+            .child(popover::dialog_title(&theme, &title))
             .child(body)
             .into_any_element();
         Some(popover::modal("add-account-dialog", viewport, card))
@@ -1862,7 +2250,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "CodeGraff usage and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.",
+                                "CodeGraff usage, graff's provider sign-ins, and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.",
                             ))
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
@@ -1876,6 +2264,7 @@ impl Render for AccountsPage {
                                 )
                             })
                             .child(self.render_codegraff_section(&theme, now, cx))
+                            .child(self.render_graff_logins_section(&theme, cx))
                             .children(sections)
                             // Footer note (harness: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).
@@ -2039,5 +2428,75 @@ mod tests {
         );
         assert_eq!(provider_accounts(&snapshot, HarnessId::Codex).len(), 1);
         assert!(provider_accounts(&snapshot, HarnessId::Cursor).is_empty());
+    }
+
+    fn codex_account(id: &str, active: bool, email: Option<&str>) -> AgentAccount {
+        AgentAccount {
+            id: id.into(),
+            harness: HarnessId::Codex,
+            email: email.map(str::to_string),
+            plan_label: None,
+            active,
+            usage_windows: vec![],
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+        }
+    }
+
+    #[test]
+    fn graffs_openai_row_follows_the_active_codex_account() {
+        // Saved but not live: graff reads the live auth.json, so not signed in.
+        let saved_only = AgentAccountsSnapshot {
+            accounts: vec![codex_account("x1", false, Some("a@x.test"))],
+            warnings: vec![],
+        };
+        assert_eq!(openai_login(&saved_only), (false, None));
+        assert_eq!(
+            openai_login(&AgentAccountsSnapshot::default()),
+            (false, None)
+        );
+
+        let live = AgentAccountsSnapshot {
+            accounts: vec![
+                codex_account("x1", false, Some("a@x.test")),
+                codex_account("x2", true, Some("b@x.test")),
+            ],
+            warnings: vec![],
+        };
+        assert_eq!(openai_login(&live), (true, Some("b@x.test".to_string())));
+
+        // A live login with no email still counts as signed in.
+        let anonymous = AgentAccountsSnapshot {
+            accounts: vec![codex_account("x3", true, None)],
+            warnings: vec![],
+        };
+        assert_eq!(openai_login(&anonymous), (true, None));
+    }
+
+    #[test]
+    fn login_dialog_titles_name_the_graff_provider() {
+        let graff = |provider: Option<&str>| LoginFlow::Starting {
+            harness: HarnessId::Graff,
+            provider: provider.map(str::to_string),
+        };
+        assert_eq!(graff(Some("xai")).title(), "Sign in to xAI");
+        assert_eq!(graff(Some("kimi")).title(), "Sign in to Kimi");
+        assert_eq!(graff(Some("zai")).title(), "Sign in to Z.AI");
+        assert_eq!(graff(None).title(), "Sign in to graff");
+        assert_eq!(graff(Some("nope")).title(), "Sign in to graff");
+        // The other harnesses keep their titles.
+        let starting = |harness| LoginFlow::Starting {
+            harness,
+            provider: None,
+        };
+        assert_eq!(starting(HarnessId::Codex).title(), "Add Codex account");
+        assert_eq!(starting(HarnessId::Cursor).title(), "Connect Cursor");
+        assert_eq!(
+            starting(HarnessId::ClaudeCode).title(),
+            "Add Claude account"
+        );
     }
 }

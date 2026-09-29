@@ -214,6 +214,19 @@ pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     );
 }
 
+/// [`compose_child_path`] with `prefix` ahead of everything else, for a child
+/// that must find a stand-in tool (a no-op `open`) before the real one.
+pub fn compose_child_path_with_prefix(
+    cmd: &mut process::Command,
+    exe: &std::path::Path,
+    prefix: &std::path::Path,
+) {
+    compose_path(
+        cmd.as_std_mut(),
+        std::iter::once(prefix).chain(exe.parent().filter(|d| !d.as_os_str().is_empty())),
+    );
+}
+
 fn compose_path<'a>(
     cmd: &mut std::process::Command,
     executable_dir: impl IntoIterator<Item = &'a std::path::Path>,
@@ -391,6 +404,7 @@ pub(crate) fn crash_message(
 
 pub use acp::AcpHarness;
 pub use acp::exo_bridge::serve as serve_exo_acp;
+pub use acp::graff_login::login_command as graff_login_command;
 pub use acp::graff_worktree::{
     GraffWorktreeAction, GraffWorktreeOutcome, GraffWorktreeResult, run_graff_worktree_action,
 };
