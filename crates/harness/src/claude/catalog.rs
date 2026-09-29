@@ -84,6 +84,12 @@ fn toggle(id: &str, label: &str) -> ModelOption {
     }
 }
 
+/// Start the session with Claude in Chrome (`--chrome`), so it can drive the
+/// user's browser through the extension. Every model carries it.
+pub(crate) fn chrome() -> ModelOption {
+    toggle("chrome", "Chrome")
+}
+
 /// The 200K/1M context-window select carried by the long-context models. The
 /// 1M window is selected via a model-id suffix (`<model>[1m]`), exactly how the
 /// CLI itself does it.
@@ -188,7 +194,7 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
                 label: id.into(),
                 description: None,
                 reasoning_levels: FULL_LADDER.to_vec(),
-                options: vec![],
+                options: vec![chrome()],
             });
         }
     }
@@ -289,7 +295,7 @@ pub(super) fn with_discovered_models(
             label: text("displayName").unwrap_or(id).into(),
             description: text("description").map(str::to_owned),
             reasoning_levels: ladder,
-            options: vec![],
+            options: vec![chrome()],
         });
     }
     if !valid {
@@ -322,49 +328,49 @@ pub fn static_models() -> Vec<Model> {
             "Fable 5.1",
             "Most intelligent model for building agents",
             FULL_LADDER,
-            vec![context_window()],
+            vec![context_window(), chrome()],
         ),
         model(
             "claude-fable-5",
             "Fable 5",
             "Previous generation Fable",
             FULL_LADDER,
-            vec![context_window()],
+            vec![context_window(), chrome()],
         ),
         model(
             "claude-opus-5-5",
             "Opus 5.5",
             "Best for everyday, complex tasks",
             FULL_LADDER,
-            vec![context_window(), toggle("fastMode", "Fast Mode")],
+            vec![context_window(), toggle("fastMode", "Fast Mode"), chrome()],
         ),
         model(
             "claude-opus-4-8",
             "Opus 4.8",
             "Previous generation Opus",
             FULL_LADDER,
-            vec![toggle("fastMode", "Fast Mode")],
+            vec![toggle("fastMode", "Fast Mode"), chrome()],
         ),
         model(
             "claude-opus-4-7",
             "Opus 4.7",
             "Older generation Opus",
             XHIGH_LADDER,
-            vec![toggle("fastMode", "Fast Mode")],
+            vec![toggle("fastMode", "Fast Mode"), chrome()],
         ),
         model(
             "claude-sonnet-5",
             "Sonnet 5",
             "Balanced speed and intelligence",
             XHIGH_LADDER,
-            vec![context_window()],
+            vec![context_window(), chrome()],
         ),
         model(
             "claude-haiku-4-5",
             "Haiku 4.5",
             "Fastest model for everyday tasks",
             &[],
-            vec![toggle("thinking", "Thinking")],
+            vec![toggle("thinking", "Thinking"), chrome()],
         ),
     ]
 }
