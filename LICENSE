@@ -1,20 +1,93 @@
-Harness — GNU Affero General Public License, Version 3
+                  Harness — Modified GNU Affero General
+                     Public License, Version 3 (AGPLv3)
 
 This license applies from the commit that introduces it forward. Earlier
 published versions retain the license terms supplied with those versions.
 
-Copyright (C) 2026 Standard Harness Pte. Ltd. All rights reserved in the
-original Harness contributions owned by the company, subject to the public
-license grant below.
+Copyright (C) 2026 Standard Harness Pte. Ltd. (the "Company"), Rach Pradhan
+("justrach") and Yu Xi Lim ("yxlyx"), each as to the original Harness
+contributions it or they own.
 
-The Harness work is licensed to the public under the GNU Affero General Public
-License, Version 3 (AGPL-3.0-only). The complete, unmodified license text
-follows. The company retains the ability to license material that it owns
-separately. This does not grant the company ownership of, or separate licensing
-rights over, material contributed by others or incorporated under third-party
-licenses. Their copyright and license notices are preserved in
-THIRD_PARTY_NOTICES.md and alongside the relevant sources.
+This program is free software, licensed to the public under the terms of the
+GNU Affero General Public License, Version 3 (AGPL-3.0), the complete and
+unmodified text of which is reproduced below, AS MODIFIED by the Additional
+Terms and Reserved Rights set out in this preamble. These Additional Terms form
+part of this License and, to the extent of any conflict, prevail over the
+AGPL-3.0 text that follows.
 
+--------------------------------------------------------------------------------
+DEFINITIONS
+--------------------------------------------------------------------------------
+
+"Licensors" means, together, the Company, Rach Pradhan ("justrach") and Yu Xi
+Lim ("yxlyx"); each is a "Licensor".
+
+"Licensor Material" means the original Harness source code and other original
+Harness material in which a Licensor owns the copyright.
+
+"Third-Party Material" means everything else, including material contributed by
+others and material incorporated under third-party licenses, such as the Zeron
+application code (MIT), vendored GPUI and related crates (Apache-2.0), and the
+other components listed in THIRD_PARTY_NOTICES.md.
+
+--------------------------------------------------------------------------------
+RESERVED COMMERCIAL & CLOUD RIGHTS (Licensor carve-out)
+--------------------------------------------------------------------------------
+
+Notwithstanding anything in the AGPL-3.0 text below, and as to the Licensor
+Material only, the Licensors jointly retain and reserve all rights, including
+the unrestricted, perpetual, irrevocable, and royalty-free right to use,
+reproduce, modify, prepare derivative works of, sublicense, distribute, host,
+operate, and commercially exploit the Licensor Material and any modified or
+derivative version of it -- including, without limitation, the right to offer
+it, or any product or service based on or incorporating it, as a private,
+proprietary, hosted, managed, or cloud offering -- free of, and without being
+bound by, any obligation of the AGPL-3.0 (including, without limitation, its
+copyleft, source-availability, and Section 13 remote-network-interaction
+obligations). The Licensors may additionally license the Licensor Material to
+third parties under separate proprietary or commercial terms only by the joint
+written agreement of all three Licensors (see EXERCISE OF RESERVED RIGHTS
+below); no Licensor, and no two Licensors, may grant any such license without
+the third.
+
+This reservation runs solely to the three Licensors named above. EVERY OTHER
+PERSON OR ENTITY receives, copies, runs, modifies, conveys, and interacts with
+this software strictly and only under the AGPL-3.0 as set out below --
+including its Section 13 obligation to offer the Corresponding Source to all
+users who interact with a modified version remotely over a network. Nothing in
+this carve-out grants any right to anyone other than the three named Licensors,
+and nothing in it reduces any right a recipient has under the AGPL-3.0.
+
+THIRD-PARTY MATERIAL. This carve-out does not reach Third-Party Material. It
+grants the Licensors no ownership of, and no separate licensing rights over,
+material contributed by others or incorporated under third-party licenses, and
+it does not replace the license under which that material is provided. The
+copyright and license notices for Third-Party Material are preserved in
+THIRD_PARTY_NOTICES.md, in third_party/licenses/, and alongside the relevant
+sources.
+
+EXERCISE OF RESERVED RIGHTS. The reserved commercial, proprietary, and cloud
+rights set out above are held by the three Licensors JOINTLY, not severally.
+Any exercise of those rights to grant a license to any third party, or to offer
+the Licensor Material (or any product or service based on or incorporating it)
+as a private, proprietary, hosted, managed, or cloud offering, requires the
+joint, express, written agreement of ALL THREE Licensors. The Company gives its
+agreement only through a duly authorised officer. No Licensor may exercise
+those rights, or grant any such license, alone, independently, or without the
+consent, signature, and joinder of each other Licensor, and there is no
+sole-authority or unavailability fallback: if all three Licensors do not agree
+in writing, the reserved rights are not exercised. Any proprietary or
+commercial permission so granted is separate from the AGPL-3.0 license and is
+revocable by the Licensors at their discretion unless its written grant states
+otherwise; the provision of consultancy or other services by any Licensor does
+not, of itself, grant any such permission or make one irrevocable. By contrast,
+each recipient's license under the AGPL-3.0 is irrevocable except by reason of
+that recipient's own material breach.
+
+For commercial or proprietary licensing, contact the Licensors.
+
+--------------------------------------------------------------------------------
+The complete text of the GNU Affero General Public License, Version 3 follows.
 --------------------------------------------------------------------------------
 
                     GNU AFFERO GENERAL PUBLIC LICENSE

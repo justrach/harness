@@ -21,7 +21,7 @@ exclude = ["vendor/zui", "vendor/gpui-component"]
 [workspace.package]
 version = "0.2.97"
 edition = "2024"
-license = "AGPL-3.0-only"
+license-file = "LICENSE"
 publish = false
 
 [workspace.dependencies]

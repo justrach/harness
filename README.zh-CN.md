@@ -101,4 +101,4 @@ macOS 上用桌面发行包，或者从源码构建 `harness` 再运行 `harness
 
 ## 许可
 
-Harness 使用 [GNU Affero General Public License 第 3 版](LICENSE)（`AGPL-3.0-only`），与 CodeGraff 的公共许可采用相同的 AGPL 版本。Standard Harness Pte. Ltd. 保留其拥有的原创 Harness 贡献的权利；已有代码和第三方材料仍保留各自的版权与许可声明，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
+Harness 使用[修改版 GNU Affero General Public License 第 3 版](LICENSE)（AGPL-3.0 加附加条款），结构与 CodeGraff 的许可一致。通过网络使用会触发第 13 条。Standard Harness Pte. Ltd.、Rach Pradhan（justrach）和 Yu Xi Lim（yxlyx）保留就其拥有的原创 Harness 贡献提供专有版或托管版的权利。接收方的 AGPL 许可长期有效，除非其自身违约。不受 copyleft 约束的商业许可，只有在三方共同书面同意时才存在，并且可以撤销。已有代码和第三方材料仍保留各自的版权与许可声明，详见[第三方声明](THIRD_PARTY_NOTICES.md)。
