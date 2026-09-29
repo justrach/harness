@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -35,18 +36,18 @@ class SessionFlowTest {
     fun sendIsDisabledUntilThereIsADraft() {
         openToolGroupSession()
         rule.onNodeWithContentDescription("Send message").assertIsNotEnabled()
-        rule.onNode(hasSetTextAction()).performTextInput("hello")
+        rule.onNode(hasSetTextAction() and !hasContentDescription("Search sessions")).performTextInput("hello")
         rule.onNodeWithContentDescription("Send message").assertIsEnabled()
     }
 
     @Test
     fun theDraftAndTheOpenSessionSurviveRecreation() {
         openToolGroupSession()
-        rule.onNode(hasSetTextAction()).performTextInput("keep me")
+        rule.onNode(hasSetTextAction() and !hasContentDescription("Search sessions")).performTextInput("keep me")
         rule.activityRule.scenario.recreate()
         rule.waitForIdle()
         rule.onNodeWithText("Matches the desktop fix in", substring = true).assertExists()
-        rule.onNode(hasSetTextAction()).assertTextContains("keep me")
+        rule.onNode(hasSetTextAction() and !hasContentDescription("Search sessions")).assertTextContains("keep me")
     }
 
     @Test
