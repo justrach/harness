@@ -93,7 +93,7 @@ struct TranscriptView: View {
             case .inputChip(let header, let resolved):
                 InputChipView(header: header, resolved: resolved)
             case .errorChip(let message):
-                ErrorChipView(message: message)
+                if ChatGPTSignIn.isUsageLimit(message: message) { UsageLimitCard() } else { ErrorChipView(message: message) }
             }
         }
         .padding(.top, row.topGap)

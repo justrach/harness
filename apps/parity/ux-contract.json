@@ -101,7 +101,14 @@
       "Something went wrong on your computer. Try again.",
       "Prefer the terminal? Run",
       "graff login chatgpt",
-      "Copy"
+      "Copy",
+      "Complete eligible AI requests in this app with usage included in your ChatGPT plan or credits balance.",
+      "Using ChatGPT plan",
+      "Eligible AI requests in this app use your ChatGPT plan. You can manage usage in ChatGPT settings.",
+      "Usage limit reached",
+      "Review your plan or app limit in ChatGPT settings.",
+      "New",
+      "Use your ChatGPT plan in this app"
     ]
   },
   "queuePanelLayout": {

@@ -50,10 +50,7 @@ struct SettingsView: View {
 
                 if !chatGPTComputers.isEmpty {
                     Section {
-                        Button("Use your ChatGPT plan") { showChatGPT = true }
-                            .accessibilityIdentifier("settings-chatgpt")
-                    } footer: {
-                        Text("Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.")
+                        ChatGPTPlanCard(connected: model.chatGPTConnected) { showChatGPT = true }
                     }
                 }
 

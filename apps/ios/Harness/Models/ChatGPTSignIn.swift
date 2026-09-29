@@ -45,6 +45,17 @@ enum ChatGPTSignIn {
         }
     }
 
+    /// A session runs on the person's ChatGPT plan when its model's provider is `chatgpt` (`chatgpt/<slug>`).
+    static func usesPlan(modelId: String?) -> Bool {
+        modelId?.hasPrefix("chatgpt/") == true
+    }
+
+    /// The plan's usage limit (HTTP 429, `subscription_sharing_usage_limit_exceeded`), as it reaches the transcript. It
+    /// gets its own card that leads with Manage usage instead of a one-line error.
+    static func isUsageLimit(message: String) -> Bool {
+        message.contains("subscription_sharing_usage_limit_exceeded") || message.contains("chatgpt.com/settings/usage")
+    }
+
     static func action(in phase: ChatGPTPhase) -> ChatGPTAction {
         switch phase {
         case .idle: .start

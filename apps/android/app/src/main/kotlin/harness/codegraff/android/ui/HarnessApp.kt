@@ -62,6 +62,7 @@ private val SidebarWidth = 380.dp
 @Composable
 fun HarnessApp(model: AppModel) {
     val state by model.workspace.collectAsState()
+    val chatGPTConnected by model.chatGPTConnected.collectAsState()
     // Keeps relative times and stale-session checks moving without tying them to every write.
     LaunchedEffect(model) { model.runClock() }
     var signedIn by rememberSaveable { mutableStateOf(true) }
@@ -166,6 +167,8 @@ fun HarnessApp(model: AppModel) {
             onDismissDeletionError = model::dismissAccountDeletionError,
             chatGPT = model.chatGPTSignIn,
             chatGPTComputers = state.chatGPTComputers(),
+            chatGPTConnected = chatGPTConnected,
+            onChatGPTConnected = { model.chatGPTConnected.value = true },
         )
     }
     if (showNewSpace) {

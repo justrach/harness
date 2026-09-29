@@ -53,6 +53,27 @@ class DemoDataset(
             return DemoDataset(listOf(mac), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyMap(), mapOf(mac.id to agents))
         }
 
+        /**
+         * One session that runs on the ChatGPT plan and hit the plan's usage limit, for the plan indicator and the limit
+         * card (intent extra `scenario` = `chatgpt-plan`).
+         */
+        fun chatGPTPlan(now: Long): DemoDataset {
+            val mac = DeviceRow("dev-mac", "MacBook Pro", "macos", now, now - 30 * DAY)
+            val space = Space("space-harness", mac.id, "/Users/dev/harness", null, true, now - 9 * DAY)
+            val chat = Chat(
+                "chat-plan", mac.id, "Plan session", false, space.path, "main",
+                ChatConfig("graff", "chatgpt/gpt-6.1-sol", null, sandbox = "workspace-write"),
+                "Usage limit reached", now - MIN, now - 60 * MIN, space.id, now,
+            )
+            val entries = mapOf(
+                chat.id to listOf(
+                    user("m1", "Summarize what changed in the last release.", now - 70_000),
+                    assistant("m2", listOf(MessagePart.Error("e0", "HTTP 429 subscription_sharing_usage_limit_exceeded: manage usage at https://chatgpt.com/settings/usage")), now - 60_000, "dev-mac"),
+                ),
+            )
+            return DemoDataset(listOf(mac), listOf(space), listOf(chat), emptyMap(), emptyMap(), entries, mapOf(mac.id to allAgentsReady))
+        }
+
         private const val MIN = 60_000L
         private const val DAY = 86_400_000L
 

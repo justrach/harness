@@ -64,6 +64,15 @@ final class AppModel {
     /// Set to open the sign-in sheet on these computers. Home presents it, so an agent turning on mid-sign-in cannot
     /// take the sheet away with the onboarding card that asked for it.
     var chatGPTSheetComputers: [ChatGPTComputer]?
+    /// A ChatGPT sign-in has finished with plan usage on. Demo only until the account lookup is wired.
+    var chatGPTConnected = false
+    /// OpenAI asks for the "You're using your ChatGPT plan" confirmation only the first time; later sign-ins skip it.
+    private(set) var chatGPTWelcomeSeen = UserDefaults.standard.bool(forKey: "chatgptWelcomeSeen")
+
+    func markChatGPTWelcomeSeen() {
+        chatGPTWelcomeSeen = true
+        UserDefaults.standard.set(true, forKey: "chatgptWelcomeSeen")
+    }
     var demoPinnedSessionIds: [String] = []
     /// Graced connectivity truth — one stream every consumer inherits calm
     /// from (home pill, composer notice, Queued/Failed badges).
@@ -385,15 +394,20 @@ final class AppModel {
             demo = DemoDataset.onboarding(computerOnline: true, agentReady: false)
         } else if args.contains("-onboarding-ready") {
             demo = DemoDataset.onboarding(computerOnline: true, agentReady: true)
+        } else if args.contains("-chatgpt-plan") {
+            demo = DemoDataset.chatGPTPlan()
         } else {
             demo = DemoDataset.standard()
         }
         demoPinnedSessionIds = []
         if let i = args.firstIndex(of: "-chatgpt-result"), i + 1 < args.count {
             chatGPTSignIn = DemoChatGPTSignIn(outcome: args[i + 1])
-        } else if args.contains("-chatgpt-signin") {
+        } else if args.contains("-chatgpt-signin") || args.contains("-chatgpt-plan") {
             chatGPTSignIn = DemoChatGPTSignIn(outcome: "connected")
         }
+        // The demo starts from a clean slate so each run sees the first-sign-in confirmation, unless it says otherwise.
+        chatGPTConnected = args.contains("-chatgpt-connected")
+        chatGPTWelcomeSeen = args.contains("-chatgpt-welcome-seen")
         DraftStore.persistsToDisk = false
         phase = .ready
     }
@@ -407,6 +421,7 @@ final class AppModel {
         config = nil
         demo = nil
         chatGPTSignIn = nil
+        chatGPTConnected = false
         demoPinnedSessionIds = []
         DraftStore.wipeAll()
         DraftStore.persistsToDisk = true

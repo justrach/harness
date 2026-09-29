@@ -53,6 +53,16 @@ object ChatGPTSignIn {
         else -> ChatGPTPhase.Failed
     }
 
+    /** A session runs on the person's ChatGPT plan when its model's provider is `chatgpt` (`chatgpt/<slug>`). */
+    fun usesPlan(modelId: String?): Boolean = modelId?.startsWith("chatgpt/") == true
+
+    /**
+     * The plan's usage limit (HTTP 429, `subscription_sharing_usage_limit_exceeded`), as it reaches the transcript. It gets
+     * its own card that leads with Manage usage instead of a one-line error.
+     */
+    fun isUsageLimit(message: String): Boolean =
+        "subscription_sharing_usage_limit_exceeded" in message || "chatgpt.com/settings/usage" in message
+
     fun action(phase: ChatGPTPhase): ChatGPTAction = when (phase) {
         ChatGPTPhase.Idle -> ChatGPTAction.Start
         ChatGPTPhase.Waiting -> ChatGPTAction.Cancel

@@ -22,6 +22,8 @@ struct HomeView: View {
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
     @State private var showSettings = false
+    /// Computers that can sign in to ChatGPT for Graff, for the Home banner.
+    @State private var chatGPTComputers: [ChatGPTComputer] = []
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
@@ -118,6 +120,16 @@ struct HomeView: View {
 
     private var sidebar: some View {
         List {
+            // Someone signed in another way is invited to use their ChatGPT plan; with no sessions yet the onboarding card offers it.
+            if model.chatGPTSignIn != nil, !model.chatGPTConnected, !chatGPTComputers.isEmpty, !model.overviewChats.isEmpty {
+                Section {
+                    ChatGPTPlanBanner { model.chatGPTSheetComputers = chatGPTComputers }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
+                }
+                .listSectionSeparator(.hidden)
+            }
             sessionsSection
             // The desktop's archived shelf sits under the active list,
             // scoped by the same space filter and search. Archived sessions
@@ -126,6 +138,7 @@ struct HomeView: View {
                 ArchivedSection(spaceId: selectedSpace?.id, query: searchText, path: sidebarPath)
             }
         }
+        .task { chatGPTComputers = await model.chatGPTComputers() }
         .searchable(text: $searchText, prompt: "Search sessions")
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)

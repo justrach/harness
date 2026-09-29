@@ -17,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,7 +28,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.platform.testTag
@@ -43,6 +43,7 @@ import harness.codegraff.android.model.ChatGPTSignInClient
 import harness.codegraff.android.model.ChatGPTSignInFlow
 import harness.codegraff.android.theme.Theme
 import harness.codegraff.android.theme.sans
+import harness.codegraff.android.ui.rememberPref
 import harness.codegraff.android.ui.components.HarnessSheet
 import harness.codegraff.android.ui.components.SheetBody
 import harness.codegraff.android.ui.components.SheetCard
@@ -58,15 +59,15 @@ import harness.codegraff.android.ui.components.pressWashClickable
  * pinned in apps/parity/ux-contract.json.
  */
 @Composable
-fun ChatGPTSignInSheet(computers: List<ChatGPTComputer>, client: ChatGPTSignInClient, onDismiss: () -> Unit) {
+fun ChatGPTSignInSheet(computers: List<ChatGPTComputer>, client: ChatGPTSignInClient, onConnected: () -> Unit, onDismiss: () -> Unit) {
     HarnessSheet(title = "Use your ChatGPT plan", onDismiss = onDismiss) {
-        ChatGPTSignInContent(computers, client, onDone = onDismiss)
+        ChatGPTSignInContent(computers, client, onConnected = onConnected, onDone = onDismiss)
     }
 }
 
 /** The sheet's body, also used as a page inside Settings. */
 @Composable
-fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignInClient, onDone: () -> Unit) {
+fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignInClient, onConnected: () -> Unit, onDone: () -> Unit) {
     val p = Theme.palette
     val scope = rememberCoroutineScope()
     val flow = remember(client) { ChatGPTSignInFlow(client, scope) }
@@ -74,7 +75,14 @@ fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignIn
     val selectedName = computers.firstOrNull { it.id == selected }?.name ?: ""
     // Leaving mid-wait tells the computer to close its callback listener.
     DisposableEffect(flow) { onDispose { if (flow.phase == ChatGPTPhase.Waiting) flow.abandon(selected) else flow.stop() } }
-    val uri = LocalUriHandler.current
+    // OpenAI asks for the "You're using your ChatGPT plan" confirmation only the first time; a later sign-in just closes.
+    val welcomeSeen = rememberPref("chatgptWelcomeSeen", "")
+    LaunchedEffect(flow.phase) {
+        if (flow.phase == ChatGPTPhase.Connected) {
+            onConnected()
+            if (welcomeSeen.value == "1") onDone() else welcomeSeen.set("1")
+        }
+    }
 
     SheetBody {
         Text(
@@ -116,9 +124,7 @@ fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignIn
                     val (title, body) = outcomeCopy(flow.phase)
                     Text(title, style = sans(17f, FontWeight.SemiBold), color = p.text)
                     if (body != null) Text(body, style = sans(14f), color = p.textMuted)
-                    if (flow.phase == ChatGPTPhase.Connected) {
-                        TextAction("Manage usage", "chatgpt-manage-usage") { uri.openUri(ChatGPTSignIn.MANAGE_USAGE_URL) }
-                    }
+                    if (flow.phase == ChatGPTPhase.Connected) ManageUsageButton()
                 }
                 when (ChatGPTSignIn.action(flow.phase)) {
                     ChatGPTAction.Start -> Unit
@@ -154,7 +160,8 @@ private fun Terminal() {
 }
 
 private fun outcomeCopy(phase: ChatGPTPhase): Pair<String, String?> = when (phase) {
-    ChatGPTPhase.Connected -> "You're using your ChatGPT plan" to null
+    ChatGPTPhase.Connected ->
+        "You're using your ChatGPT plan" to "Eligible AI requests in this app use your ChatGPT plan. You can manage usage in ChatGPT settings."
     ChatGPTPhase.PlanUsageOff ->
         "Signed in, but plan usage is off" to "Graff can't use your ChatGPT plan yet. Sign in again and allow plan usage, or use an API key."
     ChatGPTPhase.Declined -> "You didn't approve the sign-in" to "Nothing was changed. Try again when you're ready."

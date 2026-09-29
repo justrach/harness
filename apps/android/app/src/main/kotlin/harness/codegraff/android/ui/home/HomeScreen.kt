@@ -3,6 +3,7 @@ package harness.codegraff.android.ui.home
 import androidx.compose.animation.core.animateFloatAsState
 import harness.codegraff.android.model.ChatGPTComputer
 import harness.codegraff.android.model.OnboardingState
+import harness.codegraff.android.ui.signin.ChatGPTPlanBanner
 import harness.codegraff.android.ui.signin.ChatGPTSignInSheet
 import androidx.compose.ui.platform.testTag
 import harness.codegraff.android.perf.Perf
@@ -42,6 +43,7 @@ import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -136,8 +138,9 @@ fun HomeScreen(
     val topInset = statusBarHeight()
 
     val chatGPT = model.chatGPTSignIn
+    val chatGPTConnected by model.chatGPTConnected.collectAsState()
     if (chatGPT != null) {
-        chatGPTComputers?.let { ChatGPTSignInSheet(it, chatGPT, onDismiss = { chatGPTComputers = null }) }
+        chatGPTComputers?.let { ChatGPTSignInSheet(it, chatGPT, onConnected = { model.chatGPTConnected.value = true }, onDismiss = { chatGPTComputers = null }) }
     }
 
     Box(modifier.fillMaxSize().background(p.surface)) {
@@ -149,6 +152,11 @@ fun HomeScreen(
                 bottom = 148.dp + navigationBarHeight(),
             ),
         ) {
+            // Someone signed in another way is invited to use their ChatGPT plan; with no sessions yet the onboarding card offers it.
+            val planComputers = state.chatGPTComputers()
+            if (chatGPT != null && !chatGPTConnected && planComputers.isNotEmpty() && state.overviewChats.isNotEmpty()) {
+                item(key = "chatgpt-banner") { ChatGPTPlanBanner { chatGPTComputers = planComputers } }
+            }
             if (scoped.isNotEmpty()) {
                 item(key = "filters") {
                     Row(

@@ -362,6 +362,13 @@ class ParityTest {
             val poll = ChatGPTPoll(c.getString("status"), if (c.has("planUsage")) c.getBoolean("planUsage") else null)
             assertEquals(c.getString("name"), c.getString("phase"), ChatGPTSignIn.phase(poll).wireName)
         }
+        val plan = v.getJSONObject("plan")
+        for (c in plan.rows("models")) {
+            assertEquals(c.optString("model"), c.getBoolean("usesPlan"), ChatGPTSignIn.usesPlan(if (c.isNull("model")) null else c.getString("model")))
+        }
+        for (c in plan.rows("limits")) {
+            assertEquals(c.getString("message"), c.getBoolean("limit"), ChatGPTSignIn.isUsageLimit(c.getString("message")))
+        }
     }
 
     // MARK: Performance monitor

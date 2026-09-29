@@ -50,6 +50,20 @@ final class DemoDataset {
         return DemoDataset(devices: [mac], spaces: [], chats: [], sessions: [:], agents: ["dev-mac": agents])
     }
 
+    /// One session that runs on the ChatGPT plan and hit the plan's usage limit, for the plan indicator and the limit
+    /// card (launch arg `-chatgpt-plan`; open it with `-route chat:chat-plan`).
+    static func chatGPTPlan() -> DemoDataset {
+        let now = nowMs()
+        let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos", lastSeenAt: now, createdAt: now - 86_400_000 * 30)
+        let space = Space(id: "space-harness", deviceId: "dev-mac", path: "/Users/dev/harness", name: nil, gitDetected: true,
+                          gitCheckedAt: now, checkoutId: nil, createdAt: now - 86_400_000 * 9)
+        let chat = Chat(id: "chat-plan", deviceId: "dev-mac", title: "Plan session", archived: false, cwd: space.path, branch: "main",
+                        checkoutId: nil, config: ChatConfig(harness: "graff", model: "chatgpt/gpt-6.1-sol", reasoning: nil, sandbox: "workspace-write"),
+                        lastMessagePreview: "Usage limit reached", lastMessageAt: now - 60_000, createdAt: now - 3_600_000,
+                        spaceId: space.id, lastSeenAt: now)
+        return DemoDataset(devices: [mac], spaces: [space], chats: [chat], sessions: [:], agents: ["dev-mac": allAgentsReady])
+    }
+
     static func standard() -> DemoDataset {
         let now = nowMs()
         let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos",
@@ -338,6 +352,15 @@ final class DemoDataset {
                     .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs"]), isError: false, resolved: true),
                     .text(id: "t0", text: "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`."),
                 ], createdAt: now - 950_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            ]
+        case "chat-plan":
+            return [
+                MessageEntry(id: "m1", role: .user, parts: [
+                    .text(id: "t0", text: "Summarize what changed in the last release."),
+                ], createdAt: now - 70_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "m2", role: .assistant, parts: [
+                    .error(id: "e0", message: "HTTP 429 subscription_sharing_usage_limit_exceeded: manage usage at https://chatgpt.com/settings/usage"),
+                ], createdAt: now - 60_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]
         case "chat-deploy":
             return [

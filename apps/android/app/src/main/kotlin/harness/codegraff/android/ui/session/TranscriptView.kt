@@ -1,5 +1,7 @@
 package harness.codegraff.android.ui.session
 
+import harness.codegraff.android.model.ChatGPTSignIn
+import harness.codegraff.android.ui.signin.UsageLimitCard
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
@@ -121,7 +123,7 @@ private fun TranscriptRowView(row: TranscriptRow, veils: VeilStore, reduceMotion
         }
         is RowKind.ToolGroup -> ToolGroupView(row.id, kind.tools, kind.autoOpen)
         is RowKind.InputChip -> InputChipView(kind.header, kind.resolved)
-        is RowKind.ErrorChip -> ErrorChipView(kind.message)
+        is RowKind.ErrorChip -> if (ChatGPTSignIn.isUsageLimit(kind.message)) UsageLimitCard() else ErrorChipView(kind.message)
     }
 }
 

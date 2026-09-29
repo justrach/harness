@@ -1,5 +1,7 @@
 package harness.codegraff.android.ui.session
 
+import harness.codegraff.android.model.ChatGPTSignIn
+import harness.codegraff.android.ui.signin.PlanUsageLine
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.semantics.Role
@@ -361,6 +363,8 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
                 contentAlignment = Alignment.CenterStart,
             ) { Text(if (dead) "Copy edit and stop editing" else "Stop editing", style = sans(12f), color = Theme.palette.textMuted) }
         }
+        // OpenAI asks for this wherever requests run on the person's ChatGPT plan.
+        if (ChatGPTSignIn.usesPlan(chat.config?.model)) PlanUsageLine(Modifier.padding(horizontal = 24.dp))
         ComposerShell(
             draft = draft, onDraftChange = { draft = it },
             sendEnabled = true, showStop = runLive,

@@ -66,5 +66,60 @@
       "status": "something-new",
       "phase": "failed"
     }
-  ]
+  ],
+  "plan": {
+    "$comment": "Which sessions run on the ChatGPT plan (the model id carries the provider: chatgpt/<slug>), and which error is the plan's usage limit (HTTP 429, code subscription_sharing_usage_limit_exceeded, or the usage settings link in the message).",
+    "models": [
+      {
+        "model": "chatgpt/gpt-6.1-sol",
+        "usesPlan": true
+      },
+      {
+        "model": "chatgpt/some-future-model",
+        "usesPlan": true
+      },
+      {
+        "model": "gpt-6.1-sol",
+        "usesPlan": false
+      },
+      {
+        "model": "claude-fable-5",
+        "usesPlan": false
+      },
+      {
+        "model": "ChatGPT/gpt-6.1-sol",
+        "usesPlan": false
+      },
+      {
+        "model": "",
+        "usesPlan": false
+      },
+      {
+        "model": null,
+        "usesPlan": false
+      }
+    ],
+    "limits": [
+      {
+        "message": "HTTP 429 subscription_sharing_usage_limit_exceeded: usage limit reached",
+        "limit": true
+      },
+      {
+        "message": "Usage limit reached. Manage usage at https://chatgpt.com/settings/usage",
+        "limit": true
+      },
+      {
+        "message": "HTTP 403 subscription_sharing_user_not_eligible",
+        "limit": false
+      },
+      {
+        "message": "rate limited, retry in 20s",
+        "limit": false
+      },
+      {
+        "message": "",
+        "limit": false
+      }
+    ]
+  }
 }

@@ -429,6 +429,13 @@ final class ParityTests: XCTestCase {
             let poll = ChatGPTPoll(status: c["status"] as! String, planUsage: c["planUsage"] as? Bool)
             XCTAssertEqual(ChatGPTSignIn.phase(for: poll).rawValue, c["phase"] as? String, "\(c["name"] ?? "")")
         }
+        let plan = try XCTUnwrap(v["plan"] as? [String: Any])
+        for c in try rows(plan, "models") {
+            XCTAssertEqual(ChatGPTSignIn.usesPlan(modelId: c["model"] as? String), c["usesPlan"] as? Bool, "\(c["model"] ?? "nil")")
+        }
+        for c in try rows(plan, "limits") {
+            XCTAssertEqual(ChatGPTSignIn.isUsageLimit(message: c["message"] as! String), c["limit"] as? Bool, "\(c["message"] ?? "")")
+        }
     }
 
     /// Test double for a value the uploader's `@Sendable` closures read while the test moves it on.

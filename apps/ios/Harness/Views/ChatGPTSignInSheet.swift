@@ -9,8 +9,8 @@ struct ChatGPTSignInSheet: View {
     let computers: [ChatGPTComputer]
     let client: any ChatGPTSignInClient
 
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     @State private var flow: ChatGPTSignInFlow
     @State private var selected: String
 
@@ -51,6 +51,12 @@ struct ChatGPTSignInSheet: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chatgpt-sheet")
         .onDisappear { flow.stop() }
+        // The confirmation is for the first sign-in with plan usage only; a later one just closes.
+        .onChange(of: flow.phase) { _, phase in
+            guard phase == .connected else { return }
+            model.chatGPTConnected = true
+            if model.chatGPTWelcomeSeen { dismiss() } else { model.markChatGPTWelcomeSeen() }
+        }
     }
 
     private var header: some View {
@@ -163,13 +169,7 @@ struct ChatGPTSignInSheet: View {
                             .foregroundStyle(Theme.textMuted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if flow.phase == .connected {
-                        Button("Manage usage") {
-                            if let url = URL(string: ChatGPTSignIn.manageUsageURL) { openURL(url) }
-                        }
-                        .font(Theme.sans(14, weight: .medium))
-                        .accessibilityIdentifier("chatgpt-manage-usage")
-                    }
+                    if flow.phase == .connected { ManageUsageButton() }
                 }
                 actionButton
             }
@@ -186,7 +186,9 @@ struct ChatGPTSignInSheet: View {
 
     private func outcomeCopy(_ phase: ChatGPTPhase) -> (title: String, body: String?) {
         switch phase {
-        case .connected: ("You're using your ChatGPT plan", nil)
+        case .connected:
+            ("You're using your ChatGPT plan",
+             "Eligible AI requests in this app use your ChatGPT plan. You can manage usage in ChatGPT settings.")
         case .planUsageOff:
             ("Signed in, but plan usage is off",
              "Graff can't use your ChatGPT plan yet. Sign in again and allow plan usage, or use an API key.")

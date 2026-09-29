@@ -17,6 +17,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         AppModel.scenario = intent?.getStringExtra("scenario")
         AppModel.chatGptResult = intent?.getStringExtra("chatgptResult")
+        AppModel.chatGptConnected = intent?.getBooleanExtra("chatgptConnected", false) == true
+        // The demo starts from a clean slate so each run sees the first-sign-in confirmation, unless it says otherwise.
+        if (AppModel.chatGptResult != null || intent?.getStringExtra("scenario") == "chatgpt-plan") {
+            getSharedPreferences("harness-ui", MODE_PRIVATE).edit()
+                .putString("chatgptWelcomeSeen", if (intent?.getBooleanExtra("chatgptWelcomeSeen", false) == true) "1" else "").apply()
+        }
         PerfSharing.init(this)
         // Only a launch counts as startup; a rotation or a return to the app is not one.
         if (Perf.isColdStart()) Perf.watchFirstFrame(this)

@@ -363,6 +363,12 @@ struct ComposerView: View {
                 .disabled(queueEditBusy)
                 .accessibilityHint(queueEdit?.terminal == true ? "Copies the edit and restores your previous draft" : "")
             }
+            // OpenAI asks for this wherever requests run on the person's ChatGPT plan.
+            if ChatGPTSignIn.usesPlan(modelId: chat.config?.model) {
+                PlanUsageLine()
+                    .padding(.horizontal, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             ComposerShell(
                 draft: $text,
                 placeholder: editingQueuedId == nil ? "Message" : "Edit queued message",

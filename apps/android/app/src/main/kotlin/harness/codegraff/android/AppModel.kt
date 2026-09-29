@@ -178,6 +178,9 @@ class AppModel(
     /** Runs the "Use your ChatGPT plan" sign-in on a computer. Demo only until the engine ships the call; null offers nothing. */
     val chatGPTSignIn: ChatGPTSignInClient? = chatGptResult?.let { DemoChatGPTSignIn(it) }
 
+    /** A ChatGPT sign-in has finished with plan usage on. Demo only until the account lookup is wired. */
+    val chatGPTConnected = MutableStateFlow(chatGptConnected)
+
     companion object {
         /** Demo rig: which dataset a new model starts with (`onboarding-*`; anything else is the standard demo). Set from an intent extra. */
         @Volatile
@@ -186,6 +189,10 @@ class AppModel(
         /** Demo rig: with a value (a phase's wire name), the ChatGPT sign-in is offered and ends that way. Set from an intent extra. */
         @Volatile
         var chatGptResult: String? = null
+
+        /** Demo rig: start with plan usage already connected. Set from an intent extra. */
+        @Volatile
+        var chatGptConnected: Boolean = false
     }
 
     /** The workspace and all transcripts as one value. */
@@ -206,6 +213,7 @@ class AppModel(
             "onboarding-nocomputer" -> DemoDataset.onboarding(now, computerOnline = false, agentReady = false)
             "onboarding-noagent" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = false)
             "onboarding-ready" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = true)
+            "chatgpt-plan" -> DemoDataset.chatGPTPlan(now)
             else -> DemoDataset.standard(now)
         }
         _workspace = MutableStateFlow(
