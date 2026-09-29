@@ -97,8 +97,7 @@ struct SessionSwitcherPill: View {
         return HStack(spacing: 5) {
             ForEach(shown) { chat in
                 let indicator = juggled.indicators[chat.id] ?? .idle
-                Circle()
-                    .fill(dotColor(indicator))
+                statusMark(indicator)
                     .frame(width: 7, height: 7)
                     .padding(2)
                     .overlay {
@@ -115,13 +114,15 @@ struct SessionSwitcherPill: View {
         }
     }
 
-    /// The Home status chips' colors: needs you, running; finished-and-read
-    /// sessions read as a quiet grey dot.
-    private func dotColor(_ indicator: ChatIndicator) -> Color {
+    /// Running is a ring, needs you a filled dot, finished-and-read a quiet
+    /// grey dot: shape carries the state, since some themes paint running
+    /// and needs-you in near-identical hues. Colors are the Home chips'.
+    @ViewBuilder
+    private func statusMark(_ indicator: ChatIndicator) -> some View {
         switch indicator {
-        case .working: return Theme.statusWorking
-        case .awaitingInput, .errored, .completed: return Theme.warning
-        case .idle: return ink(0.25)
+        case .working: Circle().strokeBorder(Theme.statusWorking, lineWidth: 1.8)
+        case .awaitingInput, .errored, .completed: Circle().fill(Theme.warning)
+        case .idle: Circle().fill(ink(0.25))
         }
     }
 
