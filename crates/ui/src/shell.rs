@@ -535,6 +535,26 @@ impl SettingsSection {
         SettingsSection::Archived,
     ];
 
+    /// The section saved in `ui-settings.json` as `settingsSection`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SettingsSection::Devices => "devices",
+            SettingsSection::Harnesses => "harnesses",
+            SettingsSection::Agents => "agents",
+            SettingsSection::Appearance => "appearance",
+            SettingsSection::Files => "files",
+            SettingsSection::Notifications => "notifications",
+            SettingsSection::Shortcuts => "shortcuts",
+            SettingsSection::Appshots => "appshots",
+            SettingsSection::Archived => "archived",
+        }
+    }
+
+    /// Inverse of [`Self::key`]; `None` for anything unrecognised.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|section| section.key() == key)
+    }
+
     /// Sidebar + header label (harness settings-sidebar.tsx SECTIONS / __root.tsx
     /// `settingsTitle` — the same strings in both places).
     pub fn label(self) -> &'static str {
@@ -4226,9 +4246,31 @@ impl Shell {
         }
         self.route = Route::Settings(section);
         self.nav.push(NavEntry::Settings(section));
+        self.remember_settings_section(section, cx);
         self.close_user_menu(cx);
         self.close_chat_menu(cx);
         cx.notify();
+    }
+
+    /// Save the section being viewed, so the next generic open lands on it.
+    fn remember_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if self.settings.settings_section.as_deref() != Some(section.key()) {
+            self.settings.settings_section = Some(section.key().to_owned());
+            self.schedule_save(cx);
+        }
+    }
+
+    /// Where a bare "open Settings" lands: the section last viewed, or Devices
+    /// when there is none, it is unknown, or this platform hides it.
+    fn remembered_settings_section(&self) -> SettingsSection {
+        self.settings
+            .settings_section
+            .as_deref()
+            .and_then(SettingsSection::from_key)
+            .filter(|section| {
+                *section != SettingsSection::Appshots || crate::appshots::is_desktop()
+            })
+            .unwrap_or(SettingsSection::Devices)
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -4273,6 +4315,7 @@ impl Shell {
                     page.update(cx, |page, cx| page.load_completion_harnesses(cx));
                 }
                 self.route = Route::Settings(section);
+                self.remember_settings_section(section, cx);
             }
         }
         self.close_user_menu(cx);
@@ -7763,7 +7806,8 @@ impl Shell {
                     popover::menu_row(theme, false, "user-menu-settings")
                         .id("user-menu-settings")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_settings(SettingsSection::Devices, cx)
+                            let section = this.remembered_settings_section();
+                            this.open_settings(section, cx)
                         }))
                         .child(
                             icon(icons::SETTINGS_MINIMALISTIC)
@@ -10912,7 +10956,10 @@ impl Render for Shell {
                     .update(cx, |c, cx| c.open_model_menu(window, cx)),
                 WorkspaceCommand::New => self.open_new_session(cx),
                 WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
-                WorkspaceCommand::Settings => self.open_settings(SettingsSection::Devices, cx),
+                WorkspaceCommand::Settings => {
+                    let section = self.remembered_settings_section();
+                    self.open_settings(section, cx)
+                }
                 WorkspaceCommand::Diff if !self.active_chat.is_empty() => self.add_diff_surface(cx),
                 WorkspaceCommand::Files if !self.active_chat.is_empty() => {
                     self.add_files_surface(window, cx)
@@ -11256,9 +11303,10 @@ impl Render for Shell {
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
-            // macOS, Ctrl+, elsewhere) always land on the default section.
+            // macOS, Ctrl+, elsewhere) land on the section last viewed.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.open_settings(SettingsSection::Devices, cx)
+                let section = this.remembered_settings_section();
+                this.open_settings(section, cx)
             }))
             // Chat-scoped, unlike new-session — `cycle_session` holds the guard
             // and says why.
@@ -11731,6 +11779,22 @@ mod tests {
             room_gen: None,
             parent_chat_id: None,
             last_prompt_at: None,
+        }
+    }
+
+    #[test]
+    fn settings_section_keys_round_trip_and_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for section in SettingsSection::ALL {
+            assert!(
+                seen.insert(section.key()),
+                "duplicate key {}",
+                section.key()
+            );
+            assert_eq!(SettingsSection::from_key(section.key()), Some(section));
+        }
+        for unknown in ["", "nope", "Devices", "settings/devices"] {
+            assert_eq!(SettingsSection::from_key(unknown), None, "{unknown:?}");
         }
     }
 
