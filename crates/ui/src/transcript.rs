@@ -3586,6 +3586,13 @@ impl Transcript {
         follow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A split pane drawn from a cached frame keeps its selectable text
+        // registered under this transcript; drop it with the transcript.
+        let selection_owner = cx.entity_id().as_u64();
+        cx.on_release(move |_, _| {
+            crate::markdown::render::release_selection_owner(selection_owner)
+        })
+        .detach();
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
         // not the list's per-layout hard snap.
         //
@@ -9430,10 +9437,13 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
-            // FIRST child ⇒ paints first: clears the frame's markdown text-
-            // selection registry before any row's text elements re-register
+            // FIRST child ⇒ paints first: clears THIS transcript's entries in
+            // the markdown text-selection registry before its rows re-register
             // (document paint order = selection order; see markdown/render.rs).
-            .child(crate::markdown::render::selection_frame_reset())
+            // Another transcript drawn from a cached frame keeps its own.
+            .child(crate::markdown::render::selection_owner_reset(
+                cx.entity_id().as_u64(),
+            ))
             .child(content)
             .child(rail)
             // After the list lays out: a resize that changed the gutter asks
@@ -9452,7 +9462,9 @@ impl Render for Transcript {
                 )
                 .absolute()
                 .size_0()
-            });
+            })
+            // LAST child: text painted after this is no longer this transcript's.
+            .child(crate::markdown::render::selection_owner_end());
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -11840,6 +11852,154 @@ mod tests {
         assert!(selected.as_deref().is_some_and(|s| s.starts_with("My message")), "during streaming: {selected:?}");
         assert!(after_up.as_deref().is_some_and(|s| s.starts_with("My message")), "after mouse up: {after_up:?}");
         assert!(after_more.as_deref().is_some_and(|s| s.starts_with("My message")), "after more output: {after_more:?}");
+    }
+
+    /// Split panes are cached views: a frame where only one pane changed
+    /// replays the others. The replayed pane's text must stay selectable,
+    /// and the pane that did repaint must select its new text.
+    #[gpui::test]
+    fn selection_works_in_a_cached_pane_that_did_not_repaint(cx: &mut gpui::TestAppContext) {
+        let _selection = crate::markdown::selection::test_state_lock();
+        struct Split(Entity<Transcript>, Entity<Transcript>);
+        impl Render for Split {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let cached = || gpui::StyleRefinement::default().size_full();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .w(px(450.0))
+                            .h_full()
+                            .child(self.0.clone().cached(cached())),
+                    )
+                    .child(
+                        div()
+                            .w(px(450.0))
+                            .h_full()
+                            .child(self.1.clone().cached(cached())),
+                    )
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (left_state, right_state) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
+        });
+        let (split, cx) = cx.add_window_view(|_, cx| {
+            Split(
+                cx.new(|cx| Transcript::new(left_state.clone(), cx)),
+                cx.new(|cx| Transcript::new(right_state.clone(), cx)),
+            )
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+        let (left, right) = split.read_with(cx, |s, _| (s.0.clone(), s.1.clone()));
+        let fill =
+            |cx: &mut gpui::VisualTestContext, state: &Entity<AppState>, chat: &str, text: &str| {
+                let mut user = assistant(
+                    &format!("{chat}-u"),
+                    MessageStatus::Complete,
+                    vec![text_part("t", "hi")],
+                );
+                user.role = MessageRole::User;
+                state.update(cx, |state, _| {
+                    state.selected_chat = Some(chat.into());
+                    state.transcript_replayed = true;
+                    state.transcript = vec![
+                        user,
+                        assistant(
+                            &format!("{chat}-a"),
+                            MessageStatus::Complete,
+                            vec![text_part("t", text)],
+                        ),
+                    ];
+                    state.transcript_revision += 1;
+                });
+            };
+        fill(
+            cx,
+            &left_state,
+            "left-chat",
+            "Left pane paragraph about something else entirely here.",
+        );
+        fill(
+            cx,
+            &right_state,
+            "right-chat",
+            "Right pane answer you are trying to select and copy now.",
+        );
+        for _ in 0..3 {
+            left.update(cx, |this, cx| this.sync(cx));
+            right.update(cx, |this, cx| this.sync(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        // Only the left pane changes; no refresh, so the right pane replays
+        // its last frame.
+        fill(
+            cx,
+            &left_state,
+            "left-chat",
+            "Left pane now says something new and longer than before.",
+        );
+        left.update(cx, |this, cx| this.sync(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let drag = |cx: &mut gpui::VisualTestContext, starts: &str| {
+            let entries = crate::markdown::render::selection_test_entries();
+            let (key, _, bounds) = entries
+                .iter()
+                .find(|(_, t, _)| t.starts_with(starts))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{starts:?} must be registered; have {:?}",
+                        entries.iter().map(|e| &e.1).collect::<Vec<_>>()
+                    )
+                })
+                .clone();
+            let y = bounds.top() + px(8.0);
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(bounds.left() + px(1.0), y),
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: gpui::point(bounds.left() + px(150.0), y),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            let selected = crate::markdown::selection::selected_text();
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(bounds.left() + px(150.0), y),
+                ..Default::default()
+            });
+            crate::markdown::selection::clear_if_owner(&key);
+            selected
+        };
+        let right_sel = drag(cx, "Right pane");
+        assert!(
+            right_sel
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Right pane")),
+            "a drag in the cached right pane selected {right_sel:?}"
+        );
+        let left_sel = drag(cx, "Left pane now");
+        assert!(
+            left_sel
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Left pane now")),
+            "a drag in the repainted left pane selected {left_sel:?}"
+        );
     }
 
     #[gpui::test]
