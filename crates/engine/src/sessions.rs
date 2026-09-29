@@ -393,7 +393,7 @@ impl SessionsEngine {
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
-        request.cwd = expand_home(&request.cwd);
+        request.cwd = crate::repos::expand_home(&request.cwd);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         harness_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -1586,18 +1586,6 @@ fn finish_segment<'a>(
             SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish(&rendered, status)
         }
         None => Ok(()),
-    }
-}
-
-/// `~` / `~/…` → this host's home directory. Anything else passes through.
-pub(crate) fn expand_home(cwd: &str) -> String {
-    match cwd.strip_prefix("~") {
-        Some("") => crate::repos::home_dir().to_string_lossy().into_owned(),
-        Some(rest) if rest.starts_with('/') => crate::repos::home_dir()
-            .join(&rest[1..])
-            .to_string_lossy()
-            .into_owned(),
-        _ => cwd.to_string(),
     }
 }
 
