@@ -28,6 +28,10 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default `tools` package no longer exists in the SDK repository, which
+          # made sdkmanager exit 1. Gradle fetches the platform it needs once licenses are accepted.
+          packages: ""
       - uses: gradle/actions/setup-gradle@v4
       - name: unit tests and debug build
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
